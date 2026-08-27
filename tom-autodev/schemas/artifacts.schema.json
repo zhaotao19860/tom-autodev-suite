@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tom-autodev/artifacts.schema.json",
+  "title": "Tom Autodev Artifact",
+  "type": "object",
+  "required": ["artifact_id", "run_id", "kind", "sha256", "path", "metadata"],
+  "properties": {
+    "artifact_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string"},
+    "kind": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "path": {"type": "string", "minLength": 1},
+    "metadata": {"type": "object"},
+    "input_hash": {"type": "string"},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

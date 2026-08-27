@@ -1,0 +1,1103 @@
+import copy
+import hashlib
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
+from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from orchestrator import Orchestrator
+from orchestrator import main as cli_main
+from clients.icafe_client import CafeClient
+from knowledge_sync import KnowledgeSync
+
+from test_collaboration import FakeGroupClient
+from test_ipipe_runtime import FakeApi, trigger_binding
+from test_live_preflight import PROFILE
+from test_schema_validation import specialized_examples
+
+
+def snapshot(card_id):
+    value = {
+        "canonical_card_id": card_id, "title": f"Requirement {card_id}",
+        "body": "behavior", "html": "<p>behavior</p>", "acceptance": ["AC-1"],
+        "fields": {"priority": "P1"}, "attachments": [], "links": [], "status": "OPEN",
+        "type": "REQUIREMENT", "responsible_people": [{"email": "owner@example.test"}],
+        "created": {"user": {"email": "owner@example.test"}, "time": "2026-08-11T00:00:00+00:00"},
+        "modified": {"user": {"email": "owner@example.test"}, "time": "2026-08-11T00:00:00+00:00"},
+    }
+    value["content_hash"] = hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return value
+
+
+def canonical_hash(value):
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class FakeKuBoundary:
+    def __init__(self, project):
+        self.project = project
+        self.calls = []
+        self.sequence = 0
+
+    def ensure_run_root(self, parent_doc_id, title, markdown):
+        self.calls.append(("ensure_run_root", parent_doc_id, title, markdown))
+        doc_id = f"{self.project}-run-root"
+        return {
+            "ok": True, "reason_code": "OK", "doc_id": doc_id,
+            "url": f"https://ku.baidu-int.com/knowledge/{doc_id}", "version": "v1",
+            "evidence_refs": [f"ku:{doc_id}/v1"],
+        }
+
+    def create_artifact(self, parent_doc_id, title, markdown):
+        self.sequence += 1
+        self.calls.append(("create_artifact", parent_doc_id, title, markdown))
+        doc_id = f"{self.project}-artifact-{self.sequence}"
+        return {
+            "ok": True, "reason_code": "OK", "doc_id": doc_id,
+            "url": f"https://ku.baidu-int.com/knowledge/{doc_id}",
+            "version": f"v{self.sequence}",
+            "content_hash": hashlib.sha256(markdown.encode("utf-8")).hexdigest(),
+            "evidence_refs": [f"ku:{doc_id}/v{self.sequence}"],
+        }
+
+    def update_index(self, doc_id, entry):
+        self.calls.append(("update_index", doc_id, copy.deepcopy(entry)))
+        version = f"index-{self.sequence}"
+        return {
+            "ok": True, "reason_code": "OK", "doc_id": doc_id, "version": version,
+            "evidence_refs": [f"ku:{doc_id}/{version}"],
+        }
+
+
+class FakeCafeBoundary:
+    def __init__(self):
+        self.calls = []
+
+    def comment(self, card_id, content, idempotency_key):
+        self.calls.append((card_id, content, idempotency_key))
+        comment_id = str(len(self.calls))
+        return {
+            "ok": True, "reason_code": "OK", "comment_id": comment_id,
+            "evidence_refs": [f"icafe:{card_id}/{comment_id}"],
+        }
+
+
+class FakeIcodeRuntime:
+    def __init__(self, state, run_id):
+        self.state = state
+        self.run_id = run_id
+
+    def submit(self, change_set, approval):
+        repo_path = str(Path(change_set["repo_path"]).expanduser().resolve())
+        payload = {
+            "run_id": self.run_id,
+            "change_set_id": change_set["change_set_id"],
+            "revision_set_id": change_set["revision_set_id"],
+            "input_hash": change_set["input_hash"],
+            "approval_id": approval["approval_id"],
+            "repo_path": repo_path,
+            "module": change_set["module"],
+            "target_branch": change_set["target_branch"],
+            "commit_revision": change_set["commit_revision"],
+            "card_id": change_set["card_id"],
+            "owner": change_set["owner"],
+            "revision_set": copy.deepcopy(change_set["revision_set"]),
+        }
+        key = (
+            f"icode.submit:{self.run_id}:{change_set['change_set_id']}:"
+            f"{change_set['revision_set_id']}"
+        )
+        claim = self.state.claim_intent(self.run_id, "icode.submit", key, payload)
+        response = {
+            "ok": True,
+            "reason_code": "OK",
+            "run_id": self.run_id,
+            "change_set_id": change_set["change_set_id"],
+            "revision_set_id": change_set["revision_set_id"],
+            "repo_path": repo_path,
+            "module": change_set["module"],
+            "target_branch": change_set["target_branch"],
+            "commit_revision": change_set["commit_revision"],
+            "revision_set": copy.deepcopy(change_set["revision_set"]),
+            "change_number": "42",
+            "patchset": change_set["commit_revision"],
+            "cr_url": "https://icode.example/cr/42",
+            "evidence_refs": ["icode-cr-42", "revision-r2", "revision-t2"],
+        }
+        self.state.receipt(claim["intent"]["intent_id"], response, response["evidence_refs"])
+        return response
+
+
+class StatefulKuTransport:
+    skip_preflight = True
+
+    def __init__(self, repo_id="sX0BTOBWJX"):
+        self.repo_id = repo_id
+        self.calls = []
+        self.docs = {}
+        self.sequence = 0
+
+    def run(self, argv, **options):
+        command = list(argv)
+        self.calls.append((command, dict(options)))
+        operation = command[1]
+        argument = lambda name: command[command.index(name) + 1]
+        if operation == "query-repo":
+            parent = argument("--parent-doc-id")
+            data = [
+                self._info(doc_id, name_field="name")
+                for doc_id, document in self.docs.items()
+                if document["parent"] == parent
+            ]
+            return self._result({"count": len(data), "total": len(data), "data": data})
+        if operation == "create-doc":
+            self.sequence += 1
+            doc_id = f"fake-doc-{self.sequence}"
+            self.docs[doc_id] = {
+                "parent": argument("--parent-doc-id"),
+                "title": argument("--title"),
+                "text": argument("--content"),
+                "version": 1,
+                "published": False,
+            }
+            return self._result(self._info(doc_id))
+        if operation == "query-content":
+            doc_id = argument("--doc-id")
+            return self._result({**self._info(doc_id), "text": self.docs[doc_id]["text"]})
+        if operation == "query-version":
+            doc_id = argument("--doc-id")
+            document = self.docs[doc_id]
+            return self._result({
+                "data": [{
+                    "docGuid": doc_id,
+                    "versionId": document["version"],
+                    "initType": 0 if document["published"] else 4,
+                }]
+            })
+        if operation == "publish-doc":
+            doc_id = argument("--doc-id")
+            self.docs[doc_id]["published"] = True
+            self.docs[doc_id]["version"] += 1
+            return self._result({"docGuid": doc_id})
+        if operation == "edit-content":
+            doc_id = argument("--doc-id")
+            edit = json.loads(argument("--operation"))
+            self.docs[doc_id]["text"] = (
+                self.docs[doc_id]["text"].rstrip() + "\n\n" + edit["markdown"]
+            )
+            self.docs[doc_id]["published"] = False
+            self.docs[doc_id]["version"] += 1
+            return self._result({"docGuid": doc_id})
+        raise AssertionError(f"unexpected KU operation: {command!r}")
+
+    def _info(self, doc_id, name_field="title"):
+        document = self.docs[doc_id]
+        return {
+            "docGuid": doc_id,
+            name_field: document["title"],
+            "repositoryGuid": self.repo_id,
+            "url": f"https://ku.baidu-int.com/knowledge/space/category/{self.repo_id}/{doc_id}",
+        }
+
+    @staticmethod
+    def _result(result):
+        return {"returnCode": 200, "success": True, "result": result}
+
+
+class StatefulCafeTransport:
+    skip_preflight = True
+
+    def __init__(self):
+        self.calls = []
+        self.comments = []
+
+    def run(self, argv, **options):
+        command = list(argv)
+        self.calls.append((command, dict(options)))
+        if command[1:3] == ["comment", "get"]:
+            return {"status": 200, "success": True, "result": copy.deepcopy(self.comments)}
+        if command[1:3] == ["comment", "create"]:
+            content = command[command.index("--content") + 1]
+            self.comments.append({"id": str(len(self.comments) + 1), "content": content})
+            return {"status": 200, "success": True, "result": {"id": self.comments[-1]["id"]}}
+        raise AssertionError(f"unexpected iCafe operation: {command!r}")
+
+
+class FakeE2ETests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self._write_profile("bgw", "I15ClP2KW4ZGAK", "tom-lang-c-cpp", "tom-project-bgw")
+        self._write_profile("xflow", "meQ-Acjg0K09Xr", "tom-lang-npl", "tom-project-xflow")
+        self.orchestrator = Orchestrator(self.root)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_bgw_and_xflow_enter_one_comate_controller_with_exact_project_binding(self):
+        for project, card, parent, skill in (
+            ("bgw", "BGW-101", "I15ClP2KW4ZGAK", None),
+            ("xflow", "XFLOW-202", "meQ-Acjg0K09Xr", None),
+        ):
+            with self.subTest(project=project):
+                started = self.orchestrator.start(card, project, requirement_snapshot=snapshot(card))
+                action = self.orchestrator.next(started["run_id"])
+                trace = self.orchestrator.trace(started["run_id"])
+
+                self.assertEqual(action["host"], "comate")
+                self.assertEqual(action["phase"], "INTAKE")
+                self.assertEqual(trace["events"][0]["state"], "INTAKE")
+                self.assertEqual(trace["project"]["project_id"], project)
+                self.assertEqual(trace["project"]["ku_parent_doc_id"], parent)
+                self.assertEqual(trace["artifacts"], [])
+                self.assertEqual(trace["collaboration"], [])
+
+    def test_bgw_and_xflow_traverse_integrated_controller_boundaries(self):
+        results = {}
+        for project, card, parent, decision in (
+            ("bgw", "BGW-701", "I15ClP2KW4ZGAK", "REJECT"),
+            ("xflow", "XFLOW-702", "meQ-Acjg0K09Xr", "APPROVE"),
+        ):
+            with self.subTest(project=project):
+                results[project] = self._integrated_run(project, card, parent, decision)
+
+        self.assertEqual(results["bgw"]["optimization"]["reason_code"], "G10_REJECTED")
+        self.assertEqual(results["bgw"]["target"].read_text(encoding="utf-8"), "before\n")
+        self.assertEqual(results["xflow"]["optimization"]["reason_code"], "OK")
+        self.assertEqual(results["xflow"]["target"].read_text(encoding="utf-8"), "after\n")
+
+    def test_trace_collects_artifacts_group_receipts_and_role_routing(self):
+        started = self.orchestrator.start("BGW-303", "bgw", requirement_snapshot=snapshot("BGW-303"))
+        run_id = started["run_id"]
+        self.orchestrator.artifacts.put(run_id, "fixture-evidence", b"{}", {"source": "fake-e2e"})
+        intent = self.orchestrator.state.intent(run_id, "collaboration.group.create", "fake-group", {"run_id": run_id})
+        self.orchestrator.state.receipt(intent["intent_id"], {"group_id": "10001"}, ["group-10001"])
+        self.orchestrator.state.transition(run_id, "REVIEW", {"fake_remote_evidence": True})
+
+        code = self.orchestrator.route_failure(run_id, "CODE_FAILURE", {"classification": "CODE", "signature": "c1"})
+        duplicate = self.orchestrator.route_failure(run_id, "CODE_FAILURE", {"classification": "CODE", "signature": "c1"})
+        trace = self.orchestrator.trace(run_id)
+
+        self.assertEqual(code, duplicate)
+        self.assertEqual(code["collaboration_category"], "code")
+        self.assertEqual([event["state"] for event in trace["events"]], ["INTAKE", "REVIEW", "DIAGNOSE"])
+        self.assertEqual(trace["artifacts"][0]["kind"], "fixture-evidence")
+        self.assertEqual(trace["collaboration"][0]["receipt"]["response"]["group_id"], "10001")
+        self.assertEqual(trace["role_routing"][-1]["roles"], ["development"])
+
+    def test_test_environment_and_mixed_failures_route_to_expected_people(self):
+        cases = (
+            ("TEST_FAILURE", "TEST", "test-case", ["test"]),
+            ("ENV_UNSATISFIED", "ENVIRONMENT", "environment", ["test"]),
+            ("PIPELINE_FAILURE", "MIXED", "mixed", ["development", "test"]),
+        )
+        for index, (reason, classification, expected, expected_roles) in enumerate(cases):
+            with self.subTest(reason=reason):
+                card = f"BGW-{400 + index}"
+                result = self._integrated_run(
+                    "bgw", card, "I15ClP2KW4ZGAK", "REJECT",
+                    failure_reason=reason, failure_classification=classification,
+                    stop_after_routing=True,
+                )
+                self.assertEqual(result["routed"]["collaboration_category"], expected)
+                self.assertEqual(result["trace"]["role_routing"][-1]["roles"], expected_roles)
+                self.assertEqual(result["at_users"], {
+                    "development": ["dev@example.test"],
+                    "test": ["tester@example.test"],
+                    "development+test": ["dev@example.test", "tester@example.test"],
+                }["+".join(expected_roles)])
+
+    def test_pending_external_intent_blocks_next_until_recovery(self):
+        result = self._integrated_run(
+            "bgw", "BGW-500", "I15ClP2KW4ZGAK", "REJECT", stop_after_routing=True
+        )
+
+        self.assertEqual(result["blocked_after_restart"]["reason_code"], "RECOVERY_REQUIRED")
+        self.assertFalse(result["blocked_after_restart"]["retry_allowed"])
+        self.assertEqual(result["recovered_trigger"], result["replayed_trigger"])
+        self.assertEqual(result["pending_after_recovery"], [])
+
+    def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")
+        approval = self._approval(run_id, "G4", "approved-hash")
+
+        result = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": "approved-hash",
+            "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"],
+            "task_id": "FORGED-TASK",
+            "source_revisions": {"business": "forged-b", "tests": "forged-t"},
+            "repo_revisions": {"business": "real-b", "tests": "real-t"},
+            "evidence_revisions": {"business": "real-b", "tests": "real-t"},
+        })
+
+        self.assertEqual(result["reason_code"], "WORKSPACE_BINDING_REQUIRED")
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
+
+    def test_plan_derives_task_and_revisions_from_owned_business_and_test_worktrees(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-511", "bgw", "I15ClP2KW4ZGAK")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        self.assertTrue(binding["ok"], binding)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+
+        result = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"],
+            "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"],
+            "workspace_receipts": receipts,
+            "workspace_binding": binding["workspace_binding"],
+            "task_id": binding["workspace_binding"]["task_id"],
+            "source_revisions": binding["workspace_binding"]["source_revisions"],
+            "repo_revisions": binding["workspace_binding"]["source_revisions"],
+            "evidence_revisions": binding["workspace_binding"]["source_revisions"],
+        })
+
+        self.assertEqual(result["state"], "PLAN", result)
+        payload = self.orchestrator.status(run_id)["events"][-1]["payload"]
+        self.assertEqual(payload["task_id"], "T-1")
+        self.assertEqual(payload["source_revisions"], binding["workspace_binding"]["source_revisions"])
+        self.assertEqual(payload["workspace_binding"], binding["workspace_binding"])
+        self.assertNotIn(receipts["business"]["owner_token"], json.dumps(payload))
+
+    def test_plan_rejects_caller_aliases_that_disagree_with_owned_workspace_binding(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-512", "bgw", "I15ClP2KW4ZGAK")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+
+        result = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"],
+            "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"],
+            "workspace_receipts": receipts,
+            "task_id": "FORGED-TASK",
+            "source_revisions": binding["workspace_binding"]["source_revisions"],
+            "repo_revisions": binding["workspace_binding"]["source_revisions"],
+            "evidence_revisions": binding["workspace_binding"]["source_revisions"],
+        })
+
+        self.assertEqual(result["reason_code"], "WORKSPACE_TASK_MISMATCH")
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
+
+    def test_unbound_legacy_plan_checkpoint_cannot_issue_an_executable_plan_action(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-513", "bgw", "I15ClP2KW4ZGAK")
+        approval = self._approval(run_id, "G4", "legacy-policy-hash")
+
+        result = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": "legacy-policy-hash",
+            "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"],
+        })
+
+        self.assertEqual(result["state"], "PLAN", result)
+        payload = self.orchestrator.status(run_id)["events"][-1]["payload"]
+        self.assertNotIn("task_id", payload)
+        self.assertNotIn("source_revisions", payload)
+        self.assertNotIn("workspace_binding", payload)
+        self.assertEqual(self.orchestrator.next(run_id)["reason_code"], "SOURCE_REVISION_REQUIRED")
+
+    def test_workspace_binding_rejects_business_and_test_profile_role_swap(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-514", "bgw", "I15ClP2KW4ZGAK")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        swapped = copy.deepcopy(receipts)
+        for role, other in (("business", "tests"), ("tests", "business")):
+            swapped[role].update({
+                key: receipts[other][key]
+                for key in ("module", "repo_path", "worktree_path", "baseline_revision", "owner_token")
+            })
+
+        result = self.orchestrator.workspace_binding(run_id, swapped)
+
+        self.assertEqual(result["reason_code"], "WORKSPACE_PROFILE_MISMATCH")
+
+    def test_plan_projects_canonical_evidence_and_discards_real_owner_token_aliases(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-515", "bgw", "I15ClP2KW4ZGAK")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+        owner_token = receipts["business"]["owner_token"]
+
+        result = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"],
+            "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan", owner_token],
+            "required_artifacts": [owner_token],
+            "workspace_receipts": receipts,
+            "task_id": binding["workspace_binding"]["task_id"],
+            "source_revisions": binding["workspace_binding"]["source_revisions"],
+            "repo_revisions": binding["workspace_binding"]["source_revisions"],
+            "evidence_revisions": binding["workspace_binding"]["source_revisions"],
+            "opaque_proof": owner_token,
+            "nested_alias": {"proof": owner_token, "values": [owner_token]},
+        })
+
+        self.assertEqual(result["state"], "PLAN", result)
+        evidence = self.orchestrator.status(run_id)["events"][-1]["payload"]["evidence"]
+        self.assertNotIn(owner_token, json.dumps(evidence, sort_keys=True))
+        self.assertEqual(evidence["artifacts"], ["workspace", "task-plan"])
+        self.assertEqual(set(evidence), {
+            "run_id", "input_hash", "approved_input_hash", "approval_id", "approval_record",
+            "artifacts", "task_id", "source_revisions", "repo_revisions",
+            "evidence_revisions", "workspace_binding",
+        })
+
+    def test_plan_discards_duplicated_workspace_receipts_under_an_unknown_key(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-516", "bgw", "I15ClP2KW4ZGAK")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+
+        result = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"],
+            "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"],
+            "workspace_receipts": receipts,
+            "workspace_receipts_copy": copy.deepcopy(receipts),
+        })
+
+        self.assertEqual(result["state"], "PLAN", result)
+        evidence = self.orchestrator.status(run_id)["events"][-1]["payload"]["evidence"]
+        self.assertNotIn("workspace_receipts_copy", evidence)
+        self.assertNotIn(receipts["business"]["owner_token"], json.dumps(evidence, sort_keys=True))
+
+    def test_plan_rejects_a_forged_workspace_binding_alias(self):
+        run_id, _knowledge = self._run_to_workspace("BGW-517", "bgw", "I15ClP2KW4ZGAK")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+
+        result = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"],
+            "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"],
+            "workspace_receipts": receipts,
+            "workspace_binding": {"forged": True},
+        })
+
+        self.assertEqual(result["reason_code"], "WORKSPACE_BINDING_MISMATCH")
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
+
+    def test_plan_rejects_near_match_workspace_binding_aliases(self):
+        mutations = (
+            ("worktree", lambda value: value["repositories"]["business"].update(
+                {"worktree_path": value["repositories"]["tests"]["worktree_path"]}
+            )),
+            ("owner-proof", lambda value: value["repositories"]["business"].update(
+                {"owner_proof": "0" * 64}
+            )),
+        )
+        for index, (label, mutate) in enumerate(mutations):
+            with self.subTest(label=label):
+                card = f"BGW-{518 + index}"
+                run_id, _knowledge = self._run_to_workspace(card, "bgw", "I15ClP2KW4ZGAK")
+                receipts = self._owned_workspace_receipts(run_id, "bgw")
+                binding = self.orchestrator.workspace_binding(run_id, receipts)
+                approval = self._approval(run_id, "G4", binding["input_hash"])
+                supplied = copy.deepcopy(binding["workspace_binding"])
+                mutate(supplied)
+
+                result = self.orchestrator.advance(run_id, "PLAN", {
+                    "input_hash": binding["input_hash"],
+                    "approval_id": approval["approval_id"],
+                    "artifacts": ["workspace", "task-plan"],
+                    "workspace_receipts": receipts,
+                    "workspace_binding": supplied,
+                })
+
+                self.assertEqual(result["reason_code"], "WORKSPACE_BINDING_MISMATCH")
+                self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
+
+    def test_optimize_rejects_missing_run_and_runtime_replacement(self):
+        missing = self.orchestrator.optimize("missing-run", "build")
+
+        self.assertEqual(missing["reason_code"], "RUN_NOT_FOUND")
+        with self.assertRaises(TypeError):
+            self.orchestrator.optimize("missing-run", "build", summary_runtime=object())
+        with self.assertRaises(TypeError):
+            self.orchestrator.optimize("missing-run", "build", knowledge_sync=object())
+
+    def test_optimize_rejects_a_summary_owned_by_another_run(self):
+        run_a = self.orchestrator.start(
+            "BGW-801", "bgw", requirement_snapshot=snapshot("BGW-801")
+        )["run_id"]
+        run_b = self.orchestrator.start(
+            "BGW-802", "bgw", requirement_snapshot=snapshot("BGW-802")
+        )["run_id"]
+        control_root, _target = self._optimization_candidate(run_a, "summary-cross-run")
+        summary_a = self.orchestrator.optimize(run_a, "build")
+        ku, cafe = self._install_knowledge_transports()
+
+        result = self.orchestrator.optimize(
+            run_b, "propose", summary=summary_a, allowed_roots=[control_root]
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "OPTIMIZATION_RUN_MISMATCH")
+        self.assertEqual(ku.calls, [])
+        self.assertEqual(cafe.calls, [])
+
+    def test_optimize_rejects_another_runs_proposal_and_approval(self):
+        run_a = self.orchestrator.start(
+            "BGW-803", "bgw", requirement_snapshot=snapshot("BGW-803")
+        )["run_id"]
+        run_b = self.orchestrator.start(
+            "BGW-804", "bgw", requirement_snapshot=snapshot("BGW-804")
+        )["run_id"]
+        control_root, target = self._optimization_candidate(run_a, "apply-cross-run")
+        summary_a = self.orchestrator.optimize(run_a, "build")
+        ku, cafe = self._install_knowledge_transports()
+        proposal_a = self.orchestrator.optimize(
+            run_a, "propose", summary=summary_a, allowed_roots=[control_root]
+        )
+        approval_a = self._approval(run_a, "G10", proposal_a["candidate_hash"])
+
+        calls_before = (len(ku.calls), len(cafe.calls))
+        result = self.orchestrator.optimize(
+            run_b, "apply", proposal_id=proposal_a["proposal_id"],
+            approval_id=approval_a["approval_id"],
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "OPTIMIZATION_RUN_MISMATCH")
+        self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
+        self.assertEqual((len(ku.calls), len(cafe.calls)), calls_before)
+
+    def test_trace_fails_closed_when_the_pinned_profile_drifts(self):
+        run_id = self.orchestrator.start(
+            "BGW-601", "bgw", requirement_snapshot=snapshot("BGW-601")
+        )["run_id"]
+        profile_path = self.root / "config" / "projects" / "bgw.yaml"
+        profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
+        profile["knowledge_sources"][0]["parent_doc_id"] = "meQ-Acjg0K09Xr"
+        profile_path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+
+        result = self.orchestrator.trace(run_id)
+
+        self.assertEqual(result["reason_code"], "PROFILE_CONFLICT")
+        self.assertNotIn("project", result)
+
+    def test_cli_exposes_next_complete_phase_optimize_and_preflight(self):
+        class Controller:
+            def __init__(self): self.calls = []
+            def next(self, run_id): self.calls.append(("next", run_id)); return {"ok": True, "reason_code": "OK"}
+            def complete_phase(self, run_id, envelope): self.calls.append(("complete", run_id, envelope)); return {"ok": True, "reason_code": "OK"}
+            def optimize(self, run_id, operation, **options): self.calls.append(("optimize", run_id, operation, options)); return {"ok": True, "reason_code": "OK"}
+            def preflight(self, project): self.calls.append(("preflight", project)); return {"ready": True, "status": "READY", "reason_code": "READY"}
+
+        controller = Controller()
+        envelope = self.root / "envelope.json"
+        envelope.write_text('{"run_id":"run-1"}', encoding="utf-8")
+        summary = self.root / "summary.json"
+        summary.write_text('{"run_id":"run-1"}', encoding="utf-8")
+        commands = (
+            ["next", "run-1"],
+            ["complete-phase", "run-1", str(envelope)],
+            ["optimize", "run-1", "build"],
+            ["optimize", "run-1", "propose", "--summary", str(summary), "--allowed-root", str(self.root)],
+            ["optimize", "run-1", "apply", "--proposal-id", "p1", "--approval-id", "g10"],
+            ["preflight", "bgw"],
+        )
+        with patch("orchestrator.Orchestrator", return_value=controller):
+            for argv in commands:
+                with self.subTest(command=argv[0]), redirect_stdout(StringIO()):
+                    self.assertEqual(cli_main(argv), 0)
+
+        self.assertEqual([call[0] for call in controller.calls], [
+            "next", "complete", "optimize", "optimize", "optimize", "preflight"
+        ])
+
+    def _integrated_run(
+        self, project, card, parent, optimization_decision,
+        *, failure_reason="CODE_FAILURE", failure_classification="CODE",
+        stop_after_routing=False,
+    ):
+        profile = self._integrated_profile(project)
+        raw_snapshot = snapshot(card)
+        raw_snapshot.pop("content_hash")
+        cafe = CafeClient(fetcher=lambda requested: copy.deepcopy(raw_snapshot))
+        requirement = cafe.snapshot(card)
+        started = self.orchestrator.start(card, project, requirement_snapshot=requirement)
+        self.assertEqual(started["state"], "INTAKE", started)
+        run_id = started["run_id"]
+
+        group_client = FakeGroupClient(create_result={"group_id": f"group-{project}"})
+        collaboration = self.orchestrator.collaboration_session(group_client)
+        prepared = collaboration.prepare_g0(
+            run_id, project, {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+        )
+        self.assertEqual(prepared["input_hash"], self.orchestrator.next(run_id)["input_hash"])
+        g0 = self._approval(run_id, "G0", prepared["input_hash"])
+        group = collaboration.create(
+            run_id, project, {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+            approval_id=g0["approval_id"], input_hash=prepared["input_hash"],
+        )
+        self.assertEqual(group["group_id"], f"group-{project}")
+
+        ku = FakeKuBoundary(project)
+        cafe_comments = FakeCafeBoundary()
+        knowledge = KnowledgeSync(
+            state_store=self.orchestrator.state,
+            ku_client=ku,
+            cafe_client=cafe_comments,
+            parent_doc_id=None,
+            project_parent_doc_id=parent,
+            run_root_title=f"{card}-{run_id[:12]}-fixture",
+            card_id=card,
+            run_id=run_id,
+        )
+
+        expected_children = {
+            "INTAKE": None, "GRILL": "tom-grill", "SPEC": "tom-spec",
+            "TASKS": "tom-tasks", "PLAN": "tom-plan",
+            "IMPLEMENT": "tom-implement", "REVIEW": "tom-review",
+        }
+        for phase in ("INTAKE", "GRILL", "SPEC", "TASKS"):
+            action = self.orchestrator.next(run_id)
+            self.assertEqual((action["phase"], action["child_skill"]), (phase, expected_children[phase]))
+            content = self._phase_content(action, requirement)
+            envelope = self._phase_envelope(action, content, run_id)
+            result = self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)
+            self.assertTrue(result["ok"], result)
+
+        receipts = self._owned_workspace_receipts(run_id, project)
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        self.assertTrue(binding["ok"], binding)
+        workspace_hash = binding["input_hash"]
+        workspace_approval = self._approval(run_id, "G4", workspace_hash)
+        workspace = self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": workspace_hash,
+            "approval_id": workspace_approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"],
+            "workspace_receipts": receipts,
+            "task_id": binding["workspace_binding"]["task_id"],
+            "source_revisions": binding["workspace_binding"]["source_revisions"],
+            "repo_revisions": binding["workspace_binding"]["source_revisions"],
+            "evidence_revisions": binding["workspace_binding"]["source_revisions"],
+        })
+        self.assertEqual(workspace["state"], "PLAN", workspace)
+
+        for phase in ("PLAN", "IMPLEMENT", "REVIEW"):
+            action = self.orchestrator.next(run_id)
+            self.assertTrue(action["ok"], action)
+            self.assertEqual((action["phase"], action["child_skill"]), (phase, expected_children[phase]))
+            content = self._phase_content(action, requirement)
+            envelope = self._phase_envelope(action, content, run_id)
+            result = self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)
+            self.assertTrue(result["ok"], result)
+
+        self.assertEqual(self.orchestrator.next(run_id)["controller"], "submit")
+        revision_set = {
+            "business": {"module": "baidu/team/app", "branch": "main", "revision": "r2"},
+            "test": {"module": "baidu/team/app-tests", "branch": "main", "revision": "t2"},
+        }
+        submit_hash = canonical_hash({"run_id": run_id, "revision_set": revision_set})
+        g7 = self._approval(run_id, "G7", submit_hash)
+        change_set = {
+            "run_id": run_id, "change_set_id": f"CS-{project}",
+            "revision_set_id": f"RS-{project}", "repo_path": str(self.root / f"{project}-business"),
+            "module": "baidu/team/app", "target_branch": "main", "commit_revision": "r2",
+            "card_id": card, "owner": "owner@example.test", "revision_set": revision_set,
+            "input_hash": submit_hash,
+        }
+        submitted = self.orchestrator.submit_to_ipipe(
+            run_id, change_set, g7,
+            icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
+        )
+        self.assertTrue(submitted["ok"], submitted)
+        self.assertEqual(self.orchestrator.next(run_id)["controller"], "ipipe")
+
+        revisions = {
+            "run_id": run_id, "revision_set_id": f"RS-{project}",
+            "repositories": [
+                {"kind": "business", "module": "baidu/team/app", "revision": "r2", "branch": "main"},
+                {"kind": "test", "module": "baidu/team/app-tests", "revision": "t2", "branch": "main"},
+            ],
+            "parameters": {"mode": "remote"},
+        }
+        api = FakeApi()
+        candidate = {
+            "id": "build-1", "pipelineConfId": "pipe-1", "module": "baidu/team/app",
+            "revision": "r2", "revisions": {"baidu/team/app": "r2", "baidu/team/app-tests": "t2"},
+            "params": {"mode": "remote"}, "status": "SUCCESS",
+            "stageBuilds": [{"id": "stage-1", "stageName": "compile", "status": "SUCCESS"}],
+        }
+        api.candidates = []
+        def crash_after_remote_trigger():
+            api.candidates = [copy.deepcopy(candidate)]
+            api.builds["build-1"] = copy.deepcopy(candidate)
+            raise SystemExit("simulated process crash after remote trigger")
+
+        api.on_trigger = crash_after_remote_trigger
+        runtime = self.orchestrator.ipipe_runtime(run_id, api, sleeper=lambda _seconds: None)
+        g8_hash = canonical_hash(trigger_binding(profile, revisions))
+        g8 = self._approval(run_id, "G8", g8_hash)
+        with self.assertRaises(SystemExit):
+            runtime.trigger(profile, revisions, g8)
+        restarted = Orchestrator(self.root)
+        blocked_after_restart = restarted.next(run_id)
+        self.assertEqual(blocked_after_restart["reason_code"], "RECOVERY_REQUIRED")
+        api.on_trigger = None
+        recovered_runtime = restarted.ipipe_runtime(run_id, api, sleeper=lambda _seconds: None)
+        recovered_trigger = recovered_runtime.trigger(profile, revisions, g8)
+        replayed_trigger = recovered_runtime.trigger(profile, revisions, g8)
+        self.assertEqual(recovered_trigger, replayed_trigger)
+        self.assertEqual(recovered_trigger["build_id"], "build-1")
+        self.assertEqual(sum(call[0] == "trigger_by_revision" for call in api.calls), 1)
+        self.orchestrator = restarted
+
+        api.stages["build-1"] = [{"id": "stage-1", "stageName": "compile", "status": "SUCCESS"}]
+        monitored = runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+        self.assertTrue(monitored["ok"], monitored)
+        ipipe = copy.deepcopy(specialized_examples()["ipipe-evidence"])
+        ipipe.update({
+            "pipeline_id": "pipe-1", "build_id": "build-1", "module": "baidu/team/app",
+            "revisions": {"business": "r2", "tests": "t2"},
+            "stages": [{"stage_id": "stage-1", "status": "SUCCESS", "job_ids": ["job-1"]}],
+            "jobs": [{"job_id": "job-1", "status": "SUCCESS", "evidence_refs": ["ipipe:build-1/job-1"]}],
+            "environment_fingerprint": canonical_hash(profile["environment_profile"]),
+            "release_rule": "manual-approval",
+            "remote_evidence_refs": monitored["evidence_refs"],
+            "release_evidence": monitored["evidence_refs"],
+        })
+        ingested = self.orchestrator.phase_protocol(knowledge).ingest_ipipe_evidence(run_id, ipipe)
+        self.assertTrue(ingested["ok"], ingested)
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE")
+
+        control_root = self.root / f"control-{hashlib.sha256(card.encode()).hexdigest()[:12]}"
+        target = control_root / "scripts" / "guard.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("before\n", encoding="utf-8")
+        candidate_fix = {
+            "schema_version": "1", "root_cause": "missing durable retry guard",
+            "expected_benefit": "deterministic retry", "risk": "low",
+            "rollback": "restore previous bytes",
+            "target_files": [{"path": str(target), "content": "after\n"}],
+            "verification_commands": ["python3 -m unittest scripts.tests.test_fake_e2e"],
+        }
+        routed = self.orchestrator.route_failure(run_id, failure_reason, {
+            "classification": failure_classification, "failure_signature": f"SIG-{project}",
+            "optimization_candidate": candidate_fix,
+        })
+        duplicate_route = self.orchestrator.route_failure(run_id, failure_reason, {
+            "classification": failure_classification, "failure_signature": f"SIG-{project}",
+            "optimization_candidate": candidate_fix,
+        })
+        self.assertEqual(routed, duplicate_route)
+        failure_message = collaboration.route_failure({
+            "run_id": run_id, "category": routed["collaboration_category"],
+            "summary": "remote pipeline failure",
+            "evidence": {"build": "build-1"}, "next_action": "repair source",
+        })
+        duplicate_message = collaboration.route_failure({
+            "run_id": run_id, "category": routed["collaboration_category"],
+            "summary": "remote pipeline failure",
+            "evidence": {"build": "build-1"}, "next_action": "repair source",
+        })
+        self.assertEqual(failure_message, duplicate_message)
+        self.assertEqual(len(group_client.send_calls), 1)
+        if stop_after_routing:
+            return {
+                "trace": self.orchestrator.trace(run_id),
+                "routed": routed,
+                "at_users": failure_message["at_users"],
+                "blocked_after_restart": blocked_after_restart,
+                "recovered_trigger": recovered_trigger,
+                "replayed_trigger": replayed_trigger,
+                "pending_after_recovery": self.orchestrator.state.pending_intents(run_id),
+            }
+
+        self.orchestrator._run_summary_options = {
+            "control_root": control_root,
+            "validation_runner": lambda _commands, _root: {"ok": True, "reason_code": "OK"},
+        }
+        summary = self.orchestrator.optimize(run_id, "build")
+        self.assertEqual(summary["collaboration_receipt_count"], 2)
+        self.assertEqual(summary["pipeline_evidence_count"], 1)
+        self._install_knowledge_transports()
+        proposal = self.orchestrator.optimize(
+            run_id, "propose", summary=summary, allowed_roots=[control_root]
+        )
+        self.assertTrue(proposal["ok"], proposal)
+        g10 = self._approval(run_id, "G10", proposal["candidate_hash"], optimization_decision)
+        optimization = self.orchestrator.optimize(
+            run_id, "apply", proposal_id=proposal["proposal_id"],
+            approval_id=g10["approval_id"],
+        )
+
+        trace = self.orchestrator.trace(run_id)
+        self.assertEqual(trace["project"], {
+            "project_id": project,
+            "profile_hash": trace["project"]["profile_hash"],
+            "ku_repo_id": "sX0BTOBWJX", "ku_parent_doc_id": parent,
+        })
+        self.assertEqual([event["state"] for event in trace["events"]], [
+            "INTAKE", "GRILL", "SPEC", "TASKS", "WORKSPACE", "PLAN",
+            "IMPLEMENT", "REVIEW", "SUBMIT", "IPIPE", "RELEASE", "DIAGNOSE",
+        ])
+        self.assertEqual([item["receipt"]["response"].get("group_id") for item in trace["collaboration"]], [
+            f"group-{project}", f"group-{project}",
+        ])
+        self.assertEqual(trace["role_routing"][-1], {
+            "category": routed["collaboration_category"],
+            "roles": ["development"] if routed["collaboration_category"] == "code" else trace["role_routing"][-1]["roles"],
+        })
+        self.assertEqual(
+            {"intake", "grill", "spec", "tasks", "plan", "implement", "review", "submission", "ipipe", "run-summary"},
+            {artifact["kind"] for artifact in trace["artifacts"]},
+        )
+        self.assertEqual(ku.calls[0][1], parent)
+        return {
+            "trace": trace, "optimization": optimization, "target": target,
+            "blocked_after_restart": blocked_after_restart,
+            "recovered_trigger": recovered_trigger,
+            "replayed_trigger": replayed_trigger,
+            "pending_after_recovery": self.orchestrator.state.pending_intents(run_id),
+        }
+
+    def _phase_content(self, action, requirement):
+        content = copy.deepcopy(action.get("content") or specialized_examples()[action["result_schema"]])
+        if action["phase"] == "INTAKE":
+            return copy.deepcopy(requirement)
+        if action["phase"] == "GRILL":
+            content["source_evidence"] = [f"icafe:{requirement['canonical_card_id']}/snapshot-1"]
+        elif action["phase"] == "PLAN":
+            content["g4_input_hash"] = action["input_hash"]
+            for repository in content["repositories"]:
+                repository["revision"] = action["source_revisions"][repository["role"]]
+        elif action["phase"] == "IMPLEMENT":
+            content["baseline_revisions"] = copy.deepcopy(action["source_revisions"])
+            content["revisions"] = {"business": "r2", "tests": "t2"}
+            content["full_diff_hash"] = canonical_hash({
+                "business_patch": content["business_patch"], "test_patch": content["test_patch"],
+            })
+            content["candidate_hash"] = canonical_hash({
+                key: value for key, value in content.items() if key != "candidate_hash"
+            })
+        elif action["phase"] == "REVIEW":
+            predecessor = self.orchestrator.artifacts.latest_phase(action["run_id"], "IMPLEMENT", "T-1")
+            content["change_set_hash"] = predecessor["envelope"]["content"]["candidate_hash"]
+            content["baseline_revisions"] = predecessor["envelope"]["content"]["baseline_revisions"]
+        return content
+
+    def _optimization_candidate(self, run_id, label):
+        control_root = self.root / f"control-{label}"
+        target = control_root / "scripts" / "guard.py"
+        target.parent.mkdir(parents=True)
+        target.write_text("before\n", encoding="utf-8")
+        candidate = {
+            "schema_version": "1", "root_cause": "missing run binding",
+            "expected_benefit": "reject cross-run dispatch", "risk": "low",
+            "rollback": "restore previous bytes",
+            "target_files": [{"path": str(target), "content": "after\n"}],
+            "verification_commands": ["python3 -m unittest scripts.tests.test_fake_e2e"],
+        }
+        self.orchestrator.state.transition(run_id, "DIAGNOSE", {
+            "classification": "CODE", "failure_signature": f"SIG-{label}",
+            "optimization_candidate": candidate,
+        })
+        self.orchestrator._run_summary_options = {
+            "control_root": control_root,
+            "validation_runner": lambda _commands, _root: {"ok": True, "reason_code": "OK"},
+        }
+        return control_root, target
+
+    def _install_knowledge_transports(self):
+        ku = StatefulKuTransport()
+        cafe = StatefulCafeTransport()
+        self.orchestrator._knowledge_sync_transport_options = {
+            "ku_transport": ku,
+            "cafe_transport": cafe,
+            "username": "fixture-user",
+            "cafe_preflight": False,
+        }
+        return ku, cafe
+
+    def _run_to_workspace(self, card, project, parent):
+        requirement = snapshot(card)
+        started = self.orchestrator.start(card, project, requirement_snapshot=requirement)
+        run_id = started["run_id"]
+        profile = yaml.safe_load(
+            (self.root / "config" / "projects" / f"{project}.yaml").read_text(encoding="utf-8")
+        )
+        collaboration = self.orchestrator.collaboration_session(
+            FakeGroupClient(create_result={"group_id": f"group-{project}-{card}"})
+        )
+        prepared = collaboration.prepare_g0(
+            run_id, project, {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+        )
+        approval = self._approval(run_id, "G0", prepared["input_hash"])
+        created = collaboration.create(
+            run_id, project, {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+            approval_id=approval["approval_id"], input_hash=prepared["input_hash"],
+        )
+        self.assertEqual(created["run_id"], run_id, created)
+        knowledge = KnowledgeSync(
+            state_store=self.orchestrator.state,
+            ku_client=FakeKuBoundary(project),
+            cafe_client=FakeCafeBoundary(),
+            parent_doc_id=None,
+            project_parent_doc_id=parent,
+            run_root_title=f"{card}-{run_id[:12]}-fixture",
+            card_id=card,
+            run_id=run_id,
+        )
+        for phase in ("INTAKE", "GRILL", "SPEC", "TASKS"):
+            action = self.orchestrator.next(run_id)
+            self.assertEqual(action["phase"], phase)
+            content = self._phase_content(action, requirement)
+            result = self.orchestrator.complete_phase(
+                run_id, self._phase_envelope(action, content, run_id), knowledge_sync=knowledge
+            )
+            self.assertTrue(result["ok"], result)
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
+        return run_id, knowledge
+
+    def _owned_workspace_receipts(self, run_id, project):
+        action = self.orchestrator.next(run_id)
+        self.assertEqual(action["state"], "WORKSPACE", action)
+        task_id = action["task_id"]
+        profile = yaml.safe_load(
+            (self.root / "config" / "projects" / f"{project}.yaml").read_text(encoding="utf-8")
+        )
+        selected = {
+            "business": profile["business_repos"][0],
+            "tests": profile["test_repo"],
+        }
+        receipts = {}
+        for role, repository in selected.items():
+            repo = Path(repository["path"])
+            revision = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            baseline = self.orchestrator.workspaces.inspect(
+                repo, run_id, task_id, baseline_evidence={"revision": revision}
+            )
+            created = self.orchestrator.workspaces.create(repo, run_id, task_id, baseline)
+            self.assertEqual(created["status"], "CREATED", created)
+            receipts[role] = {
+                "role": role,
+                "module": repository["module"],
+                "repo_path": str(repo.resolve()),
+                "worktree_path": created["worktree_path"],
+                "baseline_revision": created["baseline_revision"],
+                "owner_token": created["owner_token"],
+            }
+        return receipts
+
+    def _phase_envelope(self, action, content, run_id):
+        content_hash = canonical_hash(content)
+        source_revisions = (
+            copy.deepcopy(content["revisions"])
+            if action["phase"] == "IMPLEMENT"
+            else copy.deepcopy(action["source_revisions"])
+        )
+        approval_hash = (
+            action["input_hash"] if action["phase"] == "INTAKE" else canonical_hash({
+                "action_id": action["action_id"], "task_id": action["task_id"],
+                "parent_artifact_hash": action["parent_artifact_hash"],
+                "source_revisions": source_revisions, "content_hash": content_hash,
+            })
+        )
+        approval = None
+        if action["required_human_gate"] is not None:
+            approval = self._approval(run_id, action["required_human_gate"], approval_hash)
+        return {
+            "action_id": action["action_id"], "source_event_id": action["source_event_id"],
+            "host": "comate", "run_id": run_id, "phase": action["phase"],
+            "task_id": action["task_id"], "schema_version": "1", "input_hash": action["input_hash"],
+            "content_hash": content_hash, "source_revisions": source_revisions,
+            "parent_artifact_hash": action["parent_artifact_hash"],
+            "knowledge_doc_id": None, "knowledge_url": None, "knowledge_version": None,
+            "icafe_comment_id": None, "evidence_refs": copy.deepcopy(action["source_evidence_refs"]),
+            "approval_id": approval["approval_id"] if approval else None,
+            "approval_input_hash": approval_hash if approval else approval_hash,
+            "content": content,
+        }
+
+    def _approval(self, run_id, action, input_hash, decision="APPROVE"):
+        policy = {
+            "comate": ["owner@example.test"],
+            "infoflow": ["owner@example.test"],
+        }
+        row = self.orchestrator.approvals.request(
+            action, input_hash, ["comate", "infoflow"], run_id=run_id,
+            member_policy=policy,
+        )
+        for channel in ("comate", "infoflow"):
+            self.orchestrator.approvals.record_delivery(
+                row["approval_id"], channel, {"request_id": f"{channel}-{action}"},
+                payload_hash=input_hash,
+            )
+        self.orchestrator.approvals.resolve(
+            row["approval_id"], decision, input_hash, "comate", run_id=run_id,
+            responder="owner@example.test", state_store=self.orchestrator.state,
+        )
+        return {"approval_id": row["approval_id"], "input_hash": input_hash}
+
+    def _integrated_profile(self, project):
+        path = self.root / "config" / "projects" / f"{project}.yaml"
+        profile = yaml.safe_load(path.read_text(encoding="utf-8"))
+        profile["business_repos"][0]["module"] = "baidu/team/app"
+        profile["test_repo"]["module"] = "baidu/team/app-tests"
+        profile["pipeline_profile"].update({
+            "pipeline_id": "pipe-1", "allowed_parameters": ["mode"],
+            "stage_classes": ["compile", "unit", "release"],
+            "release_rule": "manual-approval",
+        })
+        path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+        return profile
+
+    def _write_profile(self, project, parent, language_name, project_name):
+        profile = copy.deepcopy(PROFILE)
+        profile["project_id"] = project
+        business = self.root / f"{project}-business"
+        tests = self.root / f"{project}-tests"
+        subprocess.run(["git", "init", "-q", str(business)], check=True)
+        subprocess.run(["git", "init", "-q", str(tests)], check=True)
+        for repo, label in ((business, "business"), (tests, "tests")):
+            (repo / "README.md").write_text(f"{project} {label}\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+            subprocess.run([
+                "git", "-C", str(repo),
+                "-c", "user.name=tom-autodev-fixture",
+                "-c", "user.email=fixture@example.test",
+                "commit", "-q", "-m", "fixture baseline",
+            ], check=True)
+        language = self.root / f"{project}-{language_name}"
+        project_skill = self.root / f"{project}-{project_name}"
+        for path in (language, project_skill):
+            path.mkdir()
+            (path / "SKILL.md").write_text("---\nname: fixture\n---\n", encoding="utf-8")
+        profile["business_repos"][0].update(path=str(business), module=project, lock=f"{project}-main")
+        profile["test_repo"].update(path=str(tests), module=f"{project}-tests", lock=f"{project}-tests-main")
+        profile["language_skill"] = str(language)
+        profile["project_skill"] = str(project_skill)
+        profile["knowledge_sources"][0]["parent_doc_id"] = parent
+        profile["pipeline_profile"]["pipeline_id"] = f"{project}-pipeline"
+        target = self.root / "config" / "projects" / f"{project}.yaml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(yaml.safe_dump(profile), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    unittest.main()

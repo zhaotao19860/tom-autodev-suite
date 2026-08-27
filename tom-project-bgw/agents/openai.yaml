@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Project BGW"
+  short_description: "Provide BGW project topology and delivery rules"
+  default_prompt: "Load BGW project evidence and pipeline rules for this approved task"

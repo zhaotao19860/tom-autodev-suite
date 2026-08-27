@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tom-autodev/events.schema.json",
+  "title": "Tom Autodev State Event",
+  "type": "object",
+  "required": ["event_id", "run_id", "state", "payload", "created_at"],
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string"},
+    "state": {"type": "string", "minLength": 1},
+    "payload": {"type": "object"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "idempotency_key": {"type": "string"},
+    "input_hash": {"type": "string"},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": true
+}

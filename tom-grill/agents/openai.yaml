@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Grill"
+  short_description: "Close human decisions before Spec"
+  default_prompt: "Clarify only unresolved decisions for this iCafe requirement"

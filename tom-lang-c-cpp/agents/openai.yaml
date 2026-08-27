@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom C Cpp"
+  short_description: "Apply C and C++ generation and review rules"
+  default_prompt: "Apply the C or C++ language rules to this approved task"

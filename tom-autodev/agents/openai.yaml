@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Autodev"
+  short_description: "Drive approved iCafe requirements through iPipe delivery"
+  default_prompt: "Start a tom-autodev run after selecting the project and iCafe requirement"

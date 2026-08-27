@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Spec"
+  short_description: "Write versioned behavioral Specs"
+  default_prompt: "Create the approved behavioral Spec and test contract for this requirement"

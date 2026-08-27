@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Implement"
+  short_description: "Execute approved task plans without local tests"
+  default_prompt: "Generate the approved business and product-test Change Set for this task"

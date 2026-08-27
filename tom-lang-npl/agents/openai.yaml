@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom NPL"
+  short_description: "Apply NPL generation and error rules"
+  default_prompt: "Apply NPL language rules to this approved XFlow task"

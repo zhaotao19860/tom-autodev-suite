@@ -1,0 +1,373 @@
+import copy
+import hashlib
+import json
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+try:
+    from schema_validator import load_named_schema, validate_named_schema
+except ImportError:
+    load_named_schema = None
+    validate_named_schema = None
+
+
+HASH = "a" * 64
+
+
+def canonical_hash(value):
+    return hashlib.sha256(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+
+
+def specialized_examples():
+    snapshot = {
+        "canonical_card_id": "BGW-1", "title": "Resolver change", "body": "Body",
+        "html": "<p>Body</p>", "acceptance": ["AC-1"],
+        "fields": {"priority": "P1"}, "attachments": [{"name": "design", "url": "https://ku.baidu-int.com/doc/1"}],
+        "links": ["https://ku.baidu-int.com/doc/1"], "status": "OPEN", "type": "REQUIREMENT",
+        "responsible_people": [{"email": "owner@baidu.com", "name": "Owner"}],
+        "created": {"user": {"email": "creator@baidu.com"}, "time": "2026-08-10T00:00:00+00:00"},
+        "modified": {"user": {"email": "editor@baidu.com"}, "time": "2026-08-10T01:00:00+00:00"},
+    }
+    snapshot["content_hash"] = hashlib.sha256(json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    examples = {
+        "requirement-snapshot": snapshot,
+        "decision-log": {
+            "decision_result": "NO_OPEN_DECISIONS", "status": "COMPLETE", "decisions": [],
+            "unresolved_frontier": [], "glossary_delta": {}, "adr_candidates": [],
+            "source_evidence": ["icafe:BGW-1/snapshot-1"],
+        },
+        "spec": {
+            "version": "1", "behaviors": [{"id": "B-1", "number": 1, "description": "Resolve"}],
+            "acceptance_scenarios": [{"id": "S-1", "acceptance_point_ids": ["AC-1"], "given": "a query", "when": "resolved", "then": "an answer"}],
+            "boundaries": ["No release"], "errors": ["fail closed"], "compatibility": ["v1"],
+            "test_interface": ["resolver API"], "environment_requirements": ["Linux runner"],
+            "non_goals": ["UI"], "risks": ["cache"], "rollback": ["revert"],
+            "release_evidence": ["ipipe stage"],
+            "traceability": [{"acceptance_point_id": "AC-1", "behavior_ids": ["B-1"], "scenario_ids": ["S-1"]}],
+        },
+        "task-dag": {
+            "nodes": [{"task_id": "T-1", "title": "Resolver slice", "capability_slice": "Resolve query",
+                "business_changes": ["src/resolver.cc"], "test_changes": ["test/test_resolver.py"],
+                "test_ids": ["resolver.answer"], "fixtures": ["query-a"], "ipipe_stages": ["unit"],
+                "completion_predicate": "review accepted", "acceptance_point_ids": ["AC-1"]}],
+            "edges": [], "acceptance_coverage": [{"acceptance_point_id": "AC-1", "task_ids": ["T-1"]}],
+        },
+        "task-plan": {
+            "plan_id": "P-1", "task_id": "T-1", "g4_input_hash": HASH,
+            "repositories": [
+                {"role": "business", "path": "/repo/bgw", "revision": "r1"},
+                {"role": "tests", "path": "/repo/bgw-tests", "revision": "t1"},
+            ],
+            "files": ["src/resolver.cc"], "modules": ["resolver"], "symbols": ["resolve"],
+            "interfaces": ["Resolver::resolve"],
+            "tests": [{"test_id": "resolver.answer", "fixture": "query-a", "assertions": ["returns answer"]}],
+            "fixtures": ["query-a"], "ipipe_parameters": {"module": "resolver"}, "risks": ["cache"],
+            "rollback": ["revert"], "checklist": [{"order": 1, "item": "add failing test"}],
+            "acceptance_point_ids": ["AC-1"],
+        },
+        "change-set": {
+            "change_set_id": "CS-1", "task_id": "T-1",
+            "baseline_revisions": {"business": "r1", "tests": "t1"},
+            "revisions": {"business": "r2", "tests": "t2"}, "business_patch": "diff --git a b",
+            "test_patch": "diff --git a t", "full_diff_hash": "", "test_ids": ["resolver.answer"],
+            "traceability_delta": [{"acceptance_point_id": "AC-1", "test_ids": ["resolver.answer"]}],
+            "candidate_hash": "",
+        },
+        "review": {
+            "task_id": "T-1", "change_set_hash": HASH,
+            "baseline_revisions": {"business": "r1", "tests": "t1"},
+            "axes": {"standards": {"complete": True, "finding_ids": []}, "spec": {"complete": True, "finding_ids": []}},
+            "findings": [], "verdict": "ACCEPT", "provider": {"kind": "source-only", "identity": "review-provider-v1"},
+            "completeness_state": "COMPLETE",
+        },
+        "diagnosis": {
+            "task_id": "T-1", "attempt": 1, "frozen_revisions": {"business": "r2", "tests": "t2"},
+            "build_id": "build-1", "stage_id": "stage-1", "job_id": "job-1", "environment_fingerprint": "env-1",
+            "log_evidence": ["ipipe:build-1/job-1"], "classification": "CODE",
+            "reproduction": ["rerun stage"], "comparison": ["baseline passed"],
+            "hypothesis": "null branch is unhandled", "minimal_verification": ["run resolver.answer"],
+            "route": "REPAIR", "repair_direction": "guard null", "repair_plan": ["add test", "fix guard"],
+            "repair_diff_hash": HASH, "failure_signature": "SIG-1", "evidence_state": "SUFFICIENT",
+        },
+        "ipipe-evidence": {
+            "pipeline_id": "pipe-1", "build_id": "build-1", "module": "resolver",
+            "revisions": {"business": "r2", "tests": "t2"},
+            "stages": [{"stage_id": "unit", "status": "SUCCESS", "job_ids": ["job-1"]}],
+            "jobs": [{"job_id": "job-1", "status": "SUCCESS", "evidence_refs": ["ipipe:build-1/job-1"]}],
+            "environment_fingerprint": "env-1", "status": "SUCCESS", "classification": "PASS",
+            "failure_signature": None, "release_rule": "all stages pass", "release_evidence": ["ipipe:build-1/job-1"],
+            "remote_evidence_refs": ["ipipe:build-1/job-1"],
+        },
+        "run-summary": {
+            "terminal_state": "RELEASE_SUCCESS", "result": "SUCCESS",
+            "phase_timings": [{"phase": "SPEC", "started_at": "2026-08-10T00:00:00+00:00", "ended_at": "2026-08-10T00:01:00+00:00"}],
+            "human_waits": [], "retries": [], "review_findings": [], "failure_signatures": [],
+            "failure_classes": [], "resolutions": [], "missing_knowledge": [], "repeated_manual_operations": [],
+            "collaboration_receipt_refs": ["icafe:BGW-1/comment-1"], "external_receipt_refs": ["ku:doc-1/v1"],
+            "redacted_metrics": {"duration_seconds": 60},
+        },
+        "optimization-proposal": {
+            "proposal_id": "OPT-1", "candidate_hash": HASH, "evidence": ["artifact:summary-1"],
+            "root_cause": "duplicate manual reconciliation", "target_files": ["scripts/phase_protocol.py"],
+            "candidate_diff": "diff --git a/scripts/phase_protocol.py b/scripts/phase_protocol.py",
+            "expected_benefit": "one fewer manual step", "risk": "low", "rollback": "revert candidate",
+            "verification_commands": ["python3 -m unittest scripts.tests.test_phase_protocol"],
+            "status": "PROPOSED", "g10_approval_id": "approval-g10", "g10_input_hash": HASH,
+        },
+    }
+    change = examples["change-set"]
+    change["full_diff_hash"] = canonical_hash({
+        "business_patch": change["business_patch"], "test_patch": change["test_patch"],
+    })
+    change["candidate_hash"] = canonical_hash({
+        key: value for key, value in change.items() if key != "candidate_hash"
+    })
+    examples["review"]["change_set_hash"] = change["candidate_hash"]
+    return examples
+
+
+class NamedSchemaValidationTests(unittest.TestCase):
+    def test_every_specialized_schema_accepts_a_complete_artifact(self):
+        if validate_named_schema is None:
+            self.fail("named schema validation is not implemented")
+        for name, instance in specialized_examples().items():
+            with self.subTest(schema=name):
+                self.assertEqual(validate_named_schema(instance, name), [])
+
+    def test_every_schema_reports_deterministic_missing_and_invalid_paths(self):
+        if validate_named_schema is None:
+            self.fail("named schema validation is not implemented")
+        for name, instance in specialized_examples().items():
+            first_field = next(iter(instance))
+            malformed = copy.deepcopy(instance)
+            del malformed[first_field]
+            malformed["unexpected"] = True
+            with self.subTest(schema=name):
+                issues = validate_named_schema(malformed, name)
+                self.assertEqual(issues, sorted(issues, key=lambda issue: (issue.path, issue.kind)))
+                self.assertIn((first_field, "missing"), [(issue.path, issue.kind) for issue in issues])
+                self.assertIn(("unexpected", "invalid"), [(issue.path, issue.kind) for issue in issues])
+
+    def test_dag_rejects_cycles_unknown_edges_and_incomplete_acceptance_coverage(self):
+        if validate_named_schema is None:
+            self.fail("named schema validation is not implemented")
+        dag = specialized_examples()["task-dag"]
+        dag["nodes"].append({**copy.deepcopy(dag["nodes"][0]), "task_id": "T-2", "acceptance_point_ids": ["AC-2"]})
+        dag["edges"] = [{"from": "T-1", "to": "T-2"}, {"from": "T-2", "to": "T-1"}, {"from": "T-X", "to": "T-1"}]
+        issues = validate_named_schema(dag, "task-dag")
+        self.assertEqual([(issue.path, issue.kind) for issue in issues], [
+            ("acceptance_coverage", "incomplete"), ("edges", "cycle"), ("edges[2].from", "unknown"),
+        ])
+
+    def test_optimization_rejects_targets_outside_skill_control_plane_roots(self):
+        if validate_named_schema is None:
+            self.fail("named schema validation is not implemented")
+        proposal = specialized_examples()["optimization-proposal"]
+        proposal["target_files"] = ["profiles/bgw.yaml", "/repo/bgw/src/main.cc", "state.sqlite"]
+        self.assertEqual(
+            [(issue.path, issue.kind) for issue in validate_named_schema(proposal, "optimization-proposal")],
+            [("target_files[0]", "forbidden"), ("target_files[1]", "forbidden"), ("target_files[2]", "forbidden")],
+        )
+
+    def test_named_loader_rejects_path_traversal(self):
+        if load_named_schema is None:
+            self.fail("named schema loading is not implemented")
+        with self.assertRaisesRegex(ValueError, "SCHEMA_NAME_INVALID"):
+            load_named_schema("../project-profile")
+
+    def test_requirement_snapshot_recomputes_the_established_canonical_hash(self):
+        snapshot = specialized_examples()["requirement-snapshot"]
+        self.assertEqual(validate_named_schema(snapshot, "requirement-snapshot"), [])
+        snapshot["content_hash"] = "0" * 64
+        self.assertEqual(
+            [(issue.path, issue.kind) for issue in validate_named_schema(snapshot, "requirement-snapshot")],
+            [("content_hash", "mismatch")],
+        )
+
+    def test_requirement_snapshot_normalizes_string_and_object_acceptance_ids(self):
+        snapshot = specialized_examples()["requirement-snapshot"]
+        snapshot["acceptance"] = ["AC-1", {"id": "AC-2", "text": "Second"}]
+        snapshot["content_hash"] = canonical_hash({
+            key: value for key, value in snapshot.items() if key != "content_hash"
+        })
+
+        self.assertEqual(validate_named_schema(snapshot, "requirement-snapshot"), [])
+
+    def test_requirement_snapshot_rejects_malformed_and_duplicate_normalized_acceptance_ids(self):
+        cases = (
+            (["AC-1", ""], ("acceptance[1]", "invalid")),
+            (["AC-1", {"id": ""}], ("acceptance[1]", "invalid")),
+            (["AC-1", 7], ("acceptance[1]", "invalid")),
+            (["AC-1", {"id": "AC-1"}], ("acceptance[1]", "duplicate")),
+        )
+        for acceptance, expected in cases:
+            with self.subTest(acceptance=acceptance):
+                snapshot = specialized_examples()["requirement-snapshot"]
+                snapshot["acceptance"] = acceptance
+                snapshot["content_hash"] = canonical_hash({
+                    key: value for key, value in snapshot.items() if key != "content_hash"
+                })
+                issues = validate_named_schema(snapshot, "requirement-snapshot")
+                self.assertIn(expected, [(issue.path, issue.kind) for issue in issues])
+
+    def test_decision_log_and_spec_reject_shallow_or_contradictory_completion(self):
+        decision = specialized_examples()["decision-log"]
+        decision["decisions"] = [{
+            "id": "D-1", "question": "Which mode?", "options": ["A", "B"],
+            "choice": "A", "rationale": "Evidence", "evidence": ["artifact:source-1"],
+        }]
+        spec = specialized_examples()["spec"]
+        spec["boundaries"] = []
+
+        self.assertIn(
+            ("decision_result", "inconsistent"),
+            [(issue.path, issue.kind) for issue in validate_named_schema(decision, "decision-log")],
+        )
+        self.assertIn(
+            ("boundaries", "missing"),
+            [(issue.path, issue.kind) for issue in validate_named_schema(spec, "spec")],
+        )
+
+    def test_decision_log_enforces_each_result_state_and_coherent_recorded_choices(self):
+        recorded = specialized_examples()["decision-log"]
+        recorded.update({
+            "decision_result": "DECISIONS_RECORDED",
+            "decisions": [{
+                "id": "D-1", "question": "Which mode?", "options": ["A", "B"],
+                "choice": "A", "rationale": "Evidence", "evidence": ["artifact:source-1"],
+            }],
+        })
+        unresolved = specialized_examples()["decision-log"]
+        unresolved.update({
+            "decision_result": "UNRESOLVED", "status": "INCOMPLETE",
+            "unresolved_frontier": ["Which timeout?"],
+        })
+        self.assertEqual(validate_named_schema(recorded, "decision-log"), [])
+        self.assertEqual(validate_named_schema(unresolved, "decision-log"), [])
+
+        cases = []
+        empty_recorded = copy.deepcopy(recorded)
+        empty_recorded["decisions"] = []
+        cases.append((empty_recorded, ("decision_result", "inconsistent")))
+        open_recorded = copy.deepcopy(recorded)
+        open_recorded["unresolved_frontier"] = ["Still open"]
+        cases.append((open_recorded, ("decision_result", "inconsistent")))
+        duplicate_id = copy.deepcopy(recorded)
+        duplicate_id["decisions"].append(copy.deepcopy(duplicate_id["decisions"][0]))
+        cases.append((duplicate_id, ("decisions[1].id", "duplicate")))
+        duplicate_option = copy.deepcopy(recorded)
+        duplicate_option["decisions"][0]["options"] = ["A", "A"]
+        cases.append((duplicate_option, ("decisions[0].options", "duplicate")))
+        unknown_choice = copy.deepcopy(recorded)
+        unknown_choice["decisions"][0]["choice"] = "C"
+        cases.append((unknown_choice, ("decisions[0].choice", "unknown")))
+        empty_unresolved = copy.deepcopy(unresolved)
+        empty_unresolved["unresolved_frontier"] = []
+        cases.append((empty_unresolved, ("decision_result", "inconsistent")))
+        contradictory_none = specialized_examples()["decision-log"]
+        contradictory_none["status"] = "INCOMPLETE"
+        cases.append((contradictory_none, ("decision_result", "inconsistent")))
+
+        for value, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(
+                    expected,
+                    [(issue.path, issue.kind) for issue in validate_named_schema(value, "decision-log")],
+                )
+
+    def test_dag_plan_review_diagnosis_and_ipipe_reject_semantic_contradictions(self):
+        dag = specialized_examples()["task-dag"]
+        dag["nodes"].append(copy.deepcopy(dag["nodes"][0]))
+        plan = specialized_examples()["task-plan"]
+        plan["repositories"] = plan["repositories"][:1]
+        plan["checklist"].append({"order": 1, "item": "duplicate order"})
+        review = specialized_examples()["review"]
+        review["findings"] = [{
+            "id": "F-1", "axis": "standards", "severity": "P0", "location": "src/a.cc:1",
+            "evidence": "broken", "acceptance_point_ids": ["AC-1"], "blocking": True,
+        }]
+        diagnosis = specialized_examples()["diagnosis"]
+        diagnosis["evidence_state"] = "INSUFFICIENT"
+        diagnosis["route"] = "REPAIR"
+        ipipe = specialized_examples()["ipipe-evidence"]
+        ipipe["status"] = "SUCCESS"
+        ipipe["failure_signature"] = "SIG-FAIL"
+        ipipe["stages"][0]["job_ids"] = ["unknown-job"]
+
+        cases = [
+            ("task-dag", dag, ("nodes[1].task_id", "duplicate")),
+            ("task-plan", plan, ("repositories", "incomplete")),
+            ("task-plan", plan, ("checklist", "unordered")),
+            ("review", review, ("verdict", "inconsistent")),
+            ("diagnosis", diagnosis, ("route", "inconsistent")),
+            ("ipipe-evidence", ipipe, ("failure_signature", "inconsistent")),
+            ("ipipe-evidence", ipipe, ("stages[0].job_ids[0]", "unknown")),
+        ]
+        for name, value, expected in cases:
+            with self.subTest(schema=name, expected=expected):
+                self.assertIn(
+                    expected,
+                    [(issue.path, issue.kind) for issue in validate_named_schema(value, name)],
+                )
+
+    def test_change_set_recomputes_patch_and_candidate_hashes(self):
+        for field in ("full_diff_hash", "candidate_hash"):
+            change = specialized_examples()["change-set"]
+            change[field] = "0" * 64
+            with self.subTest(field=field):
+                self.assertIn(
+                    (field, "mismatch"),
+                    [(issue.path, issue.kind) for issue in validate_named_schema(change, "change-set")],
+                )
+
+    def test_ipipe_statuses_and_incomplete_diagnosis_are_semantically_explicit(self):
+        inconsistent = specialized_examples()["ipipe-evidence"]
+        inconsistent["status"] = "FAILURE"
+        inconsistent["classification"] = "CODE"
+        inconsistent["failure_signature"] = "SIG-FAIL"
+        unknown = specialized_examples()["ipipe-evidence"]
+        unknown["stages"][0]["status"] = "MYSTERY"
+        incomplete = specialized_examples()["diagnosis"]
+        incomplete.update({
+            "evidence_state": "INSUFFICIENT", "route": "DIAGNOSIS_INCOMPLETE",
+            "hypothesis": None, "repair_direction": None, "repair_plan": [],
+            "repair_diff_hash": None,
+        })
+
+        self.assertIn(
+            ("status", "inconsistent"),
+            [(issue.path, issue.kind) for issue in validate_named_schema(inconsistent, "ipipe-evidence")],
+        )
+        self.assertIn(
+            ("stages[0].status", "invalid"),
+            [(issue.path, issue.kind) for issue in validate_named_schema(unknown, "ipipe-evidence")],
+        )
+        self.assertEqual(validate_named_schema(incomplete, "diagnosis"), [])
+
+    def test_ipipe_rejects_noncanonical_or_secret_nested_evidence_references(self):
+        cases = (
+            ("job", "https://logs.example.test/job-1", ("jobs[0].evidence_refs", "invalid")),
+            ("remote", "ipipe:build-1/token-secret", ("remote_evidence_refs", "invalid")),
+        )
+        for location, reference, expected in cases:
+            with self.subTest(location=location):
+                evidence = specialized_examples()["ipipe-evidence"]
+                if location == "job":
+                    evidence["jobs"][0]["evidence_refs"] = [reference]
+                else:
+                    evidence["remote_evidence_refs"] = [reference]
+                self.assertIn(
+                    expected,
+                    [(issue.path, issue.kind) for issue in validate_named_schema(evidence, "ipipe-evidence")],
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

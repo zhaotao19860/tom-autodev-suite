@@ -1,0 +1,23 @@
+stateDiagram-v2
+    [*] --> INTAKE
+    INTAKE --> GRILL
+    GRILL --> SPEC
+    SPEC --> TASKS
+    TASKS --> WORKSPACE
+    WORKSPACE --> PLAN
+    PLAN --> IMPLEMENT
+    IMPLEMENT --> REVIEW
+    REVIEW --> SUBMIT: G7 通过
+    SUBMIT --> IPIPE
+    IPIPE --> RELEASE: 远程证据通过
+    RELEASE --> RELEASE_SUCCESS: G9 通过
+    REVIEW --> DIAGNOSE: Review 问题
+    IPIPE --> DIAGNOSE: 代码或测试失败
+    IPIPE --> ENVIRONMENT_BLOCKED: 环境问题
+    DIAGNOSE --> SPEC: 需要改需求或设计
+    DIAGNOSE --> PLAN: 需要改任务计划
+    DIAGNOSE --> IMPLEMENT: 可直接修复
+    ENVIRONMENT_BLOCKED --> IPIPE: 环境恢复后重试
+    RELEASE_SUCCESS --> G10: 运行总结
+    G10 --> [*]
+    STOPPED --> [*]

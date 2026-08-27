@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Project XFlow"
+  short_description: "Provide XFlow and TD5 project delivery rules"
+  default_prompt: "Load XFlow project, TD5 constraint, and iPipe rules for this approved task"

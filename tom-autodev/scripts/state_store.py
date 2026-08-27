@@ -1,0 +1,796 @@
+from __future__ import annotations
+
+import base64
+import json
+import hashlib
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from persistence_policy import ensure_persistable, validate_evidence_refs
+
+
+class StateStore:
+    def __init__(self, database_path: Path | str):
+        self.database_path = Path(database_path)
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    run_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS events_run_sequence
+                    ON events(run_id, sequence);
+                CREATE TABLE IF NOT EXISTS idempotency_results (
+                    idempotency_key TEXT PRIMARY KEY,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS external_intents (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    intent_id TEXT NOT NULL UNIQUE,
+                    run_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS external_intents_run_sequence
+                    ON external_intents(run_id, sequence);
+                CREATE TABLE IF NOT EXISTS receipts (
+                    intent_id TEXT PRIMARY KEY,
+                    response_json TEXT NOT NULL,
+                    evidence_refs_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS external_results (
+                    intent_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    evidence_refs_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS external_results_run_operation
+                    ON external_results(run_id, operation);
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    content_path TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    metadata_path TEXT NOT NULL,
+                    metadata_sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS locks (
+                    lock_key TEXT PRIMARY KEY,
+                    owner_token TEXT NOT NULL,
+                    owner_pid INTEGER NOT NULL,
+                    ttl_seconds INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    heartbeat_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS heartbeats (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    lock_key TEXT NOT NULL,
+                    owner_token TEXT NOT NULL,
+                    owner_pid INTEGER NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    kind TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS heartbeats_lock_sequence
+                    ON heartbeats(lock_key, sequence);
+                CREATE TABLE IF NOT EXISTS handoffs (
+                    handoff_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS handoffs_run_id
+                    ON handoffs(run_id, handoff_id);
+                CREATE TABLE IF NOT EXISTS optimization_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    candidate_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS optimization_proposals_run_id
+                    ON optimization_proposals(run_id, created_at);
+                """
+            )
+            _optimization_migrate(connection)
+
+    def transition(self, run_id: str, state: str, payload: dict[str, Any]) -> dict[str, Any]:
+        event = {
+            "event_id": uuid.uuid4().hex,
+            "run_id": run_id,
+            "state": state,
+            "payload": payload,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO events(event_id, run_id, state, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event["event_id"],
+                    event["run_id"],
+                    event["state"],
+                    _encode(payload),
+                    event["created_at"],
+                ),
+            )
+        return event
+
+    def events(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, run_id, state, payload_json, created_at
+                FROM events
+                WHERE run_id = ?
+                ORDER BY sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "run_id": row["run_id"],
+                "state": row["state"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def save_idempotency_result(self, key: str, result: dict[str, Any]) -> dict[str, Any]:
+        encoded = _encode(result)
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            existing = connection.execute(
+                "SELECT result_json FROM idempotency_results WHERE idempotency_key = ?",
+                (key,),
+            ).fetchone()
+            if existing is not None:
+                if existing["result_json"] != encoded:
+                    raise ValueError(f"idempotency result already exists for {key}")
+                return json.loads(existing["result_json"])
+            connection.execute(
+                """
+                INSERT INTO idempotency_results(idempotency_key, result_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (key, encoded, created_at),
+            )
+        return result
+
+    def idempotency_result(self, key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM idempotency_results WHERE idempotency_key = ?",
+                (key,),
+            ).fetchone()
+        return json.loads(row["result_json"]) if row is not None else None
+
+    def commit_transition_result(
+        self,
+        run_id: str,
+        expected_event_id: str,
+        state: str,
+        payload: dict[str, Any],
+        result_key: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """CAS the current checkpoint and persist its definite result atomically."""
+        payload_json = _encode(payload)
+        requested_result_json = _encode(result)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT result_json FROM idempotency_results WHERE idempotency_key = ?",
+                (result_key,),
+            ).fetchone()
+            if existing is not None:
+                saved = json.loads(existing["result_json"])
+                if any(saved.get(key) != value for key, value in result.items()):
+                    return {"status": "RESULT_CONFLICT", "result": saved}
+                return {"status": "REPLAY", "result": saved}
+            current = connection.execute(
+                "SELECT event_id FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if current is None or current["event_id"] != expected_event_id:
+                return {"status": "SOURCE_EVENT_MISMATCH"}
+            event_id = uuid.uuid4().hex
+            created_at = _now()
+            final_result = {
+                **json.loads(requested_result_json),
+                "run_id": run_id,
+                "state": state,
+                "event_id": event_id,
+            }
+            connection.execute(
+                """
+                INSERT INTO events(event_id, run_id, state, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (event_id, run_id, state, payload_json, created_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO idempotency_results(idempotency_key, result_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (result_key, _encode(final_result), created_at),
+            )
+        return {"status": "COMMITTED", "result": final_result}
+
+    def intent(
+        self,
+        run_id: str,
+        operation: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        encoded = _encode(payload)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM external_intents WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["run_id"] != run_id
+                    or existing["operation"] != operation
+                    or existing["payload_json"] != encoded
+                ):
+                    raise ValueError("INTENT_CONFLICT")
+                return _intent_row(existing)
+            intent_id = uuid.uuid4().hex
+            created_at = _now()
+            connection.execute(
+                """
+                INSERT INTO external_intents(
+                    intent_id, run_id, operation, idempotency_key, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (intent_id, run_id, operation, idempotency_key, encoded, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM external_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        return _intent_row(row)
+
+    def claim_intent(
+        self,
+        run_id: str,
+        operation: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically claim responsibility for one external write.
+
+        `intent()` remains compatible with older callers. New write paths need the
+        created flag because only the transaction that inserted the intent may send.
+        """
+        encoded = _encode(payload)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM external_intents WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+            if existing is not None:
+                if existing["run_id"] != run_id or existing["operation"] != operation:
+                    return {"status": "CONFLICT", "intent": _intent_row(existing)}
+                if existing["payload_json"] != encoded:
+                    return {"status": "CONFLICT", "intent": _intent_row(existing)}
+                return {"status": "EXISTING", "intent": _intent_row(existing)}
+            intent_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO external_intents(
+                    intent_id, run_id, operation, idempotency_key, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (intent_id, run_id, operation, idempotency_key, encoded, _now()),
+            )
+            row = connection.execute(
+                "SELECT * FROM external_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        return {"status": "CLAIMED", "intent": _intent_row(row)}
+
+    def intent_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM external_intents WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+        return _intent_row(row) if row is not None else None
+
+    def result_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT intent.*, receipt.response_json, receipt.evidence_refs_json,
+                       receipt.created_at AS receipt_created_at
+                FROM external_intents AS intent
+                JOIN receipts AS receipt ON receipt.intent_id = intent.intent_id
+                WHERE intent.idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        intent = _intent_row(row)
+        receipt = {
+            "intent_id": row["intent_id"],
+            "response": json.loads(row["response_json"]),
+            "evidence_refs": json.loads(row["evidence_refs_json"]),
+            "created_at": row["receipt_created_at"],
+        }
+        return {"operation": row["operation"], "intent": intent, "receipt": receipt}
+
+    def receipt(
+        self,
+        intent_id: str,
+        response: dict[str, Any],
+        evidence_refs: list[str],
+    ) -> dict[str, Any]:
+        evidence_refs = validate_evidence_refs(evidence_refs)
+        evidence_json = json.dumps(
+            evidence_refs, ensure_ascii=False, separators=(",", ":")
+        )
+        response_json = _encode(response)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            intent = connection.execute(
+                "SELECT * FROM external_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if intent is None:
+                raise ValueError("INTENT_NOT_FOUND")
+            existing = connection.execute(
+                "SELECT * FROM receipts WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["response_json"] != response_json
+                    or existing["evidence_refs_json"] != evidence_json
+                ):
+                    raise ValueError("RECEIPT_CONFLICT")
+                return _receipt_row(existing)
+            created_at = _now()
+            connection.execute(
+                """
+                INSERT INTO receipts(intent_id, response_json, evidence_refs_json, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (intent_id, response_json, evidence_json, created_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO external_results(
+                    intent_id, run_id, operation, result_json, evidence_refs_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    intent_id,
+                    intent["run_id"],
+                    intent["operation"],
+                    response_json,
+                    evidence_json,
+                    created_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM receipts WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        return _receipt_row(row)
+
+    def pending_intents(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT intent.*
+                FROM external_intents AS intent
+                LEFT JOIN receipts ON receipts.intent_id = intent.intent_id
+                WHERE intent.run_id = ? AND receipts.intent_id IS NULL
+                ORDER BY intent.sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_intent_row(row) for row in rows]
+
+    def external_results(self, run_id: str) -> list[dict[str, Any]]:
+        """Return durable, verified side-effect evidence in intent order."""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT intent.intent_id, intent.run_id, intent.operation, intent.idempotency_key,
+                       intent.payload_json, intent.created_at AS intent_created_at,
+                       receipt.response_json, receipt.evidence_refs_json,
+                       receipt.created_at AS receipt_created_at
+                FROM external_intents AS intent
+                JOIN receipts AS receipt ON receipt.intent_id = intent.intent_id
+                WHERE intent.run_id = ?
+                ORDER BY intent.sequence
+                """,
+                (run_id,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            {
+                "intent": {
+                    "intent_id": row["intent_id"], "run_id": row["run_id"],
+                    "operation": row["operation"], "idempotency_key": row["idempotency_key"],
+                    "payload": json.loads(row["payload_json"]), "created_at": row["intent_created_at"],
+                },
+                "receipt": {
+                    "intent_id": row["intent_id"], "response": json.loads(row["response_json"]),
+                    "evidence_refs": json.loads(row["evidence_refs_json"]),
+                    "created_at": row["receipt_created_at"],
+                },
+            }
+            for row in rows
+        ]
+
+    def record_handoff(
+        self, run_id: str, handoff_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        encoded = _encode(payload)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing["run_id"] != run_id or existing["payload_json"] != encoded:
+                    raise ValueError("HANDOFF_CONFLICT")
+                return _handoff_row(existing)
+            created_at = _now()
+            connection.execute(
+                """
+                INSERT INTO handoffs(
+                    handoff_id, run_id, payload_json, status, created_at, updated_at
+                ) VALUES (?, ?, ?, 'PENDING', ?, ?)
+                """,
+                (handoff_id, run_id, encoded, created_at, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+            ).fetchone()
+        return _handoff_row(row)
+
+    def complete_handoff(self, handoff_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("HANDOFF_NOT_FOUND")
+            if row["status"] != "COMPLETE":
+                connection.execute(
+                    "UPDATE handoffs SET status = 'COMPLETE', updated_at = ? WHERE handoff_id = ?",
+                    (_now(), handoff_id),
+                )
+                row = connection.execute(
+                    "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
+                ).fetchone()
+        return _handoff_row(row)
+
+    def incomplete_handoffs(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM handoffs
+                WHERE run_id = ? AND status != 'COMPLETE'
+                ORDER BY handoff_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_handoff_row(row) for row in rows]
+
+    def save_optimization_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
+        """Persist one immutable G10 candidate and its mutable result status."""
+        required = ("proposal_id", "run_id", "candidate_hash", "envelope_hash")
+        if any(not isinstance(proposal.get(key), str) or not proposal[key] for key in required):
+            raise ValueError("OPTIMIZATION_PROPOSAL_INVALID")
+        encoded = _encode(proposal)
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM optimization_proposals WHERE proposal_id = ?",
+                (proposal["proposal_id"],),
+            ).fetchone()
+            if existing is not None:
+                if existing["payload_json"] != encoded or existing["candidate_hash"] != proposal["candidate_hash"] or existing["envelope_hash"] != proposal["envelope_hash"]:
+                    raise ValueError("OPTIMIZATION_PROPOSAL_CONFLICT")
+                return _optimization_row(existing)
+            connection.execute(
+                """INSERT INTO optimization_proposals(
+                    proposal_id, run_id, candidate_hash, envelope_hash, payload_json, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'ARCHIVING', ?, ?)""",
+                (proposal["proposal_id"], proposal["run_id"], proposal["candidate_hash"], proposal["envelope_hash"], encoded, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM optimization_proposals WHERE proposal_id = ?",
+                (proposal["proposal_id"],),
+            ).fetchone()
+        return _optimization_row(row)
+
+    def mark_optimization_archived(self, proposal_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
+        encoded = _encode(receipt)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if row is None: raise ValueError("OPTIMIZATION_PROPOSAL_NOT_FOUND")
+            if row["status"] == "PROPOSED" and row["proposal_receipt_json"] == encoded: return _optimization_row(row)
+            if row["status"] != "ARCHIVING": raise ValueError("OPTIMIZATION_ARCHIVE_STATE_INVALID")
+            connection.execute("UPDATE optimization_proposals SET status='PROPOSED', proposal_receipt_json=?, archive_receipt_json=?, updated_at=? WHERE proposal_id=?", (encoded, encoded, _now(), proposal_id))
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+        return _optimization_row(row)
+
+    def claim_optimization_apply(self, proposal_id: str, approval_id: str, journal: dict[str, Any]) -> dict[str, Any]:
+        """CAS PROPOSED -> APPLYING after a complete backup journal is durable."""
+        token = uuid.uuid4().hex
+        heartbeat_at = datetime.now(timezone.utc)
+        lease_expires_at = (heartbeat_at + timedelta(seconds=300)).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+            if row is None:
+                return {"status": "NOT_FOUND"}
+            if row["status"] != "PROPOSED":
+                return {"status": row["status"], "proposal": _optimization_row(row)}
+            proposal = json.loads(row["payload_json"])
+            expected = {
+                "schema_version": "2", "proposal_id": proposal_id, "run_id": row["run_id"],
+                "candidate_hash": row["candidate_hash"], "approval_id": approval_id,
+                "allowed_roots": proposal.get("allowed_roots"),
+                "target_identities": [
+                    {"path": item["path"], "before_sha256": item["before_sha256"], "content_sha256": item["content_sha256"]}
+                    for item in proposal.get("candidate", {}).get("target_files", [])
+                ],
+            }
+            if not _claim_journal_matches(journal, expected):
+                return {"status": "JOURNAL_INVALID"}
+            journal = dict(journal)
+            # The journal stores a non-secret ownership proof; the actual token remains in its dedicated column.
+            journal["claim"] = {"owner_proof": hashlib.sha256(token.encode("utf-8")).hexdigest(), "owner_pid": os.getpid(), "heartbeat_at": heartbeat_at.isoformat(), "lease_expires_at": lease_expires_at}
+            journal["journal_hash"] = _journal_hash({key: value for key, value in journal.items() if key != "journal_hash"})
+            encoded = _encode(journal)
+            connection.execute(
+                """UPDATE optimization_proposals SET status = 'APPLYING', approval_id = ?, owner_token = ?,
+                   owner_pid = ?, apply_journal_json = ?, heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
+                   WHERE proposal_id = ? AND status = 'PROPOSED'""",
+                (approval_id, token, os.getpid(), encoded, heartbeat_at.isoformat(), lease_expires_at, _now(), proposal_id),
+            )
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+        return {"status": "CLAIMED", "owner_token": token, "proposal": _optimization_row(row)}
+
+    def heartbeat_optimization_apply(self, proposal_id: str, owner_token: str, lease_seconds: int = 300) -> dict[str, Any]:
+        if not isinstance(lease_seconds, int) or lease_seconds <= 0: raise ValueError("OPTIMIZATION_LEASE_INVALID")
+        now = datetime.now(timezone.utc); expiry = (now + timedelta(seconds=lease_seconds)).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row=connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?",(proposal_id,)).fetchone()
+            if row is None or row["status"] != "APPLYING" or row["owner_token"] != owner_token: raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
+            connection.execute("UPDATE optimization_proposals SET heartbeat_at=?, lease_expires_at=?, updated_at=? WHERE proposal_id=?",(now.isoformat(),expiry,_now(),proposal_id))
+            row=connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?",(proposal_id,)).fetchone()
+        return _optimization_row(row)
+
+    def finalize_optimization_apply(self, proposal_id: str, owner_token: str, status: str, result: dict[str, Any]) -> dict[str, Any]:
+        encoded = _encode(result)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+            if row is None or row["status"] not in {"APPLYING", "RECOVERY_REQUIRED"} or row["owner_token"] != owner_token:
+                raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
+            connection.execute("UPDATE optimization_proposals SET status=?, result_json=?, updated_at=? WHERE proposal_id=?", (status, encoded, _now(), proposal_id))
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+        return _optimization_row(row)
+
+    def begin_optimization_result_archive(self, proposal_id: str, owner_token: str, result: dict[str, Any], terminal_status: str) -> dict[str, Any]:
+        """Persist the result before publishing it; terminal states require a receipt."""
+        if terminal_status not in {"APPLIED", "ROLLED_BACK"}:
+            raise ValueError("OPTIMIZATION_TERMINAL_STATUS_INVALID")
+        encoded = _encode(result)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if row is None or row["status"] not in {"APPLYING", "RECOVERY_REQUIRED"} or row["owner_token"] != owner_token:
+                raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
+            connection.execute("UPDATE optimization_proposals SET status='RESULT_ARCHIVING', result_json=?, pending_terminal_status=?, updated_at=? WHERE proposal_id=?", (encoded, terminal_status, _now(), proposal_id))
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+        return _optimization_row(row)
+
+    def mark_optimization_result_archive_pending(self, proposal_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        encoded = _encode(result)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if row is None or row["status"] not in {"RESULT_ARCHIVING", "ARCHIVE_PENDING"}:
+                raise ValueError("OPTIMIZATION_RESULT_ARCHIVE_STATE_INVALID")
+            connection.execute("UPDATE optimization_proposals SET status='ARCHIVE_PENDING', result_json=?, updated_at=? WHERE proposal_id=?", (encoded, _now(), proposal_id))
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+        return _optimization_row(row)
+
+    def complete_optimization_result_archive(self, proposal_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
+        encoded = _encode(receipt)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if row is None or row["status"] not in {"RESULT_ARCHIVING", "ARCHIVE_PENDING"} or row["pending_terminal_status"] not in {"APPLIED", "ROLLED_BACK"}:
+                raise ValueError("OPTIMIZATION_RESULT_ARCHIVE_STATE_INVALID")
+            connection.execute("UPDATE optimization_proposals SET status=?, result_receipt_json=?, pending_terminal_status=NULL, updated_at=? WHERE proposal_id=?", (row["pending_terminal_status"], encoded, _now(), proposal_id))
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+        return _optimization_row(row)
+
+    def mark_optimization_recovery_required(self, proposal_id: str, owner_token: str | None, result: dict[str, Any]) -> dict[str, Any]:
+        encoded = _encode(result)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+            if row is None or row["status"] not in {"APPLYING", "ROLLBACK_FAILED", "RECOVERY_REQUIRED"} or (owner_token is not None and row["owner_token"] != owner_token):
+                raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
+            connection.execute("UPDATE optimization_proposals SET status='RECOVERY_REQUIRED', result_json=?, updated_at=? WHERE proposal_id=?", (encoded, _now(), proposal_id))
+            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
+        return _optimization_row(row)
+
+    def optimization_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+        finally:
+            connection.close()
+        return _optimization_row(row) if row is not None else None
+
+    def update_optimization_proposal(
+        self, proposal_id: str, status: str, result: dict[str, Any], approval_id: str | None = None
+    ) -> dict[str, Any]:
+        encoded = _encode(result)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("OPTIMIZATION_PROPOSAL_NOT_FOUND")
+            if row["status"] == status and row["result_json"] == encoded:
+                return _optimization_row(row)
+            if row["status"] in {"APPLIED", "ROLLED_BACK", "REJECTED", "ARCHIVE_FAILED"}:
+                if row["status"] != status:
+                    raise ValueError("OPTIMIZATION_PROPOSAL_FINAL")
+            connection.execute(
+                "UPDATE optimization_proposals SET status = ?, result_json = ?, approval_id = COALESCE(?, approval_id), updated_at = ? WHERE proposal_id = ?",
+                (status, encoded, approval_id, _now(), proposal_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)
+            ).fetchone()
+        return _optimization_row(row)
+
+
+def _encode(value: dict[str, Any]) -> str:
+    ensure_persistable(value)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _journal_hash(value: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _claim_journal_matches(journal: Any, expected: dict[str, Any]) -> bool:
+    try:
+        if not isinstance(journal, dict) or any(journal.get(key) != value for key, value in expected.items()): return False
+        entries = journal.get("entries")
+        targets = expected["target_identities"]
+        if not isinstance(entries, list) or len(entries) != len(targets): return False
+        for entry, target in zip(entries, targets):
+            data = base64.b64decode(entry["bytes_b64"], validate=True)
+            if entry.get("path") != target["path"] or entry.get("sha256") != hashlib.sha256(data).hexdigest() or entry["sha256"] != target["before_sha256"]: return False
+        return True
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _intent_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "intent_id": row["intent_id"],
+        "run_id": row["run_id"],
+        "operation": row["operation"],
+        "idempotency_key": row["idempotency_key"],
+        "payload": json.loads(row["payload_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _receipt_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "intent_id": row["intent_id"],
+        "response": json.loads(row["response_json"]),
+        "evidence_refs": json.loads(row["evidence_refs_json"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _handoff_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "handoff_id": row["handoff_id"],
+        "run_id": row["run_id"],
+        "payload": json.loads(row["payload_json"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _optimization_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "proposal_id": row["proposal_id"],
+        "run_id": row["run_id"],
+        "candidate_hash": row["candidate_hash"],
+        "envelope_hash": row["envelope_hash"],
+        "proposal": json.loads(row["payload_json"]),
+        "status": row["status"],
+        "result": json.loads(row["result_json"]) if row["result_json"] else None,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "approval_id": row["approval_id"],
+        "owner_token": row["owner_token"],
+        "owner_pid": row["owner_pid"],
+        "apply_journal": json.loads(row["apply_journal_json"]) if row["apply_journal_json"] else None,
+        "archive_receipt": json.loads(row["proposal_receipt_json"] or row["archive_receipt_json"]) if (row["proposal_receipt_json"] or row["archive_receipt_json"]) else None,
+        "proposal_receipt": json.loads(row["proposal_receipt_json"]) if row["proposal_receipt_json"] else None,
+        "result_receipt": json.loads(row["result_receipt_json"]) if row["result_receipt_json"] else None,
+        "pending_terminal_status": row["pending_terminal_status"],
+        "heartbeat_at": row["heartbeat_at"], "lease_expires_at": row["lease_expires_at"],
+    }
+
+
+def _optimization_migrate(connection: sqlite3.Connection) -> None:
+    fields = {
+        "envelope_hash": "TEXT NOT NULL DEFAULT ''", "approval_id": "TEXT",
+        "owner_token": "TEXT", "owner_pid": "INTEGER", "apply_journal_json": "TEXT", "archive_receipt_json": "TEXT", "proposal_receipt_json": "TEXT", "result_receipt_json": "TEXT", "pending_terminal_status": "TEXT", "heartbeat_at": "TEXT", "lease_expires_at": "TEXT",
+    }
+    existing = {row["name"] for row in connection.execute("PRAGMA table_info(optimization_proposals)")}
+    for field, definition in fields.items():
+        if field not in existing:
+            connection.execute(f"ALTER TABLE optimization_proposals ADD COLUMN {field} {definition}")

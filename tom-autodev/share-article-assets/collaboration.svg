@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 710 716" width="710" height="716" style="background:#ffffff"><rect width="100%" height="100%" fill="#ffffff"/>
+
+<defs>
+  <marker id="seq-arrow" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto-start-reverse">
+    <polygon points="0 0, 8 2.4, 0 4.8" fill="#0969da" />
+  </marker>
+  <marker id="seq-arrow-open" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto-start-reverse">
+    <polyline points="0 0, 8 2.4, 0 4.8" fill="none" stroke="#0969da" stroke-width="1" />
+  </marker>
+</defs>
+<rect x="30" y="358" width="520" height="268" rx="0" ry="0" fill="none" stroke="#d1d9e0" stroke-width="1" />
+<rect x="30" y="358" width="79.8" height="18" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+<text x="36" y="367" dy="0.35em" font-size="11" font-weight="600" fill="#59636e">alt [开发问题]</text>
+<line x1="30" y1="474" x2="550" y2="474" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" />
+<text x="38" y="488" font-size="11" font-weight="400" fill="#59636e">[环境或用例问题]</text>
+<line x1="30" y1="578" x2="550" y2="578" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" />
+<text x="38" y="592" font-size="11" font-weight="400" fill="#59636e">[共同问题]</text>
+<line x1="80" y1="70" x2="80" y2="686" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" />
+<line x1="220" y1="70" x2="220" y2="686" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" />
+<line x1="360" y1="70" x2="360" y2="686" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" />
+<line x1="500" y1="70" x2="500" y2="686" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" />
+<line x1="640" y1="70" x2="640" y2="686" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" />
+<line x1="220" y1="90" x2="360" y2="90" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="290" y="84" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">创建需求群并确认成员</text>
+<line x1="220" y1="130" x2="80" y2="130" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="150" y="124" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">分派需求分析设计开发</text>
+<line x1="220" y1="170" x2="500" y2="170" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="360" y="164" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">分派环境建设用例构建评审</text>
+<line x1="80" y1="210" x2="220" y2="210" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="150" y="204" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">提交实现与单测变更</text>
+<line x1="500" y1="250" x2="220" y2="250" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="360" y="244" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">提交测试环境与用例证据</text>
+<line x1="220" y1="290" x2="640" y2="290" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="430" y="284" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">提交 iCode 并触发远程流程</text>
+<line x1="640" y1="330" x2="220" y2="330" stroke="#d1d9e0" stroke-width="0.75" stroke-dasharray="6 4" marker-end="url(#seq-arrow)" />
+<text x="430" y="324" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">返回阶段结果和日志</text>
+<line x1="220" y1="398" x2="360" y2="398" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="290" y="392" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">@研发 发送代码证据和修复任务</text>
+<line x1="80" y1="438" x2="220" y2="438" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="150" y="432" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">修复并更新文档</text>
+<line x1="220" y1="502" x2="360" y2="502" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="290" y="496" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">@测试 发送环境证据和修复任务</text>
+<line x1="500" y1="542" x2="220" y2="542" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="360" y="536" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">修复并更新文档</text>
+<line x1="220" y1="606" x2="360" y2="606" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="290" y="600" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">同时 @研发和测试</text>
+<line x1="220" y1="646" x2="640" y2="646" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#seq-arrow)" />
+<text x="430" y="640" text-anchor="middle" font-size="11" font-weight="400" fill="#59636e">审批后继续或重跑</text>
+<rect x="40" y="30" width="80" height="40" rx="4" ry="4" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+<text x="80" y="50" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">研发</text>
+<rect x="164.675" y="30" width="110.65" height="40" rx="4" ry="4" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+<text x="220" y="50" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">tom-autodev</text>
+<rect x="320" y="30" width="80" height="40" rx="4" ry="4" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+<text x="360" y="50" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">如流需求群</text>
+<rect x="460" y="30" width="80" height="40" rx="4" ry="4" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+<text x="500" y="50" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">测试</text>
+<rect x="600" y="30" width="80" height="40" rx="4" ry="4" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+<text x="640" y="50" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">iPipe</text>
+</svg>

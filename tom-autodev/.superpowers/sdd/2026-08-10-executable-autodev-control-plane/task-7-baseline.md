@@ -1,0 +1,14 @@
+# Task 7 non-Git baseline
+
+Captured before Task 7 production edits. New Task 7 files did not exist.
+
+```text
+1296d3893c17369164c8bbbb67efc264367d0ef5e26dbb84cb9bfa2c49937ac7  scripts/schema_validator.py
+96325ffde419679ee93538bcc0aa6b9560a07a61f1ce118f963ae10df8960d37  scripts/orchestrator.py
+c964021f99b6ce6e6d78470dc439427799caa777c73e1e289a4a245dee7d09a7  scripts/artifact_store.py
+79ac48d4f7066cae6c8ded8d5a60dbb48668117aac183a74975fd8a01368b25c  scripts/state_store.py
+5edcb459406e21d9cd7bf85752f97c13ed1c833d9721424238d9282351979bf9  scripts/knowledge_sync.py
+96a3c8f988b89e3104eafc771b35c37d291044fb68faac5990d6989db0316685  scripts/transition_policy.py
+7c50a7c259a27f883b5a1a698eb16fe42382ada63909968853594f41f832951d  scripts/evidence_policy.py
+9e13f8b26c00ee131a1d49d4717c59b1299a3c073a863ab3d3ce6d23d61c1321  scripts/evidence_gate.py
+```

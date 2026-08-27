@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Diagnose"
+  short_description: "Establish root causes before repairs"
+  default_prompt: "Diagnose this Review or iPipe failure and classify the repair route"

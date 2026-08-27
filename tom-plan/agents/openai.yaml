@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Plan"
+  short_description: "Write concrete per-task implementation plans"
+  default_prompt: "Create the approved per-task implementation plan for this frontier task"

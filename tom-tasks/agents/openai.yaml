@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tom Tasks"
+  short_description: "Split Specs into end-to-end task slices"
+  default_prompt: "Create an approved end-to-end capability-slice DAG for this Spec"

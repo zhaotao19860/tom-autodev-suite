@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1675.6999999999998 326" width="1675.6999999999998" height="326" style="background:#ffffff"><rect width="100%" height="100%" fill="#ffffff"/>
+
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto">
+    <polygon points="0 0, 8 2.4, 0 4.8" fill="#0969da" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="4.8" refX="0" refY="2.4" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.4, 8 4.8" fill="#0969da" />
+  </marker>
+</defs>
+<polyline points="143.5,148 183.49999999999997,148" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="337.04999999999995,148 357.05,148 357.05,58 387.77500000000003,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="498.425,58 552.725,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="656.225,58 699.8000000000001,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="810.4500000000002,58 850.45,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="953.95,58 993.95,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1133.2,58 1173.2,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1291.0000000000002,58 1331,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1413.0500000000002,58 1453.05,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="1535.1000000000001,58 1575.1,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="337.04999999999995,148 357.05,148 357.05,118 394.925,118" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="337.04999999999995,148 357.05,148 357.05,178 394.925,178" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="337.04999999999995,148 357.05,148 357.05,238 377.05,238" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="509.15000000000003,238 529.1500000000001,238 529.1500000000001,178 549.15,178" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="509.15000000000003,238 529.1500000000001,238 529.1500000000001,268 549.15,268" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<rect x="40" y="130" width="103.5" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="183.49999999999997" y="130" width="153.55" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="387.77500000000003" y="40" width="110.65" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="552.725" y="40" width="103.5" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="699.8000000000001" y="40" width="110.65" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="850.45" y="40" width="103.5" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="993.95" y="40" width="139.25" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="1173.2" y="40" width="117.80000000000001" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="1331" y="40" width="82.05000000000001" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="1453.05" y="40" width="82.05000000000001" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="1575.1" y="40" width="60.6" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="394.925" y="100" width="96.35000000000001" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="394.925" y="160" width="96.35000000000001" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="377.05" y="220" width="132.10000000000002" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="549.15" y="160" width="110.65" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="549.15" y="250" width="110.65" height="36" rx="0" ry="0" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<text x="91.75" y="148" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;iCafe 需求&quot;</text>
+<text x="260.275" y="148" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;tom-autodev 控制面&quot;</text>
+<text x="443.1" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;tom-grill&quot;</text>
+<text x="604.475" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;tom-spec&quot;</text>
+<text x="755.1250000000001" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;tom-tasks&quot;</text>
+<text x="902.2" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;tom-plan&quot;</text>
+<text x="1063.575" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;tom-implement&quot;</text>
+<text x="1232.1000000000001" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;tom-review&quot;</text>
+<text x="1372.025" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;iCode&quot;</text>
+<text x="1494.075" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;iPipe&quot;</text>
+<text x="1605.3999999999999" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;发布&quot;</text>
+<text x="443.1" y="118" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;KU 阶段文档&quot;</text>
+<text x="443.1" y="178" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;如流协作与审批&quot;</text>
+<text x="443.1" y="238" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;语言与项目子 Skill&quot;</text>
+<text x="604.475" y="178" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;BGW C/C++&quot;</text>
+<text x="604.475" y="268" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">&quot;XFlow NPL&quot;</text>
+</svg>

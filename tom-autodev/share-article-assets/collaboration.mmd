@@ -1,0 +1,23 @@
+sequenceDiagram
+    participant D as 研发
+    participant A as tom-autodev
+    participant Q as 如流需求群
+    participant T as 测试
+    participant P as iPipe
+    A->>Q: 创建需求群并确认成员
+    A->>D: 分派需求分析设计开发
+    A->>T: 分派环境建设用例构建评审
+    D->>A: 提交实现与单测变更
+    T->>A: 提交测试环境与用例证据
+    A->>P: 提交 iCode 并触发远程流程
+    P-->>A: 返回阶段结果和日志
+    alt 开发问题
+        A->>Q: @研发 发送代码证据和修复任务
+        D->>A: 修复并更新文档
+    else 环境或用例问题
+        A->>Q: @测试 发送环境证据和修复任务
+        T->>A: 修复并更新文档
+    else 共同问题
+        A->>Q: 同时 @研发和测试
+    end
+    A->>P: 审批后继续或重跑

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Setup Tom Autodev"
+  short_description: "Register and validate project delivery profiles"
+  default_prompt: "Validate the project profile before starting tom-autodev"

@@ -1,0 +1,1187 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from artifact_store import ArtifactStore
+from collaboration import (
+    intake_prerequisites,
+    intake_prerequisites_valid,
+)
+from persistence_policy import ensure_persistable, validate_evidence_refs
+from project_registry import load_profile
+from requirement_snapshot import AcceptanceValueError, normalized_acceptance_ids
+from schema_validator import validate_named_schema
+
+
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_STABLE_DEPENDENCY_REASONS = frozenset({
+    "INTENT_CONFLICT", "RECEIPT_CONFLICT", "ARTIFACT_CONFLICT",
+    "ARTIFACT_COMPONENT_INVALID", "ARTIFACT_PATH_ESCAPE", "ARTIFACT_ENVELOPE_INVALID",
+    "CONTENT_HASH_MISMATCH", "SCHEMA_INVALID", "EVIDENCE_REF_INVALID",
+    "EVIDENCE_REQUIRED", "PERSISTENCE_SECRET_REJECTED", "KNOWLEDGE_RECEIPT_INVALID",
+    "APPROVAL_NOT_FOUND", "APPROVAL_INPUT_MISMATCH", "APPROVAL_RUN_MISMATCH",
+})
+_DRAFT_KEYS = frozenset(
+    {
+        "action_id", "source_event_id", "host", "run_id", "phase", "task_id",
+        "schema_version", "input_hash", "content_hash", "source_revisions",
+        "parent_artifact_hash", "knowledge_doc_id", "knowledge_url", "knowledge_version",
+        "icafe_comment_id", "evidence_refs", "approval_id", "approval_input_hash", "content",
+    }
+)
+
+_PHASES: dict[str, dict[str, Any]] = {
+    "INTAKE": {"controller": "intake", "schema": "requirement-snapshot", "gate": "G0", "target": "GRILL"},
+    "GRILL": {"skill": "tom-grill", "schema": "decision-log", "gate": "G1", "target": "SPEC", "predecessor": "INTAKE"},
+    "SPEC": {"skill": "tom-spec", "schema": "spec", "gate": "G2", "target": "TASKS", "predecessor": "GRILL"},
+    "TASKS": {"skill": "tom-tasks", "schema": "task-dag", "gate": "G3", "target": "WORKSPACE", "predecessor": "SPEC"},
+    "PLAN": {"skill": "tom-plan", "schema": "task-plan", "gate": "G4", "target": "IMPLEMENT", "predecessor": "TASKS", "revisions": True},
+    "IMPLEMENT": {"skill": "tom-implement", "schema": "change-set", "gate": "G5", "target": "REVIEW", "predecessor": "PLAN", "revisions": True},
+    "REVIEW": {"skill": "tom-review", "schema": "review", "gate": None, "target": "SUBMIT", "predecessor": "IMPLEMENT", "revisions": True},
+    "DIAGNOSE": {"skill": "tom-diagnose", "schema": "diagnosis", "gate": "G6", "target": None, "predecessor": ("REVIEW", "IPIPE", "IMPLEMENT"), "revisions": True},
+}
+
+_CONTROLLERS = {
+    "WORKSPACE": {"controller": "workspace", "target": "PLAN", "gate": "G4", "predecessor": "TASKS"},
+    "SUBMIT": {"controller": "submit", "target": "IPIPE", "gate": "G7", "predecessor": "REVIEW"},
+    "IPIPE": {"controller": "ipipe", "target": None, "gate": None, "revisions": True},
+    "RELEASE": {"controller": "release", "target": None, "gate": "G9", "predecessor": "IPIPE", "revisions": True},
+}
+
+_TITLE = {
+    "INTAKE": "00-requirement-snapshot", "GRILL": "01-grill", "SPEC": "02-spec",
+    "TASKS": "03-tasks", "PLAN": "04-task-plan", "IMPLEMENT": "05-change-set",
+    "REVIEW": "06-review", "DIAGNOSE": "07-diagnosis", "IPIPE": "08-ipipe-evidence",
+}
+
+
+class PhaseProtocol:
+    def __init__(
+        self,
+        *,
+        state_store: Any,
+        artifact_store: ArtifactStore,
+        knowledge_sync: Any | None,
+        approval_ledger: Any | None,
+        evidence_gate: Any,
+        transition_policy: Any,
+    ):
+        self.state = state_store
+        self.artifacts = artifact_store
+        self.knowledge = knowledge_sync
+        self.approvals = approval_ledger
+        self.evidence_gate = evidence_gate
+        self.transitions = transition_policy
+
+    def next(self, run_id: str) -> dict[str, Any]:
+        try:
+            return self._next(run_id)
+        except Exception as error:
+            return _failure(_exception_reason(error, "PHASE_PROTOCOL_INVALID"), run_id=run_id)
+
+    def _next(self, run_id: str) -> dict[str, Any]:
+        if not isinstance(run_id, str) or not run_id:
+            return _failure("INVALID_INPUT")
+        events = self.state.events(run_id)
+        if not events:
+            return _failure("RUN_NOT_FOUND", run_id=run_id)
+        current = events[-1]
+        state = current.get("state")
+        if state in {"RELEASE_SUCCESS", "STOPPED"}:
+            return {
+                **_failure("TERMINAL_STATE", run_id=run_id),
+                "state": state,
+                "host": "comate",
+                "stop": True,
+            }
+        profile_error = _pinned_profile_error(events)
+        if profile_error is not None:
+            return _failure(profile_error, run_id=run_id)
+        if self.state.pending_intents(run_id):
+            return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
+        definition = _PHASES.get(state)
+        controller_definition = _CONTROLLERS.get(state)
+        if definition is None and controller_definition is None:
+            return _failure("INVALID_STATE", run_id=run_id, state=state)
+        selected = definition or controller_definition
+        if state == "INTAKE":
+            payload = current.get("payload")
+            snapshot = payload.get("requirement_snapshot") if isinstance(payload, dict) else None
+            if (
+                not intake_prerequisites_valid(payload, run_id)
+                or validate_named_schema(snapshot, "requirement-snapshot")
+            ):
+                return _failure("INTAKE_PREREQUISITES_INVALID", run_id=run_id, state=state)
+        if state == "IPIPE":
+            binding_error = self._ipipe_binding_error(events, current.get("payload"))
+            if binding_error is not None:
+                return _failure(binding_error, run_id=run_id, state=state)
+        task_id = self._task_id(run_id, state, current)
+        if state in {"PLAN", "IMPLEMENT", "REVIEW"} and task_id is None:
+            return _failure("TASK_FRONTIER_EMPTY", run_id=run_id, state=state)
+        predecessor = self._predecessor(run_id, selected.get("predecessor"), task_id)
+        if selected.get("predecessor") and predecessor is None:
+            return _failure("PREDECESSOR_REQUIRED", run_id=run_id, state=state, task_id=task_id)
+        source_revisions = self._source_revisions(current, predecessor)
+        if selected.get("revisions") and not _valid_revisions(source_revisions):
+            return _failure("SOURCE_REVISION_REQUIRED", run_id=run_id, state=state, task_id=task_id)
+        target = selected.get("target")
+        if isinstance(target, str):
+            transition = self.transitions.validate(state, target)
+            if not transition.get("allowed"):
+                return _failure(transition.get("reason_code", "INVALID_TRANSITION"), run_id=run_id, state=state)
+        input_artifacts = [] if predecessor is None else [_artifact_reference(predecessor)]
+        parent_hash = predecessor["envelope"]["content_hash"] if predecessor is not None else None
+        action_inputs = {
+            "run_id": run_id,
+            "source_event_id": current["event_id"],
+            "state": state,
+            "phase": state,
+            "task_id": task_id,
+            "profile_hash": _pinned_profile_hash(events),
+            "input_artifacts": input_artifacts,
+            "parent_artifact_hash": parent_hash,
+            "source_revisions": source_revisions,
+            **({"intake_prerequisites": _intake_prerequisites(events)} if state == "INTAKE" else {}),
+            **({"controller_binding": _ipipe_controller_binding(current.get("payload"))} if state == "IPIPE" else {}),
+            **({"baseline_revisions": source_revisions} if state == "IMPLEMENT" else {}),
+        }
+        input_hash = (
+            current["payload"]["g0_input_hash"]
+            if state == "INTAKE"
+            else _canonical_hash(action_inputs)
+        )
+        action = {
+            "ok": True,
+            "reason_code": "OK",
+            "action_id": _canonical_hash({"identity": action_inputs, "input_hash": input_hash}),
+            "run_id": run_id,
+            "source_event_id": current["event_id"],
+            "state": state,
+            "phase": state,
+            "host": "comate",
+            "child_skill": selected.get("skill"),
+            "controller": selected.get("controller"),
+            "task_id": task_id,
+            "input_artifacts": input_artifacts,
+            "input_hash": input_hash,
+            "parent_artifact_hash": parent_hash,
+            "source_revisions": source_revisions,
+            **({"baseline_revisions": source_revisions} if state == "IMPLEMENT" else {}),
+            **({"controller_binding": _ipipe_controller_binding(current.get("payload"))} if state == "IPIPE" else {}),
+            "source_evidence_refs": _source_evidence_refs(events, predecessor),
+            "required_human_gate": selected.get("gate"),
+            "allowed_side_effects": _allowed_side_effects(state, controller_definition is not None),
+            "completion_predicate": _completion_predicate(state, selected.get("schema")),
+            "result_schema": selected.get("schema"),
+            "target_state": target,
+            **({"content": _intake_snapshot(events)} if state == "INTAKE" else {}),
+        }
+        key = f"phase-action:{run_id}:{current['event_id']}:{state}:{task_id or '-'}"
+        existing = self.state.idempotency_result(key)
+        if existing is not None:
+            return existing if existing == action else _failure("ACTION_CONFLICT", run_id=run_id, state=state)
+        self.state.save_idempotency_result(key, action)
+        return action
+
+    def validate_result(self, action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._validate_result(action, result)
+        except Exception as error:
+            return _failure(_exception_reason(error, "RESULT_VALIDATION_FAILED"))
+
+    def _validate_result(self, action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(action, dict) or not action.get("ok") or not isinstance(result, dict):
+            return _failure("INVALID_INPUT")
+        if action.get("controller") not in {None, "intake"}:
+            return _failure("CONTROLLER_ACTION_NOT_COMPLETABLE")
+        if set(result) != _DRAFT_KEYS:
+            return _failure("ENVELOPE_INVALID")
+        if result.get("host") != "comate" or action.get("host") != "comate":
+            return _failure("HOST_NOT_COMATE")
+        if result.get("run_id") != action.get("run_id"):
+            return _failure("RUN_ID_MISMATCH")
+        if result.get("source_event_id") != action.get("source_event_id"):
+            return _failure("STALE_ACTION")
+        events = self.state.events(action["run_id"])
+        if not events or events[-1].get("event_id") != action.get("source_event_id"):
+            return _failure("STALE_ACTION")
+        action_key = (
+            f"phase-action:{action['run_id']}:{action['source_event_id']}:"
+            f"{action.get('state')}:{action.get('task_id') or '-'}"
+        )
+        issued = self.state.idempotency_result(action_key)
+        if issued is None or issued != action:
+            return _failure("ACTION_ID_MISMATCH")
+        if result.get("action_id") != action.get("action_id"):
+            return _failure("ACTION_ID_MISMATCH")
+        collaboration_error = self._collaboration_session_error(action, result)
+        if collaboration_error is not None:
+            return _failure(collaboration_error)
+        if result.get("phase") != action.get("phase"):
+            return _failure("PHASE_MISMATCH")
+        if result.get("task_id") != action.get("task_id"):
+            return _failure("TASK_ID_MISMATCH")
+        content = result.get("content")
+        if isinstance(content, dict) and action.get("task_id") is not None:
+            content_task = content.get("task_id")
+            if content_task is not None and content_task != action["task_id"]:
+                return _failure("TASK_ID_MISMATCH")
+        if result.get("schema_version") != "1":
+            return _failure("SCHEMA_VERSION_INVALID")
+        if result.get("input_hash") != action.get("input_hash"):
+            return _failure("INPUT_HASH_MISMATCH")
+        if result.get("parent_artifact_hash") != action.get("parent_artifact_hash"):
+            return _failure("PARENT_ARTIFACT_MISMATCH")
+        if action.get("phase") == "IMPLEMENT":
+            if (
+                not _valid_revisions(result.get("source_revisions"))
+                or not isinstance(content, dict)
+                or result.get("source_revisions") != content.get("revisions")
+            ):
+                return _failure("SOURCE_REVISION_MISMATCH")
+        elif result.get("source_revisions") != action.get("source_revisions"):
+            return _failure("SOURCE_REVISION_MISMATCH")
+        if action.get("phase") != "INTAKE" and result.get("parent_artifact_hash") is None:
+            return _failure("PARENT_ARTIFACT_MISMATCH")
+        schema_name = action.get("result_schema")
+        if not isinstance(schema_name, str):
+            return _failure("RESULT_SCHEMA_REQUIRED")
+        schema_issues = validate_named_schema(content, schema_name)
+        if schema_issues:
+            return {
+                **_failure("SCHEMA_INVALID"),
+                "schema_errors": [{"path": issue.path, "kind": issue.kind} for issue in schema_issues],
+            }
+        predecessor_error = self._predecessor_binding_error(action, content)
+        if predecessor_error is not None:
+            return _failure(predecessor_error)
+        if action.get("phase") == "INTAKE" and content != action.get("content"):
+            return _failure("REQUIREMENT_CHANGED")
+        expected_hash = _canonical_hash(content)
+        if result.get("content_hash") != expected_hash:
+            return _failure("CONTENT_HASH_MISMATCH")
+        if not _valid_hash(result.get("content_hash")):
+            return _failure("CONTENT_HASH_INVALID")
+        try:
+            references = validate_evidence_refs(result.get("evidence_refs"))
+            ensure_persistable(result)
+        except ValueError as error:
+            return _failure(str(error))
+        if not references and action.get("phase") != "INTAKE":
+            return _failure("EVIDENCE_REQUIRED")
+        if any(result.get(key) is not None for key in ("knowledge_doc_id", "knowledge_url", "knowledge_version", "icafe_comment_id")):
+            return _failure("DRAFT_REMOTE_IDENTITY_INVALID")
+        expected_approval_hash = _approval_input_hash(
+            action, result["content_hash"], result.get("source_revisions")
+        )
+        if result.get("approval_input_hash") != expected_approval_hash:
+            return _failure("APPROVAL_INPUT_MISMATCH")
+        approval_error = self._approval_error(action, result)
+        if approval_error is not None:
+            return _failure(approval_error)
+        return {"ok": True, "reason_code": "OK", "draft": json.loads(_canonical_json(result))}
+
+    def _collaboration_session_error(
+        self, action: dict[str, Any], result: dict[str, Any]
+    ) -> str | None:
+        if action.get("phase") != "INTAKE":
+            return None
+        events = self.state.events(action.get("run_id"))
+        payload = events[0].get("payload") if events else None
+        run_id = action.get("run_id")
+        if not isinstance(run_id, str) or not intake_prerequisites_valid(payload, run_id):
+            return "INTAKE_PREREQUISITES_INVALID"
+        binding = payload["collaboration_binding"]
+        completed = self.state.result_by_idempotency_key(binding["session_idempotency_key"])
+        if not isinstance(completed, dict) or completed.get("operation") != "infoflow.group.create":
+            return "COLLABORATION_SESSION_INVALID"
+        expected_request = {
+            key: binding[key]
+            for key in (
+                "run_id", "project", "card_id", "profile_hash", "group_name", "owner",
+                "member_snapshot", "roles", "friendlyLevel", "card_content_hash",
+            )
+        }
+        expected_request.update({
+            "input_hash": action.get("input_hash"),
+            "approval_id": result.get("approval_id"),
+        })
+        intent = completed.get("intent")
+        receipt = completed.get("receipt")
+        response = receipt.get("response") if isinstance(receipt, dict) else None
+        if not isinstance(intent, dict) or intent.get("payload") != expected_request:
+            return "COLLABORATION_SESSION_INVALID"
+        if not isinstance(response, dict) or not isinstance(response.get("group_id"), str) or not response["group_id"]:
+            return "COLLABORATION_SESSION_INVALID"
+        expected_response = {
+            "run_id": run_id,
+            "group_name": binding["group_name"],
+            "owner": binding["owner"],
+            "roles": binding["roles"],
+            "member_snapshot": binding["member_snapshot"],
+            "approval_requests": [action.get("input_hash")],
+            "g0_approval_id": result.get("approval_id"),
+        }
+        if any(response.get(key) != value for key, value in expected_response.items()):
+            return "COLLABORATION_SESSION_INVALID"
+        return None
+
+    def _predecessor_binding_error(self, action: dict[str, Any], content: Any) -> str | None:
+        if not isinstance(content, dict):
+            return "SCHEMA_INVALID"
+        phase = action.get("phase")
+        run_id = action["run_id"]
+        task_id = action.get("task_id")
+        definition = _PHASES.get(phase, {})
+        predecessor = self._predecessor(run_id, definition.get("predecessor"), task_id)
+        predecessor_content = predecessor.get("envelope", {}).get("content") if predecessor else None
+
+        if phase == "SPEC":
+            root = self.artifacts.latest_phase(run_id, "INTAKE", None)
+            if not root.get("valid"):
+                return "TRACEABILITY_MISMATCH"
+            try:
+                expected = set(normalized_acceptance_ids(
+                    root["envelope"]["content"].get("acceptance")
+                ))
+            except AcceptanceValueError:
+                return "TRACEABILITY_MISMATCH"
+            actual = {
+                item.get("acceptance_point_id") for item in content.get("traceability", [])
+                if isinstance(item, dict)
+            }
+            return None if actual == expected else "TRACEABILITY_MISMATCH"
+
+        if phase == "TASKS" and isinstance(predecessor_content, dict):
+            expected = {
+                item.get("acceptance_point_id") for item in predecessor_content.get("traceability", [])
+                if isinstance(item, dict)
+            }
+            actual = {
+                item.get("acceptance_point_id") for item in content.get("acceptance_coverage", [])
+                if isinstance(item, dict)
+            }
+            return None if actual == expected else "TRACEABILITY_MISMATCH"
+
+        if phase == "PLAN" and isinstance(predecessor_content, dict):
+            node = next((
+                item for item in predecessor_content.get("nodes", [])
+                if isinstance(item, dict) and item.get("task_id") == task_id
+            ), None)
+            if node is None or content.get("g4_input_hash") != action.get("input_hash"):
+                return "G4_INPUT_MISMATCH" if node is not None else "TASK_PLAN_MISMATCH"
+            repository_revisions = {
+                item.get("role"): item.get("revision")
+                for item in content.get("repositories", []) if isinstance(item, dict)
+            }
+            if repository_revisions != action.get("source_revisions"):
+                return "SOURCE_REVISION_MISMATCH"
+            plan_tests = {
+                item.get("test_id") for item in content.get("tests", []) if isinstance(item, dict)
+            }
+            plan_fixtures = set(content.get("fixtures", []))
+            if (
+                plan_tests != set(node.get("test_ids", []))
+                or plan_fixtures != set(node.get("fixtures", []))
+                or set(content.get("acceptance_point_ids", [])) != set(node.get("acceptance_point_ids", []))
+            ):
+                return "TASK_PLAN_MISMATCH"
+
+        if phase == "IMPLEMENT" and isinstance(predecessor_content, dict):
+            baselines = {
+                item.get("role"): item.get("revision")
+                for item in predecessor_content.get("repositories", []) if isinstance(item, dict)
+            }
+            if content.get("baseline_revisions") != baselines or baselines != action.get("baseline_revisions"):
+                return "BASELINE_REVISION_MISMATCH"
+            expected_tests = {
+                item.get("test_id") for item in predecessor_content.get("tests", [])
+                if isinstance(item, dict)
+            }
+            if set(content.get("test_ids", [])) != expected_tests:
+                return "CHANGE_SET_MISMATCH"
+
+        if phase == "REVIEW" and isinstance(predecessor_content, dict):
+            if (
+                content.get("change_set_hash") != predecessor_content.get("candidate_hash")
+                or content.get("baseline_revisions") != predecessor_content.get("baseline_revisions")
+            ):
+                return "REVIEW_PREDECESSOR_MISMATCH"
+
+        if phase == "DIAGNOSE" and content.get("frozen_revisions") != action.get("source_revisions"):
+            return "SOURCE_REVISION_MISMATCH"
+        return None
+
+    def complete(self, run_id: str, envelope: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._complete(run_id, envelope)
+        except Exception as error:
+            return _failure(_exception_reason(error, "PHASE_COMPLETION_FAILED"), run_id=run_id)
+
+    def _complete(self, run_id: str, envelope: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(envelope, dict) or envelope.get("run_id") != run_id:
+            return _failure("RUN_ID_MISMATCH", run_id=run_id)
+        action_id = envelope.get("action_id")
+        if not isinstance(action_id, str):
+            return _failure("ACTION_ID_MISMATCH", run_id=run_id)
+        result_key = f"phase-completion:{run_id}:{action_id}"
+        draft_hash = _canonical_hash(envelope)
+        existing = self.state.idempotency_result(result_key)
+        if existing is not None:
+            if existing.get("draft_hash") != draft_hash:
+                return _failure("COMPLETION_CONFLICT", run_id=run_id)
+            return self._validated_cached_completion(run_id, existing)
+        if self.state.pending_intents(run_id):
+            return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
+        action = self.next(run_id)
+        if not action.get("ok"):
+            return action
+        validated = self.validate_result(action, envelope)
+        if not validated.get("ok"):
+            return {**validated, "run_id": run_id}
+        if self.knowledge is None:
+            return _failure("KNOWLEDGE_SYNC_REQUIRED", run_id=run_id)
+        publish_document = _canonical_json(validated["draft"]["content"])
+        title = _phase_title(action)
+        receipt = self.knowledge.publish_phase(
+            run_id,
+            {"title": title, "markdown": publish_document, "content_hash": envelope["content_hash"]},
+        )
+        receipt_error = self._receipt_error(run_id, envelope, receipt)
+        if receipt_error is not None:
+            return _failure(receipt_error, run_id=run_id, phase_complete=False)
+        final_envelope = {
+            **validated["draft"],
+            "knowledge_doc_id": receipt["child_doc_id"],
+            "knowledge_url": receipt["child_url"],
+            "knowledge_version": receipt["child_version"],
+            "icafe_comment_id": str(receipt["comment_id"]),
+            "evidence_refs": _merge_evidence_refs(
+                validated["draft"]["evidence_refs"], receipt["evidence_refs"]
+            ),
+        }
+        stored = self.artifacts.put_envelope(final_envelope)
+        if not stored.get("valid"):
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        recheck = self._post_publish_recheck(action, envelope, stored)
+        if recheck is not None:
+            if recheck == "STALE_ACTION":
+                raced = self.state.idempotency_result(result_key)
+                if raced is not None and raced.get("draft_hash") == draft_hash:
+                    return self._validated_cached_completion(run_id, raced)
+            return _failure(recheck, run_id=run_id)
+        if self.state.pending_intents(run_id):
+            return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
+        target, next_task_id, completion_reason = self._completion_target(action, envelope)
+        transition = self.transitions.validate(action["state"], target)
+        if not transition.get("allowed"):
+            return _failure(transition.get("reason_code", "INVALID_TRANSITION"), run_id=run_id)
+        event_payload = {
+                "previous_state": action["state"],
+                "source_event_id": action["source_event_id"],
+                "action_id": action_id,
+                "input_hash": action["input_hash"],
+                "artifact_id": stored["artifact_id"],
+                "artifact_hash": envelope["content_hash"],
+                "task_id": action.get("task_id"),
+                "source_revisions": validated["draft"].get("source_revisions", {}),
+                "knowledge_receipt": {
+                    "child_doc_id": receipt["child_doc_id"],
+                    "child_version": receipt["child_version"],
+                    "comment_id": str(receipt["comment_id"]),
+                    "evidence_refs": receipt["evidence_refs"],
+                },
+                "policy_decision": transition,
+                **({"task_id": next_task_id} if next_task_id is not None else {}),
+            }
+        result = {
+            "ok": True, "reason_code": completion_reason, "phase_complete": True, "run_id": run_id,
+            "state": target, "action_id": action_id,
+            "artifact_id": stored["artifact_id"], "content_hash": envelope["content_hash"],
+            "phase": action["phase"], "task_id": action.get("task_id"),
+            "draft_hash": draft_hash, "knowledge_receipt": receipt,
+        }
+        committed = self.state.commit_transition_result(
+            run_id, action["source_event_id"], target, event_payload, result_key, result
+        )
+        if committed.get("status") == "SOURCE_EVENT_MISMATCH":
+            return _failure("STALE_ACTION", run_id=run_id)
+        if committed.get("status") == "RESULT_CONFLICT":
+            return _failure("COMPLETION_CONFLICT", run_id=run_id)
+        return committed["result"]
+
+    def _validated_cached_completion(self, run_id: str, existing: dict[str, Any]) -> dict[str, Any]:
+        artifact_id = existing.get("artifact_id")
+        artifact = self.artifacts.phase_artifact(artifact_id) if isinstance(artifact_id, str) else {}
+        if not artifact.get("valid"):
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        envelope = artifact.get("envelope", {})
+        if (
+            envelope.get("run_id") != run_id
+            or envelope.get("phase") != existing.get("phase")
+            or envelope.get("task_id") != existing.get("task_id")
+        ):
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        receipt_error = self._receipt_error(run_id, envelope, existing.get("knowledge_receipt"))
+        if receipt_error is not None:
+            return _failure(receipt_error, run_id=run_id)
+        action_key = (
+            f"phase-action:{run_id}:{envelope.get('source_event_id')}:"
+            f"{envelope.get('phase')}:{envelope.get('task_id') or '-'}"
+        )
+        action = self.state.idempotency_result(action_key)
+        if not isinstance(action, dict) or action.get("action_id") != envelope.get("action_id"):
+            return _failure("ACTION_ID_MISMATCH", run_id=run_id)
+        approval_error = self._approval_error(action, envelope)
+        if approval_error is not None:
+            return _failure(approval_error, run_id=run_id)
+        collaboration_error = self._collaboration_session_error(action, envelope)
+        if collaboration_error is not None:
+            return _failure(collaboration_error, run_id=run_id)
+        events = self.state.events(run_id)
+        checkpoint = next((event for event in events if event.get("event_id") == existing.get("event_id")), None)
+        payload = checkpoint.get("payload") if isinstance(checkpoint, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or checkpoint.get("state") != existing.get("state")
+            or payload.get("source_event_id") != envelope.get("source_event_id")
+            or payload.get("action_id") != envelope.get("action_id")
+            or payload.get("artifact_id") != existing.get("artifact_id")
+        ):
+            return _failure("CHECKPOINT_INTEGRITY_FAILED", run_id=run_id)
+        return existing
+
+    def _post_publish_recheck(
+        self, action: dict[str, Any], draft: dict[str, Any], stored: dict[str, Any]
+    ) -> str | None:
+        events = self.state.events(action["run_id"])
+        if not events or events[-1].get("event_id") != action.get("source_event_id"):
+            return "STALE_ACTION"
+        profile_error = _pinned_profile_error(events)
+        if profile_error is not None:
+            return profile_error
+        predecessor = self._predecessor(
+            action["run_id"],
+            (_PHASES.get(action["state"]) or {}).get("predecessor"),
+            action.get("task_id"),
+        )
+        actual_parent = predecessor.get("envelope", {}).get("content_hash") if predecessor else None
+        if actual_parent != action.get("parent_artifact_hash"):
+            return "PARENT_ARTIFACT_MISMATCH"
+        if not self.artifacts.get(stored["artifact_id"]).get("valid"):
+            return "ARTIFACT_INTEGRITY_FAILED"
+        collaboration_error = self._collaboration_session_error(action, draft)
+        if collaboration_error is not None:
+            return collaboration_error
+        approval_error = self._approval_error(action, draft)
+        return approval_error
+
+    def _task_id(self, run_id: str, state: str, current: dict[str, Any]) -> str | None:
+        payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+        explicit = payload.get("task_id")
+        if not isinstance(explicit, str):
+            evidence = payload.get("evidence")
+            explicit = evidence.get("task_id") if isinstance(evidence, dict) else None
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        if state in {"WORKSPACE", "PLAN"}:
+            return self._ready_task(run_id)
+        if state == "IMPLEMENT":
+            artifact = self.artifacts.latest_phase(run_id, "PLAN")
+            return artifact.get("envelope", {}).get("task_id") if artifact.get("valid") else None
+        if state == "REVIEW":
+            artifact = self.artifacts.latest_phase(run_id, "IMPLEMENT")
+            return artifact.get("envelope", {}).get("task_id") if artifact.get("valid") else None
+        if state == "DIAGNOSE":
+            for phase in ("REVIEW", "IPIPE", "IMPLEMENT"):
+                artifact = self.artifacts.latest_phase(run_id, phase)
+                if artifact.get("valid"):
+                    return artifact["envelope"].get("task_id")
+        return None
+
+    def _ready_task(self, run_id: str) -> str | None:
+        dag = self.artifacts.latest_phase(run_id, "TASKS", None)
+        if not dag.get("valid"):
+            return None
+        content = dag["envelope"].get("content", {})
+        nodes = content.get("nodes", [])
+        edges = content.get("edges", [])
+        passing = {
+            artifact["envelope"].get("task_id")
+            for artifact in self.artifacts.phase_artifacts(run_id, "REVIEW")
+            if artifact.get("valid") and _passing_review(artifact["envelope"].get("content"))
+        }
+        dependencies: dict[str, set[str]] = {
+            node.get("task_id"): set() for node in nodes if isinstance(node, dict)
+        }
+        for edge in edges:
+            if isinstance(edge, dict) and edge.get("to") in dependencies:
+                dependencies[edge["to"]].add(edge.get("from"))
+        for node in nodes:
+            task_id = node.get("task_id") if isinstance(node, dict) else None
+            if isinstance(task_id, str) and task_id not in passing and dependencies.get(task_id, set()).issubset(passing):
+                return task_id
+        return None
+
+    def _predecessor(
+        self, run_id: str, phase: str | tuple[str, ...] | None, task_id: str | None
+    ) -> dict[str, Any] | None:
+        if phase is None:
+            return None
+        if isinstance(phase, tuple):
+            for artifact in reversed(self.artifacts.phase_artifacts(run_id)):
+                envelope = artifact.get("envelope", {})
+                if (
+                    artifact.get("valid")
+                    and envelope.get("phase") in phase
+                    and (task_id is None or envelope.get("task_id") in {None, task_id})
+                ):
+                    return artifact
+            return None
+        exact_task = task_id if phase in {"PLAN", "IMPLEMENT", "REVIEW"} else None
+        artifact = self.artifacts.latest_phase(run_id, phase, exact_task)
+        return artifact if artifact.get("valid") else None
+
+    @staticmethod
+    def _source_revisions(current: dict[str, Any], predecessor: dict[str, Any] | None) -> dict[str, str]:
+        payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+        for key in ("source_revisions", "repo_revisions"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                return dict(value)
+        if predecessor is not None:
+            value = predecessor["envelope"].get("source_revisions")
+            if isinstance(value, dict):
+                return dict(value)
+        return {}
+
+    def _approval_error(self, action: dict[str, Any], result: dict[str, Any]) -> str | None:
+        gate = action.get("required_human_gate")
+        if gate is None:
+            return None if result.get("approval_id") is None else "APPROVAL_MISMATCH"
+        approval_id = result.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id:
+            return "APPROVAL_REQUIRED"
+        if self.approvals is None:
+            return "APPROVAL_REQUIRED"
+        approval = self.approvals.get(approval_id)
+        if not isinstance(approval, dict):
+            return "APPROVAL_REQUIRED"
+        if approval.get("run_id") != action.get("run_id") or approval.get("run_id") == "legacy":
+            return "APPROVAL_RUN_MISMATCH"
+        if approval.get("action") != gate:
+            return "APPROVAL_GATE_MISMATCH"
+        approval_input_hash = result.get("approval_input_hash")
+        if approval.get("input_hash") != approval_input_hash:
+            return "APPROVAL_INPUT_MISMATCH"
+        if approval.get("effective_decision") != "APPROVE":
+            return "APPROVAL_REQUIRED"
+        gate_check = self.evidence_gate.check(
+            gate,
+            {
+                "run_id": action["run_id"], "input_hash": approval_input_hash,
+                "approved_input_hash": approval["input_hash"], "approval_id": approval_id,
+                "approval_record": approval,
+            },
+        )
+        return None if gate_check.get("passed") else gate_check.get("reason_code", "APPROVAL_REQUIRED")
+
+    def _receipt_error(self, run_id: str, envelope: dict[str, Any], receipt: Any) -> str | None:
+        if not isinstance(receipt, dict) or not receipt.get("ok"):
+            if isinstance(receipt, dict) and receipt.get("reason_code") in {"QUERY_REQUIRED", "RECOVERY_REQUIRED"}:
+                return "RECOVERY_REQUIRED"
+            return "KNOWLEDGE_PUBLISH_INCOMPLETE"
+        if receipt.get("run_id", run_id) != run_id or receipt.get("artifact_hash") != envelope["content_hash"]:
+            return "KU_RECEIPT_MISMATCH"
+        if not receipt.get("child_doc_id") or not receipt.get("child_version"):
+            return "KU_RECEIPT_MISMATCH"
+        if not _canonical_ku_url(receipt.get("child_url"), receipt.get("child_doc_id")):
+            return "KU_RECEIPT_MISMATCH"
+        comment_id = receipt.get("comment_id")
+        if comment_id is None or str(comment_id) == "":
+            return "ICAFE_RECEIPT_MISMATCH"
+        try:
+            refs = validate_evidence_refs(receipt.get("evidence_refs"))
+        except ValueError:
+            return "KNOWLEDGE_RECEIPT_INVALID"
+        card_id = _requirement_id(self.state.events(run_id))
+        if f"ku:{receipt['child_doc_id']}/{receipt['child_version']}" not in refs:
+            return "KU_RECEIPT_MISMATCH"
+        if f"icafe:{card_id}/{comment_id}" not in refs:
+            return "ICAFE_RECEIPT_MISMATCH"
+        return None
+
+    def _completion_target(
+        self, action: dict[str, Any], envelope: dict[str, Any]
+    ) -> tuple[str, str | None, str]:
+        if action["phase"] == "REVIEW":
+            review = envelope["content"]
+            if review.get("verdict") == "INCOMPLETE" or review.get("completeness_state") != "COMPLETE":
+                return "STOPPED", None, "REVIEW_INCOMPLETE"
+            if not _passing_review(review):
+                return "DIAGNOSE", action.get("task_id"), "OK"
+            next_task = self._ready_task_excluding(action["run_id"], action.get("task_id"))
+            return ("WORKSPACE", next_task, "OK") if next_task else ("SUBMIT", None, "OK")
+        if action["phase"] == "DIAGNOSE":
+            route = envelope["content"].get("route")
+            if route == "DIAGNOSIS_INCOMPLETE":
+                return "STOPPED", None, "DIAGNOSIS_INCOMPLETE"
+            return ("SPEC" if route == "REPAIR" else route), None, "OK"
+        target = action.get("target_state")
+        if not isinstance(target, str):
+            raise ValueError("COMPLETION_TARGET_REQUIRED")
+        return target, None, "OK"
+
+    def _ready_task_excluding(self, run_id: str, completing_task: str | None) -> str | None:
+        dag = self.artifacts.latest_phase(run_id, "TASKS", None)
+        if not dag.get("valid"):
+            return None
+        content = dag["envelope"]["content"]
+        passing = {
+            artifact["envelope"].get("task_id")
+            for artifact in self.artifacts.phase_artifacts(run_id, "REVIEW")
+            if artifact.get("valid") and _passing_review(artifact["envelope"].get("content"))
+        }
+        if completing_task:
+            passing.add(completing_task)
+        dependencies = {node["task_id"]: set() for node in content["nodes"]}
+        for edge in content["edges"]:
+            dependencies[edge["to"]].add(edge["from"])
+        for node in content["nodes"]:
+            task_id = node["task_id"]
+            if task_id not in passing and dependencies[task_id].issubset(passing):
+                return task_id
+        return None
+
+    def ingest_ipipe_evidence(self, run_id: str, content: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._ingest_ipipe_evidence(run_id, content)
+        except Exception as error:
+            return _failure(_exception_reason(error, "IPIPE_EVIDENCE_INGEST_FAILED"), run_id=run_id)
+
+    def _ingest_ipipe_evidence(self, run_id: str, content: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(content, dict) or not isinstance(content.get("build_id"), str):
+            return _failure("INVALID_INPUT", run_id=run_id)
+        content_hash = _canonical_hash(content)
+        result_key = f"ipipe-ingest:{run_id}:{content['build_id']}"
+        existing = self.state.idempotency_result(result_key)
+        if existing is not None:
+            if existing.get("ingest_hash") != content_hash:
+                return _failure("COMPLETION_CONFLICT", run_id=run_id)
+            return self._validated_cached_ipipe_ingestion(run_id, existing)
+        events = self.state.events(run_id)
+        if events and events[-1].get("state") != "IPIPE":
+            prior = self.artifacts.latest_phase(run_id, "IPIPE", None)
+            if prior.get("valid"):
+                return _failure("COMPLETION_CONFLICT", run_id=run_id)
+        action = self.next(run_id)
+        if not action.get("ok"):
+            return action
+        if action.get("state") != "IPIPE" or action.get("controller") != "ipipe":
+            return _failure("INVALID_STATE", run_id=run_id)
+        issues = validate_named_schema(content, "ipipe-evidence")
+        if issues:
+            return {**_failure("SCHEMA_INVALID", run_id=run_id), "schema_errors": [
+                {"path": issue.path, "kind": issue.kind} for issue in issues
+            ]}
+        events = self.state.events(run_id)
+        payload = events[-1]["payload"]
+        binding_error = self._ipipe_binding_error(events, payload, content)
+        if binding_error is not None:
+            return _failure(binding_error, run_id=run_id)
+        revisions = payload.get("source_revisions")
+        artifact_id = payload.get("submission_artifact_id")
+        submission = self.artifacts.get(artifact_id) if isinstance(artifact_id, str) else {"valid": False}
+        if not submission.get("valid") or submission.get("sha256") != payload.get("submission_hash"):
+            return _failure("PREDECESSOR_REQUIRED", run_id=run_id)
+        approval_error = self._controller_approval_error(run_id, payload, "G7")
+        if approval_error is not None:
+            return _failure(approval_error, run_id=run_id)
+        draft = {
+            "action_id": action["action_id"], "source_event_id": action["source_event_id"],
+            "host": "comate", "run_id": run_id, "phase": "IPIPE", "task_id": None,
+            "schema_version": "1", "input_hash": action["input_hash"], "content_hash": content_hash,
+            "source_revisions": revisions, "parent_artifact_hash": submission["sha256"],
+            "knowledge_doc_id": None, "knowledge_url": None, "knowledge_version": None,
+            "icafe_comment_id": None, "evidence_refs": content.get("remote_evidence_refs", []),
+            "approval_id": payload.get("approval_id"),
+            "approval_input_hash": payload.get("approval_input_hash"), "content": content,
+        }
+        receipt = self.knowledge.publish_phase(run_id, {
+            "title": f"08-ipipe-evidence/{content['build_id']}",
+            "markdown": _canonical_json(content), "content_hash": content_hash,
+        })
+        receipt_error = self._receipt_error(run_id, draft, receipt)
+        if receipt_error:
+            return _failure(receipt_error, run_id=run_id)
+        final = {
+            **draft, "knowledge_doc_id": receipt["child_doc_id"], "knowledge_url": receipt["child_url"],
+            "knowledge_version": receipt["child_version"], "icafe_comment_id": str(receipt["comment_id"]),
+            "evidence_refs": _merge_evidence_refs(
+                draft["evidence_refs"], receipt["evidence_refs"]
+            ),
+        }
+        stored = self.artifacts.put_envelope(final)
+        events = self.state.events(run_id)
+        if not events or events[-1].get("event_id") != action["source_event_id"]:
+            raced = self.state.idempotency_result(result_key)
+            return self._validated_cached_ipipe_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
+        profile_error = _pinned_profile_error(events)
+        if profile_error is not None:
+            return _failure(profile_error, run_id=run_id)
+        binding_error = self._ipipe_binding_error(events, payload, content)
+        if binding_error is not None:
+            return _failure(binding_error, run_id=run_id)
+        current_submission = self.artifacts.get(payload.get("submission_artifact_id"))
+        if (
+            not current_submission.get("valid")
+            or current_submission.get("sha256") != payload.get("submission_hash")
+            or current_submission.get("sha256") != final["parent_artifact_hash"]
+        ):
+            return _failure("PREDECESSOR_REQUIRED", run_id=run_id)
+        approval_error = self._controller_approval_error(run_id, payload, "G7")
+        if approval_error is not None:
+            return _failure(approval_error, run_id=run_id)
+        if not self.artifacts.get(stored["artifact_id"]).get("valid"):
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        target = {"SUCCESS": "RELEASE", "FAILURE": "DIAGNOSE", "BLOCKED": "ENVIRONMENT_BLOCKED"}[content["status"]]
+        transition = self.transitions.validate("IPIPE", target)
+        if not transition.get("allowed"):
+            return _failure(transition.get("reason_code", "INVALID_TRANSITION"), run_id=run_id)
+        result = {
+            "ok": True, "reason_code": "OK", "phase_complete": True, "action_id": action["action_id"],
+            "artifact_id": stored["artifact_id"], "content_hash": content_hash, "phase": "IPIPE",
+            "task_id": None, "draft_hash": _canonical_hash(draft), "ingest_hash": content_hash,
+            "knowledge_receipt": receipt,
+        }
+        committed = self.state.commit_transition_result(
+            run_id, action["source_event_id"], target,
+            {"previous_state": "IPIPE", "artifact_id": stored["artifact_id"],
+             "action_id": action["action_id"], "source_event_id": action["source_event_id"],
+             "policy_decision": transition},
+            result_key, result,
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return _failure("COMPLETION_CONFLICT", run_id=run_id)
+        raced = self.state.idempotency_result(result_key)
+        return self._validated_cached_ipipe_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
+
+    def _controller_approval_error(
+        self, run_id: str, payload: dict[str, Any], gate: str
+    ) -> str | None:
+        approval_id = payload.get("approval_id")
+        approval_hash = payload.get("approval_input_hash")
+        if not isinstance(approval_id, str) or not approval_id or self.approvals is None:
+            return "APPROVAL_REQUIRED"
+        approval = self.approvals.get(approval_id)
+        if not isinstance(approval, dict):
+            return "APPROVAL_REQUIRED"
+        if approval.get("run_id") != run_id or approval.get("run_id") == "legacy":
+            return "APPROVAL_RUN_MISMATCH"
+        if approval.get("action") != gate:
+            return "APPROVAL_GATE_MISMATCH"
+        if approval.get("input_hash") != approval_hash:
+            return "APPROVAL_INPUT_MISMATCH"
+        return None if approval.get("effective_decision") == "APPROVE" else "APPROVAL_REQUIRED"
+
+    def _ipipe_binding_error(
+        self, events: list[dict[str, Any]], payload: Any, content: Any = None
+    ) -> str | None:
+        profile_error = _pinned_profile_error(events)
+        if profile_error is not None:
+            return profile_error
+        if not isinstance(payload, dict):
+            return "PROJECT_NOT_READY"
+        profile_path = payload.get("profile_path")
+        if not isinstance(profile_path, str) or not profile_path:
+            return "PROJECT_NOT_READY"
+        loaded = load_profile(profile_path, check_paths=False)
+        if not loaded.get("ready"):
+            return "PROJECT_NOT_READY"
+        profile = loaded.get("profile")
+        if not isinstance(profile, dict) or profile.get("project_id") != payload.get("project"):
+            return "PROJECT_NOT_READY"
+        pipeline = profile.get("pipeline_profile")
+        repositories = profile.get("business_repos")
+        if not isinstance(pipeline, dict) or not isinstance(repositories, list):
+            return "PROJECT_NOT_READY"
+        modules = {
+            repository.get("module") for repository in repositories
+            if isinstance(repository, dict) and isinstance(repository.get("module"), str)
+        }
+        expected_pipeline = pipeline.get("pipeline_id")
+        expected_release_rule = pipeline.get("release_rule")
+        module = payload.get("module")
+        if payload.get("pipeline_id") != expected_pipeline:
+            return "PIPELINE_IDENTITY_MISMATCH"
+        if module not in modules:
+            return "PIPELINE_IDENTITY_MISMATCH"
+        if payload.get("release_rule") != expected_release_rule:
+            return "RELEASE_RULE_MISMATCH"
+        expected_environment = _canonical_hash(profile.get("environment_profile"))
+        if payload.get("environment_fingerprint") != expected_environment:
+            return "ENV_FINGERPRINT_MISMATCH"
+        revisions = payload.get("source_revisions")
+        if not _valid_revisions(revisions):
+            return "SOURCE_REVISION_REQUIRED"
+        artifact_id = payload.get("submission_artifact_id")
+        submission = self.artifacts.get(artifact_id) if isinstance(artifact_id, str) else {"valid": False}
+        if not submission.get("valid") or submission.get("sha256") != payload.get("submission_hash"):
+            return "PREDECESSOR_REQUIRED"
+        expected_submission_binding = {
+            "pipeline_id": expected_pipeline,
+            "module": module,
+            "release_rule": expected_release_rule,
+            "source_revisions": revisions,
+            "environment_fingerprint": expected_environment,
+        }
+        if submission.get("metadata", {}).get("controller_binding") != expected_submission_binding:
+            return "SUBMISSION_BINDING_MISMATCH"
+        if content is not None:
+            if not isinstance(content, dict):
+                return "SCHEMA_INVALID"
+            if content.get("pipeline_id") != expected_pipeline or content.get("module") != module:
+                return "PIPELINE_IDENTITY_MISMATCH"
+            if content.get("release_rule") != expected_release_rule:
+                return "RELEASE_RULE_MISMATCH"
+            if content.get("revisions") != revisions:
+                return "SOURCE_REVISION_MISMATCH"
+            if content.get("environment_fingerprint") != expected_environment:
+                return "ENV_FINGERPRINT_MISMATCH"
+        return None
+
+    def _validated_cached_ipipe_ingestion(
+        self, run_id: str, existing: Any
+    ) -> dict[str, Any]:
+        if not isinstance(existing, dict):
+            return _failure("STALE_ACTION", run_id=run_id)
+        artifact_id = existing.get("artifact_id")
+        artifact = self.artifacts.phase_artifact(artifact_id) if isinstance(artifact_id, str) else {}
+        if not artifact.get("valid"):
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        envelope = artifact["envelope"]
+        if envelope.get("run_id") != run_id or envelope.get("phase") != "IPIPE" or envelope.get("task_id") is not None:
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        receipt_error = self._receipt_error(run_id, envelope, existing.get("knowledge_receipt"))
+        if receipt_error is not None:
+            return _failure(receipt_error, run_id=run_id)
+        events = self.state.events(run_id)
+        source_event = next((
+            event for event in events if event.get("event_id") == envelope.get("source_event_id")
+        ), None)
+        payload = source_event.get("payload") if isinstance(source_event, dict) else None
+        binding_error = self._ipipe_binding_error(events, payload, envelope.get("content"))
+        if binding_error is not None:
+            return _failure(binding_error, run_id=run_id)
+        approval_error = self._controller_approval_error(run_id, {
+            "approval_id": envelope.get("approval_id"),
+            "approval_input_hash": envelope.get("approval_input_hash"),
+        }, "G7")
+        if approval_error is not None:
+            return _failure(approval_error, run_id=run_id)
+        return existing
+
+
+def _failure(reason_code: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "reason_code": reason_code, "phase_complete": False, **details}
+
+
+def _exception_reason(error: Exception, fallback: str) -> str:
+    reason = str(error)
+    return reason if isinstance(error, ValueError) and reason in _STABLE_DEPENDENCY_REASONS else fallback
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _canonical_hash(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _envelope_hash(envelope: dict[str, Any]) -> str:
+    return _canonical_hash(envelope.get("content"))
+
+
+def _approval_input_hash(
+    action: dict[str, Any], content_hash: str, source_revisions: Any = None
+) -> str:
+    if action.get("phase") == "INTAKE":
+        return action["input_hash"]
+    return _canonical_hash(
+        {
+            "action_id": action["action_id"],
+            "task_id": action.get("task_id"),
+            "parent_artifact_hash": action.get("parent_artifact_hash"),
+            "source_revisions": (
+                source_revisions
+                if isinstance(source_revisions, dict)
+                else action.get("source_revisions", {})
+            ),
+            "content_hash": content_hash,
+        }
+    )
+
+
+def _merge_evidence_refs(*groups: Any) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for reference in validate_evidence_refs(group):
+            if reference not in seen:
+                seen.add(reference)
+                merged.append(reference)
+    return validate_evidence_refs(merged)
+
+
+def _valid_hash(value: Any) -> bool:
+    return isinstance(value, str) and _HEX64.fullmatch(value) is not None
+
+
+def _valid_revisions(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and {"business", "tests"}.issubset(value)
+        and all(isinstance(revision, str) and revision for revision in value.values())
+    )
+
+
+def _canonical_ku_url(value: Any, doc_id: Any) -> bool:
+    if not isinstance(value, str) or not isinstance(doc_id, str) or not doc_id:
+        return False
+    parsed = urlsplit(value)
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc == "ku.baidu-int.com"
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.path.rstrip("/").endswith(f"/{doc_id}")
+    )
+
+
+def _pinned_profile_hash(events: list[dict[str, Any]]) -> str | None:
+    payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
+    value = payload.get("profile_hash")
+    return value if isinstance(value, str) and value else None
+
+
+def _pinned_profile_error(events: list[dict[str, Any]]) -> str | None:
+    payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
+    expected = payload.get("profile_hash")
+    if not _valid_hash(expected):
+        return "PROJECT_NOT_READY"
+    profile_path = payload.get("profile_path")
+    if profile_path is None:
+        return None
+    if not isinstance(profile_path, str) or not profile_path:
+        return "PROJECT_NOT_READY"
+    try:
+        actual = hashlib.sha256(Path(profile_path).read_bytes()).hexdigest()
+    except OSError:
+        return "PROJECT_NOT_READY"
+    return None if actual == expected else "PROFILE_CONFLICT"
+
+
+def _requirement_id(events: list[dict[str, Any]]) -> str:
+    payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
+    value = payload.get("requirement_id")
+    return value if isinstance(value, str) and value else "UNKNOWN"
+
+
+def _intake_snapshot(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
+    snapshot = payload.get("requirement_snapshot")
+    return json.loads(_canonical_json(snapshot)) if isinstance(snapshot, dict) else None
+
+
+def _intake_prerequisites(events: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
+    return intake_prerequisites(payload)
+
+
+def _ipipe_controller_binding(payload: Any) -> dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
+    return {
+        key: source.get(key)
+        for key in (
+            "pipeline_id", "module", "release_rule", "source_revisions",
+            "environment_fingerprint", "submission_artifact_id", "submission_hash",
+            "approval_id", "approval_input_hash",
+        )
+    }
+
+
+def _source_evidence_refs(
+    events: list[dict[str, Any]], predecessor: dict[str, Any] | None
+) -> list[str]:
+    if predecessor is not None:
+        references = predecessor.get("envelope", {}).get("evidence_refs")
+        return list(references) if isinstance(references, list) else []
+    payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
+    references = payload.get("evidence_refs")
+    return list(references) if isinstance(references, list) else []
+
+
+def _artifact_reference(artifact: dict[str, Any]) -> dict[str, Any]:
+    envelope = artifact["envelope"]
+    return {
+        "artifact_id": artifact["artifact_id"], "phase": envelope["phase"],
+        "task_id": envelope["task_id"], "content_hash": envelope["content_hash"],
+    }
+
+
+def _allowed_side_effects(state: str, controller: bool) -> list[str]:
+    if controller:
+        return {
+            "WORKSPACE": ["workspace.inspect", "workspace.create", "state.transition"],
+            "SUBMIT": ["icode.submit", "state.transition"],
+            "IPIPE": ["ipipe.trigger", "ipipe.monitor", "artifact.write", "knowledge.publish", "icafe.comment"],
+            "RELEASE": ["release.verify", "artifact.write", "knowledge.publish", "icafe.comment", "state.transition"],
+        }[state]
+    return ["artifact.write", "knowledge.publish", "icafe.comment", "state.transition"]
+
+
+def _completion_predicate(state: str, schema: str | None) -> dict[str, Any]:
+    return {
+        "state": state,
+        "schema": schema,
+        "accepts_phase_result": schema is not None,
+        "requires_local_integrity": schema is not None,
+        "requires_ku_receipt": schema is not None,
+        "requires_icafe_receipt": schema is not None,
+        "requires_legal_transition": True,
+    }
+
+
+def _passing_review(content: Any) -> bool:
+    if not isinstance(content, dict):
+        return False
+    if content.get("verdict") != "ACCEPT" or content.get("completeness_state") != "COMPLETE":
+        return False
+    axes = content.get("axes")
+    if not isinstance(axes, dict) or not axes:
+        return False
+    if any(not isinstance(axis, dict) or axis.get("complete") is not True for axis in axes.values()):
+        return False
+    findings = content.get("findings")
+    return isinstance(findings, list) and not any(
+        isinstance(finding, dict) and finding.get("blocking") is True for finding in findings
+    )
+
+
+def _phase_title(action: dict[str, Any]) -> str:
+    base = _TITLE[action["phase"]]
+    task_id = action.get("task_id")
+    if action["phase"] in {"PLAN", "IMPLEMENT", "REVIEW"}:
+        return f"{base}/{task_id}"
+    if action["phase"] == "DIAGNOSE":
+        return f"{base}/1"
+    return base

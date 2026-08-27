@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 679.8124999999999 826" width="679.8124999999999" height="826" style="background:#ffffff"><rect width="100%" height="100%" fill="#ffffff"/>
+
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto">
+    <polygon points="0 0, 8 2.4, 0 4.8" fill="#0969da" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="4.8" refX="0" refY="2.4" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.4, 8 4.8" fill="#0969da" />
+  </marker>
+</defs>
+<polyline points="88.17499999999995,169 88.17499999999995,226" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="88.17499999999995,262 88.17499999999995,319" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="88.17499999999995,355 88.17499999999995,412" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="88.17499999999995,448 88.17499999999995,505" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="88.17499999999995,541 88.17499999999995,598" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="88.17499999999995,634 88.17499999999995,692 175.35499999999996,692" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="205.65499999999997,710 205.65499999999997,768 532.8249999999999,768" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="580.9999999999999,750 580.9999999999999,730 659.8124999999999,730 659.8124999999999,58 606.4499999999999,58" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="568.9999999999999,76 568.9999999999999,104.5 353.44499999999994,104.5 353.44499999999994,133" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="353.44499999999994,169 353.44499999999994,226" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="353.44499999999994,262 353.44499999999994,290.5 211.58749999999998,290.5 211.58749999999998,319" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="211.58749999999998,355 211.58749999999998,430 173.75,430" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="568.9999999999999,76 568.9999999999999,104.5 561.9124999999999,104.5 561.9124999999999,337 580.3,337" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="353.44499999999994,262 353.44499999999994,290.5 320.1975,290.5 320.1975,337 491.0999999999999,337" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="353.44499999999994,262 353.44499999999994,290.5 379.65749999999997,290.5 379.65749999999997,337 299.2499999999999,337" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="535.6999999999999,355 535.6999999999999,383.5 371.4749999999999,383.5 371.4749999999999,430 118.47499999999995,430" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="535.6999999999999,355 535.6999999999999,383.5 518.6374999999999,383.5 518.6374999999999,692 235.95499999999998,692" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="535.6999999999999,355 535.6999999999999,383.5 621.5124999999999,383.5 621.5124999999999,768 629.1749999999998,768" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="383.1749999999999,319 383.1749999999999,290.5 463.64,290.5 463.64,244 387.31999999999994,244" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="243.375,448 243.375,505" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="243.375,541 243.375,598" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="172.17499999999995,76 172.17499999999995,133" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<rect x="331.1449999999999" y="91" width="44.6" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="353.44499999999994" y="104.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">G7 通过</text>
+<rect x="186.42749999999998" y="277" width="50.32" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="211.58749999999998" y="290.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">远程证据通过</text>
+<rect x="189.28749999999997" y="370" width="44.6" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="211.58749999999998" y="383.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">G9 通过</text>
+<rect x="528.1724999999999" y="184" width="67.48" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="561.9124999999999" y="197.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">Review 问题</text>
+<rect x="292.1775" y="277" width="56.04" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="320.1975" y="290.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">代码或测试失败</text>
+<rect x="360.2175" y="277" width="38.88" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="379.65749999999997" y="290.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">环境问题</text>
+<rect x="340.5949999999999" y="370" width="61.760000000000005" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="371.4749999999999" y="383.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">需要改需求或设计</text>
+<rect x="490.61749999999995" y="509.5" width="56.04" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="518.6374999999999" y="523" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">需要改任务计划</text>
+<rect x="599.2125" y="556" width="44.6" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="621.5124999999999" y="569.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">可直接修复</text>
+<rect x="435.62" y="277" width="56.04" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="463.64" y="290.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">环境恢复后重试</text>
+<rect x="223.935" y="463" width="38.88" height="27" rx="4" ry="4" fill="#ffffff" stroke="#d1d9e0" stroke-width="0.5" />
+<text x="243.375" y="476.5" text-anchor="middle" dy="0.35em" font-size="11" font-weight="400" fill="#59636e">运行总结</text>
+<circle cx="88.17499999999995" cy="151" r="16" fill="#1f2328" stroke="none" />
+<rect x="50.72499999999995" y="226" width="74.9" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="54.299999999999955" y="319" width="67.75" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="57.87499999999996" y="412" width="60.6" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="54.299999999999955" y="505" width="67.75" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="39.99999999999995" y="598" width="96.35000000000001" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="175.35499999999996" y="674" width="60.6" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="532.8249999999999" y="750" width="96.35000000000001" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="531.5499999999998" y="40" width="74.9" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="315.99499999999995" y="133" width="74.9" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="319.56999999999994" y="226" width="67.75" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="170.56249999999997" y="319" width="82.05000000000001" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="173.75" y="412" width="139.25" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="491.0999999999999" y="319" width="89.2" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="299.2499999999999" y="319" width="167.85000000000002" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<rect x="213.375" y="505" width="60" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<circle cx="243.375" cy="616" r="16" fill="none" stroke="#1f2328" stroke-width="1.5" />
+<circle cx="243.375" cy="616" r="12" fill="#1f2328" stroke="none" />
+<rect x="131.14999999999995" y="40" width="82.05000000000001" height="36" rx="6" ry="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="0.75" />
+<circle cx="172.17499999999995" cy="151" r="16" fill="none" stroke="#1f2328" stroke-width="1.5" />
+<circle cx="172.17499999999995" cy="151" r="12" fill="#1f2328" stroke="none" />
+
+<text x="88.17499999999995" y="244" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">INTAKE</text>
+<text x="88.17499999999995" y="337" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">GRILL</text>
+<text x="88.17499999999995" y="430" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">SPEC</text>
+<text x="88.17499999999995" y="523" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">TASKS</text>
+<text x="88.17499999999995" y="616" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">WORKSPACE</text>
+<text x="205.65499999999997" y="692" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">PLAN</text>
+<text x="580.9999999999999" y="768" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">IMPLEMENT</text>
+<text x="568.9999999999999" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">REVIEW</text>
+<text x="353.44499999999994" y="151" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">SUBMIT</text>
+<text x="353.44499999999994" y="244" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">IPIPE</text>
+<text x="211.58749999999998" y="337" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">RELEASE</text>
+<text x="243.375" y="430" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">RELEASE_SUCCESS</text>
+<text x="535.6999999999999" y="337" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">DIAGNOSE</text>
+<text x="383.1749999999999" y="337" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">ENVIRONMENT_BLOCKED</text>
+<text x="243.375" y="523" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">G10</text>
+
+<text x="172.17499999999995" y="58" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">STOPPED</text>
+
+</svg>
