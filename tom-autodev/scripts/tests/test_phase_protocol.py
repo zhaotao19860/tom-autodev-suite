@@ -83,6 +83,21 @@ class RaisingKnowledgeSync:
         raise RuntimeError("transport exploded")
 
 
+class SettlingKnowledgeSync(FakeKnowledgeSync):
+    """A publish that closes its own intents, the way the real one does on success."""
+
+    def __init__(self, state, result=None):
+        super().__init__(result)
+        self.state = state
+
+    def publish_phase(self, run_id, artifact):
+        response = super().publish_phase(run_id, artifact)
+        if response.get("ok"):
+            for pending in self.state.pending_intents(run_id):
+                self.state.receipt(pending["intent_id"], {"ok": True, "reason_code": "OK"}, [])
+        return response
+
+
 class FakeApprovals:
     def __init__(self, action="G0", input_hash=None, decision="APPROVE", run_id="run-1"):
         self.record = {"approval_id": "approval-1", "run_id": run_id, "action": action,
@@ -226,10 +241,16 @@ class PhaseProtocolTests(unittest.TestCase):
         self.assertEqual(action["result_schema"], "task-plan")
 
     def test_next_rejects_pending_intent_and_missing_predecessor(self):
-        self.state.intent("run-1", "ku.document.publish", "pending-1", {"doc_id": "doc-1"})
+        self.state.intent("run-1", "icode.submit", "pending-1", {"change_set_id": "cs-1"})
         self.assertEqual(self.protocol().next("run-1")["reason_code"], "RECOVERY_REQUIRED")
         self.state.transition("run-spec", "SPEC", {"requirement_id": "BGW-1", "profile_hash": HASH})
         self.assertEqual(self.protocol().next("run-spec")["reason_code"], "PREDECESSOR_REQUIRED")
+
+    def test_next_ignores_a_pending_intent_its_own_publish_redrives(self):
+        self.state.intent(
+            "run-1", "knowledge.publish-phase", "pending-publish", {"content_hash": "b" * 64}
+        )
+        self.assertEqual(self.protocol().next("run-1")["reason_code"], "OK")
 
     def test_validate_rejects_wrong_host_stale_cross_run_and_input_hash(self):
         protocol = self.protocol()
@@ -349,10 +370,60 @@ class PhaseProtocolTests(unittest.TestCase):
     def test_complete_returns_recovery_required_for_pending_intent(self):
         action = self.protocol().next("run-1")
         envelope = self.result_for(action)
-        self.state.intent("run-1", "ku.document.publish", "pending-complete", {"doc_id": "doc-pending"})
+        self.state.intent("run-1", "icode.submit", "pending-complete", {"change_set_id": "cs-1"})
         result = self.protocol(approvals=FakeApprovals()).complete("run-1", envelope)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason_code"], "RECOVERY_REQUIRED")
+
+    def test_complete_redrives_a_pending_publish_of_the_same_artifact(self):
+        """KU verified its own write late, so the publish intent stayed open.
+
+        The reconciliation lives inside `publish_phase`, so refusing here would leave
+        the only way forward a hand-written call to it -- which is what the CDN-URL run
+        had to do nine times.
+        """
+        from phase_protocol import _phase_title
+
+        action = self.protocol().next("run-1")
+        envelope = self.result_for(action)
+        title = _phase_title(action)
+        self.state.intent(
+            "run-1",
+            "knowledge.publish-phase",
+            "pending-same-artifact",
+            {
+                "title_hash": hashlib.sha256(title.encode("utf-8")).hexdigest(),
+                "content_hash": envelope["content_hash"],
+            },
+        )
+        sync = SettlingKnowledgeSync(self.state)
+        result = self.protocol(
+            approvals=FakeApprovals(input_hash=action["input_hash"]), sync=sync
+        ).complete("run-1", envelope)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([call[1]["title"] for call in sync.calls], [title])
+        self.assertEqual(self.state.pending_intents("run-1"), [])
+
+    def test_complete_still_refuses_a_pending_publish_of_another_artifact(self):
+        action = self.protocol().next("run-1")
+        envelope = self.result_for(action)
+        self.state.intent(
+            "run-1",
+            "knowledge.publish-phase",
+            "pending-other-artifact",
+            {
+                "title_hash": hashlib.sha256(b"09-something-else").hexdigest(),
+                "content_hash": "c" * 64,
+            },
+        )
+        sync = FakeKnowledgeSync()
+        result = self.protocol(
+            approvals=FakeApprovals(input_hash=action["input_hash"]), sync=sync
+        ).complete("run-1", envelope)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "RECOVERY_REQUIRED")
+        self.assertFalse(result["retry_allowed"])
+        self.assertEqual(sync.calls, [])
 
     def test_public_completion_converts_dependency_exceptions_to_structured_failure(self):
         protocol = self.protocol(sync=RaisingKnowledgeSync())

@@ -64,6 +64,29 @@ _TITLE = {
 # title that already exists.
 _TASK_SCOPED_TITLES = frozenset({"PLAN", "IMPLEMENT", "REVIEW"})
 
+# Operations that a fresh `publish_phase` for the same artifact drives again by itself.
+# Every one of them is keyed on the artifact's own content, so calling `publish_phase`
+# with the same title and content hash reuses the existing intent row (see
+# `state_store.intent`, which returns the stored row for a repeated idempotency key)
+# and re-attempts the same external write.
+_PUBLISH_REDRIVEN_OPERATIONS = frozenset({
+    "knowledge.publish-phase",
+    "ku.run-root.create",
+    "ku.document.create",
+    "ku.document.publish",
+    "ku.document.publish.reflush",
+    "ku.index.edit",
+    "icafe.comment",
+})
+
+
+def _redriven_by_publish(operation: Any) -> bool:
+    if not isinstance(operation, str):
+        return False
+    suffix = ".reconcile"
+    base = operation[: -len(suffix)] if operation.endswith(suffix) else operation
+    return base in _PUBLISH_REDRIVEN_OPERATIONS
+
 
 class PhaseProtocol:
     def __init__(
@@ -96,6 +119,53 @@ class PhaseProtocol:
         run_id = events[0].get("run_id") if events else None
         return record_for(self.state, run_id) if isinstance(run_id, str) and run_id else None
 
+    def _blocking_pending(self, run_id: str) -> list[dict[str, Any]]:
+        """Pending intents that no further phase work can settle.
+
+        A pending intent means the control plane does not know whether an external
+        write landed, and for `icode.submit` or `ipipe.trigger` the only way to find
+        out is to go and ask, so the run stops and waits for recovery. The KU publish
+        steps are not like that: `complete` publishes through the very operations
+        listed in `_PUBLISH_REDRIVEN_OPERATIONS`, each keyed on the artifact's own
+        content hash, so calling it again re-attempts exactly the write that is open
+        and closes the intent either way.
+
+        Treating those as terminal is what parked the x86bgw CDN-URL run nine times:
+        KU's read-back lagged behind its own successful write, `_verify_child` failed
+        with no receipt, and the reconciliation that would have settled the intent sat
+        behind this guard. The only way out was to call `publish_phase` by hand.
+        """
+        return [
+            pending
+            for pending in self.state.pending_intents(run_id)
+            if not _redriven_by_publish(pending.get("operation"))
+        ]
+
+    def _foreign_publish_intent(
+        self, run_id: str, title: str, content_hash: str
+    ) -> dict[str, Any] | None:
+        """A pending publish that publishing *this* artifact would leave open.
+
+        `_blocking_pending` is only safe while the open rows belong to the artifact
+        about to be published. A publish intent naming another title or content hash
+        is keyed on that other artifact, so this publish would not touch it -- and
+        letting it through would carry a second artifact past an external write that
+        nobody ever confirmed, which is what the absolute guard was there to stop.
+        """
+        title_hash = hashlib.sha256(title.encode("utf-8")).hexdigest()
+        for pending in self.state.pending_intents(run_id):
+            if pending.get("operation") != "knowledge.publish-phase":
+                continue
+            payload = pending.get("payload")
+            if not isinstance(payload, dict):
+                return pending
+            if (
+                payload.get("title_hash") != title_hash
+                or payload.get("content_hash") != content_hash
+            ):
+                return pending
+        return None
+
     def _next(self, run_id: str) -> dict[str, Any]:
         if not isinstance(run_id, str) or not run_id:
             return _failure("INVALID_INPUT")
@@ -114,7 +184,7 @@ class PhaseProtocol:
         profile_error = _pinned_profile_error(events, self._repin(events))
         if profile_error is not None:
             return _failure(profile_error, run_id=run_id)
-        if self.state.pending_intents(run_id):
+        if self._blocking_pending(run_id):
             return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
         definition = _PHASES.get(state)
         controller_definition = _CONTROLLERS.get(state)
@@ -462,14 +532,16 @@ class PhaseProtocol:
             if existing.get("draft_hash") != draft_hash:
                 return _failure("COMPLETION_CONFLICT", run_id=run_id)
             return self._validated_cached_completion(run_id, existing)
-        if self.state.pending_intents(run_id):
+        if self._blocking_pending(run_id):
             return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
         action = self.next(run_id)
         if not action.get("ok"):
-            return action
+            return self._raced_completion(run_id, result_key, draft_hash, action)
         validated = self.validate_result(action, envelope)
         if not validated.get("ok"):
-            return {**validated, "run_id": run_id}
+            return self._raced_completion(
+                run_id, result_key, draft_hash, {**validated, "run_id": run_id}
+            )
         if self.knowledge is None:
             return _failure("KNOWLEDGE_SYNC_REQUIRED", run_id=run_id)
         canonical = _canonical_json(validated["draft"]["content"])
@@ -480,6 +552,14 @@ class PhaseProtocol:
         publish_document = render_phase_markdown(
             title, validated["draft"]["content"], envelope["content_hash"], canonical
         )
+        foreign = self._foreign_publish_intent(run_id, title, envelope["content_hash"])
+        if foreign is not None:
+            return _failure(
+                "RECOVERY_REQUIRED",
+                run_id=run_id,
+                retry_allowed=False,
+                intent_id=foreign["intent_id"],
+            )
         receipt = self.knowledge.publish_phase(
             run_id,
             {
@@ -507,11 +587,9 @@ class PhaseProtocol:
             return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
         recheck = self._post_publish_recheck(action, envelope, stored)
         if recheck is not None:
-            if recheck == "STALE_ACTION":
-                raced = self.state.idempotency_result(result_key)
-                if raced is not None and raced.get("draft_hash") == draft_hash:
-                    return self._validated_cached_completion(run_id, raced)
-            return _failure(recheck, run_id=run_id)
+            return self._raced_completion(
+                run_id, result_key, draft_hash, _failure(recheck, run_id=run_id)
+            )
         if self.state.pending_intents(run_id):
             return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
         target, next_task_id, completion_reason = self._completion_target(action, envelope)
@@ -547,10 +625,37 @@ class PhaseProtocol:
             run_id, action["source_event_id"], target, event_payload, result_key, result
         )
         if committed.get("status") == "SOURCE_EVENT_MISMATCH":
-            return _failure("STALE_ACTION", run_id=run_id)
+            return self._raced_completion(
+                run_id, result_key, draft_hash, _failure("STALE_ACTION", run_id=run_id)
+            )
         if committed.get("status") == "RESULT_CONFLICT":
             return _failure("COMPLETION_CONFLICT", run_id=run_id)
         return committed["result"]
+
+    def _raced_completion(
+        self,
+        run_id: str,
+        result_key: str,
+        draft_hash: str,
+        failure: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Reconcile a stale action to the completion that overtook it.
+
+        Two callers completing the same action both do the work, and the loser only
+        learns it lost once the winner's transition has landed -- which is the same
+        transaction that stores the completion under this key, since both callers carry
+        the same action id. Reporting a bare `STALE_ACTION` there says the work was
+        discarded about work that did in fact complete, and the caller has no way to
+        tell that from a genuinely stale draft. Staleness discovered before the publish
+        is the common case: the loser is refused by `validate_result`, not by the
+        commit, so checking only at the commit would miss it.
+        """
+        if failure.get("reason_code") != "STALE_ACTION":
+            return failure
+        raced = self.state.idempotency_result(result_key)
+        if raced is not None and raced.get("draft_hash") == draft_hash:
+            return self._validated_cached_completion(run_id, raced)
+        return failure
 
     def _validated_cached_completion(self, run_id: str, existing: dict[str, Any]) -> dict[str, Any]:
         artifact_id = existing.get("artifact_id")
