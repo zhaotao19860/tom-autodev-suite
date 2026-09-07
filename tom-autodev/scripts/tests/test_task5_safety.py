@@ -500,7 +500,13 @@ class ClientAndOrchestratorSafetyTests(unittest.TestCase):
                     [entry["channel"] for entry in approval["delivery_receipts"]],
                     ["comate"],
                 )
-                self.assertEqual(approval["status"], "PENDING")
+                # The gate is not waiting on a human: the Infoflow card was refused, so
+                # nobody can answer it -- which is what APPROVAL_DELIVERY_INCOMPLETE
+                # below says. The ledger reports that instead of a pending gate that
+                # would sit there until its deadline expired.
+                self.assertEqual(approval["status"], "DELIVERY_FAILED")
+                self.assertEqual(approval["delivery_failure"]["channels"], ["infoflow"])
+                self.assertFalse(approval["delivery_failure"]["retry_allowed"])
                 self.assertIsNone(approval["effective_decision"])
                 self.assertEqual(
                     blocked["reason_code"], "APPROVAL_DELIVERY_INCOMPLETE"
@@ -655,7 +661,13 @@ class ClientAndOrchestratorSafetyTests(unittest.TestCase):
                     [entry["channel"] for entry in approval["delivery_receipts"]],
                     ["comate"],
                 )
-                self.assertEqual(approval["status"], "PENDING")
+                # The gate is not waiting on a human: the Infoflow card was refused, so
+                # nobody can answer it -- which is what APPROVAL_DELIVERY_INCOMPLETE
+                # below says. The ledger reports that instead of a pending gate that
+                # would sit there until its deadline expired.
+                self.assertEqual(approval["status"], "DELIVERY_FAILED")
+                self.assertEqual(approval["delivery_failure"]["channels"], ["infoflow"])
+                self.assertFalse(approval["delivery_failure"]["retry_allowed"])
                 self.assertIsNone(approval["effective_decision"])
                 self.assertEqual(
                     blocked["reason_code"], "APPROVAL_DELIVERY_INCOMPLETE"
@@ -1152,3 +1164,193 @@ class ClientAndOrchestratorSafetyTests(unittest.TestCase):
         self.assertEqual(bot.calls[1][3], ["owner@example.test"])
         with self.assertRaisesRegex(ValueError, "MESSAGE_MENTION_MISMATCH"):
             client.send_markdown("8", "body", ["owner@example.test"], "k")
+
+
+class ApprovalDeliveryFailureTests(unittest.TestCase):
+    """What the control plane does when a channel will not take the card.
+
+    Aborting the loop on the first failure used to hide the request from *both*
+    audiences, and every failure was reported as an unknown outcome, which parks the
+    run. Neither is right: a client that raised before dispatching proves nothing was
+    sent.
+    """
+
+    policy = {"comate": ["owner@example.test"], "infoflow": ["owner@example.test"]}
+
+    def _infoflow(self):
+        class Infoflow:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, payload):
+                self.calls.append(payload)
+                return _pending_delivery_receipt(payload)
+
+            def reconcile(self, _payload):
+                return None
+
+        return Infoflow()
+
+    def _request(self, orchestrator, comate, infoflow, action="G0"):
+        return orchestrator.request_infoflow_approval(
+            "run-1", action, "hash-a", member_policy=self.policy,
+            evidence={"icafe": "BGW-1"}, comate_client=comate, infoflow_client=infoflow,
+        )
+
+    def test_a_client_defect_is_retryable_and_leaves_no_claim(self):
+        class BrokenComate:
+            """A wiring defect: the transport this client needs is not there."""
+
+            def request(self, _payload):
+                raise AttributeError("'NoneType' object has no attribute 'post'")
+
+            def reconcile(self, _payload):
+                return None
+
+        class WorkingComate:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, payload):
+                self.calls.append(payload)
+                return {"request_id": "comate-request"}
+
+            def reconcile(self, _payload):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator(Path(directory))
+            strict_intake(orchestrator.state)
+            infoflow = self._infoflow()
+            failed = self._request(orchestrator, BrokenComate(), infoflow)
+            approval = orchestrator.approvals.get(failed["approval_id"])
+
+            self.assertEqual(failed["reason_code"], "APPROVAL_DELIVERY_FAILED")
+            self.assertTrue(failed["retry_allowed"])
+            self.assertIn("AttributeError", failed["detail"])
+            # Nothing was sent, so nothing is owed a reconciliation. A claim left here
+            # parks the run in RECOVERY_REQUIRED over a write nobody performed.
+            self.assertEqual(orchestrator.state.pending_intents("run-1"), [])
+            self.assertEqual(approval["status"], "DELIVERY_FAILED")
+            self.assertEqual(approval["delivery_failure"]["channels"], ["comate"])
+            self.assertEqual(approval["delivery_failure"]["error_types"], ["AttributeError"])
+            # The dead channel no longer hides the request from the live one.
+            self.assertEqual(len(infoflow.calls), 1)
+            self.assertEqual(
+                [entry["channel"] for entry in approval["delivery_receipts"]], ["infoflow"]
+            )
+
+            comate = WorkingComate()
+            repaired = self._request(orchestrator, comate, infoflow)
+
+            self.assertEqual(repaired["approval_id"], failed["approval_id"])
+            self.assertEqual(repaired["status"], "PENDING")
+            self.assertIsNone(repaired["delivery_failed_at"])
+            self.assertEqual(
+                {entry["channel"] for entry in repaired["delivery_receipts"]},
+                {"comate", "infoflow"},
+            )
+            # The channel that already delivered is not asked twice.
+            self.assertEqual(len(infoflow.calls), 1)
+            self.assertEqual(len(comate.calls), 1)
+
+    def test_a_transport_error_is_still_an_unknown_outcome(self):
+        """The split is by exception class, not by whichever answer is convenient.
+
+        A socket that died mid-request may well have delivered the card, so the claim
+        stays open and the run has to go and ask.
+        """
+
+        class DeadSocketComate:
+            def request(self, _payload):
+                raise OSError("connection reset by peer")
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator(Path(directory))
+            strict_intake(orchestrator.state)
+            infoflow = self._infoflow()
+            result = self._request(orchestrator, DeadSocketComate(), infoflow)
+            approval = orchestrator.approvals.get(result["approval_id"])
+
+            self.assertEqual(result["reason_code"], "QUERY_REQUIRED")
+            self.assertFalse(result["retry_allowed"])
+            self.assertEqual(
+                [item["operation"] for item in orchestrator.state.pending_intents("run-1")],
+                ["approval.delivery.comate"],
+            )
+            self.assertEqual(approval["status"], "DELIVERY_FAILED")
+            self.assertFalse(approval["delivery_failure"]["retry_allowed"])
+            self.assertEqual(len(infoflow.calls), 1)
+
+    def test_reissue_frees_an_undeliverable_gate_but_not_a_retryable_one(self):
+        class DeadSocketComate:
+            def request(self, _payload):
+                raise OSError("connection reset by peer")
+
+        class BrokenComate:
+            def request(self, _payload):
+                raise AttributeError("no transport")
+
+            def reconcile(self, _payload):
+                return None
+
+        class WorkingComate:
+            def request(self, _payload):
+                return {"request_id": "comate-request"}
+
+            def reconcile(self, _payload):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator(Path(directory))
+            strict_intake(orchestrator.state)
+            retryable = self._request(orchestrator, BrokenComate(), self._infoflow())
+            refused = orchestrator.reissue_infoflow_approval(
+                "run-1", "G0", "hash-a", member_policy=self.policy,
+                infoflow_client=self._infoflow(), comate_client=BrokenComate(),
+            )
+            # Fixing the defect and asking again re-posts only the dead channel, so
+            # burning a new action name on it would lose that retry for nothing.
+            self.assertEqual(refused["reason_code"], "APPROVAL_DELIVERY_RETRYABLE")
+            self.assertEqual(refused["approval_id"], retryable["approval_id"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator(Path(directory))
+            strict_intake(orchestrator.state)
+            stuck = self._request(orchestrator, DeadSocketComate(), self._infoflow())
+            reissued = orchestrator.reissue_infoflow_approval(
+                "run-1", "G0", "hash-a", member_policy=self.policy,
+                infoflow_client=self._infoflow(), comate_client=WorkingComate(),
+            )
+
+            self.assertNotEqual(reissued["approval_id"], stuck["approval_id"])
+            self.assertEqual(reissued["action"], "G0#retry-1")
+            self.assertEqual(reissued["input_hash"], "hash-a")
+            self.assertEqual(reissued["status"], "PENDING")
+            self.assertEqual(
+                {entry["channel"] for entry in reissued["delivery_receipts"]},
+                {"comate", "infoflow"},
+            )
+            # The attempt nobody could answer stays in the audit trail.
+            self.assertEqual(
+                sorted(
+                    approval["status"] for approval in orchestrator.approvals.for_run("run-1")
+                ),
+                ["DELIVERY_FAILED", "PENDING"],
+            )
+
+    def test_an_undeliverable_gate_is_not_offered_to_the_reply_watcher(self):
+        class BrokenComate:
+            def request(self, _payload):
+                raise AttributeError("no transport")
+
+            def reconcile(self, _payload):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = Orchestrator(Path(directory))
+            strict_intake(orchestrator.state)
+            self._request(orchestrator, BrokenComate(), self._infoflow())
+            # No channel is showing that card, so polling for a reply on it only
+            # teaches the watcher to report silence as though somebody were deciding.
+            self.assertEqual(orchestrator.approvals.pending(), [])

@@ -117,6 +117,35 @@ class ApprovalLedger:
                 entries.append(entry); c.execute("UPDATE approvals SET delivery_receipts_json=? WHERE approval_id=?", (json.dumps(entries,sort_keys=True),approval_id)); row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
         return _row(row)
 
+    def record_delivery_failure(self, approval_id: str, failure: dict[str, Any] | None) -> dict[str, Any]:
+        """Mark -- or, with `failure=None`, clear -- an approval as undeliverable.
+
+        A gate whose card reached nobody cannot be answered, yet the ledger row is
+        unique per `(run_id, action, input_hash)`, so the failed attempt holds the only
+        slot this question has and `reissue-approval`, which accepted a timeout and
+        nothing else, could not free it. Recording the failure on the row is what lets
+        that command tell "nobody was ever asked" from "somebody is still thinking".
+
+        Clearing on a later success is part of the same contract: a retry that gets
+        through must leave no trace of the attempt that did not, or the row keeps
+        claiming undeliverable while a live card sits in front of a reviewer.
+        """
+        if failure is not None:
+            ensure_persistable(failure)
+        with self._connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+            if row is None: raise ValueError("APPROVAL_NOT_FOUND")
+            if row["effective_decision"] is not None: return {**_row(row), "reason_code": "APPROVAL_ALREADY_RESOLVED"}
+            c.execute(
+                "UPDATE approvals SET delivery_failed_at=?,delivery_failure_json=? WHERE approval_id=?",
+                (_now() if failure is not None else None,
+                 json.dumps(failure, ensure_ascii=False, sort_keys=True) if failure is not None else None,
+                 approval_id),
+            )
+            row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+        return _row(row)
+
     def record_heartbeat(self, approval_id: str, observed_at: str) -> dict[str, Any]:
         _parse_deadline(observed_at)
         with self._connect() as c:
@@ -152,12 +181,17 @@ class ApprovalLedger:
         with self._connect() as c: row=c.execute("SELECT * FROM approvals WHERE approval_id=?",(approval_id,)).fetchone()
         return _row(row) if row else None
     def pending(self) -> list[dict[str, Any]]:
-        """Unresolved strict approvals, oldest first, for the reply watcher."""
+        """Unresolved strict approvals, oldest first, for the reply watcher.
+
+        An undeliverable approval is not among them: no channel is showing that card,
+        so no reply can arrive on it, and polling one only teaches the watcher to
+        report silence as though somebody were still deciding.
+        """
         c = self._connect()
         try:
             rows = c.execute(
                 "SELECT * FROM approvals WHERE effective_decision IS NULL AND run_id != 'legacy'"
-                " ORDER BY created_at, approval_id"
+                " AND delivery_failed_at IS NULL ORDER BY created_at, approval_id"
             ).fetchall()
         finally:
             c.close()
@@ -177,7 +211,7 @@ class ApprovalLedger:
         return [{"response_id":x["response_id"],"approval_id":x["approval_id"],"decision":x["decision"],"input_hash":x["input_hash"],"channel":x["channel"],"responder":x["responder"],"effective":bool(x["effective"]),"conflict":bool(x["conflict"]),"valid":bool(x["valid"]),"rejected_reason":x["rejected_reason"],"late":bool(x["late"]),"received_at":x["received_at"]} for x in rows]
 
 def _migrate(c: sqlite3.Connection) -> None:
-    for table, fields in {"approvals":{"run_id":"TEXT NOT NULL DEFAULT 'legacy'","member_policy_json":"TEXT NOT NULL DEFAULT '{}'","delivery_receipts_json":"TEXT NOT NULL DEFAULT '[]'","deadline_at":"TEXT","timeout_at":"TEXT","heartbeat_at":"TEXT"},"approval_responses":{"responder":"TEXT","valid":"INTEGER NOT NULL DEFAULT 1","rejected_reason":"TEXT","late":"INTEGER NOT NULL DEFAULT 0"}}.items():
+    for table, fields in {"approvals":{"run_id":"TEXT NOT NULL DEFAULT 'legacy'","member_policy_json":"TEXT NOT NULL DEFAULT '{}'","delivery_receipts_json":"TEXT NOT NULL DEFAULT '[]'","deadline_at":"TEXT","timeout_at":"TEXT","heartbeat_at":"TEXT","delivery_failed_at":"TEXT","delivery_failure_json":"TEXT"},"approval_responses":{"responder":"TEXT","valid":"INTEGER NOT NULL DEFAULT 1","rejected_reason":"TEXT","late":"INTEGER NOT NULL DEFAULT 0"}}.items():
         existing={r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
         for field,definition in fields.items():
             if field not in existing: c.execute(f"ALTER TABLE {table} ADD COLUMN {field} {definition}")
@@ -213,7 +247,11 @@ def _record(c:sqlite3.Connection,approval_id:str,decision:str,input_hash:str,cha
     c.execute("INSERT INTO approval_responses(response_id,approval_id,decision,input_hash,channel,responder,effective,conflict,valid,rejected_reason,late,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",(uuid.uuid4().hex,approval_id,decision,input_hash,channel,responder,int(effective),int(conflict),int(valid),rejected,int(late),now.isoformat()))
 def _row(row:sqlite3.Row)->dict[str,Any]:
     decision=row["effective_decision"]
-    return {"approval_id":row["approval_id"],"run_id":row["run_id"],"action":row["action"],"input_hash":row["input_hash"],"channels":json.loads(row["channels_json"]),"member_policy":json.loads(row["member_policy_json"]),"delivery_receipts":json.loads(row["delivery_receipts_json"]),"deadline_at":row["deadline_at"],"heartbeat_at":row["heartbeat_at"],"status":"TIMEOUT" if decision=="TIMEOUT" else ("RESOLVED" if decision else "PENDING"),"effective_decision":decision,"effective_channel":row["effective_channel"],
+    undelivered=row["delivery_failed_at"] if "delivery_failed_at" in row.keys() else None
+    return {"approval_id":row["approval_id"],"run_id":row["run_id"],"action":row["action"],"input_hash":row["input_hash"],"channels":json.loads(row["channels_json"]),"member_policy":json.loads(row["member_policy_json"]),"delivery_receipts":json.loads(row["delivery_receipts_json"]),"deadline_at":row["deadline_at"],"heartbeat_at":row["heartbeat_at"],"status":"TIMEOUT" if decision=="TIMEOUT" else ("RESOLVED" if decision else ("DELIVERY_FAILED" if undelivered else "PENDING")),"effective_decision":decision,"effective_channel":row["effective_channel"],
+    # Why the card never landed, for `reissue-approval` and for the operator reading
+    # the ledger. Absent once a retry delivers, so it never outlives the attempt.
+    "delivery_failed_at":undelivered,"delivery_failure":json.loads(row["delivery_failure_json"]) if undelivered and row["delivery_failure_json"] else None,
     # When the decision landed. A reader has to be able to tell a decision that
     # answers the current phase from one left over from an earlier attempt at it.
     "resolved_at":row["resolved_at"]}

@@ -35,6 +35,14 @@ from workspace_manager import WorkspaceManager
 
 _PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
+# Exceptions that prove the call never reached the network: a method that is not
+# there, a signature that does not match, a module that will not import. They are
+# defects in this process, so they say nothing at all about the remote side, and
+# treating them as uncertainty parks the run over a write that provably never
+# happened. Every other exception -- a socket dying mid-request, an HTTP error, a
+# timeout -- leaves the outcome genuinely unknown and must still be reconciled.
+_NOTHING_SENT_EXCEPTIONS = (AttributeError, TypeError, NameError, ImportError)
+
 
 def _pinned_profile_hash(orchestrator: Any, run_id: str, events: list[dict[str, Any]]) -> Any:
     """The hash this run is pinned to, honouring an approved re-pin over INTAKE's."""
@@ -1119,12 +1127,49 @@ class Orchestrator:
             "evidence": evidence or {},
             "member_policy": request["member_policy"],
         }
+        outcomes = []
         for channel, client in (("comate", comate_client), ("infoflow", infoflow_client)):
             envelope = {"channel": channel, "approval": payload}
             outcome = self._deliver_approval_channel(run_id, request["approval_id"], channel, client, envelope, input_hash)
-            if outcome.get("reason_code") not in {None, "OK"}:
+            if outcome.get("reason_code") == "APPROVAL_DELIVERY_CONFLICT":
+                # The payload no longer matches the one this approval_id was claimed
+                # for. Every channel is keyed on that same payload, so the rest would
+                # conflict identically; the caller has to settle the input first.
                 return {**(self.approvals.get(request["approval_id"]) or request), **outcome}
-        return self.approvals.get(request["approval_id"]) or request
+            outcomes.append({"channel": channel, **outcome})
+        failed = [outcome for outcome in outcomes if outcome.get("reason_code") not in {None, "OK"}]
+        if not failed:
+            # A retry after a partial failure gets here; the mark has to go, or the row
+            # keeps saying undeliverable while both channels are showing the card.
+            if (self.approvals.get(request["approval_id"]) or {}).get("delivery_failed_at"):
+                self.approvals.record_delivery_failure(request["approval_id"], None)
+            return self.approvals.get(request["approval_id"]) or request
+
+        # Aborting on the first failure meant one dead channel hid the request from
+        # both audiences: Infoflow was never even attempted, so nobody saw the card
+        # anywhere and the run looked stalled for no visible reason. Every channel is
+        # attempted now, and a channel that already delivered short-circuits inside
+        # `_deliver_approval_channel`, so a retry never posts a second card.
+        #
+        # A partial delivery is still a failure: `_reject` accepts a response only once
+        # the receipts cover every channel, so a gate one channel can see cannot be
+        # answered there either. What changes is that the operator gets told which
+        # channel broke, and the reviewer at least sees the question.
+        self.approvals.record_delivery_failure(request["approval_id"], {
+            "reason_code": failed[0]["reason_code"],
+            "channels": sorted(item["channel"] for item in failed),
+            # The exception type, not its message: only key names are screened for
+            # secrets, and a client's error text can quote the URL it was called with.
+            # The full detail still reaches the operator in the returned result.
+            "error_types": sorted({item["error_type"] for item in failed if item.get("error_type")}),
+            "retry_allowed": all(item.get("retry_allowed") for item in failed),
+        })
+        return {
+            **(self.approvals.get(request["approval_id"]) or request),
+            **failed[0],
+            "retry_allowed": all(item.get("retry_allowed") for item in failed),
+            "channel_outcomes": outcomes,
+        }
 
     def _deliver_approval_channel(
         self, run_id: str, approval_id: str, channel: str, client: Any, payload: dict[str, Any], payload_hash: str
@@ -1132,7 +1177,8 @@ class Orchestrator:
         key = f"approval.delivery:{approval_id}:{channel}"
         canonical_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         canonical_payload_hash = hashlib.sha256(canonical_payload.encode()).hexdigest()
-        claim = self.state.claim_intent(run_id, f"approval.delivery.{channel}", key, {"approval_id": approval_id, "canonical_payload_sha256": canonical_payload_hash})
+        claim_payload = {"approval_id": approval_id, "canonical_payload_sha256": canonical_payload_hash}
+        claim = self.state.claim_intent(run_id, f"approval.delivery.{channel}", key, claim_payload)
         if claim["status"] == "CONFLICT":
             return {"reason_code": "APPROVAL_DELIVERY_CONFLICT"}
         failure_key = f"{key}:failure"
@@ -1159,6 +1205,8 @@ class Orchestrator:
                 if reconciled is None:
                     return {"reason_code": "QUERY_REQUIRED", "intent_id": intent["intent_id"], "retry_allowed": False}
                 response = reconciled
+            except _NOTHING_SENT_EXCEPTIONS as error:
+                return self._undelivered(run_id, channel, key, claim_payload, error)
             except Exception:
                 reconciled = client.reconcile(payload) if hasattr(client, "reconcile") else None
                 if reconciled is None:
@@ -1178,6 +1226,35 @@ class Orchestrator:
         self.state.receipt(intent["intent_id"], {"approval_id": approval_id, "channel": channel, "input_hash": payload_hash, "canonical_payload_sha256": canonical_payload_hash, "receipt": response}, [])
         self.approvals.record_delivery(approval_id, channel, response, payload_hash=payload_hash)
         return {"reason_code": "OK"}
+
+    def _undelivered(
+        self, run_id: str, channel: str, key: str, claim_payload: dict[str, Any], error: BaseException
+    ) -> dict[str, Any]:
+        """Close the claim for a card that provably never left this process.
+
+        The claim exists so that an interrupted delivery is remembered as *maybe sent*.
+        When the client raised before dispatching -- a missing method, a signature that
+        does not match -- there is nothing to remember, and leaving the claim pending
+        parks the whole run in `RECOVERY_REQUIRED` over a write nobody performed. The
+        two alternatives are both wrong: a failure receipt would make
+        `result_by_idempotency_key` report the card as delivered, and a saved failure
+        result is permanent, so fixing the defect would still never let the card go out.
+
+        `retry_allowed` is the distinction this pays for. `QUERY_REQUIRED` means the
+        outcome is unknown and must be reconciled, never retried;
+        `APPROVAL_DELIVERY_FAILED` means nothing was sent, so retrying after the fix is
+        the correct move and cannot double-post. If the claim will not withdraw -- a
+        receipt raced in, or the payload no longer matches -- then something did happen
+        after all, and this falls back to the reconcile path.
+        """
+        withdrawn = self.state.withdraw_intent(run_id, f"approval.delivery.{channel}", key, claim_payload)
+        outcome = {"error_type": type(error).__name__, "detail": f"{type(error).__name__}: {error}"}
+        if withdrawn.get("status") != "WITHDRAWN":
+            return {
+                **outcome, "reason_code": "QUERY_REQUIRED", "retry_allowed": False,
+                "intent_id": (withdrawn.get("intent") or {}).get("intent_id"),
+            }
+        return {**outcome, "reason_code": "APPROVAL_DELIVERY_FAILED", "retry_allowed": True}
 
     def wait_infoflow_approval(self, run_id: str, approval_id: str, input_hash: str, infoflow_client: Any, timeout_seconds: float) -> dict[str, Any]:
         approval = self.approvals.get(approval_id)
@@ -1273,12 +1350,25 @@ class Orchestrator:
         infoflow_client: Any,
         comate_client: Any | None = None,
     ) -> dict[str, Any]:
-        """Open a fresh attempt at a timed-out gate, bound to the same input hash.
+        """Open a fresh attempt at a stuck gate, bound to the same input hash.
 
         A timed-out approval is terminal in the ledger and its row is unique per
         `(run_id, action, input_hash)`, so recovery cannot reuse it. The retry keeps
         the bound content and only takes a new action name, which leaves the expired
         attempt in the audit trail instead of overwriting it.
+
+        A gate whose card reached nobody is stuck for the same reason and gets the same
+        way out. It used to be refused as `APPROVAL_NOT_TIMED_OUT` and then waited for
+        a deadline that no reviewer could ever answer, because a rejected gateway
+        response is stored against the approval id permanently: the only way to make
+        the request deliverable again is a new id. A delivery failure that says it is
+        retryable is *not* stuck -- calling `request_infoflow_approval` again re-posts
+        only the channel that failed -- so it is sent back down that path rather than
+        being allowed to burn an action name.
+
+        A REJECT is deliberately not reissuable. Re-asking a question a human answered,
+        under the same input hash, is approval shopping; changing the input is what
+        earns a new gate.
         """
         from approval_delivery import ComateApprovalClient
 
@@ -1290,11 +1380,20 @@ class Orchestrator:
         ]
         if not attempts:
             return {"run_id": run_id, "reason_code": "APPROVAL_NOT_FOUND"}
-        if attempts[-1].get("effective_decision") != "TIMEOUT":
+        latest = attempts[-1]
+        undeliverable = latest.get("status") == "DELIVERY_FAILED"
+        if latest.get("effective_decision") != "TIMEOUT" and not undeliverable:
             return {
                 "run_id": run_id,
-                "approval_id": attempts[-1]["approval_id"],
+                "approval_id": latest["approval_id"],
                 "reason_code": "APPROVAL_NOT_TIMED_OUT",
+            }
+        if undeliverable and (latest.get("delivery_failure") or {}).get("retry_allowed"):
+            return {
+                "run_id": run_id,
+                "approval_id": latest["approval_id"],
+                "reason_code": "APPROVAL_DELIVERY_RETRYABLE",
+                "delivery_failure": latest.get("delivery_failure"),
             }
         retry = sum(1 for approval in attempts if "#retry-" in str(approval["action"])) + 1
         return self.request_infoflow_approval(
