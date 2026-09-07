@@ -106,20 +106,28 @@ def specialized_examples():
             "remote_evidence_refs": ["ipipe:build-1/job-1"],
         },
         "run-summary": {
-            "terminal_state": "RELEASE_SUCCESS", "result": "SUCCESS",
-            "phase_timings": [{"phase": "SPEC", "started_at": "2026-08-10T00:00:00+00:00", "ended_at": "2026-08-10T00:01:00+00:00"}],
-            "human_waits": [], "retries": [], "review_findings": [], "failure_signatures": [],
-            "failure_classes": [], "resolutions": [], "missing_knowledge": [], "repeated_manual_operations": [],
-            "collaboration_receipt_refs": ["icafe:BGW-1/comment-1"], "external_receipt_refs": ["ku:doc-1/v1"],
-            "redacted_metrics": {"duration_seconds": 60},
+            "run_id": "run-1", "schema_version": "1", "terminal_state": "RELEASE_SUCCESS", "outcome": "SUCCESS",
+            "metrics": {"event_count": 12, "artifact_count": 9, "valid_artifact_count": 9,
+                        "external_receipt_count": 4, "unreconciled_intent_count": 0},
+            "approval_metrics": {"approved": 8, "rejected": 0, "pending": 0, "timed_out": 0},
+            "failure_groups": [], "collaboration_receipt_count": 2, "pipeline_evidence_count": 1,
+            "artifact_integrity_failures": [], "content_hash": HASH,
         },
         "optimization-proposal": {
-            "proposal_id": "OPT-1", "candidate_hash": HASH, "evidence": ["artifact:summary-1"],
-            "root_cause": "duplicate manual reconciliation", "target_files": ["scripts/phase_protocol.py"],
-            "candidate_diff": "diff --git a/scripts/phase_protocol.py b/scripts/phase_protocol.py",
+            "schema_version": "1", "proposal_id": HASH, "run_id": "run-1", "summary_hash": HASH,
+            "summary_artifact_id": HASH, "candidate_hash": HASH,
+            "candidate": {
+                "root_cause": "duplicate manual reconciliation",
+                "expected_benefit": "one fewer manual step", "risk": "low", "rollback": "revert candidate",
+                "target_files": [{"path": "/skills/tom-autodev/scripts/phase_protocol.py",
+                                  "before_sha256": HASH, "content": "print()", "content_sha256": HASH}],
+                "verification_commands": ["python3 -m unittest tests.test_phase_protocol"],
+            },
+            "candidate_diff": "--- /skills/tom-autodev/scripts/phase_protocol.py",
+            "allowed_roots": ["/skills/tom-autodev/scripts"], "approval_gate": "G10",
             "expected_benefit": "one fewer manual step", "risk": "low", "rollback": "revert candidate",
-            "verification_commands": ["python3 -m unittest scripts.tests.test_phase_protocol"],
-            "status": "PROPOSED", "g10_approval_id": "approval-g10", "g10_input_hash": HASH,
+            "evidence": {"failure_groups": [], "summary_artifact_id": HASH},
+            "envelope_hash": HASH,
         },
     }
     change = examples["change-set"]
@@ -167,13 +175,29 @@ class NamedSchemaValidationTests(unittest.TestCase):
         ])
 
     def test_optimization_rejects_targets_outside_skill_control_plane_roots(self):
+        """The deny list reads the nested, resolved target paths a proposal really has.
+
+        It used to read a top-level `target_files` of relative strings, which the
+        proposal builder has never produced. Nothing loaded this schema, so the check
+        passed its own fixture and would have flagged every genuine candidate.
+        """
         if validate_named_schema is None:
             self.fail("named schema validation is not implemented")
         proposal = specialized_examples()["optimization-proposal"]
-        proposal["target_files"] = ["profiles/bgw.yaml", "/repo/bgw/src/main.cc", "state.sqlite"]
+        target = proposal["candidate"]["target_files"][0]
+        proposal["candidate"]["target_files"] = [
+            {**target, "path": "/skills/tom-autodev/profiles/bgw.yaml"},
+            {**target, "path": "/skills/tom-autodev/scripts/pipeline_templates.py"},
+            {**target, "path": "/skills/tom-autodev/scripts/state.sqlite"},
+            {**target, "path": "/skills/tom-autodev/scripts/orchestrator.py"},
+        ]
         self.assertEqual(
             [(issue.path, issue.kind) for issue in validate_named_schema(proposal, "optimization-proposal")],
-            [("target_files[0]", "forbidden"), ("target_files[1]", "forbidden"), ("target_files[2]", "forbidden")],
+            [
+                ("candidate.target_files[0].path", "forbidden"),
+                ("candidate.target_files[1].path", "forbidden"),
+                ("candidate.target_files[2].path", "forbidden"),
+            ],
         )
 
     def test_named_loader_rejects_path_traversal(self):

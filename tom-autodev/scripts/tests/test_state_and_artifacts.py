@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -350,6 +351,77 @@ class StateAndArtifactTests(unittest.TestCase):
                 ],
             )
             self.assertFalse(sentinel.encode() in persisted)
+
+
+class GenericPutSchemaTests(unittest.TestCase):
+    """Content checks on the plain `put` path, which had none.
+
+    `put_envelope` derives a schema from the phase, so phase artifacts were always
+    checked. Everything else -- the submit descriptor iCode is asked to take, the run
+    summary G10 reasons from -- was archived, hashed, indexed, and read back as
+    evidence with nobody having looked at its shape.
+    """
+
+    descriptor = {
+        "run_id": "run-1", "change_set_id": "change-1", "revision_set_id": "RS-1",
+        "repo_path": "/tmp/work/repo", "module": "baidu/team/repo", "target_branch": "main",
+        "commit_revision": "rev-1", "card_id": "BGW-1", "owner": "dev",
+        "revision_set": {
+            "business": {"module": "baidu/team/repo", "revision": "rev-1", "branch": "main"},
+            "test": {"module": "baidu/team/repo-tests", "revision": "test-rev", "branch": "main"},
+        },
+    }
+
+    @staticmethod
+    def _canonical(value):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+    def test_a_whole_submit_descriptor_is_archived_and_a_partial_one_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "artifacts"
+            store = ArtifactStore(root)
+
+            archived = store.put("run-1", "change-set", self._canonical(self.descriptor), {"verdict": "PASS"})
+            self.assertTrue(store.get(archived["artifact_id"])["valid"])
+
+            # Dropping `revision_set` used to be found by iCode rejecting the
+            # submission, one approved gate and one push attempt later.
+            partial = {key: value for key, value in self.descriptor.items() if key != "revision_set"}
+            cases = {
+                "missing field": self._canonical(partial),
+                "unknown field": self._canonical({**self.descriptor, "merged": True}),
+                "wrong nesting": self._canonical({**self.descriptor, "revision_set": {"business": {}, "test": {}}}),
+                "not json": b"<html>gateway timeout</html>",
+            }
+            for name, content in cases.items():
+                with self.subTest(case=name):
+                    with self.assertRaisesRegex(ValueError, "SCHEMA_INVALID"):
+                        store.put("run-1", "change-set", content, {"verdict": "PASS"})
+
+            # Rejected before any write, so nothing can cite a rejected artifact: no
+            # file on disk beyond the one good archive, and no index row.
+            with sqlite3.connect(store.database_path) as connection:
+                rows = connection.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0]
+            self.assertEqual(rows, 1)
+            self.assertEqual(
+                sorted(path.name for path in (root / "run-1" / "change-set").iterdir()),
+                [archived["artifact_id"]],
+            )
+
+    def test_a_kind_with_no_schema_still_takes_opaque_bytes(self):
+        """`submission` and `ai-review` wrap a remote response whose shape is iCode's.
+
+        Pinning it here would reject real evidence for being unfamiliar, so the
+        exemption is deliberate and listed. An unrecognised kind is archived too --
+        this is a check on known kinds, not an allowlist.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+
+            for kind, content in (("submission", b'{"cr":1}'), ("ai-review", b"{}"), ("spec", b"not json")):
+                with self.subTest(kind=kind):
+                    artifact = store.put("run-1", kind, content, {})
+                    self.assertEqual(store.get(artifact["artifact_id"])["content"], content)
 
 
 if __name__ == "__main__":

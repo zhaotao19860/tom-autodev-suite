@@ -37,6 +37,10 @@ _NAMED_SCHEMAS = frozenset(
         "ipipe-evidence",
         "run-summary",
         "optimization-proposal",
+        # The submit descriptor. Deliberately not called "change-set": that name is
+        # already the IMPLEMENT phase content, and the descriptor is a different
+        # document stored under an artifact kind that happens to reuse the word.
+        "submit-descriptor",
     }
 )
 
@@ -455,22 +459,31 @@ def _validate_ipipe(instance: dict[str, Any]) -> list[SchemaIssue]:
 
 
 def _validate_optimization_targets(instance: dict[str, Any]) -> list[SchemaIssue]:
-    targets = instance.get("target_files")
+    """Refuse a G10 candidate that names a file G10 must never touch.
+
+    The targets live at `candidate.target_files[].path` and are resolved absolute
+    paths. This check read a top-level `target_files` of relative path strings and
+    required each to start with `scripts/` or a skill directory -- a shape the
+    proposal builder has never produced, so every real target would have been
+    flagged as forbidden had anything ever loaded this schema.
+
+    The relative-prefix rule is gone rather than rewritten: confinement is decided in
+    `_normalize_candidate`, which resolves each path and checks containment in the
+    approved roots, and a substring test on an absolute path cannot improve on that.
+    What survives is the deny list, which does compose -- it names files that sit
+    inside an approved root and still must not be rewritten by an automated proposal.
+    """
+    candidate = instance.get("candidate")
+    targets = candidate.get("target_files") if isinstance(candidate, dict) else None
     if not isinstance(targets, list):
         return []
-    allowed = ("scripts/", "schemas/", "tom-autodev/", "tom-grill/", "tom-spec/", "tom-tasks/", "tom-plan/", "tom-implement/", "tom-review/", "tom-diagnose/")
     forbidden = ("profiles/", "project-profile", "pipeline", "credential", "state.sqlite", "approvals.sqlite")
     issues = []
     for index, target in enumerate(targets):
-        normalized = target.replace("\\", "/") if isinstance(target, str) else ""
-        if (
-            not normalized
-            or normalized.startswith("/")
-            or ".." in normalized.split("/")
-            or not normalized.startswith(allowed)
-            or any(fragment in normalized.lower() for fragment in forbidden)
-        ):
-            issues.append(SchemaIssue(f"target_files[{index}]", "forbidden"))
+        path = target.get("path") if isinstance(target, dict) else None
+        normalized = path.replace("\\", "/").lower() if isinstance(path, str) else ""
+        if not normalized or any(fragment in normalized for fragment in forbidden):
+            issues.append(SchemaIssue(f"candidate.target_files[{index}].path", "forbidden"))
     return issues
 
 

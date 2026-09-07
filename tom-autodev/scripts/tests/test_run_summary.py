@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from approval_ledger import ApprovalLedger
 from artifact_store import ArtifactStore
 from run_summary import RunSummary, _has_secret, _redact
+from schema_validator import validate_named_schema
 from state_store import StateStore
 
 
@@ -193,6 +194,29 @@ class RunSummaryTests(unittest.TestCase):
         proposal = self.summary.propose(self.summary.build("run-1"), [self.root])
         self.assertEqual(proposal["reason_code"], "OK")
         self.assertEqual(proposal["evidence"]["failure_groups"][0]["signature"], "review:nested")
+
+    def test_the_schemas_describe_the_documents_this_module_really_writes(self):
+        """Drift between these two schema files and their builders is a test failure now.
+
+        Both described documents no code has ever produced: `run-summary.schema.json`
+        required a `result` and `phase_timings`, and `optimization-proposal.schema.json`
+        wanted a flat `target_files` of relative path strings. Nothing loaded either, so
+        being wrong was free. They are loaded now -- the summary through
+        `ArtifactStore.put`, the proposal in `propose` before the immutable row is
+        written -- and what is validated here is what durably exists: the archived
+        bytes, and the persisted proposal G10 later reads back.
+        """
+        target = self.root / "scripts" / "guard.py"
+        target.parent.mkdir(); target.write_text("before", encoding="utf-8")
+        self._record_candidate(self._candidate(target))
+
+        built = self.summary.build("run-1")
+        archived = json.loads(self.artifacts.get(built["artifact_id"])["content"])
+        proposal = self.summary.propose(built, [self.root])
+        persisted = self.state.optimization_proposal(proposal["proposal_id"])["proposal"]
+
+        self.assertEqual(validate_named_schema(archived, "run-summary"), [])
+        self.assertEqual(validate_named_schema(persisted, "optimization-proposal"), [])
 
     def test_propose_rejects_a_symlink_allowed_root(self):
         real = self.root / "scripts"; real.mkdir()

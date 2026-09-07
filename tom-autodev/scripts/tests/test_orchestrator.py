@@ -927,7 +927,18 @@ class MultiRepoSubmitFrontierTests(unittest.TestCase):
 
     @staticmethod
     def _descriptor(orchestrator, run_id, task_id, change_set_id, verdict="PASS"):
-        content = json.dumps({"change_set_id": change_set_id}, sort_keys=True).encode()
+        # A whole descriptor, not the one key this test reads: the store validates
+        # `change-set` content now, and a fixture that skips the other nine fields
+        # would be asserting that an unsubmittable descriptor is archivable.
+        content = json.dumps({
+            "run_id": run_id, "change_set_id": change_set_id, "revision_set_id": f"RS-{task_id}",
+            "repo_path": f"/tmp/{task_id}", "module": f"baidu/team/{task_id}", "target_branch": "main",
+            "commit_revision": f"rev-{task_id}", "card_id": "BGW-1", "owner": "dev",
+            "revision_set": {
+                "business": {"module": f"baidu/team/{task_id}", "revision": f"rev-{task_id}", "branch": "main"},
+                "test": {"module": f"baidu/team/{task_id}-tests", "revision": "test-rev", "branch": "main"},
+            },
+        }, sort_keys=True).encode()
         return orchestrator.artifacts.put(run_id, "change-set", content, {
             "verdict": verdict, "task_id": task_id, "revision_set_id": f"RS-{task_id}",
         })

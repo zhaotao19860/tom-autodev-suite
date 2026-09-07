@@ -28,6 +28,31 @@ _PHASE_SCHEMAS = {
     "TASKS": "task-dag", "PLAN": "task-plan", "IMPLEMENT": "change-set",
     "REVIEW": "review", "DIAGNOSE": "diagnosis", "IPIPE": "ipipe-evidence",
 }
+# Content checks for the kinds written through the generic `put`. `put_envelope` picks
+# its schema from the phase, so phase artifacts were always validated; everything else
+# was archived, hashed, indexed, and then read back as evidence without anyone having
+# looked at its shape. A submit descriptor missing `revision_set` got as far as iCode
+# rejecting it, and a run summary in a shape G10 does not understand was still the
+# document G10 reasoned from.
+#
+# `change-set` here is the submit descriptor, NOT the IMPLEMENT phase artifact: that
+# one is stored under kind `implement`. Mapping each kind to a same-named schema is
+# exactly the mistake this table exists to avoid -- it would check the descriptor
+# against `change-set.schema.json` and reject every SUBMIT.
+_KIND_SCHEMAS = {
+    "change-set": "submit-descriptor",
+    "run-summary": "run-summary",
+}
+# Kinds archived unchecked on purpose, so an absent kind can be told from a considered
+# exemption. Both wrap a remote response verbatim: their shape belongs to iCode, and
+# pinning it here would reject real evidence for being unfamiliar. What the controller
+# needs from them is checked where it is read, against the request that produced it
+# (`_submission_controller_binding`, `clients/icode_ai_review`).
+#
+# An unlisted kind is still archived. Turning this into an allowlist would be a
+# stronger guarantee and a different change: the store is also used for opaque bytes,
+# which have no schema to name.
+_UNVALIDATED_KINDS = frozenset({"submission", "ai-review"})
 
 
 class ArtifactStore:
@@ -78,6 +103,7 @@ class ArtifactStore:
         ensure_persistable(metadata)
         _validate_component(run_id)
         _validate_component(kind)
+        _validate_kind_content(kind, content)
         content_hash = hashlib.sha256(content).hexdigest()
         metadata_json = json.dumps(
             metadata,
@@ -377,6 +403,26 @@ def _validate_component(value: str) -> None:
         or "\\" in value
     ):
         raise ValueError("ARTIFACT_COMPONENT_INVALID")
+
+
+def _validate_kind_content(kind: str, content: bytes) -> None:
+    """Check a generically archived artifact against the schema for its kind.
+
+    Raises before anything is written, so a rejected artifact leaves no file, no index
+    row, and no id a later step could cite. `SCHEMA_INVALID` is the reason code the
+    phase path already uses for the same failure, and unparseable bytes under a
+    schema-bearing kind are that same failure: the kind is a promise that this is JSON
+    of a known shape.
+    """
+    schema = _KIND_SCHEMAS.get(kind)
+    if schema is None:
+        return
+    try:
+        instance = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError("SCHEMA_INVALID") from None
+    if validate_named_schema(instance, schema):
+        raise ValueError("SCHEMA_INVALID")
 
 
 def _require_confined(path: Path, root: Path) -> Path:

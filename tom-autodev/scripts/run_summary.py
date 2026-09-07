@@ -15,6 +15,7 @@ from typing import Any, Callable
 from approval_ledger import ApprovalLedger
 from artifact_store import ArtifactStore
 from persistence_policy import ensure_persistable
+from schema_validator import validate_named_schema
 from state_store import StateStore
 
 _SECRET_NAME = r"authorization|api[\s_-]*key|token|credential|password|secret|access[_-]?key"
@@ -65,6 +66,13 @@ class RunSummary:
         candidate_hash = _hash(candidate); proposal_id = _proposal_id(loaded["run_id"], candidate_hash)
         proposal = {"schema_version": "1", "proposal_id": proposal_id, "run_id": loaded["run_id"], "summary_hash": loaded["content_hash"], "summary_artifact_id": summary["artifact_id"], "candidate_hash": candidate_hash, "candidate": candidate, "candidate_diff": _candidate_diff(candidate), "allowed_roots": [str(x) for x in roots], "approval_gate": "G10", "expected_benefit": candidate["expected_benefit"], "risk": candidate["risk"], "rollback": candidate["rollback"], "evidence": {"failure_groups": loaded["failure_groups"], "summary_artifact_id": summary["artifact_id"]}}
         proposal["envelope_hash"] = _hash(proposal)
+        # The shape check has to happen before the row is written, because the row is
+        # immutable and keyed on `envelope_hash`: a malformed proposal saved once is a
+        # proposal that can only ever be re-saved identically. `save_optimization_proposal`
+        # checks four string fields, which is enough to index it and not enough to know
+        # G10 can act on it.
+        if validate_named_schema(proposal, "optimization-proposal"):
+            return {"ok": False, "reason_code": "G10_PROPOSAL_INVALID", "run_id": loaded["run_id"]}
         try: stored = self.state.save_optimization_proposal(proposal)
         except ValueError: return {"ok": False, "reason_code": "G10_PROPOSAL_INVALID", "run_id": loaded["run_id"]}
         result = self._archive(loaded["run_id"], "G10 Optimization Proposal", proposal)
