@@ -353,6 +353,72 @@ class StateAndArtifactTests(unittest.TestCase):
             self.assertFalse(sentinel.encode() in persisted)
 
 
+class AbandonIntentTests(unittest.TestCase):
+    """Unsticking a run without punching a hole in the account of what it asked for.
+
+    The x86bgw CDN-URL run did this three times with `DELETE FROM external_intents`
+    against the live database, because there was no supported way. Deleting is the one
+    outcome that must not happen: the intent log is the only record of what this control
+    plane asked the outside world to do.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.database = Path(temporary.name) / "state.sqlite"
+        self.store = StateStore(self.database)
+        self.intent = self.store.intent("run-1", "collaboration.notify", "notify:1", {"card": "c"})
+
+    def test_abandoning_clears_the_block_and_keeps_the_row(self):
+        abandoned = self.store.abandon_intent(self.intent["intent_id"], "机器人下线", "owner")
+        reopened = StateStore(self.database)
+
+        self.assertEqual(abandoned["status"], "ABANDONED")
+        self.assertEqual(reopened.pending_intents("run-1"), [])
+        results = reopened.external_results("run-1")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0]["receipt"]["response"],
+            {"ok": False, "reason_code": "INTENT_ABANDONED", "abandoned": True,
+             "reason": "机器人下线", "actor": "owner"},
+        )
+
+    def test_repeating_the_same_abandonment_replays_and_a_different_one_conflicts(self):
+        first = self.store.abandon_intent(self.intent["intent_id"], "机器人下线", "owner")
+        replay = self.store.abandon_intent(self.intent["intent_id"], "机器人下线", "owner")
+
+        self.assertEqual(replay["status"], "ALREADY_ABANDONED")
+        self.assertEqual(replay["receipt"], first["receipt"])
+        with self.assertRaisesRegex(ValueError, "ABANDON_CONFLICT"):
+            self.store.abandon_intent(self.intent["intent_id"], "别的理由", "owner")
+
+    def test_an_unexplained_abandonment_and_an_unknown_intent_are_both_refused(self):
+        cases = [
+            (("  ", "owner"), "ABANDON_REASON_REQUIRED"),
+            (("reason", ""), "ABANDON_ACTOR_REQUIRED"),
+        ]
+        for arguments, reason_code in cases:
+            with self.subTest(reason_code=reason_code):
+                with self.assertRaisesRegex(ValueError, reason_code):
+                    self.store.abandon_intent(self.intent["intent_id"], *arguments)
+        with self.assertRaisesRegex(ValueError, "INTENT_NOT_FOUND"):
+            self.store.abandon_intent("no-such-intent", "reason", "owner")
+        self.assertEqual(self.store.pending_intents("run-1"), [self.intent])
+
+    def test_a_real_receipt_on_either_side_of_an_abandonment_fails_loudly(self):
+        reconciled = self.store.intent("run-1", "ipipe.trigger", "trigger:1", {})
+        self.store.receipt(reconciled["intent_id"], {"ok": True, "build_id": "b1"}, [])
+
+        with self.assertRaisesRegex(ValueError, "INTENT_ALREADY_RECONCILED"):
+            self.store.abandon_intent(reconciled["intent_id"], "give up", "owner")
+
+        # The other order matters more: a late outcome for a write somebody gave up on
+        # is a contradiction the run must not silently absorb.
+        self.store.abandon_intent(self.intent["intent_id"], "机器人下线", "owner")
+        with self.assertRaisesRegex(ValueError, "RECEIPT_CONFLICT"):
+            self.store.receipt(self.intent["intent_id"], {"ok": True, "group_id": "g1"}, [])
+
+
 class GenericPutSchemaTests(unittest.TestCase):
     """Content checks on the plain `put` path, which had none.
 

@@ -37,3 +37,11 @@ Two rules follow, and both were learned the hard way:
 
 - `retry_allowed` states which class this is, not how the caller feels about waiting. `false` means the outcome is unknown and must be reconciled; `true` means nothing was sent.
 - A pending intent is not automatically a reason to stop. Stop when no further phase work can settle it. Treating every pending intent as terminal parked the x86bgw CDN-URL run nine times over a KU write that had already succeeded, because the reconciliation lived inside the very call the guard was refusing.
+
+### When the outcome will never be known
+
+An `outcome unknown` intent that nobody can reconcile — the bot is gone, the build was garbage-collected, the person who could look has moved on — still holds the run. `tom-autodev abandon-intent <intent_id> --reason R --actor A` releases it by *writing* an abandonment receipt (`ok: false`, `INTENT_ABANDONED`, carrying who decided and why), never by deleting the intent. The row therefore stays in `external_results`, in `trace`, and in the run summary's failure groups, where `abandoned_intent_count` keeps it out of `external_receipt_count` so G10 cannot read a hand-cut knot as a clean external write.
+
+It is deliberately not approval-gated: the intents that strand a run are frequently the approval deliveries themselves, and a gate that needs the stuck channel to open it is not an escape hatch. `reason` and `actor` are required in its place. A real outcome arriving afterwards fails loudly with `RECEIPT_CONFLICT` rather than being absorbed.
+
+`withdraw_intent` remains the right call only for the narrow `nothing was sent` case, where the write provably never happened and there is nothing to account for.

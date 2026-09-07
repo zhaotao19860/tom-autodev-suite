@@ -94,7 +94,17 @@ python3 scripts/cli.py next <run-id>
 python3 scripts/cli.py complete-phase <run-id> <artifact-envelope.json>
 python3 scripts/cli.py approve <approval-id> approve <input-hash> comate <run-id> <user>
 python3 scripts/cli.py resume <run-id>
+python3 scripts/cli.py advance <run-id> <state> --artifact NAME   # gate hash from the ledger
+python3 scripts/cli.py artifact show <artifact-id>                # read back, hash-checked
+python3 scripts/cli.py abandon-intent <intent-id> --reason R --actor A
 ```
+
+`advance` takes `input_hash` and `approval_id` from the approved ledger row for the
+transition's gate, so neither is pasted by hand. The `--artifact` names stay the
+operator's assertion; omit them and the gate answers `MISSING_ARTIFACT` with what it
+wants. `abandon-intent` releases an external write whose outcome will never be known by
+writing an abandonment receipt — it never deletes the intent. See
+[`references/failure-taxonomy.md`](tom-autodev/references/failure-taxonomy.md).
 
 `preflight` only queries availability. It never creates a group, submits code, or triggers
 a pipeline. A missing requirement returns `PROJECT_NOT_READY`.

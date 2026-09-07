@@ -479,6 +479,89 @@ class StateStore:
             ).fetchone()
         return _receipt_row(row)
 
+    def abandon_intent(self, intent_id: str, reason: str, actor: str) -> dict[str, Any]:
+        """Stop waiting on an unreconciled external write, on the record.
+
+        The x86bgw CDN-URL run had no supported way to do this, so it was done three
+        times with `DELETE FROM external_intents` / `receipts` / `external_results`
+        against the live database. Deleting the row is the one outcome that must not
+        happen: the intent log is the only account of what this control plane asked the
+        outside world to do, and a run that unsticks itself by erasing that account has
+        traded a stuck run for an audit trail with a hole in it.
+
+        So this writes instead of deleting. The abandonment is a receipt like any other
+        -- `ok: False`, reason `INTENT_ABANDONED`, carrying who decided and why -- which
+        clears the intent out of `pending_intents` (unblocking the run) while leaving it
+        in `external_results`, in `trace`, and in the run summary's failure groups,
+        where `_failure_groups` picks up any `ok: False` response without needing to
+        know this code exists.
+
+        It is deliberately not an approval-gated action. The intents that strand a run
+        are frequently the approval deliveries themselves, and a gate that needs the
+        stuck channel to open it is not an escape hatch. `reason` and `actor` are
+        required in its place: an unexplained abandonment is not auditable either.
+
+        `withdraw_intent` stays the right call for the narrow in-process case where a
+        client refused before dispatching, because there the write provably never
+        happened and there is nothing to account for. Here the outcome is unknown and
+        stays recorded as unknown.
+        """
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("ABANDON_REASON_REQUIRED")
+        if not isinstance(actor, str) or not actor.strip():
+            raise ValueError("ABANDON_ACTOR_REQUIRED")
+        # Deterministic, so abandoning twice with the same reason replays rather than
+        # colliding with itself. A timestamp lives on the receipt row instead.
+        response = {
+            "ok": False, "reason_code": "INTENT_ABANDONED",
+            "abandoned": True, "reason": reason.strip(), "actor": actor.strip(),
+        }
+        ensure_persistable(response)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            intent = connection.execute(
+                "SELECT * FROM external_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if intent is None:
+                raise ValueError("INTENT_NOT_FOUND")
+            existing = connection.execute(
+                "SELECT * FROM receipts WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if existing is not None:
+                stored = json.loads(existing["response_json"])
+                if not (isinstance(stored, dict) and stored.get("abandoned") is True):
+                    raise ValueError("INTENT_ALREADY_RECONCILED")
+                if stored != response:
+                    raise ValueError("ABANDON_CONFLICT")
+                return {
+                    "status": "ALREADY_ABANDONED",
+                    "intent": _intent_row(intent),
+                    "receipt": _receipt_row(existing),
+                }
+            response_json = _encode(response)
+            created_at = _now()
+            connection.execute(
+                "INSERT INTO receipts(intent_id, response_json, evidence_refs_json, created_at)"
+                " VALUES (?, ?, '[]', ?)",
+                (intent_id, response_json, created_at),
+            )
+            connection.execute(
+                """
+                INSERT INTO external_results(
+                    intent_id, run_id, operation, result_json, evidence_refs_json, created_at
+                ) VALUES (?, ?, ?, ?, '[]', ?)
+                """,
+                (intent_id, intent["run_id"], intent["operation"], response_json, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM receipts WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        return {
+            "status": "ABANDONED",
+            "intent": _intent_row(intent),
+            "receipt": _receipt_row(row),
+        }
+
     def pending_intents(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(

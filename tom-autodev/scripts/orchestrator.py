@@ -1839,6 +1839,25 @@ def main(argv: list[str] | None = None) -> int:
     repin.add_argument("--request", action="store_true", help="开 PROFILE_REPIN 门")
     repin.add_argument("--approval-id", help="省略则只给出待批的 input_hash，不落账")
 
+    advance = subparsers.add_parser("advance", help="推进一次状态迁移，input_hash 从审批台账里取")
+    advance.add_argument("run_id")
+    advance.add_argument("state", help="目标状态，例如 SPEC / IMPLEMENT / SUBMIT")
+    advance.add_argument(
+        "--artifact", action="append", default=[], dest="artifacts",
+        help="声明本次带上的证据名，可重复；省略则由门告诉你缺哪个",
+    )
+    advance.add_argument("--evidence", help="其余证据上下文 JSON：workspace 收据、revision、环境指纹")
+    advance.add_argument("--approval-id", help="省略则取该门最近一条 APPROVE 台账")
+
+    abandon = subparsers.add_parser("abandon-intent", help="放弃一条外部写意图，写审计收据而不是删行")
+    abandon.add_argument("intent_id")
+    abandon.add_argument("--reason", required=True, help="为什么不再等这条外部写")
+    abandon.add_argument("--actor", required=True, help="谁做的这个决定")
+
+    artifact = subparsers.add_parser("artifact", help="按 artifact_id 读回归档内容（含哈希校验）")
+    artifact.add_argument("operation", choices=("show",))
+    artifact.add_argument("artifact_id")
+
     args = parser.parse_args(argv)
     orchestrator = Orchestrator(args.config_root)
     if args.command == "start":
@@ -1973,6 +1992,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = profile_repin.plan(orchestrator, args.run_id, args.previous)
+    elif args.command == "advance":
+        result = _advance(
+            orchestrator, args.run_id, args.state, args.artifacts, args.evidence, args.approval_id
+        )
+    elif args.command == "abandon-intent":
+        result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor)
+    elif args.command == "artifact":
+        result = _artifact_show(orchestrator, args.artifact_id)
     else:
         result = orchestrator.preflight(args.project)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
@@ -2245,6 +2272,109 @@ def _json_file(value: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {"ok": False, "reason_code": "JSON_FILE_INVALID"}
     return payload
+
+
+def _abandon_intent(
+    orchestrator: Orchestrator, intent_id: str, reason: str, actor: str
+) -> dict[str, Any]:
+    """Stop waiting on an external write, on the record.
+
+    The x86bgw CDN-URL run had no command for this, so it was done three times with
+    `DELETE FROM external_intents` against the live database. `StateStore.abandon_intent`
+    writes an abandonment receipt instead; this is the supported way to reach it, and
+    it turns the store's `ValueError`s into the CLI's reason codes so an
+    `INTENT_ALREADY_RECONCILED` exits 1 rather than printing a traceback.
+    """
+    try:
+        return {"ok": True, "reason_code": "OK", **orchestrator.state.abandon_intent(intent_id, reason, actor)}
+    except ValueError as error:
+        return {"ok": False, "reason_code": str(error), "intent_id": intent_id}
+
+
+def _artifact_show(orchestrator: Orchestrator, artifact_id: str) -> dict[str, Any]:
+    """Read one archived artifact back, integrity check included.
+
+    `status` lists a run's artifacts but never their content, so reading the spec the
+    gate is citing meant guessing the path under `artifacts/` and `cat`-ing the file --
+    which bypasses the hash check that decides whether those bytes are still evidence.
+    Content comes back as text when it decodes as UTF-8; when it does not, the bytes
+    are left out rather than mangled, since the point of this command is fidelity.
+    """
+    loaded = orchestrator.artifacts.get(artifact_id)
+    if not loaded.get("valid"):
+        return {"ok": False, **loaded}
+    content = loaded.get("content")
+    shaped = {key: value for key, value in loaded.items() if key != "content"}
+    try:
+        shaped["content"] = content.decode("utf-8") if isinstance(content, bytes) else content
+    except UnicodeDecodeError:
+        shaped["content_encoding"] = "BINARY"
+    return {"ok": True, **shaped}
+
+
+def _advance(
+    orchestrator: Orchestrator,
+    run_id: str,
+    next_state: str,
+    artifacts: list[str],
+    evidence_path: str | None,
+    approval_id: str | None,
+) -> dict[str, Any]:
+    """Drive one transition, taking the gate's hash from the ledger rather than a paste.
+
+    `advance` was reachable only from Python, so the x86bgw run moved the state machine
+    by hand-pasting `input_hash` into a `python3 -c` call, and mistyped it. The hash is
+    not the operator's to know: it is whatever the approval was bound to, and the ledger
+    already holds it next to the approval id. So both are read from the approved row for
+    this transition's gate -- newest wins, since a reissued gate supersedes the one that
+    timed out -- and a transition with no gate needs neither.
+
+    The artifact list stays the operator's assertion (`--artifact NAME`, repeatable).
+    Deriving it was the tempting half of this command and would have been a lie: the
+    evidence gate checks artifact *names* (`requirement-snapshot`, `task-plan`,
+    `ipipe-evidence`) and those names are not artifact kinds -- nothing ever calls
+    `put(kind="requirement-snapshot")` -- so a name-to-kind guess would produce a gate
+    that reads as though it verified the archive and did not. Omit them and the gate
+    answers `MISSING_ARTIFACT` with exactly what it wants.
+
+    `--evidence FILE` carries the rest of a context the gate needs and this command
+    cannot invent: workspace receipts, revision sets, environment fingerprints.
+    """
+    current = orchestrator.status(run_id)
+    if current["state"] == "RUN_NOT_FOUND":
+        return current
+    evidence: dict[str, Any] = {}
+    if evidence_path:
+        loaded = _json_file(evidence_path)
+        if loaded.get("ok") is False:
+            return loaded
+        evidence = loaded
+    if artifacts:
+        carried = evidence.get("artifacts")
+        carried = carried if isinstance(carried, list) else []
+        evidence["artifacts"] = list(dict.fromkeys([*carried, *artifacts]))
+    gate = requirement_for(next_state, current["state"]).approval_gate
+    if gate is not None and not (approval_id or evidence.get("approval_id")):
+        approved = [
+            row for row in orchestrator.approvals.for_run(run_id)
+            if row["action"] == gate and row["effective_decision"] == "APPROVE"
+        ]
+        if not approved:
+            return {
+                "run_id": run_id, "state": current["state"], "passed": False,
+                "action": next_state, "reason_code": "APPROVAL_REQUIRED",
+                "missing_evidence": [gate],
+            }
+        approval_id = approved[-1]["approval_id"]
+    if approval_id:
+        record = orchestrator.approvals.get(approval_id)
+        if record is None:
+            return {"ok": False, "reason_code": "APPROVAL_NOT_FOUND", "run_id": run_id}
+        evidence["approval_id"] = approval_id
+        # Only when the operator did not bring one: an `--evidence` file describing a
+        # WORKSPACE binding computes its own hash, and `advance` compares the two.
+        evidence.setdefault("input_hash", record["input_hash"])
+    return orchestrator.advance(run_id, next_state, evidence)
 
 
 if __name__ == "__main__":

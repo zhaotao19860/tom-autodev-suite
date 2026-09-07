@@ -146,6 +146,32 @@ class RunSummaryTests(unittest.TestCase):
         )
         self.assertEqual(built["outcome"], "FAILED")
 
+    def test_an_abandoned_intent_counts_as_a_failure_not_as_a_verified_write(self):
+        """`abandon-intent` unblocks a run; it must not also launder the write.
+
+        The receipt exists so `pending_intents` stops holding the run, which means the
+        naive read -- every receipt is a completed external write -- would show G10 a
+        collaboration notice that reached somebody and a pipeline that was polled. What
+        actually happened is that a human stopped waiting, and the outcome is unknown.
+        """
+        self.state.transition("run-1", "IPIPE", {"pipeline_id": "pipe-1"})
+        notice = self.state.intent("run-1", "collaboration.notify", "notify:1", {})
+        poll = self.state.intent("run-1", "ipipe.poll", "ipipe:1", {})
+        self.state.abandon_intent(notice["intent_id"], "机器人下线", "owner")
+        self.state.abandon_intent(poll["intent_id"], "机器人下线", "owner")
+
+        built = self.summary.build("run-1")
+
+        self.assertEqual(built["metrics"]["abandoned_intent_count"], 2)
+        self.assertEqual(built["metrics"]["external_receipt_count"], 0)
+        self.assertEqual(built["metrics"]["unreconciled_intent_count"], 0)
+        self.assertEqual(built["collaboration_receipt_count"], 0)
+        self.assertEqual(built["pipeline_evidence_count"], 0)
+        self.assertEqual(
+            {group["reason_code"] for group in built["failure_groups"]}, {"INTENT_ABANDONED"}
+        )
+        self.assertEqual(built["outcome"], "FAILED")
+
     def test_build_marks_timeout_and_collects_collaboration_and_pipeline_receipts(self):
         self.state.transition("run-1", "IPIPE", {"pipeline_id": "pipe-1"})
         intent = self.state.intent("run-1", "collaboration.create-group", "group:1", {})

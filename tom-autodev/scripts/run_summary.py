@@ -40,15 +40,21 @@ class RunSummary:
         events = self.state.events(run_id)
         if not events: return {"ok": False, "reason_code": "RUN_NOT_FOUND", "run_id": run_id}
         approvals, receipts = self.approvals.for_run(run_id), self.state.external_results(run_id)
+        # An abandoned intent carries a receipt so the run can move on, but it is a
+        # record that nobody ever learned the outcome -- counting it among the verified
+        # side effects would let G10 read a hand-cut knot as a clean external write.
+        # It still reaches `_failure_groups`, which takes any `ok: False` response.
+        abandoned = [item for item in receipts if _abandoned(item)]
+        verified = [item for item in receipts if not _abandoned(item)]
         artifacts = [item for item in self.artifacts.artifacts_for_run(run_id) if item.get("kind") not in _SUMMARY_EXCLUDED_KINDS]
         pending = self.state.pending_intents(run_id)
         terminal, failures = events[-1]["state"], self._failure_groups(events, receipts, pending)
         timeout = any(row.get("effective_decision") == "TIMEOUT" for row in approvals)
         outcome = "TIMEOUT" if timeout else ("SUCCESS" if terminal == "RELEASE_SUCCESS" else ("FAILED" if failures or terminal in {"STOPPED", "DIAGNOSE"} else "IN_PROGRESS"))
         value = {"run_id": run_id, "schema_version": "1", "terminal_state": terminal, "outcome": outcome,
-            "metrics": {"event_count": len(events), "artifact_count": len(artifacts), "valid_artifact_count": sum(bool(x.get("valid")) for x in artifacts), "external_receipt_count": len(receipts), "unreconciled_intent_count": len(pending)},
+            "metrics": {"event_count": len(events), "artifact_count": len(artifacts), "valid_artifact_count": sum(bool(x.get("valid")) for x in artifacts), "external_receipt_count": len(verified), "unreconciled_intent_count": len(pending), "abandoned_intent_count": len(abandoned)},
             "approval_metrics": {"approved": sum(x.get("effective_decision") == "APPROVE" for x in approvals), "rejected": sum(x.get("effective_decision") == "REJECT" for x in approvals), "pending": sum(x.get("effective_decision") is None for x in approvals), "timed_out": sum(x.get("effective_decision") == "TIMEOUT" for x in approvals)},
-            "failure_groups": failures, "collaboration_receipt_count": sum(x["intent"]["operation"].startswith(("collaboration.", "infoflow.group.")) for x in receipts), "pipeline_evidence_count": sum(x["intent"]["operation"].startswith("ipipe.") for x in receipts),
+            "failure_groups": failures, "collaboration_receipt_count": sum(x["intent"]["operation"].startswith(("collaboration.", "infoflow.group.")) for x in verified), "pipeline_evidence_count": sum(x["intent"]["operation"].startswith("ipipe.") for x in verified),
             "artifact_integrity_failures": [{"artifact_id": x.get("artifact_id"), "reason_code": x.get("reason_code")} for x in artifacts if not x.get("valid")]}
         value["content_hash"] = _hash(value)
         archived = self.artifacts.put(run_id, "run-summary", _canonical(value).encode(), {"content_hash": value["content_hash"], "schema_version": "1"})
@@ -379,6 +385,12 @@ class RunSummary:
                 if subprocess.run(shlex.split(command),cwd=root,capture_output=True,text=True,timeout=60,check=False).returncode: return {"ok":False,"reason_code":"VALIDATION_FAILED"}
         except Exception:return {"ok":False,"reason_code":"VALIDATION_FAILED"}
         return {"ok":True,"reason_code":"OK"}
+
+
+def _abandoned(result: dict[str, Any]) -> bool:
+    """Was this receipt a human giving up on the write, rather than its outcome?"""
+    response = result.get("receipt", {}).get("response")
+    return isinstance(response, dict) and response.get("abandoned") is True
 
 
 def _atomic_write(path:Path,data:bytes,mode:int|None=None,roots:list[Path]|None=None)->None:

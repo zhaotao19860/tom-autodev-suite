@@ -108,7 +108,8 @@ def specialized_examples():
         "run-summary": {
             "run_id": "run-1", "schema_version": "1", "terminal_state": "RELEASE_SUCCESS", "outcome": "SUCCESS",
             "metrics": {"event_count": 12, "artifact_count": 9, "valid_artifact_count": 9,
-                        "external_receipt_count": 4, "unreconciled_intent_count": 0},
+                        "external_receipt_count": 4, "unreconciled_intent_count": 0,
+                        "abandoned_intent_count": 0},
             "approval_metrics": {"approved": 8, "rejected": 0, "pending": 0, "timed_out": 0},
             "failure_groups": [], "collaboration_receipt_count": 2, "pipeline_evidence_count": 1,
             "artifact_integrity_failures": [], "content_hash": HASH,
