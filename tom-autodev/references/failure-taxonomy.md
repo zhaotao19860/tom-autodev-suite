@@ -7,6 +7,8 @@
 | `ACCEPTANCE_DELTA_CONFLICT` | no | Return to `tom-grill`; a delta id must not redefine a snapshot criterion. |
 | `APPROVAL_CONTENT_INVALID` | yes | `request-approval --content` could not be read or parsed; pass the phase envelope JSON. |
 | `APPROVAL_CONTENT_MISMATCH` | yes | The summarized content does not match the gate's bound hashes; open the gate on the envelope actually being approved. |
+| `APPROVAL_DELIVERY_FAILED` | yes | No channel took the card and nothing was sent; fix the client defect and ask again. |
+| `APPROVAL_DELIVERY_RETRYABLE` | yes | `reissue-approval` refused because a plain retry re-posts only the channel that failed; do that instead of burning a new action name. |
 | `LOCAL_EXECUTION_FORBIDDEN` | no | Refuse local project build/test and create an iPipe validation plan. |
 | `REVIEW_FAILED` | after diagnosis | Confirm finding, then diagnose. |
 | `REVIEW_INCOMPLETE` | no | Use human Review fallback. |
@@ -20,3 +22,18 @@
 | `REVISION_MISMATCH` | no | Stop and discard the result. |
 
 Use one root-cause hypothesis per repair round. Stop automatic proposals after two rounds with the same signature and no progress. Force an architecture Review after three unsuccessful approved fixes. Stop after five repair rounds for a task.
+
+## External writes: three outcomes, not two
+
+Every failure around an external write (KU, iCafe, an approval channel, iCode, iPipe) is one of three things, and the same four bugs kept appearing because the first two were treated as one.
+
+| Class | Meaning | Reason codes | What may happen next |
+|---|---|---|---|
+| Nothing was sent | The client raised before dispatching: a missing method, a signature that does not match, a module that will not import. A defect in this process, so it is not evidence about the remote side. | `APPROVAL_DELIVERY_FAILED` | Withdraw the claim and retry after fixing the defect. Retrying cannot double-write. |
+| Outcome unknown | The call left and no usable answer came back: a socket dying mid-request, a timeout, a malformed response. | `QUERY_REQUIRED`, `RECOVERY_REQUIRED` | Reconcile by asking the remote side. Never retry blind. Only the narrow, provable case above may withdraw a claim. |
+| Redrivable | The write is keyed on its own content, so calling the same operation again re-attempts exactly the write that is open. | any pending intent in `_PUBLISH_REDRIVEN_OPERATIONS` | Call the phase again; it settles its own intent either way. |
+
+Two rules follow, and both were learned the hard way:
+
+- `retry_allowed` states which class this is, not how the caller feels about waiting. `false` means the outcome is unknown and must be reconciled; `true` means nothing was sent.
+- A pending intent is not automatically a reason to stop. Stop when no further phase work can settle it. Treating every pending intent as terminal parked the x86bgw CDN-URL run nine times over a KU write that had already succeeded, because the reconciliation lived inside the very call the guard was refusing.
