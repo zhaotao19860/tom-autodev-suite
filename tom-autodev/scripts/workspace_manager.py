@@ -7,7 +7,8 @@ import shutil
 import sqlite3
 import subprocess
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -101,7 +102,10 @@ class WorkspaceManager:
             return {"status": "BLOCKED", "reason_code": "WORKTREE_NOT_OWNED"}
         try:
             uri = f"{database.resolve().as_uri()}?mode=ro"
-            with sqlite3.connect(uri, uri=True, timeout=30) as connection:
+            # `with sqlite3.connect(...)` ends the transaction and leaves the handle
+            # open; `closing` is what releases it. Every gate check comes through here,
+            # so a leak here is one descriptor per verified worktree.
+            with closing(sqlite3.connect(uri, uri=True, timeout=30)) as connection:
                 connection.row_factory = sqlite3.Row
                 ownership = connection.execute(
                     "SELECT * FROM worktree_ownership WHERE worktree_path = ?",
@@ -925,7 +929,14 @@ class WorkspaceManager:
             (str(worktree), owner_token, previous_status, status, created_at),
         )
 
-    def _ownership_connection(self, root: Path) -> sqlite3.Connection:
+    @contextmanager
+    def _ownership_connection(self, root: Path) -> Iterator[sqlite3.Connection]:
+        """Open the ownership database with its schema current, and close it after.
+
+        The three callers already wrote `with self._ownership_connection(root)`, which
+        read as ownership of the handle but only ended the transaction -- the schema
+        setup below runs on every call, so every ownership write leaked a descriptor.
+        """
         database = _ownership_database(root)
         database.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(database, timeout=30)
@@ -966,7 +977,11 @@ class WorkspaceManager:
             """
         )
         connection.commit()
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
 
 def _git(repo: Path, *args: str) -> str | None:

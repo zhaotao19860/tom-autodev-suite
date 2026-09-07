@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -43,10 +45,22 @@ class LockManager:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Commit on the way out like `with sqlite3.connect(...)`, and also close.
+
+        A lock is the one thing here every other caller waits behind, so a leaked
+        handle is worse than a wasted descriptor: the connection holds its journal
+        until the collector gets to it. Closing at the single place they are opened
+        covers all four call sites.
+        """
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def acquire(self, key: str, owner_token: str, ttl_seconds: int) -> dict[str, Any]:
         if not key or not owner_token or ttl_seconds <= 0:

@@ -7,6 +7,8 @@ import re
 import shutil
 import sqlite3
 import tempfile
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -88,10 +90,17 @@ class ArtifactStore:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # `with sqlite3.connect(...)` ends the transaction and leaves the handle open;
+        # closing here is what stops one leaked descriptor per index read.
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def put(
         self,
@@ -296,13 +305,10 @@ class ArtifactStore:
 
     def artifacts_for_run(self, run_id: str) -> list[dict[str, Any]]:
         """List only integrity-checked artifacts so summaries never trust the index alone."""
-        connection = self._connect()
-        try:
+        with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, artifact_id", (run_id,)
             ).fetchall()
-        finally:
-            connection.close()
         return [self._load(row) for row in rows]
 
     def _load_phase(self, row: sqlite3.Row) -> dict[str, Any]:

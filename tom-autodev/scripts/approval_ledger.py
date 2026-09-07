@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,8 +35,14 @@ class ApprovalLedger:
             """)
             _migrate(connection)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path); connection.row_factory = sqlite3.Row; return connection
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # Commits like `with sqlite3.connect(...)` and also closes, which that does not.
+        connection = sqlite3.connect(self.database_path); connection.row_factory = sqlite3.Row
+        try:
+            with connection: yield connection
+        finally:
+            connection.close()
 
     def request(self, action: str, input_hash: str, channels: list[str], *, run_id: str | None = None, member_policy: dict[str, list[str]] | None = None, deadline_at: str | None = None) -> dict[str, Any]:
         if set(channels) != APPROVAL_CHANNELS or len(channels) != 2: raise ValueError("APPROVAL_CHANNEL_NOT_CONFIGURED")
@@ -187,24 +195,18 @@ class ApprovalLedger:
         so no reply can arrive on it, and polling one only teaches the watcher to
         report silence as though somebody were still deciding.
         """
-        c = self._connect()
-        try:
+        with self._connect() as c:
             rows = c.execute(
                 "SELECT * FROM approvals WHERE effective_decision IS NULL AND run_id != 'legacy'"
                 " AND delivery_failed_at IS NULL ORDER BY created_at, approval_id"
             ).fetchall()
-        finally:
-            c.close()
         return [_row(row) for row in rows]
 
     def for_run(self, run_id: str) -> list[dict[str, Any]]:
-        c = self._connect()
-        try:
+        with self._connect() as c:
             rows = c.execute(
                 "SELECT * FROM approvals WHERE run_id = ? ORDER BY created_at, approval_id", (run_id,)
             ).fetchall()
-        finally:
-            c.close()
         return [_row(row) for row in rows]
     def responses(self, approval_id: str) -> list[dict[str, Any]]:
         with self._connect() as c: rows=c.execute("SELECT * FROM approval_responses WHERE approval_id=? ORDER BY sequence",(approval_id,)).fetchall()

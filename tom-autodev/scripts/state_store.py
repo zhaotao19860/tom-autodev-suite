@@ -6,6 +6,8 @@ import hashlib
 import os
 import sqlite3
 import uuid
+from contextlib import contextmanager
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,10 +21,24 @@ class StateStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Hand out a connection that is committed *and* closed on the way out.
+
+        `with sqlite3.connect(...) as connection` only ends the transaction; the handle
+        stays open until the garbage collector gets to it. Every method here opens one,
+        so a run leaked a file descriptor per call and the test suite printed a wall of
+        `ResourceWarning`s that hid real output. Closing at the single place they are
+        created beats remembering it at each of the thirty call sites -- two of which had
+        already grown their own `try/finally` for exactly this reason.
+        """
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -578,8 +594,7 @@ class StateStore:
 
     def external_results(self, run_id: str) -> list[dict[str, Any]]:
         """Return durable, verified side-effect evidence in intent order."""
-        connection = self._connect()
-        try:
+        with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT intent.intent_id, intent.run_id, intent.operation, intent.idempotency_key,
@@ -593,8 +608,6 @@ class StateStore:
                 """,
                 (run_id,),
             ).fetchall()
-        finally:
-            connection.close()
         return [
             {
                 "intent": {
@@ -817,13 +830,10 @@ class StateStore:
         return _optimization_row(row)
 
     def optimization_proposal(self, proposal_id: str) -> dict[str, Any] | None:
-        connection = self._connect()
-        try:
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)
             ).fetchone()
-        finally:
-            connection.close()
         return _optimization_row(row) if row is not None else None
 
     def update_optimization_proposal(
