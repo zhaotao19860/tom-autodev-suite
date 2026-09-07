@@ -18,15 +18,17 @@ Run independent reports:
 - **Standards:** repository and language/project conventions, affected callers, naming, duplication, responsibility, unsupported abstraction, scope, and tests that assert external behavior.
 - **Spec:** required behavior, exceptions, compatibility, test interface, acceptance coverage, iPipe plan, and business/test semantic alignment.
 
-Every finding contains axis, severity, repository, path/symbol/line, evidence reference, affected acceptance criterion, and blocking flag.
+Every finding contains axis, severity, repository, path/symbol/line, evidence reference, affected acceptance criterion, blocking flag, and `classification`.
 
 ## Finding Reception
 
-Classify every provider suggestion exactly once:
+Classify every provider suggestion exactly once, in the finding's required `classification` field:
 
 - `CONFIRMED`: current code, Spec, rules, and impact evidence establish the issue.
-- `REJECTED_WITH_REASON`: evidence shows it is inapplicable or conflicts with an approved decision; record the technical reason.
-- `NEEDS_CLARIFICATION`: Spec, revision, location, impact, or reproduction evidence is insufficient; pause the run and request a decision.
+- `REJECTED_WITH_REASON`: evidence shows it is inapplicable or conflicts with an approved decision; record the technical reason in `disposition_reason`, and do not mark it blocking — a suggestion you just refuted cannot hold the run.
+- `NEEDS_CLARIFICATION`: Spec, revision, location, impact, or reproduction evidence is insufficient; state what is missing in `disposition_reason`. The run stops with `REVIEW_NEEDS_CLARIFICATION` rather than going to `tom-diagnose`, which root-causes failures and cannot answer a question.
+
+`disposition_reason` is required for both non-confirmed values, and an `ACCEPT` verdict over a `NEEDS_CLARIFICATION` finding is rejected as inconsistent: the schema will not let the artifact claim the code is clean and unexamined at once.
 
 Do not use `pending`, `unverified`, or `incomplete` as finding states. `INCOMPLETE` is reserved for a Review provider that is unavailable, times out, lacks scope, or lacks a Spec.
 

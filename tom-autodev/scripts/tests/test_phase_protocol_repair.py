@@ -884,6 +884,7 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
         blocking["findings"] = [{
             "id": "F-1", "axis": "standards", "severity": "P0", "location": "src/a.cc:1",
             "evidence": "broken", "acceptance_point_ids": ["AC-1"], "blocking": True,
+            "classification": "CONFIRMED",
         }]
         blocking["axes"]["standards"]["finding_ids"] = ["F-1"]
         blocking["verdict"] = "REJECT"
@@ -903,6 +904,31 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
         self.assertEqual(blocking_result["state"], "DIAGNOSE")
         self.assertEqual((incomplete_result["state"], incomplete_result["reason_code"]), ("STOPPED", "REVIEW_INCOMPLETE"))
 
+
+    def test_an_unclarified_finding_stops_for_a_person_instead_of_going_to_diagnose(self):
+        """A question is not a failure, and `tom-diagnose` root-causes failures.
+
+        Routing `NEEDS_CLARIFICATION` to DIAGNOSE would ask the diagnosis phase to produce
+        the verification the reviewer just said it could not produce, and its output --
+        a repair direction -- would be a fix for something nobody has established is wrong.
+        The run stops instead, with a reason code that names what is missing.
+        """
+        unclarified = specialized_examples()["review"]
+        unclarified["findings"] = [{
+            "id": "F-1", "axis": "spec", "severity": "P2", "location": "src/a.cc:1",
+            "evidence": "unclear whether the budget applies", "acceptance_point_ids": ["AC-1"],
+            "blocking": False, "classification": "NEEDS_CLARIFICATION",
+            "disposition_reason": "waiting on the requirement owner",
+        }]
+        unclarified["axes"]["spec"]["finding_ids"] = ["F-1"]
+        unclarified["verdict"] = "REJECT"
+
+        result = self.review_run("run-review-unclarified", "T-1", unclarified)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            (result["state"], result["reason_code"]), ("STOPPED", "REVIEW_NEEDS_CLARIFICATION")
+        )
 
     def test_release_descriptor_is_not_a_phase_result_action_or_run_summary(self):
         run_id = "run-controller-release"

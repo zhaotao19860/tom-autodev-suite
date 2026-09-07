@@ -381,10 +381,40 @@ def _validate_review(instance: dict[str, Any]) -> list[SchemaIssue]:
             issues.append(SchemaIssue(f"axes.{axis_name}.finding_ids", "inconsistent"))
     blocking = any(isinstance(finding, dict) and finding.get("blocking") for finding in findings)
     axes_complete = all(isinstance(axes.get(name), dict) and axes[name].get("complete") is True for name in ("standards", "spec"))
-    if (verdict == "ACCEPT" and (blocking or not axes_complete or completeness != "COMPLETE")) or (
-        verdict == "INCOMPLETE" and completeness != "INCOMPLETE"
-    ):
+    issues.extend(_validate_finding_classifications(findings))
+    unclarified = any(
+        isinstance(finding, dict) and finding.get("classification") == "NEEDS_CLARIFICATION"
+        for finding in findings
+    )
+    if (
+        verdict == "ACCEPT"
+        and (blocking or unclarified or not axes_complete or completeness != "COMPLETE")
+    ) or (verdict == "INCOMPLETE" and completeness != "INCOMPLETE"):
         issues.append(SchemaIssue("verdict", "inconsistent"))
+    return issues
+
+
+def _validate_finding_classifications(findings: list[Any]) -> list[SchemaIssue]:
+    """Make a finding's disposition answer for itself.
+
+    `CONFIRMED` says the reviewer went and looked; the other two values are claims about
+    what was *not* established, and either one without a stated reason is the same
+    unverified suggestion the classification exists to catch. A rejection may also not be
+    `blocking`: holding the run on a finding the reviewer just said does not hold would
+    leave nothing to repair.
+    """
+    issues: list[SchemaIssue] = []
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            continue
+        classification = finding.get("classification")
+        reason = finding.get("disposition_reason")
+        if classification in {"REJECTED_WITH_REASON", "NEEDS_CLARIFICATION"} and not (
+            isinstance(reason, str) and reason.strip()
+        ):
+            issues.append(SchemaIssue(f"findings[{index}].disposition_reason", "missing"))
+        if classification == "REJECTED_WITH_REASON" and finding.get("blocking") is True:
+            issues.append(SchemaIssue(f"findings[{index}].blocking", "inconsistent"))
     return issues
 
 

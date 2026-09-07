@@ -12,6 +12,7 @@
 | `LOCAL_EXECUTION_FORBIDDEN` | no | Refuse local project build/test and create an iPipe validation plan. |
 | `REVIEW_FAILED` | after diagnosis | Confirm finding, then diagnose. |
 | `REVIEW_INCOMPLETE` | no | Use human Review fallback. |
+| `REVIEW_NEEDS_CLARIFICATION` | no | A finding is classified `NEEDS_CLARIFICATION`: get the answer from the requirement owner or the reviewer, then re-review. Not a diagnosis — there is no established defect to root-cause yet. |
 | `CODE_FAILURE` | after diagnosis | Diagnose, revise Spec/Task Plan, generate patch. |
 | `TEST_FAILURE` | after diagnosis | Distinguish product, test, and environment defects. |
 | `BASELINE_UNVERIFIED` | no | Require human baseline decision. |

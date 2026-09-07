@@ -897,6 +897,17 @@ class PhaseProtocol:
             review = envelope["content"]
             if review.get("verdict") == "INCOMPLETE" or review.get("completeness_state") != "COMPLETE":
                 return "STOPPED", None, "REVIEW_INCOMPLETE"
+            findings = review.get("findings")
+            findings = findings if isinstance(findings, list) else []
+            # An unclarified finding is a question, and `tom-diagnose` root-causes
+            # failures rather than answering questions: sending it there would ask the
+            # diagnosis phase to invent the verification the reviewer could not do.
+            if any(
+                isinstance(finding, dict)
+                and finding.get("classification") == "NEEDS_CLARIFICATION"
+                for finding in findings
+            ):
+                return "STOPPED", None, "REVIEW_NEEDS_CLARIFICATION"
             if not _passing_review(review):
                 return "DIAGNOSE", action.get("task_id"), "OK"
             next_task = self._ready_task_excluding(action["run_id"], action.get("task_id"))
@@ -1500,8 +1511,17 @@ def _passing_review(content: Any) -> bool:
     if any(not isinstance(axis, dict) or axis.get("complete") is not True for axis in axes.values()):
         return False
     findings = content.get("findings")
-    return isinstance(findings, list) and not any(
-        isinstance(finding, dict) and finding.get("blocking") is True for finding in findings
+    if not isinstance(findings, list):
+        return False
+    # Checked here as well as in `_validate_review`, because this is the function the
+    # SUBMIT gate and the DAG frontier actually ask, and an unanswered question is not a
+    # pass however the verdict field reads. A `NEEDS_CLARIFICATION` finding says nobody
+    # has established whether the code is wrong; treating that as clean is exactly the
+    # "do not implement an unverified suggestion" rule read backwards.
+    return not any(
+        isinstance(finding, dict)
+        and (finding.get("blocking") is True or finding.get("classification") == "NEEDS_CLARIFICATION")
+        for finding in findings
     )
 
 

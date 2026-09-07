@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from approval_delivery import ComateApprovalClient, InfoflowApprovalTransport
+from approval_summary import content_summary
 from clients.infoflow_approval_client import InfoflowApprovalClient
 from clients.infoflow_bot_client import InfoflowBotClient
 from state_store import StateStore
@@ -396,6 +397,38 @@ class ComateApprovalClientTests(unittest.TestCase):
     def test_request_without_an_approval_is_rejected(self):
         with self.assertRaises(ValueError):
             ComateApprovalClient().request({"channel": "comate"})
+
+
+class ChangeSetSummaryTests(unittest.TestCase):
+    """What the G5 card says about a diff that did not follow the approved plan.
+
+    The approver already read the Task Plan at G4, so the one thing they cannot
+    reconstruct from it is where the diff left it. Counting the deviations and naming
+    their reasons is the difference between approving a diff and approving a hash.
+    """
+
+    def _change_set(self, deviations):
+        return {
+            "change_set_id": "CS-1", "task_id": "T-1", "full_diff_hash": "a" * 64,
+            "test_ids": ["resolver.answer"],
+            "traceability_delta": [{"acceptance_point_id": "AC-1", "test_ids": ["resolver.answer"]}],
+            "deviations": deviations,
+        }
+
+    def test_the_card_counts_the_deviations_and_names_their_reasons(self):
+        summary = content_summary(self._change_set([
+            {"from_plan": "guard in resolver_answer", "as_implemented": "guard in resolver_prepare",
+             "reason": "resolver_answer runs after the budget check"},
+        ]))
+
+        self.assertIn("偏离计划 1 处", summary[1])
+        self.assertIn("偏离：resolver_answer runs after the budget check", summary)
+
+    def test_a_diff_that_followed_the_plan_says_so_rather_than_staying_silent(self):
+        summary = content_summary(self._change_set([]))
+
+        self.assertIn("偏离计划 0 处", summary[1])
+        self.assertEqual([line for line in summary if line.startswith("偏离：")], [])
 
 
 if __name__ == "__main__":

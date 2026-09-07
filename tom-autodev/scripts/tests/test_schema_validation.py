@@ -78,6 +78,7 @@ def specialized_examples():
             "revisions": {"business": "r2", "tests": "t2"}, "business_patch": "diff --git a b",
             "test_patch": "diff --git a t", "full_diff_hash": "", "test_ids": ["resolver.answer"],
             "traceability_delta": [{"acceptance_point_id": "AC-1", "test_ids": ["resolver.answer"]}],
+            "deviations": [],
             "candidate_hash": "",
         },
         "review": {
@@ -346,6 +347,7 @@ class NamedSchemaValidationTests(unittest.TestCase):
         review["findings"] = [{
             "id": "F-1", "axis": "standards", "severity": "P0", "location": "src/a.cc:1",
             "evidence": "broken", "acceptance_point_ids": ["AC-1"], "blocking": True,
+            "classification": "CONFIRMED",
         }]
         diagnosis = specialized_examples()["diagnosis"]
         diagnosis["evidence_state"] = "INSUFFICIENT"
@@ -379,6 +381,118 @@ class NamedSchemaValidationTests(unittest.TestCase):
                 self.assertIn(
                     (field, "mismatch"),
                     [(issue.path, issue.kind) for issue in validate_named_schema(change, "change-set")],
+                )
+
+    def test_a_findings_disposition_has_to_answer_for_itself(self):
+        """`tom-autodev` says not to implement an unverified suggestion; this is where it is said.
+
+        Before `classification` existed the review artifact had no way to record whether a
+        finding had been checked, so "confirmed" lived in prose and the SUBMIT gate saw
+        only `blocking`. A rejection without a reason and a rejection that still blocks are
+        both the same defect: the reviewer's verification cannot be read back.
+        """
+        finding = {
+            "id": "F-1", "axis": "standards", "severity": "P0", "location": "src/a.cc:1",
+            "evidence": "broken", "acceptance_point_ids": ["AC-1"], "blocking": False,
+            "classification": "CONFIRMED",
+        }
+        cases = []
+        for classification in ("REJECTED_WITH_REASON", "NEEDS_CLARIFICATION"):
+            unexplained = specialized_examples()["review"]
+            unexplained["findings"] = [{**finding, "classification": classification}]
+            unexplained["axes"]["standards"]["finding_ids"] = ["F-1"]
+            unexplained["verdict"] = "REJECT"
+            cases.append((classification, unexplained, ("findings[0].disposition_reason", "missing")))
+        rejected_but_blocking = specialized_examples()["review"]
+        rejected_but_blocking["findings"] = [{
+            **finding, "classification": "REJECTED_WITH_REASON", "blocking": True,
+            "disposition_reason": "the caller already checks this",
+        }]
+        rejected_but_blocking["axes"]["standards"]["finding_ids"] = ["F-1"]
+        rejected_but_blocking["verdict"] = "REJECT"
+        cases.append(("blocking", rejected_but_blocking, ("findings[0].blocking", "inconsistent")))
+        unclassified = specialized_examples()["review"]
+        unclassified["findings"] = [{
+            key: value for key, value in finding.items() if key != "classification"
+        }]
+        unclassified["axes"]["standards"]["finding_ids"] = ["F-1"]
+        cases.append(("absent", unclassified, ("findings[0].classification", "missing")))
+
+        for label, value, expected in cases:
+            with self.subTest(case=label):
+                self.assertIn(
+                    expected,
+                    [(issue.path, issue.kind) for issue in validate_named_schema(value, "review")],
+                )
+
+    def test_an_accept_verdict_cannot_stand_over_an_unanswered_question(self):
+        """`NEEDS_CLARIFICATION` is the reviewer saying they could not establish this.
+
+        An `ACCEPT` alongside it claims the opposite in the same document, which is how an
+        unverified suggestion reaches SUBMIT. A confirmed non-blocking finding is different
+        and stays acceptable: it was checked, and it does not hold up the change.
+        """
+        finding = {
+            "id": "F-1", "axis": "spec", "severity": "P2", "location": "src/a.cc:1",
+            "evidence": "unclear whether the budget applies", "acceptance_point_ids": ["AC-1"],
+            "blocking": False,
+        }
+        unclarified = specialized_examples()["review"]
+        unclarified["findings"] = [{
+            **finding, "classification": "NEEDS_CLARIFICATION",
+            "disposition_reason": "waiting on the requirement owner",
+        }]
+        unclarified["axes"]["spec"]["finding_ids"] = ["F-1"]
+        confirmed = specialized_examples()["review"]
+        confirmed["findings"] = [{**finding, "classification": "CONFIRMED"}]
+        confirmed["axes"]["spec"]["finding_ids"] = ["F-1"]
+
+        self.assertIn(
+            ("verdict", "inconsistent"),
+            [(issue.path, issue.kind) for issue in validate_named_schema(unclarified, "review")],
+        )
+        self.assertEqual(validate_named_schema(confirmed, "review"), [])
+
+    def test_a_change_set_records_its_deviations_and_they_ride_the_candidate_hash(self):
+        """An empty list is a claim; a missing field is silence.
+
+        `deviations` is required so that "the diff follows the approved plan" is something
+        the artifact says rather than something the reader assumes. Because `candidate_hash`
+        covers every other field, a deviation cannot be appended after the hash a G5
+        approval or a Review was bound to -- the hash stops matching.
+        """
+        declared = specialized_examples()["change-set"]
+        declared["deviations"] = [{
+            "from_plan": "plan added the guard in resolver_answer",
+            "as_implemented": "guard added in resolver_prepare instead",
+            "reason": "resolver_answer runs after the budget check",
+            "approval_input_hash": "grill-hash",
+        }]
+        declared["candidate_hash"] = canonical_hash({
+            key: value for key, value in declared.items() if key != "candidate_hash"
+        })
+        silent = specialized_examples()["change-set"]
+        del silent["deviations"]
+        appended_late = copy.deepcopy(declared)
+        appended_late["deviations"].append({
+            "from_plan": "x", "as_implemented": "y", "reason": "slipped in after approval",
+        })
+        incomplete = specialized_examples()["change-set"]
+        incomplete["deviations"] = [{"from_plan": "a", "as_implemented": "b"}]
+        incomplete["candidate_hash"] = canonical_hash({
+            key: value for key, value in incomplete.items() if key != "candidate_hash"
+        })
+
+        self.assertEqual(validate_named_schema(declared, "change-set"), [])
+        for label, value, expected in (
+            ("silent", silent, ("deviations", "missing")),
+            ("appended after approval", appended_late, ("candidate_hash", "mismatch")),
+            ("no reason", incomplete, ("deviations[0].reason", "missing")),
+        ):
+            with self.subTest(case=label):
+                self.assertIn(
+                    expected,
+                    [(issue.path, issue.kind) for issue in validate_named_schema(value, "change-set")],
                 )
 
     def test_ipipe_statuses_and_incomplete_diagnosis_are_semantically_explicit(self):

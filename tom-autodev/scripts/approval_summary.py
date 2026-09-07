@@ -93,12 +93,16 @@ def _task_plan(content: dict[str, Any]) -> list[str]:
 
 
 def _change_set(content: dict[str, Any]) -> list[str]:
-    return [
+    # The deviations are the part of a diff an approver cannot reconstruct from the
+    # Task Plan they already approved, so they are named rather than only counted.
+    lines = [
         f"任务 {_text(content.get('task_id'))}",
         f"测试用例 {_count(content.get('test_ids'))} 项，"
-        f"追溯更新 {_count(content.get('traceability_delta'))} 项",
+        f"追溯更新 {_count(content.get('traceability_delta'))} 项，"
+        f"偏离计划 {_count(content.get('deviations'))} 处",
         f"全量 diff 哈希 {_short(content.get('full_diff_hash'))}",
     ]
+    return lines + _named(content.get("deviations"), (), "reason", "偏离")
 
 
 def _named(
