@@ -1,0 +1,16 @@
+{
+  "name": "tom-autodev-infoflow-bot-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "tom-autodev-infoflow-gateway": "src/bot_gateway.mjs"
+  },
+  "scripts": {
+    "start": "node src/bot_gateway.mjs",
+    "check": "node --check src/bot_gateway.mjs"
+  },
+  "dependencies": {
+    "@baidu/infoflow-sdk-nodejs": "2026.8.28"
+  }
+}

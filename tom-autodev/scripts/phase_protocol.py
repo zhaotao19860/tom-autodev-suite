@@ -13,6 +13,7 @@ from collaboration import (
     intake_prerequisites_valid,
 )
 from persistence_policy import ensure_persistable, validate_evidence_refs
+from phase_document import render_phase_markdown
 from project_registry import load_profile
 from requirement_snapshot import AcceptanceValueError, normalized_acceptance_ids
 from schema_validator import validate_named_schema
@@ -58,6 +59,10 @@ _TITLE = {
     "TASKS": "03-tasks", "PLAN": "04-task-plan", "IMPLEMENT": "05-change-set",
     "REVIEW": "06-review", "DIAGNOSE": "07-diagnosis", "IPIPE": "08-ipipe-evidence",
 }
+# Phases whose KU title carries the task id. Everything else is run scoped, and
+# `_phase_attempt` has to count in the same scope or a re-entered phase would claim a
+# title that already exists.
+_TASK_SCOPED_TITLES = frozenset({"PLAN", "IMPLEMENT", "REVIEW"})
 
 
 class PhaseProtocol:
@@ -84,6 +89,13 @@ class PhaseProtocol:
         except Exception as error:
             return _failure(_exception_reason(error, "PHASE_PROTOCOL_INVALID"), run_id=run_id)
 
+    def _repin(self, events: list[dict[str, Any]]) -> Any:
+        """The approved profile re-pin for the run these events belong to, if any."""
+        from profile_repin import record_for
+
+        run_id = events[0].get("run_id") if events else None
+        return record_for(self.state, run_id) if isinstance(run_id, str) and run_id else None
+
     def _next(self, run_id: str) -> dict[str, Any]:
         if not isinstance(run_id, str) or not run_id:
             return _failure("INVALID_INPUT")
@@ -99,7 +111,7 @@ class PhaseProtocol:
                 "host": "comate",
                 "stop": True,
             }
-        profile_error = _pinned_profile_error(events)
+        profile_error = _pinned_profile_error(events, self._repin(events))
         if profile_error is not None:
             return _failure(profile_error, run_id=run_id)
         if self.state.pending_intents(run_id):
@@ -143,7 +155,7 @@ class PhaseProtocol:
             "state": state,
             "phase": state,
             "task_id": task_id,
-            "profile_hash": _pinned_profile_hash(events),
+            "profile_hash": _pinned_profile_hash(events, self._repin(events)),
             "input_artifacts": input_artifacts,
             "parent_artifact_hash": parent_hash,
             "source_revisions": source_revisions,
@@ -182,7 +194,8 @@ class PhaseProtocol:
             "target_state": target,
             **({"content": _intake_snapshot(events)} if state == "INTAKE" else {}),
         }
-        key = f"phase-action:{run_id}:{current['event_id']}:{state}:{task_id or '-'}"
+        key = _action_key(run_id, current["event_id"], state, task_id,
+                          _pinned_profile_hash(events, self._repin(events)))
         existing = self.state.idempotency_result(key)
         if existing is not None:
             return existing if existing == action else _failure("ACTION_CONFLICT", run_id=run_id, state=state)
@@ -211,9 +224,9 @@ class PhaseProtocol:
         events = self.state.events(action["run_id"])
         if not events or events[-1].get("event_id") != action.get("source_event_id"):
             return _failure("STALE_ACTION")
-        action_key = (
-            f"phase-action:{action['run_id']}:{action['source_event_id']}:"
-            f"{action.get('state')}:{action.get('task_id') or '-'}"
+        action_key = _action_key(
+            action["run_id"], action["source_event_id"], action.get("state"),
+            action.get("task_id"), _pinned_profile_hash(events, self._repin(events)),
         )
         issued = self.state.idempotency_result(action_key)
         if issued is None or issued != action:
@@ -347,11 +360,23 @@ class PhaseProtocol:
             if not root.get("valid"):
                 return "TRACEABILITY_MISMATCH"
             try:
-                expected = set(normalized_acceptance_ids(
+                snapshot_points = set(normalized_acceptance_ids(
                     root["envelope"]["content"].get("acceptance")
+                ))
+                grill_points = set(normalized_acceptance_ids(
+                    predecessor_content.get("acceptance_delta", [])
+                    if isinstance(predecessor_content, dict) else []
                 ))
             except AcceptanceValueError:
                 return "TRACEABILITY_MISMATCH"
+            # A card may arrive without acceptance criteria; tom-grill records the ones
+            # it agreed with the requirement owner as a delta. The snapshot is never
+            # rewritten, so the G0 approval stays bound to the original card hash.
+            if snapshot_points & grill_points:
+                return "ACCEPTANCE_DELTA_CONFLICT"
+            expected = snapshot_points | grill_points
+            if not expected:
+                return "ACCEPTANCE_CRITERIA_MISSING"
             actual = {
                 item.get("acceptance_point_id") for item in content.get("traceability", [])
                 if isinstance(item, dict)
@@ -447,11 +472,22 @@ class PhaseProtocol:
             return {**validated, "run_id": run_id}
         if self.knowledge is None:
             return _failure("KNOWLEDGE_SYNC_REQUIRED", run_id=run_id)
-        publish_document = _canonical_json(validated["draft"]["content"])
-        title = _phase_title(action)
+        canonical = _canonical_json(validated["draft"]["content"])
+        title = _phase_title(
+            action,
+            _phase_attempt(self.state.events(run_id), action["phase"], action.get("task_id")),
+        )
+        publish_document = render_phase_markdown(
+            title, validated["draft"]["content"], envelope["content_hash"], canonical
+        )
         receipt = self.knowledge.publish_phase(
             run_id,
-            {"title": title, "markdown": publish_document, "content_hash": envelope["content_hash"]},
+            {
+                "title": title,
+                "markdown": publish_document,
+                "content_hash": envelope["content_hash"],
+                "canonical": canonical,
+            },
         )
         receipt_error = self._receipt_error(run_id, envelope, receipt)
         if receipt_error is not None:
@@ -531,9 +567,10 @@ class PhaseProtocol:
         receipt_error = self._receipt_error(run_id, envelope, existing.get("knowledge_receipt"))
         if receipt_error is not None:
             return _failure(receipt_error, run_id=run_id)
-        action_key = (
-            f"phase-action:{run_id}:{envelope.get('source_event_id')}:"
-            f"{envelope.get('phase')}:{envelope.get('task_id') or '-'}"
+        events = self.state.events(run_id)
+        action_key = _action_key(
+            run_id, envelope.get("source_event_id"), envelope.get("phase"),
+            envelope.get("task_id"), _pinned_profile_hash(events, self._repin(events)),
         )
         action = self.state.idempotency_result(action_key)
         if not isinstance(action, dict) or action.get("action_id") != envelope.get("action_id"):
@@ -563,7 +600,7 @@ class PhaseProtocol:
         events = self.state.events(action["run_id"])
         if not events or events[-1].get("event_id") != action.get("source_event_id"):
             return "STALE_ACTION"
-        profile_error = _pinned_profile_error(events)
+        profile_error = _pinned_profile_error(events, self._repin(events))
         if profile_error is not None:
             return profile_error
         predecessor = self._predecessor(
@@ -589,6 +626,11 @@ class PhaseProtocol:
             evidence = payload.get("evidence")
             explicit = evidence.get("task_id") if isinstance(evidence, dict) else None
         if isinstance(explicit, str) and explicit:
+            if state in {"WORKSPACE", "PLAN"} and not self._task_dependencies_met(run_id, explicit):
+                # A DAG amendment can give the pinned task a new prerequisite. The
+                # pointer carried by the previous event predates that edge, so honour
+                # the amended frontier instead of planning a task that is now blocked.
+                return self._ready_task(run_id)
             return explicit
         if state in {"WORKSPACE", "PLAN"}:
             return self._ready_task(run_id)
@@ -604,6 +646,32 @@ class PhaseProtocol:
                 if artifact.get("valid"):
                     return artifact["envelope"].get("task_id")
         return None
+
+    def _task_dependencies_met(self, run_id: str, task_id: str) -> bool:
+        """True when every DAG predecessor of task_id already has a passing Review."""
+        dag = self.artifacts.latest_phase(run_id, "TASKS", None)
+        if not dag.get("valid"):
+            return True
+        content = dag["envelope"].get("content", {})
+        nodes = content.get("nodes", [])
+        known = {
+            node.get("task_id") for node in nodes
+            if isinstance(node, dict) and isinstance(node.get("task_id"), str)
+        }
+        if task_id not in known:
+            return True
+        required = {
+            edge.get("from") for edge in content.get("edges", [])
+            if isinstance(edge, dict) and edge.get("to") == task_id
+        }
+        if not required:
+            return True
+        passing = {
+            artifact["envelope"].get("task_id")
+            for artifact in self.artifacts.phase_artifacts(run_id, "REVIEW")
+            if artifact.get("valid") and _passing_review(artifact["envelope"].get("content"))
+        }
+        return required.issubset(passing)
 
     def _ready_task(self, run_id: str) -> str | None:
         dag = self.artifacts.latest_phase(run_id, "TASKS", None)
@@ -729,10 +797,19 @@ class PhaseProtocol:
             next_task = self._ready_task_excluding(action["run_id"], action.get("task_id"))
             return ("WORKSPACE", next_task, "OK") if next_task else ("SUBMIT", None, "OK")
         if action["phase"] == "DIAGNOSE":
-            route = envelope["content"].get("route")
+            content = envelope["content"]
+            route = content.get("route")
             if route == "DIAGNOSIS_INCOMPLETE":
                 return "STOPPED", None, "DIAGNOSIS_INCOMPLETE"
-            return ("SPEC" if route == "REPAIR" else route), None, "OK"
+            if route != "REPAIR":
+                return route, None, "OK"
+            # A code-only repair leaves the Spec and the DAG standing, so it re-enters
+            # at PLAN and wins a fresh G4 there. Anything that amends the Spec or moves
+            # task scope re-enters at SPEC, which is also the default when the diagnosis
+            # does not say -- the conservative reading of an older artifact.
+            if content.get("repair_scope") == "CODE_ONLY":
+                return "PLAN", action.get("task_id"), "OK"
+            return "SPEC", None, "OK"
         target = action.get("target_state")
         if not isinstance(target, str):
             raise ValueError("COMPLETION_TARGET_REQUIRED")
@@ -813,9 +890,15 @@ class PhaseProtocol:
             "approval_id": payload.get("approval_id"),
             "approval_input_hash": payload.get("approval_input_hash"), "content": content,
         }
+        ipipe_title = f"08-ipipe-evidence/{content['build_id']}"
+        ipipe_canonical = _canonical_json(content)
         receipt = self.knowledge.publish_phase(run_id, {
-            "title": f"08-ipipe-evidence/{content['build_id']}",
-            "markdown": _canonical_json(content), "content_hash": content_hash,
+            "title": ipipe_title,
+            "markdown": render_phase_markdown(
+                ipipe_title, content, content_hash, ipipe_canonical
+            ),
+            "content_hash": content_hash,
+            "canonical": ipipe_canonical,
         })
         receipt_error = self._receipt_error(run_id, draft, receipt)
         if receipt_error:
@@ -832,7 +915,7 @@ class PhaseProtocol:
         if not events or events[-1].get("event_id") != action["source_event_id"]:
             raced = self.state.idempotency_result(result_key)
             return self._validated_cached_ipipe_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
-        profile_error = _pinned_profile_error(events)
+        profile_error = _pinned_profile_error(events, self._repin(events))
         if profile_error is not None:
             return _failure(profile_error, run_id=run_id)
         binding_error = self._ipipe_binding_error(events, payload, content)
@@ -850,6 +933,16 @@ class PhaseProtocol:
             return _failure(approval_error, run_id=run_id)
         if not self.artifacts.get(stored["artifact_id"]).get("valid"):
             return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        outstanding = self._ipipe_outstanding_modules(events, content)
+        if outstanding:
+            # Every required pipeline has to report before the run may leave IPIPE. The
+            # evidence just stored stays, so the next module's ingestion carries on from
+            # here and the last one performs the transition. Leaving on the first success
+            # would release a change whose other half was never built.
+            return _failure(
+                "PIPELINE_EVIDENCE_INCOMPLETE", run_id=run_id,
+                artifact_id=stored["artifact_id"], outstanding_modules=outstanding,
+            )
         target = {"SUCCESS": "RELEASE", "FAILURE": "DIAGNOSE", "BLOCKED": "ENVIRONMENT_BLOCKED"}[content["status"]]
         transition = self.transitions.validate("IPIPE", target)
         if not transition.get("allowed"):
@@ -892,10 +985,43 @@ class PhaseProtocol:
             return "APPROVAL_INPUT_MISMATCH"
         return None if approval.get("effective_decision") == "APPROVE" else "APPROVAL_REQUIRED"
 
+    def _ipipe_outstanding_modules(
+        self, events: list[dict[str, Any]], content: dict[str, Any]
+    ) -> list[str]:
+        """Required modules with no passing pipeline evidence yet.
+
+        Only a success can wait: a failure or a blocked environment is the answer for
+        the whole run, and holding it back to ask the remaining pipelines would delay
+        the diagnosis without changing it.
+        """
+        if content.get("status") != "SUCCESS":
+            return []
+        intake = events[0].get("payload") if events else None
+        profile_path = intake.get("profile_path") if isinstance(intake, dict) else None
+        if not isinstance(profile_path, str) or not profile_path:
+            return []
+        loaded = load_profile(profile_path, check_paths=False)
+        profile = loaded.get("profile") if loaded.get("ready") else None
+        if not isinstance(profile, dict):
+            return []
+        required = _required_modules(profile.get("pipeline_profile"))
+        if not required:
+            return []
+        run_id = events[0].get("run_id") if events else None
+        passed = {str(content.get("module"))}
+        for artifact in self.artifacts.artifacts_for_run(run_id) if run_id else []:
+            envelope = artifact.get("envelope")
+            if not isinstance(envelope, dict) or envelope.get("phase") != "IPIPE":
+                continue
+            stored = envelope.get("content")
+            if isinstance(stored, dict) and stored.get("status") == "SUCCESS":
+                passed.add(str(stored.get("module")))
+        return [module for module in required if module not in passed]
+
     def _ipipe_binding_error(
         self, events: list[dict[str, Any]], payload: Any, content: Any = None
     ) -> str | None:
-        profile_error = _pinned_profile_error(events)
+        profile_error = _pinned_profile_error(events, self._repin(events))
         if profile_error is not None:
             return profile_error
         if not isinstance(payload, dict):
@@ -917,24 +1043,39 @@ class PhaseProtocol:
             repository.get("module") for repository in repositories
             if isinstance(repository, dict) and isinstance(repository.get("module"), str)
         }
-        expected_pipeline = pipeline.get("pipeline_id")
         expected_release_rule = pipeline.get("release_rule")
-        module = payload.get("module")
-        if payload.get("pipeline_id") != expected_pipeline:
+        payload_module = payload.get("module")
+        # A cross-repository requirement has one pipeline per module, so identity is
+        # checked against the pipeline registered for *this* module. The single
+        # `pipeline_id` remains the answer for a profile that registers none.
+        if payload.get("pipeline_id") != _registered_pipeline(pipeline, payload_module):
             return "PIPELINE_IDENTITY_MISMATCH"
-        if module not in modules:
+        if payload_module not in modules:
             return "PIPELINE_IDENTITY_MISMATCH"
         if payload.get("release_rule") != expected_release_rule:
             return "RELEASE_RULE_MISMATCH"
         expected_environment = _canonical_hash(profile.get("environment_profile"))
         if payload.get("environment_fingerprint") != expected_environment:
             return "ENV_FINGERPRINT_MISMATCH"
-        revisions = payload.get("source_revisions")
+        if not _valid_revisions(payload.get("source_revisions")):
+            return "SOURCE_REVISION_REQUIRED"
+        # The payload names the primary submission, but every required module needs its
+        # own pipeline evidence, so evidence about another module is checked against the
+        # submission recorded for *that* module rather than the primary's.
+        reported = content.get("module") if isinstance(content, dict) else None
+        module = reported if isinstance(reported, str) else payload_module
+        if module not in modules:
+            return "PIPELINE_IDENTITY_MISMATCH"
+        expected_pipeline = _registered_pipeline(pipeline, module)
+        target = self._evidence_submission(payload, module, expected_pipeline, events)
+        if target is None:
+            return "PIPELINE_IDENTITY_MISMATCH"
+        revisions = target["source_revisions"]
         if not _valid_revisions(revisions):
             return "SOURCE_REVISION_REQUIRED"
-        artifact_id = payload.get("submission_artifact_id")
+        artifact_id = target["artifact_id"]
         submission = self.artifacts.get(artifact_id) if isinstance(artifact_id, str) else {"valid": False}
-        if not submission.get("valid") or submission.get("sha256") != payload.get("submission_hash"):
+        if not submission.get("valid") or submission.get("sha256") != target["sha256"]:
             return "PREDECESSOR_REQUIRED"
         expected_submission_binding = {
             "pipeline_id": expected_pipeline,
@@ -956,6 +1097,49 @@ class PhaseProtocol:
                 return "SOURCE_REVISION_MISMATCH"
             if content.get("environment_fingerprint") != expected_environment:
                 return "ENV_FINGERPRINT_MISMATCH"
+        return None
+
+    def _evidence_submission(
+        self,
+        payload: dict[str, Any],
+        module: str,
+        expected_pipeline: Any,
+        events: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """The submission the evidence is about, keyed by the module it reports."""
+        if module == payload.get("module"):
+            return {
+                "artifact_id": payload.get("submission_artifact_id"),
+                "sha256": payload.get("submission_hash"),
+                "source_revisions": payload.get("source_revisions"),
+            }
+        for entry in payload.get("submissions") or []:
+            if not isinstance(entry, dict):
+                continue
+            binding = entry.get("controller_binding")
+            if isinstance(binding, dict) and binding.get("module") == module:
+                return {
+                    "artifact_id": entry.get("artifact_id"),
+                    "sha256": entry.get("sha256"),
+                    "source_revisions": binding.get("source_revisions"),
+                }
+        # The payload's list is a snapshot taken at the transition. A submission
+        # archived for this module afterwards is still a submission of this run, and
+        # the caller re-checks the whole binding, so the ledger stays the authority.
+        run_id = events[0].get("run_id") if events else None
+        for artifact in self.artifacts.artifacts_for_run(run_id) if run_id else []:
+            if artifact.get("kind") != "submission":
+                continue
+            binding = (artifact.get("metadata") or {}).get("controller_binding")
+            if not isinstance(binding, dict) or binding.get("module") != module:
+                continue
+            if binding.get("pipeline_id") != expected_pipeline:
+                continue
+            return {
+                "artifact_id": artifact.get("artifact_id"),
+                "sha256": artifact.get("sha256"),
+                "source_revisions": binding.get("source_revisions"),
+            }
         return None
 
     def _validated_cached_ipipe_ingestion(
@@ -1067,15 +1251,54 @@ def _canonical_ku_url(value: Any, doc_id: Any) -> bool:
     )
 
 
-def _pinned_profile_hash(events: list[dict[str, Any]]) -> str | None:
+def _action_key(run_id: Any, source_event_id: Any, state: Any, task_id: Any, profile_hash: Any) -> str:
+    """Identity of a phase action, including the profile it was computed against.
+
+    The action embeds the pinned `profile_hash` in its own input hash, so an approved
+    re-pin legitimately produces a different action for the same event. Without the
+    hash in the cache key the recomputed action collides with the cached one and the
+    run reports ACTION_CONFLICT forever, even though nothing is actually in conflict.
+    """
+    return f"phase-action:{run_id}:{source_event_id}:{state}:{task_id or '-'}:{profile_hash or '-'}"
+
+
+def _registered_pipeline(pipeline: Any, module: Any) -> Any:
+    """The pipeline registered for a module, else the profile's single pipeline."""
+    entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get("module") == module:
+            return entry.get("pipeline_id")
+    return pipeline.get("pipeline_id") if isinstance(pipeline, dict) else None
+
+
+def _required_modules(pipeline: Any) -> list[str]:
+    """Modules whose pipeline has to pass before the run may leave IPIPE."""
+    entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
+    return sorted({
+        entry["module"] for entry in entries or []
+        if isinstance(entry, dict) and entry.get("required_for_release")
+        and isinstance(entry.get("module"), str)
+    })
+
+
+def _pinned_profile_hash(events: list[dict[str, Any]], repin: Any = None) -> str | None:
+    if isinstance(repin, dict) and isinstance(repin.get("new_hash"), str) and repin["new_hash"]:
+        return repin["new_hash"]
     payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
     value = payload.get("profile_hash")
     return value if isinstance(value, str) and value else None
 
 
-def _pinned_profile_error(events: list[dict[str, Any]]) -> str | None:
+def _pinned_profile_error(events: list[dict[str, Any]], repin: Any = None) -> str | None:
+    """Compare the profile on disk against the hash this run is pinned to.
+
+    An approved re-pin moves that hash, so it has to be consulted here too: this is a
+    second, independent copy of the check `orchestrator._runtime_profile` performs,
+    and a re-pin only one of them honours would leave the run healthy through one
+    door and conflicted through the other.
+    """
     payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
-    expected = payload.get("profile_hash")
+    expected = _pinned_profile_hash(events, repin)
     if not _valid_hash(expected):
         return "PROJECT_NOT_READY"
     profile_path = payload.get("profile_path")
@@ -1177,11 +1400,40 @@ def _passing_review(content: Any) -> bool:
     )
 
 
-def _phase_title(action: dict[str, Any]) -> str:
+def _phase_title(action: dict[str, Any], attempt: int = 1) -> str:
     base = _TITLE[action["phase"]]
     task_id = action.get("task_id")
-    if action["phase"] in {"PLAN", "IMPLEMENT", "REVIEW"}:
-        return f"{base}/{task_id}"
-    if action["phase"] == "DIAGNOSE":
-        return f"{base}/1"
-    return base
+    if action["phase"] in _TASK_SCOPED_TITLES:
+        base = f"{base}/{task_id}"
+    elif action["phase"] == "DIAGNOSE":
+        base = f"{base}/1"
+    # A phase artifact in KU is immutable: the document carries the hash of what was
+    # written to it, so a re-entered phase (a re-cut DAG) cannot overwrite the title it
+    # used before. The attempt keeps each artifact its own document, which is also the
+    # honest record — the discarded artifact stays next to the approval it lost.
+    return base if attempt <= 1 else f"{base}-r{attempt}"
+
+
+def _phase_attempt(events: list[dict[str, Any]], phase: str, task_id: Any) -> int:
+    """How many times this run has entered this phase, in the title's own scope.
+
+    The counter exists only to keep an immutable KU title unique, so it has to be
+    counted in exactly the scope the title is qualified by. A task-scoped title is
+    entered once per task, so it is counted per task or the second task's first plan
+    would look like the first task's second attempt. A run-scoped title is counted per
+    run: a repair re-enters SPEC and TASKS carrying the diagnosis' task_id, and counting
+    that entry in its own bucket would hand it the title the original run-scoped entry
+    already published, which KU refuses as immutable.
+    """
+    task_scoped = phase in _TASK_SCOPED_TITLES
+    return sum(
+        1
+        for event in events
+        if event.get("state") == phase
+        and (not task_scoped or _event_task_id(event) == task_id)
+    )
+
+
+def _event_task_id(event: dict[str, Any]) -> Any:
+    payload = event.get("payload")
+    return payload.get("task_id") if isinstance(payload, dict) else None

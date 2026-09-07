@@ -282,6 +282,35 @@ class NamedSchemaValidationTests(unittest.TestCase):
                     [(issue.path, issue.kind) for issue in validate_named_schema(value, "decision-log")],
                 )
 
+    def test_bare_card_and_grill_acceptance_delta_validate_together(self):
+        bare = specialized_examples()["requirement-snapshot"]
+        bare["acceptance"] = []
+        bare["content_hash"] = canonical_hash(
+            {key: value for key, value in bare.items() if key != "content_hash"}
+        )
+        delta = specialized_examples()["decision-log"]
+        delta["acceptance_delta"] = [{
+            "id": "AC-1", "statement": "Resolver answers within the budget",
+            "decided_by": "owner@baidu.com", "evidence": ["icafe://BGW-1#comment-1"],
+        }]
+
+        self.assertEqual(validate_named_schema(bare, "requirement-snapshot"), [])
+        self.assertEqual(validate_named_schema(delta, "decision-log"), [])
+
+        duplicate = copy.deepcopy(delta)
+        duplicate["acceptance_delta"].append(copy.deepcopy(duplicate["acceptance_delta"][0]))
+        blank = copy.deepcopy(delta)
+        blank["acceptance_delta"][0]["id"] = " "
+        for value, expected in (
+            (duplicate, ("acceptance_delta[1].id", "duplicate")),
+            (blank, ("acceptance_delta[0].id", "invalid")),
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(
+                    expected,
+                    [(issue.path, issue.kind) for issue in validate_named_schema(value, "decision-log")],
+                )
+
     def test_dag_plan_review_diagnosis_and_ipipe_reject_semantic_contradictions(self):
         dag = specialized_examples()["task-dag"]
         dag["nodes"].append(copy.deepcopy(dag["nodes"][0]))

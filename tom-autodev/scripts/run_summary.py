@@ -40,11 +40,12 @@ class RunSummary:
         if not events: return {"ok": False, "reason_code": "RUN_NOT_FOUND", "run_id": run_id}
         approvals, receipts = self.approvals.for_run(run_id), self.state.external_results(run_id)
         artifacts = [item for item in self.artifacts.artifacts_for_run(run_id) if item.get("kind") not in _SUMMARY_EXCLUDED_KINDS]
-        terminal, failures = events[-1]["state"], self._failure_groups(events, receipts)
+        pending = self.state.pending_intents(run_id)
+        terminal, failures = events[-1]["state"], self._failure_groups(events, receipts, pending)
         timeout = any(row.get("effective_decision") == "TIMEOUT" for row in approvals)
         outcome = "TIMEOUT" if timeout else ("SUCCESS" if terminal == "RELEASE_SUCCESS" else ("FAILED" if failures or terminal in {"STOPPED", "DIAGNOSE"} else "IN_PROGRESS"))
         value = {"run_id": run_id, "schema_version": "1", "terminal_state": terminal, "outcome": outcome,
-            "metrics": {"event_count": len(events), "artifact_count": len(artifacts), "valid_artifact_count": sum(bool(x.get("valid")) for x in artifacts), "external_receipt_count": len(receipts)},
+            "metrics": {"event_count": len(events), "artifact_count": len(artifacts), "valid_artifact_count": sum(bool(x.get("valid")) for x in artifacts), "external_receipt_count": len(receipts), "unreconciled_intent_count": len(pending)},
             "approval_metrics": {"approved": sum(x.get("effective_decision") == "APPROVE" for x in approvals), "rejected": sum(x.get("effective_decision") == "REJECT" for x in approvals), "pending": sum(x.get("effective_decision") is None for x in approvals), "timed_out": sum(x.get("effective_decision") == "TIMEOUT" for x in approvals)},
             "failure_groups": failures, "collaboration_receipt_count": sum(x["intent"]["operation"].startswith(("collaboration.", "infoflow.group.")) for x in receipts), "pipeline_evidence_count": sum(x["intent"]["operation"].startswith("ipipe.") for x in receipts),
             "artifact_integrity_failures": [{"artifact_id": x.get("artifact_id"), "reason_code": x.get("reason_code")} for x in artifacts if not x.get("valid")]}
@@ -210,7 +211,7 @@ class RunSummary:
         self.state.mark_optimization_result_archive_pending(proposal["proposal_id"], result)
         return {**result, "ok": False, "reason_code": "G10_RESULT_ARCHIVE_PENDING"}
 
-    def _failure_groups(self, events: list[dict[str, Any]], receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _failure_groups(self, events: list[dict[str, Any]], receipts: list[dict[str, Any]], pending: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         groups: dict[str, dict[str, Any]] = {}
         for event in events:
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}; evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else payload
@@ -219,6 +220,13 @@ class RunSummary:
         for item in receipts:
             response = item["receipt"].get("response")
             if isinstance(response, dict) and response.get("ok") is False: self._add_failure(groups, response.get("failure_signature"), response.get("reason_code"), response.get("message"))
+        # A remote step that fails its read-back verification writes no receipt on
+        # purpose, so recovery can still query it, and it never reaches a state event
+        # either. Counting the open intents is the only way those failures appear here
+        # at all: without them the summary hides precisely the failures that stalled
+        # the run, and G10 gets evidence that says the run was clean.
+        for item in pending or []:
+            self._add_failure(groups, f"UNRECONCILED_INTENT:{item['operation']}", "EXTERNAL_INTENT_UNRECONCILED", item["intent_id"])
         return sorted(groups.values(), key=lambda x: x["signature"])
 
     def _add_failure(self, groups: dict[str, dict[str, Any]], signature: Any, reason: Any, message: Any) -> None:

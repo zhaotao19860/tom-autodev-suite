@@ -32,6 +32,24 @@ class InfoflowApprovalClient:
             raise ValueError("APPROVAL_REQUEST_RESPONSE_INVALID")
         return result
 
+    def reconcile(self, request: dict[str, Any]) -> ApprovalGatewayResult | None:
+        """A failed request may still have been delivered; only the transport knows.
+
+        Without this the controller has to treat every transient delivery error as
+        QUERY_REQUIRED and the gate wedges, because a replayed request could otherwise
+        notify the approvers twice.
+        """
+        gateway_request = _gateway_request(request)
+        if gateway_request is None or not hasattr(self.transport, "reconcile"):
+            return None
+        response = self.transport.reconcile(gateway_request)
+        if not isinstance(response, dict):
+            return None
+        result = parse_gateway_result(_public_response(response))
+        if result is None or not gateway_result_matches_request(result, gateway_request):
+            return None
+        return result
+
     def wait(self, request_id: str, timeout_seconds: float) -> ApprovalGatewayResult:
         if not isinstance(request_id, str) or not request_id or timeout_seconds < 0:
             raise ValueError("APPROVAL_WAIT_INVALID")

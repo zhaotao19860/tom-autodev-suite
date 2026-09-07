@@ -1095,7 +1095,7 @@ class KuClientTests(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertEqual(sum(call[0][1] == "publish-doc" for call in transport.calls), 1)
 
-    def test_index_marker_without_exact_single_entry_is_a_conflict(self):
+    def test_duplicated_index_marker_is_a_conflict(self):
         entry = {
             "title": "01-spec",
             "doc_id": "child-1",
@@ -1107,7 +1107,7 @@ class KuClientTests(unittest.TestCase):
             client = KuClient(
                 transport=FakeTransport(
                     [
-                        ku_content("root-1", f"# Run index\n{marker}"),
+                        ku_content("root-1", f"# Run index\n{marker}\n{marker}"),
                         ku_version("root-1", 7, 0),
                     ]
                 ),
@@ -1199,6 +1199,30 @@ class KuClientTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "KU_IMMUTABLE_CONFLICT")
         self.assertEqual(len(transport.calls), 3)
 
+    def test_unpropagated_read_back_is_unsettled_not_an_immutable_conflict(self):
+        """A create that landed must never be reported as "nothing was written"."""
+        if KuClient is None:
+            self.fail("KuClient is not implemented")
+        transport = FakeTransport(
+            [
+                ku_repo(ku_repo_document("child-1", "01-spec")),
+                ku_content("child-1", "# 01-spec"),
+                ku_version("child-1", 1, 0),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            client = KuClient(
+                transport=transport,
+                state_store=StateStore(Path(directory) / "state.sqlite"),
+                run_id="run-unsettled",
+                repo_id="repo-1",
+                username="tester",
+            )
+
+            result = client.create_artifact("root-1", "01-spec", "new content")
+
+        self.assertEqual(result["reason_code"], "KU_CHILD_CONTENT_UNSETTLED")
+
     def test_root_index_uses_exact_mdsl_append_then_publishes_and_verifies(self):
         if KuClient is None:
             self.fail("KuClient is not implemented")
@@ -1216,8 +1240,9 @@ class KuClientTests(unittest.TestCase):
                     ku_content("root-1", "# Run index"),
                     ku_version("root-1", 7, 0),
                     {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
-                    ku_content("root-1", f"# Run index\n\n{indexed}"),
-                    ku_version("root-1", 8, 4),
+                    # The mdsl edit lands in a draft, so the published text is unchanged.
+                    ku_content("root-1", "# Run index"),
+                    ku_version("root-1", 8, 0),
                     {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
                     ku_content("root-1", f"# Run index\n\n{indexed}"),
                     ku_version("root-1", 9, 0),
@@ -1348,7 +1373,80 @@ class KuClientTests(unittest.TestCase):
             pending = state.pending_intents("run-publish-fail")
 
         self.assertEqual(result["reason_code"], "QUERY_REQUIRED")
-        self.assertEqual([item["operation"] for item in pending], ["ku.document.publish"])
+        # An mdsl edit is only observable once published, so an unpublished edit stays
+        # claimed too: the retry publishes and then receipts both.
+        self.assertEqual(
+            [item["operation"] for item in pending],
+            ["ku.index.edit", "ku.document.publish"],
+        )
+
+    def test_an_edit_made_after_a_publish_receipt_is_still_flushed(self):
+        if KuClient is None:
+            self.fail("KuClient is not implemented")
+        first_entry = {
+            "title": "01-spec",
+            "doc_id": "child-1",
+            "url": ku_url("child-1"),
+            "content_hash": "a" * 64,
+        }
+        second_entry = {
+            "title": "02-tasks",
+            "doc_id": "child-2",
+            "url": ku_url("child-2"),
+            "content_hash": "b" * 64,
+        }
+        one = KuClient.index_entry_markdown("root-1", first_entry)
+        two = KuClient.index_entry_markdown("root-1", second_entry)
+        after_one = f"# Run index\n\n{one}"
+        after_two = f"# Run index\n\n{one}\n\n{two}"
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+
+            def client_for(responses):
+                return KuClient(
+                    transport=FakeTransport(responses),
+                    state_store=state,
+                    run_id="run-reflush",
+                    repo_id="repo-1",
+                    username="tester",
+                )
+
+            # The first entry lands and its publish is receipted against the preview
+            # text that now carries it.
+            first = client_for(
+                [
+                    ku_content("root-1", "# Run index"),
+                    ku_version("root-1", 7, 0),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", after_one),
+                    ku_version("root-1", 8, 0),
+                ]
+            )
+            self.assertTrue(first.update_index("root-1", first_entry)["ok"])
+
+            # The second edit sits in KU's edit state, so the preview text — and with it
+            # the publish key — is unchanged. The receipt from the first entry must not
+            # be read as "nothing left to publish".
+            second = client_for(
+                [
+                    ku_content("root-1", after_one),
+                    ku_version("root-1", 8, 0),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", after_one),
+                    ku_version("root-1", 8, 4),
+                    ku_content("root-1", after_one),
+                    ku_version("root-1", 8, 4),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", after_two),
+                    ku_version("root-1", 9, 0),
+                ]
+            )
+            result = second.update_index("root-1", second_entry)
+            pending = state.pending_intents("run-reflush")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["version"], "9")
+        self.assertEqual(pending, [])
 
     def test_publish_receipt_is_withheld_when_latest_version_is_still_a_draft(self):
         if KuClient is None:
@@ -1385,7 +1483,10 @@ class KuClientTests(unittest.TestCase):
             pending = state.pending_intents("run-draft")
 
         self.assertEqual(result["reason_code"], "KU_PUBLISH_VERIFICATION_FAILED")
-        self.assertEqual([item["operation"] for item in pending], ["ku.document.publish"])
+        self.assertEqual(
+            [item["operation"] for item in pending],
+            ["ku.index.edit", "ku.document.publish"],
+        )
 
 
 class IcodeClientTests(unittest.TestCase):

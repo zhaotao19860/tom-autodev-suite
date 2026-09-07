@@ -120,7 +120,38 @@ def _not_ready(profile: Any, missing: list[str], invalid: list[str]) -> dict[str
 
 
 def _semantic_invalid_paths(profile: dict[str, Any]) -> list[str]:
-    return []
+    """Rules the schema cannot state: a registered pipeline must name a real repo.
+
+    `pipelines` is what makes a cross-repository requirement verifiable — one entry
+    per module, so IPIPE can tell which build belongs to which repo. A module the
+    profile never registers, or two entries claiming the same module, leaves that
+    mapping ambiguous, which is worse than having no entry at all.
+    """
+    invalid: list[str] = []
+    pipeline = profile.get("pipeline_profile")
+    entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
+    if not isinstance(entries, list):
+        return invalid
+    known = {
+        repo.get("module")
+        for repo in list(profile.get("business_repos") or []) + [profile.get("test_repo")]
+        if isinstance(repo, dict) and isinstance(repo.get("module"), str)
+    }
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            continue
+        module = entry.get("module")
+        if module not in known or module in seen:
+            invalid.append(f"pipeline_profile.pipelines[{index}].module")
+        else:
+            seen.add(module)
+    if entries and not any(
+        isinstance(entry, dict) and entry.get("required_for_release") for entry in entries
+    ):
+        # A release nobody is required to pass cannot ever be decided.
+        invalid.append("pipeline_profile.pipelines.required_for_release")
+    return invalid
 
 
 def _semantic_missing_paths(profile: dict[str, Any]) -> list[str]:

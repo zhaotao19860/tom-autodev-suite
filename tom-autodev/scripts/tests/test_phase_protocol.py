@@ -368,6 +368,63 @@ class PhaseProtocolTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "PHASE_COMPLETION_FAILED")
 
 
+class PhaseTitleTests(unittest.TestCase):
+    """A re-entered phase must not reuse the KU title its predecessor already holds."""
+
+    def test_a_second_attempt_at_a_phase_gets_its_own_title(self):
+        from phase_protocol import _phase_attempt, _phase_title
+
+        events = [
+            {"state": "TASKS", "payload": {"task_id": None}},
+            {"state": "WORKSPACE", "payload": {"task_id": "T1"}},
+            {"state": "TASKS", "payload": {"task_id": None}},
+        ]
+        action = {"phase": "TASKS", "task_id": None}
+
+        attempt = _phase_attempt(events, "TASKS", None)
+
+        self.assertEqual(attempt, 2)
+        self.assertEqual(_phase_title(action, 1), "03-tasks")
+        self.assertEqual(_phase_title(action, attempt), "03-tasks-r2")
+
+    def test_a_second_task_is_not_read_as_a_second_attempt(self):
+        from phase_protocol import _phase_attempt, _phase_title
+
+        events = [
+            {"state": "PLAN", "payload": {"task_id": "T1"}},
+            {"state": "PLAN", "payload": {"task_id": "T2"}},
+        ]
+        action = {"phase": "PLAN", "task_id": "T2"}
+
+        attempt = _phase_attempt(events, "PLAN", "T2")
+
+        self.assertEqual(attempt, 1)
+        self.assertEqual(_phase_title(action, attempt), "04-task-plan/T2")
+
+    def test_a_repair_reentry_into_a_run_scoped_phase_gets_its_own_title(self):
+        """A repair re-enters SPEC carrying the diagnosis' task_id.
+
+        The first SPEC entry is run scoped and records task_id None, so counting the
+        re-entry per task would return 1 and hand it "02-spec", the title the first
+        entry already published. KU refuses that as immutable and the repair loop
+        cannot publish its amended Spec at all.
+        """
+        from phase_protocol import _phase_attempt, _phase_title
+
+        events = [
+            {"state": "SPEC", "payload": {"task_id": None}},
+            {"state": "REVIEW", "payload": {"task_id": "T1"}},
+            {"state": "DIAGNOSE", "payload": {"task_id": "T1"}},
+            {"state": "SPEC", "payload": {"task_id": "T1"}},
+        ]
+        action = {"phase": "SPEC", "task_id": "T1"}
+
+        attempt = _phase_attempt(events, "SPEC", "T1")
+
+        self.assertEqual(attempt, 2)
+        self.assertEqual(_phase_title(action, attempt), "02-spec-r2")
+
+
 class OrchestratorPhaseProtocolTests(unittest.TestCase):
     def test_orchestrator_constructs_protocol_with_shared_control_plane_stores(self):
         with tempfile.TemporaryDirectory() as directory:

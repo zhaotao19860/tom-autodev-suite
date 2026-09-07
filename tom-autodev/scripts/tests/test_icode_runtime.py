@@ -203,6 +203,33 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(stale["reason_code"], "WORKTREE_NOT_OWNED")
         self.assertEqual(after, before)
 
+    def test_preflight_accepts_a_worktree_carrying_the_change_set_commit(self):
+        """A change set sits on top of its baseline, so HEAD moving ahead is normal.
+
+        Both the ownership query and preflight used to require HEAD to equal the
+        recorded baseline, which modelled a checkout nobody had worked in and so
+        rejected every real submission.
+        """
+        baseline = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        (self.repo / "change.txt").write_text("submitted work\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "user.name=t",
+             "-c", "user.email=t@example.test", "commit", "-q", "-m", "change set"],
+            check=True,
+        )
+        head = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        result = self.runtime().preflight(self.repo)
+
+        self.assertNotEqual(head, baseline)
+        self.assertEqual(result["reason_code"], "OK")
+        self.assertEqual(result["revision"], head)
+
     def test_preflight_active_ownership_is_query_only_and_never_calls_reconcile(self):
         before = self.preflight_snapshot()
         with patch.object(

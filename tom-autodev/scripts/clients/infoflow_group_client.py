@@ -1,19 +1,21 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from cli_transport import CliTransport
+from clients.infoflow_bot_client import InfoflowBotClient
 
 
 class InfoflowGroupClient:
-    """Thin, injectable boundary around the installed Infoflow group scripts."""
+    """Collaboration group operations, performed by the bot through its gateway.
 
-    def __init__(self, transport: Any | None = None, script_root: Path | str | None = None):
-        self.transport = transport or CliTransport()
-        self.script_root = Path(
-            script_root or Path.home() / ".comate" / "skills" / "infoflow-message-group" / "scripts"
-        )
+    The `infoflow-message-group` scripts need `INFOFLOW_TOKEN` exported into their
+    environment, and the CLI boundary here deliberately refuses to carry secrets
+    (`CLI_ENVIRONMENT_SECRET_REJECTED`), so group writes go through the same
+    localhost gateway that already owns the bot credentials for approvals.
+    """
+
+    def __init__(self, bot_client: Any | None = None):
+        self.bot = bot_client or InfoflowBotClient()
 
     def create_or_reuse(self, group_request: dict[str, Any]) -> dict[str, Any]:
         group_name = _required(group_request, "group_name")
@@ -21,21 +23,20 @@ class InfoflowGroupClient:
         members = group_request.get("member_snapshot")
         if not isinstance(members, list) or not members:
             raise ValueError("GROUP_MEMBERS_INVALID")
-        normalized_members = [_email(member) for member in members]
         if group_request.get("friendlyLevel") != 3:
             raise ValueError("GROUP_FRIENDLY_LEVEL_INVALID")
-
-        self.transport.run([str(self.script_root / "setup.sh"), "--check"], expect_json=False)
-        response = self.transport.run(
-            [
-                str(self.script_root / "group_create.sh"),
-                group_name,
-                owner,
-                ",".join(normalized_members),
-                "3",
-            ]
+        receipt = self.bot.create_group(
+            {
+                "group_name": group_name,
+                "owner": owner,
+                "members": [_email(member) for member in members],
+                "friendly_level": 3,
+            }
         )
-        return _group_receipt(response, group_name)
+        result = {"group_id": receipt["group_id"], "group_name": group_name}
+        if isinstance(receipt.get("bot_id"), str) and receipt["bot_id"]:
+            result["bot_id"] = receipt["bot_id"]
+        return result
 
     def send_markdown(
         self, group_id: str, content: str, at_users: list[str], idempotency_key: str
@@ -50,23 +51,19 @@ class InfoflowGroupClient:
         for recipient in recipients:
             if f"@{recipient}" not in content:
                 raise ValueError("MESSAGE_MENTION_MISMATCH")
-        response = self.transport.run(
-            [
-                str(self.script_root / "msg_send_group.sh"),
-                group_id,
-                "MD",
-                content,
-                ",".join(recipients),
-            ]
-        )
-        return _message_receipt(response, group_id, idempotency_key)
+        receipt = self.bot.send_group_markdown(group_id, content, recipients)
+        return {
+            "message_id": receipt["message_id"],
+            "group_id": group_id,
+            "idempotency_key": idempotency_key,
+        }
 
     def reconcile_group(self, group_request: dict[str, Any]) -> dict[str, Any] | None:
-        """The group scripts have no lookup-by-client-key API, so never replay a pending create."""
+        """Infoflow exposes no lookup by group name, so never replay a pending create."""
         return None
 
     def reconcile_message(self, group_id: str, idempotency_key: str) -> dict[str, Any] | None:
-        """The group scripts have no lookup-by-client-key API, so never replay a pending send."""
+        """Infoflow exposes no lookup by client key, so never replay a pending send."""
         return None
 
 
@@ -84,29 +81,3 @@ def _email(value: Any) -> str:
     if not local or not domain or "." not in domain or any(char.isspace() for char in value):
         raise ValueError("MEMBER_CONFIRMATION_REQUIRED")
     return value
-
-
-def _group_receipt(response: dict[str, Any], group_name: str) -> dict[str, Any]:
-    data = response.get("data") if isinstance(response, dict) else None
-    source = data if isinstance(data, dict) else response
-    group_id = source.get("groupId") or source.get("group_id") or source.get("chatId")
-    if group_id is None:
-        raise ValueError("GROUP_CREATE_RESPONSE_INVALID")
-    result = {"group_id": str(group_id), "group_name": group_name}
-    bot_id = source.get("botId") or source.get("bot_id")
-    if bot_id is not None:
-        result["bot_id"] = str(bot_id)
-    return result
-
-
-def _message_receipt(response: dict[str, Any], group_id: str, idempotency_key: str) -> dict[str, Any]:
-    data = response.get("data") if isinstance(response, dict) else None
-    source = data if isinstance(data, dict) else response
-    message_id = source.get("messageId") or source.get("msgId") or source.get("message_id")
-    if message_id is None:
-        raise ValueError("MESSAGE_RESPONSE_INVALID")
-    return {
-        "message_id": str(message_id),
-        "group_id": group_id,
-        "idempotency_key": idempotency_key,
-    }

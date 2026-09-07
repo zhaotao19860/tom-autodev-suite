@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from approval_contract import (
+    STRICT_APPROVAL_TIMEOUT_SECONDS,
     gateway_result_matches_request,
     is_clean_initial_pending_result,
     parse_gateway_result,
@@ -17,11 +18,12 @@ from artifact_store import ArtifactStore
 from collaboration import (
     CollaborationSession,
     build_collaboration_binding,
+    group_id_for_run,
     intake_input_hash,
 )
 from evidence_gate import EvidenceGate
 from evidence_policy import requirement_for
-from knowledge_sync import KnowledgeSync
+from knowledge_sync import KnowledgeSync, project_ku_target
 from phase_protocol import PhaseProtocol
 from project_registry import load_profile, profile_path
 from requirement_snapshot import validation_error as snapshot_validation_error
@@ -32,6 +34,13 @@ from workspace_manager import WorkspaceManager
 
 
 _PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+
+
+def _pinned_profile_hash(orchestrator: Any, run_id: str, events: list[dict[str, Any]]) -> Any:
+    """The hash this run is pinned to, honouring an approved re-pin over INTAKE's."""
+    from profile_repin import pinned_hash, record
+
+    return pinned_hash(events, record(orchestrator, run_id))
 
 
 class Orchestrator:
@@ -139,7 +148,17 @@ class Orchestrator:
         sync = knowledge_sync if knowledge_sync is not None else self.knowledge_sync(run_id)
         if isinstance(sync, dict):
             return sync
-        return self.phase_protocol(sync).complete(run_id, envelope)
+        result = self.phase_protocol(sync).complete(run_id, envelope)
+        # A passed Review is the last moment the reviewed bytes are still identifiable, so
+        # the submit descriptor is built here rather than at SUBMIT: it pins the commit the
+        # review actually saw. Without it the iCode boundary rejects every submission with
+        # CHANGE_SET_REVIEW_REQUIRED.
+        if result.get("phase_complete") and result.get("phase") == "REVIEW":
+            from submit_descriptor import build_and_archive
+
+            descriptor = build_and_archive(self, run_id, result.get("task_id"))
+            result = {**result, "submit_descriptor": descriptor}
+        return result
 
     def optimize(
         self,
@@ -363,19 +382,14 @@ class Orchestrator:
         pinned = self._runtime_profile(run_id)
         if not isinstance(intake, dict) or not pinned.get("ok"):
             return {"ok": False, "reason_code": "KNOWLEDGE_SYNC_MISMATCH", "run_id": run_id}
-        ku = next(
-            (
-                item for item in pinned["profile"].get("knowledge_sources", [])
-                if isinstance(item, dict) and item.get("provider") == "ku"
-            ),
-            {},
-        )
+        ku_target = project_ku_target(pinned["profile"])
         if (
-            not isinstance(sync, KnowledgeSync)
+            ku_target is None
+            or not isinstance(sync, KnowledgeSync)
             or sync.state is not self.state
             or sync.run_id != run_id
             or sync.card_id != intake.get("requirement_id")
-            or sync.project_parent_doc_id != ku.get("parent_doc_id")
+            or sync.project_parent_doc_id != ku_target[1]
             or sync.parent_doc_id is not None
         ):
             return {"ok": False, "reason_code": "KNOWLEDGE_SYNC_MISMATCH", "run_id": run_id}
@@ -831,6 +845,26 @@ class Orchestrator:
             **options,
         )
 
+    def ai_review_runtime(self, run_id: str, **options: Any) -> Any:
+        """The platform's own review (小码哥), bound to this run's ledger.
+
+        Separate from `icode_runtime` on purpose: this boundary writes no code and
+        needs no approval, but its conversation id is unrecoverable once lost, so it
+        owns an intent of its own rather than riding on the submission's.
+        """
+        if self.status(run_id)["state"] == "RUN_NOT_FOUND":
+            return {"ok": False, "reason_code": "RUN_NOT_FOUND", "run_id": run_id}
+        if set(options) & {"state_store", "run_id"}:
+            return {"ok": False, "reason_code": "RUNTIME_OPTION_FORBIDDEN", "run_id": run_id}
+        from clients.icode_ai_review import IcodeAiReview
+
+        return IcodeAiReview(
+            state_store=self.state,
+            artifact_store=self.artifacts,
+            run_id=run_id,
+            **options,
+        )
+
     def submit_to_ipipe(
         self,
         run_id: str,
@@ -944,6 +978,22 @@ class Orchestrator:
             "change_set_id": change_set_id,
             "revision_set_id": revision_set_id,
         })
+        # A requirement that spans repositories has one reviewed change set per
+        # repository, and every one of them has to reach iCode before the pipelines
+        # are asked anything: a build over half the change is not evidence about the
+        # change. So the transition waits for the last submission instead of firing on
+        # the first, and the submissions in between are recorded and replayable.
+        outstanding = _outstanding_submissions(self, run_id)
+        if outstanding:
+            recorded = {
+                "ok": True, "reason_code": "SUBMISSION_RECORDED", "run_id": run_id,
+                "state": "SUBMIT",
+                "submission_artifact_id": submission["artifact_id"],
+                "submission_hash": submission["sha256"],
+                "outstanding_tasks": outstanding,
+            }
+            self.state.save_idempotency_result(result_key, recorded)
+            return recorded
         gate_context = self._ledger_backed_evidence(run_id, "SUBMIT", "IPIPE", {
             "input_hash": input_hash,
             "approval_id": approval_id,
@@ -955,15 +1005,21 @@ class Orchestrator:
         transition = self.transition_policy.validate("SUBMIT", "IPIPE")
         if not transition.get("allowed"):
             return {"run_id": run_id, "state": "SUBMIT", **transition, "ok": False}
+        submissions = _recorded_submissions(self, run_id)
+        primary = _primary_submission(profile, submissions, controller_binding, submission)
         payload = {
             "previous_state": "SUBMIT",
             "requirement_id": intake["requirement_id"],
             "project": intake["project"],
             "profile_path": intake["profile_path"],
             "profile_hash": intake["profile_hash"],
-            **controller_binding,
-            "submission_artifact_id": submission["artifact_id"],
-            "submission_hash": submission["sha256"],
+            # The single-pipeline IPIPE checks still read these, so they name the
+            # primary business repository rather than whichever submission happened to
+            # be last; `submissions` carries the rest for the per-module checks.
+            **primary["controller_binding"],
+            "submission_artifact_id": primary["artifact_id"],
+            "submission_hash": primary["sha256"],
+            "submissions": submissions,
             "approval_id": approval_id,
             "approval_input_hash": input_hash,
             "policy_decision": transition,
@@ -977,8 +1033,9 @@ class Orchestrator:
             {
                 "ok": True,
                 "reason_code": "OK",
-                "submission_artifact_id": submission["artifact_id"],
-                "submission_hash": submission["sha256"],
+                "submission_artifact_id": primary["artifact_id"],
+                "submission_hash": primary["sha256"],
+                "submissions": submissions,
             },
         )
         if committed.get("status") in {"COMMITTED", "REPLAY"}:
@@ -1013,7 +1070,7 @@ class Orchestrator:
         if not isinstance(intake, dict):
             return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
         recorded_path = intake.get("profile_path")
-        recorded_hash = intake.get("profile_hash")
+        recorded_hash = _pinned_profile_hash(self, run_id, events)
         recorded_project = intake.get("project")
         if not all(isinstance(value, str) and value for value in (recorded_path, recorded_hash, recorded_project)):
             return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
@@ -1205,6 +1262,51 @@ class Orchestrator:
             )
         return self.approvals.receive(approval_id, decision, input_hash, "infoflow", response.get("responder"), run_id=run_id, state_store=self.state)
 
+    def reissue_infoflow_approval(
+        self,
+        run_id: str,
+        action: str,
+        input_hash: str,
+        *,
+        member_policy: dict[str, list[str]],
+        evidence: dict[str, Any] | None = None,
+        infoflow_client: Any,
+        comate_client: Any | None = None,
+    ) -> dict[str, Any]:
+        """Open a fresh attempt at a timed-out gate, bound to the same input hash.
+
+        A timed-out approval is terminal in the ledger and its row is unique per
+        `(run_id, action, input_hash)`, so recovery cannot reuse it. The retry keeps
+        the bound content and only takes a new action name, which leaves the expired
+        attempt in the audit trail instead of overwriting it.
+        """
+        from approval_delivery import ComateApprovalClient
+
+        attempts = [
+            approval
+            for approval in self.approvals.for_run(run_id)
+            if approval["input_hash"] == input_hash
+            and str(approval["action"]).split("#retry-")[0] == action
+        ]
+        if not attempts:
+            return {"run_id": run_id, "reason_code": "APPROVAL_NOT_FOUND"}
+        if attempts[-1].get("effective_decision") != "TIMEOUT":
+            return {
+                "run_id": run_id,
+                "approval_id": attempts[-1]["approval_id"],
+                "reason_code": "APPROVAL_NOT_TIMED_OUT",
+            }
+        retry = sum(1 for approval in attempts if "#retry-" in str(approval["action"])) + 1
+        return self.request_infoflow_approval(
+            run_id,
+            f"{action}#retry-{retry}",
+            input_hash,
+            member_policy=member_policy,
+            evidence=evidence,
+            comate_client=comate_client or ComateApprovalClient(),
+            infoflow_client=infoflow_client,
+        )
+
     def heartbeat_infoflow_approval(self, run_id: str, approval_id: str, observed_at: str) -> dict[str, Any]:
         approval = self.approvals.get(approval_id)
         if approval is None or approval.get("run_id") != run_id or approval.get("run_id") == "legacy":
@@ -1265,23 +1367,20 @@ def _collaboration_binding(
     )
 
 
-def _with_ku_acceptance(
-    snapshot: Any, project: str, config_root: Any = None
-) -> Any:
-    """Fill an empty iCafe acceptance list from the configured KU requirement doc.
+def _ku_acceptance_candidates(project: str, config_root: Any = None) -> dict[str, Any]:
+    """Read acceptance criteria out of the configured KU requirement doc as candidates.
 
-    Some spaces keep acceptance criteria in the KU analysis document instead of an iCafe
-    property. Provenance is recorded in `acceptance_source` so a later gate can tell
-    KU-sourced acceptance apart from acceptance the card itself declared.
+    Advisory only. The snapshot is never rewritten, so these must be confirmed with the
+    requirement owner and recorded by `tom-grill` in `acceptance_delta`; `source` belongs
+    in each delta entry's evidence. Deliberately not part of any phase action identity: a
+    live document fetch must not make `action_id` or an approval `input_hash` unstable.
     """
-    if not isinstance(snapshot, dict) or snapshot.get("acceptance"):
-        return snapshot
-    from clients.ku_client import KuClient
+    from clients.ku_client import KuClient, resolve_username
     from project_registry import load_profile, profile_path
 
     loaded = load_profile(profile_path(project, config_root))
     if not loaded.get("ready"):
-        return snapshot
+        return {"ok": False, "reason_code": "PROJECT_NOT_READY", "project": project}
     ku_sources = sorted(
         (
             item
@@ -1291,24 +1390,22 @@ def _with_ku_acceptance(
         key=lambda item: item.get("priority", 0),
     )
     if not ku_sources:
-        return snapshot
+        return {"ok": False, "reason_code": "KU_SOURCE_NOT_CONFIGURED", "project": project}
+    repo_paths = [
+        repo["path"]
+        for repo in loaded["profile"].get("business_repos", [])
+        if isinstance(repo, dict) and repo.get("path")
+    ]
+    username = resolve_username(repo_paths)
+    if not username:
+        # Without an identity the CLI answers every query with `开放应用不存在`, which
+        # would otherwise look like a missing document.
+        return {"ok": False, "reason_code": "KU_USERNAME_REQUIRED", "project": project}
     source = ku_sources[0]
-    found = KuClient(repo_id=source["repo_id"]).requirement_acceptance(
+    found = KuClient(repo_id=source["repo_id"], username=username).requirement_acceptance(
         source["parent_doc_id"]
     )
-    if not found.get("ok"):
-        return snapshot
-    from requirement_snapshot import content_hash as requirement_snapshot_hash
-
-    augmented = {
-        **snapshot,
-        "acceptance": found["acceptance"],
-        "acceptance_source": found["source"],
-    }
-    # The hash covers the acceptance and its provenance, so the run is invalidated when
-    # either the card or the KU analysis document changes.
-    augmented["content_hash"] = requirement_snapshot_hash(augmented)
-    return augmented
+    return {**found, "project": project, "confirmation_required": True}
 
 
 def _runtime_failure_category(reason_code: str, classification: Any = None) -> str:
@@ -1382,6 +1479,104 @@ def _is_runtime_failure(reason_code: str) -> bool:
     )
 
 
+def _reviewed_tasks(orchestrator: Any, run_id: str) -> list[str]:
+    """Tasks whose Review passed, i.e. the change sets this run owes iCode."""
+    from phase_protocol import _passing_review
+
+    found: dict[str, None] = {}
+    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+        if artifact.get("kind") != "change-set":
+            continue
+        metadata = artifact.get("metadata") or {}
+        task_id = metadata.get("task_id")
+        if metadata.get("verdict") == "PASS" and isinstance(task_id, str) and task_id:
+            found.setdefault(task_id, None)
+    if found:
+        return sorted(found)
+    # No descriptor archived yet: fall back to the reviews themselves, so a run that
+    # predates the descriptor step is not mistaken for having nothing to submit.
+    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+        envelope = artifact.get("envelope")
+        if not isinstance(envelope, dict) or envelope.get("phase") != "REVIEW":
+            continue
+        task_id = envelope.get("task_id")
+        if isinstance(task_id, str) and task_id and _passing_review(envelope.get("content") or {}):
+            found.setdefault(task_id, None)
+    return sorted(found)
+
+
+def _recorded_submissions(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
+    """The submissions already landed, in a stable order for the IPIPE payload."""
+    submissions = []
+    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+        if artifact.get("kind") != "submission":
+            continue
+        metadata = artifact.get("metadata") or {}
+        binding = metadata.get("controller_binding")
+        submissions.append({
+            "artifact_id": artifact.get("artifact_id"),
+            "sha256": artifact.get("sha256"),
+            "change_set_id": metadata.get("change_set_id"),
+            "revision_set_id": metadata.get("revision_set_id"),
+            "controller_binding": binding if isinstance(binding, dict) else {},
+        })
+    return sorted(submissions, key=lambda item: str(item.get("change_set_id") or ""))
+
+
+def _outstanding_submissions(orchestrator: Any, run_id: str) -> list[str]:
+    """Reviewed tasks that have not reached iCode yet.
+
+    A submission records the change set it carried, and the descriptor records which
+    task that change set belongs to, so the two are joined through `change_set_id`.
+    A run with no descriptors at all cannot be judged this way — it predates the
+    descriptor step — and is left with the original behaviour of transitioning on its
+    first submission rather than being deadlocked by a rule it cannot satisfy.
+    """
+    task_by_change_set: dict[str, str] = {}
+    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+        if artifact.get("kind") != "change-set":
+            continue
+        metadata = artifact.get("metadata") or {}
+        task_id = metadata.get("task_id")
+        try:
+            change_set_id = json.loads(artifact["content"].decode("utf-8"))["change_set_id"]
+        except (AttributeError, KeyError, ValueError, UnicodeDecodeError):
+            continue
+        if metadata.get("verdict") == "PASS" and isinstance(task_id, str) and task_id:
+            task_by_change_set[str(change_set_id)] = task_id
+    if not task_by_change_set:
+        return []
+    submitted = {
+        task_by_change_set.get(str(item.get("change_set_id")))
+        for item in _recorded_submissions(orchestrator, run_id)
+    }
+    return sorted(set(_reviewed_tasks(orchestrator, run_id)) - {task for task in submitted if task})
+
+
+def _primary_submission(
+    profile: dict[str, Any],
+    submissions: list[dict[str, Any]],
+    controller_binding: dict[str, Any],
+    submission: dict[str, Any],
+) -> dict[str, Any]:
+    """The submission the legacy single-pipeline payload should describe.
+
+    `business_repos[0]` is what `ipipe_runtime._context` and the IPIPE binding checks
+    already treat as the run's module, so naming it here keeps those checks meaningful
+    instead of pointing them at whichever repository was submitted last.
+    """
+    repos = profile.get("business_repos") or []
+    primary_module = repos[0].get("module") if repos and isinstance(repos[0], dict) else None
+    for item in submissions:
+        if item["controller_binding"].get("module") == primary_module:
+            return item
+    return {
+        "artifact_id": submission["artifact_id"],
+        "sha256": submission["sha256"],
+        "controller_binding": controller_binding,
+    }
+
+
 def _submission_controller_binding(
     profile: Any, receipt: Any, change_set: Any
 ) -> tuple[str | None, dict[str, Any]]:
@@ -1425,7 +1620,11 @@ def _submission_controller_binding(
     }
     if not all(isinstance(value, str) and value for value in source_revisions.values()):
         return "SOURCE_REVISION_REQUIRED", {}
-    pipeline_id = pipeline.get("pipeline_id")
+    # One pipeline per module: the binding has to pin the pipeline that will actually
+    # gate *this* module, or IPIPE evidence for it fails `SUBMISSION_BINDING_MISMATCH`.
+    from phase_protocol import _registered_pipeline
+
+    pipeline_id = _registered_pipeline(pipeline, receipt.get("module"))
     release_rule = pipeline.get("release_rule")
     if not all(isinstance(value, str) and value for value in (pipeline_id, release_rule)):
         return "PROJECT_NOT_READY", {}
@@ -1454,6 +1653,9 @@ def main(argv: list[str] | None = None) -> int:
 
     status = subparsers.add_parser("status")
     status.add_argument("run_id")
+    status.add_argument(
+        "--json", action="store_true", help="输出完整事件流 JSON，默认输出人可读的进度摘要"
+    )
 
     approve = subparsers.add_parser("approve")
     approve.add_argument("approval_id")
@@ -1487,6 +1689,57 @@ def main(argv: list[str] | None = None) -> int:
     preflight = subparsers.add_parser("preflight")
     preflight.add_argument("project")
 
+    candidates = subparsers.add_parser("acceptance-candidates")
+    candidates.add_argument("project")
+
+    request_approval = subparsers.add_parser("request-approval")
+    request_approval.add_argument("run_id")
+    request_approval.add_argument("action")
+    request_approval.add_argument("input_hash")
+    request_approval.add_argument(
+        "--content",
+        help="产物 JSON（阶段信封或其 content），用于在审批消息里说明本次批的是什么",
+    )
+
+    await_approval = subparsers.add_parser("await-approval")
+    await_approval.add_argument("run_id")
+    await_approval.add_argument("approval_id")
+    await_approval.add_argument("input_hash")
+
+    watch = subparsers.add_parser("watch-approvals")
+    watch.add_argument("--interval", type=float, default=10)
+    watch.add_argument("--once", action="store_true")
+
+    watch_ipipe = subparsers.add_parser("watch-ipipe")
+    watch_ipipe.add_argument("--interval", type=float, default=60)
+    watch_ipipe.add_argument("--once", action="store_true")
+
+    # Callable with no arguments so a session-stop hook can drive it: whoever stopped
+    # the IDE may never have run a phase, which is exactly when the notice was missing.
+    ide_turn = subparsers.add_parser("notify-ide-turn")
+    ide_turn.add_argument("--run-id", default=None)
+
+    ai_review = subparsers.add_parser("ai-review")
+    ai_review.add_argument("operation", choices=["start", "poll"])
+    ai_review.add_argument("run_id")
+    ai_review.add_argument("--change-number", type=int, default=None)
+    ai_review.add_argument("--revision", default=None)
+    ai_review.add_argument("--conversation-id", default=None)
+    ai_review.add_argument("--working-directory", default=".")
+    ai_review.add_argument("--poll-interval", type=float, default=30)
+    ai_review.add_argument("--max-polls", type=int, default=30)
+
+    reissue = subparsers.add_parser("reissue-approval")
+    reissue.add_argument("run_id")
+    reissue.add_argument("action")
+    reissue.add_argument("input_hash")
+
+    repin = subparsers.add_parser("repin-profile")
+    repin.add_argument("run_id")
+    repin.add_argument("previous", help="被钉住的那份 profile 的副本，用于给出改动 diff")
+    repin.add_argument("--request", action="store_true", help="开 PROFILE_REPIN 门")
+    repin.add_argument("--approval-id", help="省略则只给出待批的 input_hash，不落账")
+
     args = parser.parse_args(argv)
     orchestrator = Orchestrator(args.config_root)
     if args.command == "start":
@@ -1501,12 +1754,17 @@ def main(argv: list[str] | None = None) -> int:
                 "requirement_id": args.requirement_id,
             }
         else:
-            snapshot = _with_ku_acceptance(snapshot, args.project, args.config_root)
             result = orchestrator.start(
                 args.requirement_id, args.project, requirement_snapshot=snapshot
             )
     elif args.command == "status":
-        result = orchestrator.status(args.run_id)
+        if args.json:
+            result = orchestrator.status(args.run_id)
+        else:
+            from run_brief import build, render
+
+            print(render(build(orchestrator, args.run_id)))
+            return 0
     elif args.command == "approve":
         result = orchestrator.approve(args.approval_id, args.decision, args.input_hash, args.channel, args.run_id, args.responder)
     elif args.command == "resume":
@@ -1522,6 +1780,16 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(envelope, dict)
             else envelope
         )
+        # A landed phase parks the run until someone drives the next one from the IDE.
+        # Tell them in 如流, unless an approval card is already out asking the same
+        # person for the same move.
+        if isinstance(result, dict) and result.get("phase_complete"):
+            from approval_watch import notify_ide_turn
+
+            notice = notify_ide_turn(
+                orchestrator, args.run_id, _infoflow_notify_client(orchestrator)
+            )
+            result = {**result, "ide_turn_notice": notice.get("reason_code")}
     elif args.command == "optimize":
         options: dict[str, Any] = {}
         if args.operation == "propose":
@@ -1544,6 +1812,68 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = orchestrator.optimize(args.run_id, args.operation, **options)
+    elif args.command == "acceptance-candidates":
+        result = _ku_acceptance_candidates(args.project, args.config_root)
+    elif args.command == "request-approval":
+        result = _request_approval(
+            orchestrator, args.run_id, args.action, args.input_hash, args.content
+        )
+    elif args.command == "await-approval":
+        result = orchestrator.wait_infoflow_approval(
+            args.run_id,
+            args.approval_id,
+            args.input_hash,
+            _infoflow_approval_client(orchestrator),
+            STRICT_APPROVAL_TIMEOUT_SECONDS,
+        )
+    elif args.command == "watch-approvals":
+        result = _watch_approvals(orchestrator, args.interval, args.once)
+    elif args.command == "watch-ipipe":
+        result = _watch_ipipe(orchestrator, args.interval, args.once)
+    elif args.command == "ai-review":
+        from cli_transport import ProcessTransport
+
+        runtime = orchestrator.ai_review_runtime(
+            args.run_id,
+            argv_transport=ProcessTransport(),
+            working_directory=args.working_directory,
+            poll_interval=args.poll_interval,
+            max_polls=args.max_polls,
+        )
+        if isinstance(runtime, dict):
+            result = runtime
+        elif args.operation == "start":
+            result = runtime.start(args.change_number, args.revision)
+        else:
+            result = runtime.poll(args.conversation_id)
+    elif args.command == "notify-ide-turn":
+        from approval_watch import notify_every_parked_run, notify_ide_turn
+
+        client = _infoflow_notify_client(orchestrator)
+        result = (
+            notify_ide_turn(orchestrator, args.run_id, client)
+            if args.run_id
+            else notify_every_parked_run(orchestrator, client)
+        )
+    elif args.command == "reissue-approval":
+        result = _reissue_approval(orchestrator, args.run_id, args.action, args.input_hash)
+    elif args.command == "repin-profile":
+        import profile_repin
+
+        if args.approval_id:
+            result = profile_repin.apply(
+                orchestrator, args.run_id, args.approval_id, args.previous
+            )
+        elif args.request:
+            from approval_delivery import ComateApprovalClient
+
+            result = profile_repin.request(
+                orchestrator, args.run_id, args.previous,
+                comate_client=ComateApprovalClient(),
+                infoflow_client=_infoflow_approval_client(orchestrator),
+            )
+        else:
+            result = profile_repin.plan(orchestrator, args.run_id, args.previous)
     else:
         result = orchestrator.preflight(args.project)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
@@ -1559,6 +1889,251 @@ def _cli_exit_code(result: Any) -> int:
         return 1
     reason = result.get("reason_code")
     return 0 if reason in {None, "OK", "READY"} else 1
+
+
+def _infoflow_notify_client(orchestrator: Orchestrator) -> Any:
+    """The plain-message client. Distinct from `_infoflow_approval_client`, which
+    speaks the approval-card protocol and has no `send_markdown`/`send_group_markdown`
+    at all — passing it where a notice is sent fails at send time, not at wiring."""
+    from clients.infoflow_bot_client import InfoflowBotClient
+
+    return InfoflowBotClient(journal_path=orchestrator.config_root / "infoflow-replies.jsonl")
+
+
+def _infoflow_approval_client(orchestrator: Orchestrator) -> Any:
+    from approval_delivery import InfoflowApprovalTransport
+    from clients.infoflow_approval_client import InfoflowApprovalClient
+    from clients.infoflow_bot_client import InfoflowBotClient
+    from clients.infoflow_reply_client import InfoflowReplyConsumer, InfoflowReplyJournal
+
+    journal_path = orchestrator.config_root / "infoflow-replies.jsonl"
+    return InfoflowApprovalClient(
+        InfoflowApprovalTransport(
+            orchestrator.state,
+            InfoflowBotClient(journal_path=journal_path),
+            reply_consumer=InfoflowReplyConsumer(
+                InfoflowReplyJournal(journal_path),
+                # Cards go to the run's group, so a reply typed there has to be
+                # readable — and only from that group.
+                group_resolver=lambda run_id: group_id_for_run(orchestrator.state, run_id),
+            ),
+        )
+    )
+
+
+def _request_approval(
+    orchestrator: Orchestrator,
+    run_id: str,
+    action: str,
+    input_hash: str,
+    content_path: str | None = None,
+) -> dict[str, Any]:
+    """Request a human gate over the configured channels.
+
+    The member policy is the union of the profile's role members: a gate that only
+    reached one role could be answered without the others ever seeing it.
+    """
+    from approval_delivery import ComateApprovalClient
+
+    context = _approval_context(
+        orchestrator, run_id, action=action, content_path=content_path, input_hash=input_hash
+    )
+    if "error" in context:
+        return context["error"]
+    return orchestrator.request_infoflow_approval(
+        run_id,
+        action,
+        input_hash,
+        member_policy=context["member_policy"],
+        evidence=context["evidence"],
+        comate_client=ComateApprovalClient(),
+        infoflow_client=_infoflow_approval_client(orchestrator),
+    )
+
+
+def _reissue_approval(
+    orchestrator: Orchestrator, run_id: str, action: str, input_hash: str
+) -> dict[str, Any]:
+    """Reopen a gate whose deadline passed, keeping the bound input hash."""
+    context = _approval_context(orchestrator, run_id, action=action)
+    if "error" in context:
+        return context["error"]
+    return orchestrator.reissue_infoflow_approval(
+        run_id,
+        action,
+        input_hash,
+        member_policy=context["member_policy"],
+        evidence=context["evidence"],
+        infoflow_client=_infoflow_approval_client(orchestrator),
+    )
+
+
+def _approval_context(
+    orchestrator: Orchestrator,
+    run_id: str,
+    *,
+    action: str | None = None,
+    content_path: str | None = None,
+    input_hash: str | None = None,
+) -> dict[str, Any]:
+    """Member policy and card evidence for a run's gates.
+
+    The member policy is the union of the profile's role members: a gate that only
+    reached one role could be answered without the others ever seeing it.
+    """
+    loaded = orchestrator._runtime_profile(run_id)
+    if not loaded.get("ok"):
+        return {"error": loaded}
+    channels = loaded["profile"].get("approval_channels")
+    role_members = channels.get("role_members") if isinstance(channels, dict) else None
+    if not isinstance(role_members, dict):
+        return {"error": {"ok": False, "reason_code": "MEMBER_CONFIRMATION_REQUIRED", "run_id": run_id}}
+    members = sorted({email for values in role_members.values() for email in values})
+    if not members:
+        return {"error": {"ok": False, "reason_code": "MEMBER_CONFIRMATION_REQUIRED", "run_id": run_id}}
+    events = orchestrator.state.events(run_id)
+    payload = events[0]["payload"] if events and isinstance(events[0].get("payload"), dict) else {}
+    binding = payload.get("collaboration_binding")
+    binding = binding if isinstance(binding, dict) else {}
+    card_id = binding.get("card_id", payload.get("requirement_id", ""))
+    gate = _gate_evidence(action, payload, binding, content_path, input_hash)
+    if "error" in gate:
+        return {"error": {"ok": False, "reason_code": gate["error"], "run_id": run_id}}
+    return {
+        "member_policy": {"comate": members, "infoflow": members},
+        "evidence": {
+            "project": payload.get("project", ""),
+            "card_id": card_id,
+            "card_title": binding.get("card_title", ""),
+            "card_url": _icafe_url(card_id),
+            "group_name": binding.get("group_name", ""),
+            "documents": _requirement_documents(loaded["profile"]),
+            "gate": gate["gate"],
+        },
+    }
+
+
+def _gate_evidence(
+    action: str | None,
+    payload: dict[str, Any],
+    binding: dict[str, Any],
+    content_path: str | None,
+    input_hash: str | None = None,
+) -> dict[str, Any]:
+    """What this gate decides, summarized from the content the hash covers.
+
+    A summary that is not derived from the approved content would let the message
+    and the binding drift apart, so the content is hashed here and, when the file
+    is a phase envelope, checked against the hash the gate is being opened on.
+    """
+    from approval_summary import content_summary, gate_intent
+
+    gate: dict[str, Any] = dict(gate_intent(action))
+    if content_path:
+        try:
+            document = json.loads(Path(content_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"error": "APPROVAL_CONTENT_INVALID"}
+        envelope = document if isinstance(document, dict) else {}
+        content = envelope.get("content")
+        content = content if isinstance(content, dict) else document
+        if not isinstance(content, dict):
+            return {"error": "APPROVAL_CONTENT_INVALID"}
+        content_hash = _content_hash_of(content)
+        declared = envelope.get("content_hash")
+        bound = envelope.get("approval_input_hash")
+        if isinstance(declared, str) and declared != content_hash:
+            return {"error": "APPROVAL_CONTENT_MISMATCH"}
+        if isinstance(bound, str) and isinstance(input_hash, str) and bound != input_hash:
+            return {"error": "APPROVAL_CONTENT_MISMATCH"}
+        gate["summary"] = content_summary(content)
+        gate["content_hash"] = content_hash
+    elif str(action) == "G0":
+        snapshot = payload.get("requirement_snapshot")
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        roles = binding.get("roles") if isinstance(binding.get("roles"), dict) else {}
+        gate["summary"] = [
+            f"群名 {binding.get('group_name', '-')}",
+            f"成员 {'、'.join(binding.get('member_snapshot') or []) or '-'}",
+            *(f"{role} {'、'.join(people)}" for role, people in sorted(roles.items())),
+        ]
+        gate["content_hash"] = str(snapshot.get("content_hash") or "")
+    return {"gate": gate}
+
+
+def _content_hash_of(content: Any) -> str:
+    from phase_protocol import _canonical_json
+
+    return hashlib.sha256(_canonical_json(content).encode("utf-8")).hexdigest()
+
+
+def _watch_approvals(orchestrator: Orchestrator, interval: float, once: bool) -> dict[str, Any]:
+    """Keep landing 如流 decisions while the operator is away from the CLI."""
+    from approval_watch import ApprovalWatcher
+
+    watcher = ApprovalWatcher(
+        orchestrator,
+        lambda: _infoflow_approval_client(orchestrator),
+        _infoflow_notify_client(orchestrator),
+        reporter=lambda outcome: print(json.dumps(outcome, ensure_ascii=False, sort_keys=True), flush=True),
+    )
+    settled = watcher.run(interval, iterations=1 if once else None)
+    return {"ok": True, "reason_code": "OK", "settled": settled}
+
+
+def _watch_ipipe(orchestrator: Orchestrator, interval: float, once: bool) -> dict[str, Any]:
+    """Report a build's outcome while nobody is watching the CLI."""
+    from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport
+    from clients.ku_client import resolve_username
+    from ipipe_watch import IpipeWatcher
+
+    def runtime(run_id: str) -> Any:
+        # The api client refuses to exist without a current user, and an empty
+        # `resolve_username()` is exactly what it gets when no repo is handed to it.
+        # Returning the refusal as a reason code keeps it a reported outcome instead
+        # of an exception that takes the whole watch down on its first observation.
+        pinned = orchestrator._runtime_profile(run_id)
+        if not pinned.get("ok"):
+            return pinned
+        repos = pinned["profile"].get("business_repos") or []
+        user = resolve_username([item["path"] for item in repos if item.get("path")])
+        if not user:
+            return {"ok": False, "reason_code": "IPIPE_CURRENT_USER_REQUIRED"}
+        api = IpipeApiClient(IpipeHttpTransport(), current_user=user)
+        return orchestrator.ipipe_runtime(run_id, api)
+
+    watcher = IpipeWatcher(
+        orchestrator,
+        runtime,
+        _infoflow_notify_client(orchestrator),
+        reporter=lambda outcome: print(json.dumps(outcome, ensure_ascii=False, sort_keys=True), flush=True),
+    )
+    settled = watcher.run(interval, iterations=1 if once else None)
+    return {"ok": True, "reason_code": "OK", "settled": settled}
+
+
+def _icafe_url(card_id: Any) -> str:
+    if not isinstance(card_id, str) or "-" not in card_id:
+        return ""
+    return f"https://console.cloud.baidu-int.com/devops/icafe/issue/{card_id}/show"
+
+
+def _requirement_documents(profile: Any) -> list[dict[str, str]]:
+    """Link the profile's KU sources so an approver can read what is being approved."""
+    sources = profile.get("knowledge_sources") if isinstance(profile, dict) else None
+    if not isinstance(sources, list):
+        return []
+    documents = []
+    for source in sorted(
+        (item for item in sources if isinstance(item, dict) and item.get("provider") == "ku"),
+        key=lambda item: item.get("priority", 0),
+    ):
+        url = source.get("repository")
+        if not isinstance(url, str) or not url:
+            continue
+        label = source.get("label") or source.get("search_scope") or url
+        documents.append({"label": str(label), "url": url})
+    return documents
 
 
 def _json_file(value: Any) -> dict[str, Any]:

@@ -179,6 +179,38 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "KU_INDEX_VERIFICATION_FAILED")
         self.assertEqual(cafe.calls, [])
 
+    def test_a_refused_title_does_not_park_the_run_in_recovery(self):
+        """KU refuses a title that already holds different content, writing nothing.
+
+        A re-cut phase hits exactly this, and an intent left open over an operation
+        that provably did not happen would block every later phase behind recovery.
+        """
+        if KnowledgeSync is None:
+            self.fail("KnowledgeSync is not implemented")
+        ku = FakeKuClient(child={"ok": False, "reason_code": "KU_IMMUTABLE_CONFLICT"})
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            state = StateStore(database)
+            result = KnowledgeSync(
+                state_store=state,
+                ku_client=ku,
+                cafe_client=FakeCafeClient(),
+                parent_doc_id="root-1",
+                card_id="BGW-1",
+                run_id="run-9",
+            ).publish_phase(
+                "run-9",
+                {
+                    "title": "03-tasks",
+                    "markdown": "# Tasks",
+                    "content_hash": hashlib.sha256(b"# Tasks").hexdigest(),
+                },
+            )
+            recovery = Recovery(database).resume("run-9")
+
+        self.assertEqual(result["reason_code"], "KU_IMMUTABLE_CONFLICT")
+        self.assertEqual(recovery["status"], "READY")
+
     def test_failed_icafe_comment_keeps_phase_incomplete_without_final_receipt(self):
         if KnowledgeSync is None:
             self.fail("KnowledgeSync is not implemented")
@@ -350,7 +382,42 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertEqual(ku.calls[1][0:2], ("create", "root-1"))
         self.assertEqual(ku.calls[2][0:2], ("index", "root-1"))
 
-    def test_from_profile_enforces_exact_bgw_and_xflow_ku_targets(self):
+    def test_run_root_body_reads_as_a_directory_people_can_use(self):
+        if KnowledgeSync is None:
+            self.fail("KnowledgeSync is not implemented")
+        ku = FakeKuClient()
+        cafe = FakeCafeClient()
+        with tempfile.TemporaryDirectory() as directory:
+            sync = KnowledgeSync(
+                state_store=StateStore(Path(directory) / "state.sqlite"),
+                ku_client=ku,
+                cafe_client=cafe,
+                parent_doc_id=None,
+                project_parent_doc_id="project-parent",
+                run_root_title="BGW-1-run-8-研发测试协作",
+                card_id="BGW-1",
+                run_id="run-8",
+            )
+            markdown = "# Spec"
+
+            sync.publish_phase(
+                "run-8",
+                {
+                    "title": "01-spec",
+                    "markdown": markdown,
+                    "content_hash": hashlib.sha256(markdown.encode()).hexdigest(),
+                },
+            )
+
+        body = ku.calls[0][3]
+        self.assertTrue(body.startswith("# BGW-1-run-8-研发测试协作\n\n"))
+        self.assertIn("BGW-1", body)
+        self.assertIn("run-8", body)
+        self.assertIn("## 阶段产物", body)
+        # Entries are appended after the last block, so the section note has to be it.
+        self.assertTrue(body.rstrip().endswith("请不要手工修改。"))
+
+    def test_from_profile_derives_the_ku_target_from_the_project(self):
         if KnowledgeSync is None:
             self.fail("KnowledgeSync is not implemented")
         valid = {
@@ -358,13 +425,13 @@ class KnowledgeSyncTests(unittest.TestCase):
             "knowledge_sources": [
                 {
                     "provider": "ku",
-                    "repo_id": "sX0BTOBWJX",
-                    "parent_doc_id": "I15ClP2KW4ZGAK",
+                    "repo_id": "WoXegIdYRe",
+                    "parent_doc_id": "requirement-doc",
                 }
             ],
         }
         invalid = json.loads(json.dumps(valid))
-        invalid["knowledge_sources"][0]["parent_doc_id"] = "wrong-parent"
+        invalid["project_id"] = "unregistered"
         with tempfile.TemporaryDirectory() as directory:
             state = StateStore(Path(directory) / "state.sqlite")
             sync = KnowledgeSync.from_profile(
@@ -391,6 +458,7 @@ class KnowledgeSyncTests(unittest.TestCase):
                 )
 
         self.assertEqual(sync.project_parent_doc_id, "I15ClP2KW4ZGAK")
+        self.assertEqual(sync.ku.repo_id, "sX0BTOBWJX")
         self.assertEqual(sync.run_root_title, "BGW-1-abcdef123456-研发测试协作")
 
     def test_profile_bound_sync_rejects_a_different_run_before_root_or_intent_calls(self):
@@ -647,6 +715,49 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertEqual(sum(call[0][1] == "create-doc" for call in transport.calls), 1)
         self.assertEqual(len(child_publish_calls), 1)
+
+
+    def test_rendered_document_must_carry_the_canonical_json_it_is_hashed_from(self):
+        canonical = '{"decision_result":"NO_OPEN_DECISIONS"}'
+        content_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        rendered = f"# 01-grill\n\n## 附录\n\n```json\n{canonical}\n```"
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            sync = KnowledgeSync(
+                state_store=state,
+                ku_client=FakeKuClient(),
+                cafe_client=FakeCafeClient(),
+                parent_doc_id="root-1",
+                card_id="BGW-1",
+                run_id="run-render",
+            )
+
+            accepted = sync.publish_phase(
+                "run-render",
+                {
+                    "title": "01-grill", "markdown": rendered,
+                    "content_hash": content_hash, "canonical": canonical,
+                },
+            )
+            missing = sync.publish_phase(
+                "run-render",
+                {
+                    "title": "01-grill", "markdown": "# 01-grill\n\n没有附录",
+                    "content_hash": content_hash, "canonical": canonical,
+                },
+            )
+            wrong_hash = sync.publish_phase(
+                "run-render",
+                {
+                    "title": "01-grill", "markdown": rendered,
+                    "content_hash": "0" * 64, "canonical": canonical,
+                },
+            )
+
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(accepted["artifact_hash"], content_hash)
+        self.assertEqual(missing["reason_code"], "ARTIFACT_HASH_MISMATCH")
+        self.assertEqual(wrong_hash["reason_code"], "ARTIFACT_HASH_MISMATCH")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from typing import Any
 
 
 DEFAULT_BASE_URL = "http://10.11.152.208:8701/api/process/ipipe"
+_FAILED_JOB = frozenset({"FAIL", "FAILED", "ERROR", "ABORTED", "CANCELLED"})
 
 
 class IpipeTransportError(RuntimeError):
@@ -45,9 +46,23 @@ class IpipeHttpTransport:
         timeout_seconds: float = 30,
         max_read_attempts: int = 3,
         body_limit: int = 4096,
+        response_limit: int = 8 * 1024 * 1024,
+        retry_backoff_seconds: float = 0.5,
+        retry_backoff_cap_seconds: float = 4.0,
         sleeper: Callable[[float], None] = time.sleep,
     ):
-        if timeout_seconds <= 0 or not 1 <= max_read_attempts <= 5 or not 0 <= body_limit <= 65536:
+        # `body_limit` bounds the error excerpt a failure is allowed to carry, so it stays
+        # small. A successful listing is a different quantity: a mature pipeline's build
+        # listing runs to megabytes, and reading it under the excerpt bound turned every
+        # such listing into IPIPE_RESPONSE_TOO_LARGE.
+        if (
+            timeout_seconds <= 0
+            or not 1 <= max_read_attempts <= 5
+            or not 0 <= body_limit <= 65536
+            or not body_limit < response_limit <= 64 * 1024 * 1024
+            or retry_backoff_seconds < 0
+            or retry_backoff_cap_seconds < retry_backoff_seconds
+        ):
             raise ValueError("IPIPE_TRANSPORT_CONFIG_INVALID")
         self.base_url = base_url.rstrip("/")
         self._token = _load_token(token)
@@ -55,6 +70,9 @@ class IpipeHttpTransport:
         self.timeout_seconds = timeout_seconds
         self.max_read_attempts = max_read_attempts
         self.body_limit = body_limit
+        self.response_limit = response_limit
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.retry_backoff_cap_seconds = retry_backoff_cap_seconds
         self.sleeper = sleeper
 
     def request(
@@ -86,14 +104,14 @@ class IpipeHttpTransport:
         for attempt in range(1, attempts + 1):
             try:
                 response = self.sender(
-                    verb, url, request_headers, body, self.timeout_seconds, self.body_limit
+                    verb, url, request_headers, body, self.timeout_seconds, self.response_limit
                 )
                 return self._decode_response(response)
             except IpipeTransportError as error:
                 sanitized = self._sanitize_error(error)
                 if not sanitized.transient or attempt == attempts or verb != "GET":
                     raise sanitized from None
-                self.sleeper(0)
+                self.sleeper(self._backoff_seconds(attempt))
             except (OSError, TimeoutError, urllib.error.URLError) as error:
                 wrapped = IpipeTransportError(
                     "PIPELINE_TRANSIENT", transient=True,
@@ -101,8 +119,18 @@ class IpipeHttpTransport:
                 )
                 if attempt == attempts or verb != "GET":
                     raise wrapped from None
-                self.sleeper(0)
+                self.sleeper(self._backoff_seconds(attempt))
         raise IpipeTransportError("PIPELINE_TRANSIENT", transient=True)
+
+    def _backoff_seconds(self, attempt: int) -> float:
+        """How long to wait before re-reading after a transient refusal.
+
+        A retry that waits for nothing is indistinguishable from the burst that got
+        throttled in the first place, so the gateway sees the same rate again and answers
+        the same way. The wait is bounded because a read is on the critical path of a
+        run: three attempts cost at most `retry_backoff_cap_seconds` in total.
+        """
+        return min(self.retry_backoff_seconds * (2 ** (attempt - 1)), self.retry_backoff_cap_seconds)
 
     def _decode_response(self, response: Any) -> Any:
         if not isinstance(response, dict) or not isinstance(response.get("status"), int):
@@ -159,10 +187,12 @@ class IpipeApiClient:
 
     def get_pipeline_by_id(self, pipeline_id: str) -> dict[str, Any]:
         # The gateway 404s unless the empty pipelineConfId/user/token params are present.
+        # `brief` matters: the full configuration of a mature pipeline runs past any sane
+        # body bound, while the brief form still names the pipeline and its code sources.
         value = self.transport.request(
             "GET",
             f"/api/ipipe/v10/pipeline/conf/{pipeline_id}",
-            params={"pipelineConfId": "", "user": "", "token": "", "brief": ""},
+            params={"pipelineConfId": "", "user": "", "token": "", "brief": "true"},
         )
         return _entity(value)
 
@@ -184,28 +214,42 @@ class IpipeApiClient:
         value = self.transport.request("GET", "/api/rest/v10/pipeline-build/builds", params={"module": module, "pipelineConfId": pipeline_id, "_embed": "trigger,stageBuilds,params", "_limit": 20})
         return _entities(value)
 
-    def build_by_id(self, build_id: str) -> dict[str, Any]:
-        return _entity(self.transport.request("GET", f"/api/rest/v10/pipeline-build/{build_id}", params={"_embed": "trigger,stageBuilds,params", "_include": "ext.simpleCommitInfo"}))
+
+    def build_by_id(
+        self, build_id: str, *, module: str, revision: str, pipeline_id: str
+    ) -> dict[str, Any]:
+        """One build record, read through the revision-scoped listing.
+
+        The gateway exposes no per-build resource, so the build has to be selected out
+        of the listing for its own revision. That listing is authoritative: a build id
+        it does not contain is not a build of this revision.
+        """
+        for candidate in self.builds_by_revision(module, revision, pipeline_id):
+            identity = str(candidate.get("id") or candidate.get("pipelineBuildId") or "")
+            if identity == str(build_id):
+                return candidate
+        raise IpipeTransportError("OBJECT_NOT_FOUND", status=404, transient=False)
 
     def pipeline_stage_info(self, build_id: str) -> list[dict[str, Any]]:
         value = self.transport.request(
             "GET",
             "/api/agile/v1/pipelineBuilds/pipelineBuildInfos",
-            params={"pipelineBuildId": build_id, "currentUser": self.current_user},
+            params={"pipelineBuildId": build_id, "username": self.current_user},
         )
         return _entities(value)
 
     def failed_jobs(self, build_id: str) -> list[dict[str, Any]]:
-        value = self.transport.request(
-            "GET",
-            "/api/agile/v1/pipelineBuilds/jobBuilds",
-            params={
-                "pipelineBuildId": build_id,
-                "jobStatus": "FAIL",
-                "currentUser": self.current_user,
-            },
-        )
-        return _entities(value)
+        """The failed jobs of a build, taken from the stage response.
+
+        The gateway exposes no job listing, and the stage response already embeds every
+        job with its status, so the failures are selected out of it.
+        """
+        failures: list[dict[str, Any]] = []
+        for stage in self.pipeline_stage_info(build_id):
+            for job in stage.get("jobBuildBeans") or []:
+                if isinstance(job, dict) and str(job.get("status") or "").upper() in _FAILED_JOB:
+                    failures.append(job)
+        return failures
 
     def stage_detail(self, stage_id: str) -> Any:
         return self.transport.request(
@@ -314,21 +358,21 @@ def _urllib_sender(
     headers: dict[str, str],
     body: dict[str, Any] | None,
     timeout: float,
-    body_limit: int,
+    response_limit: int,
 ) -> dict[str, Any]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request = urllib.request.Request(url, method=method, headers=headers, data=data)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return {"status": response.status, "body": _read_bounded(response, body_limit)}
+            return {"status": response.status, "body": _read_bounded(response, response_limit)}
     except urllib.error.HTTPError as error:
-        raw = _read_bounded(error, body_limit)
+        raw = _read_bounded(error, response_limit)
         raise IpipeTransportError(_http_reason(error.code), status=error.code, body=raw, transient=error.code == 429 or error.code >= 500) from None
 
 
-def _read_bounded(stream: Any, body_limit: int) -> str:
-    raw = stream.read(body_limit + 1)
-    if len(raw) > body_limit:
+def _read_bounded(stream: Any, response_limit: int) -> str:
+    raw = stream.read(response_limit + 1)
+    if len(raw) > response_limit:
         raise IpipeTransportError("IPIPE_RESPONSE_TOO_LARGE")
     return raw.decode("utf-8", errors="replace")
 

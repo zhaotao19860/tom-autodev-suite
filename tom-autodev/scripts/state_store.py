@@ -148,6 +148,31 @@ class StateStore:
             )
         return event
 
+    def latest_states(self) -> list[dict[str, Any]]:
+        """The newest event of every run, so a watcher can notice a state change.
+
+        There is no run table; the event log is the record, and a run's last event
+        is its state.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id, run_id, state, created_at
+                FROM events
+                WHERE sequence IN (SELECT MAX(sequence) FROM events GROUP BY run_id)
+                ORDER BY created_at
+                """
+            ).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "run_id": row["run_id"],
+                "state": row["state"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
     def events(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -334,6 +359,46 @@ class StateStore:
                 (idempotency_key,),
             ).fetchone()
         return _intent_row(row) if row is not None else None
+
+    def withdraw_intent(
+        self,
+        run_id: str,
+        operation: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Drop a claim for a write that provably never left this process.
+
+        Uncertainty must never be resolved by guessing, so this is only for the
+        narrow case where the client rejected the call before dispatching it: the
+        alternative is a run stuck in `RECOVERY_REQUIRED` over an action nobody
+        performed. A claim that already carries a receipt is left untouched.
+        """
+        encoded = _encode(payload)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT intent.*, receipt.intent_id AS receipt_id
+                FROM external_intents AS intent
+                LEFT JOIN receipts AS receipt ON receipt.intent_id = intent.intent_id
+                WHERE intent.idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if row is None:
+                return {"status": "MISSING"}
+            if (
+                row["run_id"] != run_id
+                or row["operation"] != operation
+                or row["payload_json"] != encoded
+                or row["receipt_id"] is not None
+            ):
+                return {"status": "CONFLICT", "intent": _intent_row(row)}
+            connection.execute(
+                "DELETE FROM external_intents WHERE intent_id = ?", (row["intent_id"],)
+            )
+        return {"status": "WITHDRAWN", "intent_id": row["intent_id"]}
 
     def result_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self._connect() as connection:

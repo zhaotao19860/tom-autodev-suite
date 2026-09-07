@@ -13,7 +13,7 @@ The child skill must validate the predecessor hash and the phase schema before p
 
 | Phase | Schema | Input | Gate | Required outcome |
 |---|---|---|---|---|
-| GRILL | `decision-log` | requirement snapshot + G0 | G1 | `CLARIFIED` or `NO_OPEN_DECISIONS` |
+| GRILL | `decision-log` | requirement snapshot + G0 | G1 | `CLARIFIED` or `NO_OPEN_DECISIONS`, plus an `acceptance_delta` when the card arrived without acceptance criteria |
 | SPEC | `spec` | grill artifact | G2 | behavior, test interface, environment, traceability |
 | TASKS | `task-dag` | approved spec | G3 | acyclic end-to-end frontier DAG |
 | PLAN | `task-plan` | task + WorkspaceGate | G4 | executable per-task plan |

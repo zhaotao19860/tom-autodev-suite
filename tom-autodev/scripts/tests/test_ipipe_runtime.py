@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from approval_ledger import ApprovalLedger
 from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport, IpipeTransportError
-from clients.ipipe_runtime import IpipeRuntime
+from clients.ipipe_runtime import IpipeRuntime, _normalize_stage, _stage_passed
 from project_registry import validate_profile
 from state_store import StateStore
 
@@ -153,7 +153,7 @@ class FakeApi:
         self.calls.append(("builds_by_revision", module, revision, pipeline_id))
         return list(self.candidates)
 
-    def build_by_id(self, build_id):
+    def build_by_id(self, build_id, *, module=None, revision=None, pipeline_id=None):
         self.calls.append(("build_by_id", build_id))
         return dict(self.builds[build_id])
 
@@ -285,13 +285,51 @@ class IpipeRuntimeTests(unittest.TestCase):
                 ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")
                 api = FakeApi()
                 runtime = pinned_runtime(state, ledger, api)
-                runtime.discover = lambda _profile, _revisions, reason=reason: {"ok": False, "reason_code": reason}
+                runtime.discover = lambda _profile, _revisions, _module=None, reason=reason: {"ok": False, "reason_code": reason}
                 approval = approved(ledger, "G8", canonical_hash(trigger_binding()))
 
                 result = runtime.trigger(PROFILE, REVISIONS, approval)
 
                 self.assertEqual(result["reason_code"], reason)
                 self.assertFalse(any(call[0] == "trigger_by_revision" for call in api.calls))
+
+    def test_discovery_resolves_the_pipeline_registered_for_the_named_module(self):
+        profile = json.loads(json.dumps(PROFILE))
+        profile["business_repos"].append(
+            {"path": "/repo/agent", "module": "baidu/team/agent", "branch": "main", "lock": "agent-main"}
+        )
+        profile["pipeline_profile"]["pipelines"] = [
+            {
+                "module": "baidu/team/app", "pipeline_id": "pipe-1",
+                "stage_classes": ["compile", "unit"], "required_for_release": True,
+            },
+            {
+                "module": "baidu/team/agent", "pipeline_id": "pipe-2",
+                "stage_classes": ["compile", "unit"], "required_for_release": True,
+            },
+        ]
+        revisions = json.loads(json.dumps(REVISIONS))
+        revisions["repositories"].insert(
+            1, {"kind": "business", "module": "baidu/team/agent", "revision": "agent-rev", "branch": "main"}
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")
+            api = FakeApi()
+            api.pipeline = {"id": "pipe-2", "module": "baidu/team/agent"}
+            runtime = IpipeRuntime(
+                state, ledger, "run-1", api,
+                validated_profile=json.loads(json.dumps(profile)),
+                profile_hash=canonical_hash(profile),
+            )
+
+            result = runtime.discover(profile, revisions, "baidu/team/agent")
+
+            self.assertEqual(result["reason_code"], "BUILD_QUERY_REQUIRED", result)
+            self.assertIn(("get_pipeline_by_id", "pipe-2"), api.calls)
+            self.assertIn(("builds_by_revision", "baidu/team/agent", "agent-rev", "pipe-2"), api.calls)
+            unknown = runtime.discover(profile, revisions, "baidu/team/absent")
+            self.assertEqual(unknown["reason_code"], "PIPELINE_IDENTITY_MISMATCH", unknown)
 
     def test_typed_transport_failure_is_preserved_by_discovery(self):
         def denied(_pipeline_id):
@@ -500,7 +538,7 @@ class IpipeRuntimeTests(unittest.TestCase):
 
     def test_typed_transport_failure_is_preserved_by_monitor_and_release(self):
         self.bind_build(status="RUNNING")
-        self.api.build_by_id = lambda _build_id: (_ for _ in ()).throw(
+        self.api.build_by_id = lambda _build_id, **_key: (_ for _ in ()).throw(
             IpipeTransportError("PERMISSION_DENIED", status=403, transient=False)
         )
         deadline = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
@@ -538,7 +576,7 @@ class IpipeRuntimeTests(unittest.TestCase):
     def test_typed_confirmation_query_failures_are_preserved_after_single_write(self):
         trigger_approval = approved(self.ledger, "G8", canonical_hash(trigger_binding()))
         original_build_by_id = self.api.build_by_id
-        self.api.build_by_id = lambda _build_id: (_ for _ in ()).throw(
+        self.api.build_by_id = lambda _build_id, **_key: (_ for _ in ()).throw(
             IpipeTransportError("OBJECT_NOT_FOUND", status=404, transient=False)
         )
         triggered = self.runtime.trigger(PROFILE, REVISIONS, trigger_approval)
@@ -553,7 +591,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         rerun_approval = approved(
             self.ledger, "G8", canonical_hash(rerun_binding(monitored["failure_signature"]))
         )
-        self.api.build_by_id = lambda _build_id: (_ for _ in ()).throw(
+        self.api.build_by_id = lambda _build_id, **_key: (_ for _ in ()).throw(
             IpipeTransportError("OBJECT_NOT_FOUND", status=404, transient=False)
         )
         rerun = self.runtime.rerun("stage-1", rerun_approval)
@@ -563,7 +601,7 @@ class IpipeRuntimeTests(unittest.TestCase):
 
     def test_typed_existing_build_and_failure_evidence_queries_are_preserved(self):
         self.api.candidates = [build()]
-        self.api.build_by_id = lambda _build_id: (_ for _ in ()).throw(
+        self.api.build_by_id = lambda _build_id, **_key: (_ for _ in ()).throw(
             IpipeTransportError("OBJECT_NOT_FOUND", status=404, transient=False)
         )
         trigger_approval = approved(self.ledger, "G8", canonical_hash(trigger_binding()))
@@ -604,7 +642,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         )
         self.api.rerun_result = TimeoutError("unknown")
         first = self.runtime.rerun("stage-1", approval)
-        self.api.build_by_id = lambda _build_id: (_ for _ in ()).throw(
+        self.api.build_by_id = lambda _build_id, **_key: (_ for _ in ()).throw(
             IpipeTransportError("PERMISSION_DENIED", status=403, transient=False)
         )
         pending = pinned_runtime(self.state, self.ledger, self.api).rerun("stage-1", approval)
@@ -675,7 +713,11 @@ class HttpTransportTests(unittest.TestCase):
                 return None
 
         success = Body(b"x" * 129)
-        transport = IpipeHttpTransport(token="secret-value", body_limit=128, max_read_attempts=1)
+        # The read bound is `response_limit`: `body_limit` only bounds the excerpt a
+        # failure carries, so a listing is read up to the larger of the two.
+        transport = IpipeHttpTransport(
+            token="secret-value", body_limit=64, response_limit=128, max_read_attempts=1
+        )
         with patch("clients.ipipe_client.urllib.request.urlopen", return_value=success):
             with self.assertRaises(IpipeTransportError) as success_error:
                 transport.request("GET", "/pipeline")
@@ -693,6 +735,67 @@ class HttpTransportTests(unittest.TestCase):
 
 
 class ApiClientShapeTests(unittest.TestCase):
+    def test_a_single_build_is_selected_out_of_its_own_revision_listing(self):
+        class ListingTransport:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, endpoint, **options):
+                self.calls.append((method, endpoint, options))
+                return {"code": 200, "entities": [{"id": 4321, "module": "baidu/team/app"}]}
+
+        transport = ListingTransport()
+        client = IpipeApiClient(transport, current_user="owner@example.test")
+        key = {"module": "baidu/team/app", "revision": "app-rev", "pipeline_id": "pipe-1"}
+
+        found = client.build_by_id("4321", **key)
+
+        self.assertEqual(found["id"], 4321)
+        self.assertEqual(transport.calls[0][1], "/api/rest/v10/pipeline-build/builds/revision")
+        with self.assertRaises(IpipeTransportError) as absent:
+            client.build_by_id("9999", **key)
+        self.assertEqual(absent.exception.reason_code, "OBJECT_NOT_FOUND")
+        self.assertFalse(absent.exception.transient)
+
+    def test_a_stage_skipped_only_in_part_still_counts_as_passing_evidence(self):
+        partly_skipped = _normalize_stage({
+            "stageName": "unit",
+            "status": "SKIPPED",
+            "jobBuildBeans": [
+                {"stageBuildId": 1, "jobName": "100G unit", "status": "SKIPPED"},
+                {"stageBuildId": 1, "jobName": "25G unit", "status": "SUCC"},
+            ],
+        })
+        wholly_skipped = _normalize_stage({
+            "stageName": "unit", "status": "SKIPPED",
+            "jobBuildBeans": [{"stageBuildId": 1, "jobName": "100G unit", "status": "SKIPPED"}],
+        })
+        skipped_with_failure = _normalize_stage({
+            "stageName": "unit", "status": "SKIPPED",
+            "jobBuildBeans": [
+                {"stageBuildId": 1, "jobName": "25G unit", "status": "SUCC"},
+                {"stageBuildId": 1, "jobName": "100G unit", "status": "FAIL"},
+            ],
+        })
+
+        self.assertTrue(_stage_passed(partly_skipped))
+        self.assertFalse(_stage_passed(wholly_skipped))
+        self.assertFalse(_stage_passed(skipped_with_failure))
+        self.assertTrue(_stage_passed(_normalize_stage({"stageName": "x", "status": "SUCC"})))
+        self.assertFalse(_stage_passed(_normalize_stage({"stageName": "x", "status": "RUNNING"})))
+
+    def test_stage_identity_falls_back_to_the_stage_build_named_by_its_jobs(self):
+        listed = {
+            "stageConfId": 4875695,
+            "stageName": "compile",
+            "status": "SUCC",
+            "jobBuildBeans": [{"stageBuildId": 636306878, "jobName": "compile", "status": "SUCC"}],
+        }
+
+        self.assertEqual(_normalize_stage(listed)["stage_build_id"], "636306878")
+        self.assertEqual(_normalize_stage({"id": 7, "stageName": "x"})["stage_build_id"], "7")
+        self.assertEqual(_normalize_stage({"stageName": "x"})["stage_build_id"], "")
+
     def test_stage_job_trigger_and_manual_requests_include_required_user_identity(self):
         class CaptureTransport:
             def __init__(self):
@@ -717,18 +820,12 @@ class ApiClientShapeTests(unittest.TestCase):
                 (
                     "GET",
                     "/api/agile/v1/pipelineBuilds/pipelineBuildInfos",
-                    {"params": {"pipelineBuildId": "build-1", "currentUser": "owner@example.test"}},
+                    {"params": {"pipelineBuildId": "build-1", "username": "owner@example.test"}},
                 ),
                 (
                     "GET",
-                    "/api/agile/v1/pipelineBuilds/jobBuilds",
-                    {
-                        "params": {
-                            "pipelineBuildId": "build-1",
-                            "jobStatus": "FAIL",
-                            "currentUser": "owner@example.test",
-                        }
-                    },
+                    "/api/agile/v1/pipelineBuilds/pipelineBuildInfos",
+                    {"params": {"pipelineBuildId": "build-1", "username": "owner@example.test"}},
                 ),
                 (
                     "GET",

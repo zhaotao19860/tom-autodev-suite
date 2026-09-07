@@ -332,6 +332,8 @@ class StateAndArtifactTests(unittest.TestCase):
                     "artifact-a",
                     "artifact:0123456789abcdef",
                     "ku:document-7/version-2",
+                    # KU mints document ids that can start with an underscore.
+                    "ku:_SpEWIeXSOhcFz/1",
                     "ipipe:build-9/stage-3",
                 ],
             )
@@ -343,6 +345,7 @@ class StateAndArtifactTests(unittest.TestCase):
                     "artifact-a",
                     "artifact:0123456789abcdef",
                     "ku:document-7/version-2",
+                    "ku:_SpEWIeXSOhcFz/1",
                     "ipipe:build-9/stage-3",
                 ],
             )

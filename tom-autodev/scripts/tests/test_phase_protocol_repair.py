@@ -1015,6 +1015,45 @@ class PhaseProtocolPredecessorBindingTests(PhaseProtocolFrontierAndControllerTes
         self.assertEqual(omitted["reason_code"], "TRACEABILITY_MISMATCH")
         self.assertEqual(unrelated["reason_code"], "TRACEABILITY_MISMATCH")
 
+    def spec_run(self, run_id, acceptance, acceptance_delta):
+        snapshot = specialized_examples()["requirement-snapshot"]
+        snapshot["acceptance"] = acceptance
+        unsigned = {key: value for key, value in snapshot.items() if key != "content_hash"}
+        snapshot["content_hash"] = canonical_hash(unsigned)
+        self.seed(run_id, "INTAKE", None, snapshot)
+        grill = specialized_examples()["decision-log"]
+        grill["acceptance_delta"] = acceptance_delta
+        return self.action_for(run_id, "SPEC", "GRILL", grill)
+
+    def test_grill_acceptance_delta_supplies_criteria_for_a_bare_card(self):
+        action = self.spec_run("run-bind-spec-bare", [], [{
+            "id": "AC-1", "statement": "Resolver answers within the budget",
+            "decided_by": "owner@baidu.com", "evidence": ["icafe://BGW-1#comment-1"],
+        }])
+
+        result = self.validate_draft(action, specialized_examples()["spec"])
+
+        self.assertTrue(result["ok"], result)
+
+    def test_spec_stops_when_no_acceptance_criterion_exists_anywhere(self):
+        action = self.spec_run("run-bind-spec-empty", [], [])
+
+        result = self.validate_draft(action, specialized_examples()["spec"])
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason_code"], "ACCEPTANCE_CRITERIA_MISSING")
+
+    def test_acceptance_delta_may_not_redefine_a_snapshot_criterion(self):
+        action = self.spec_run("run-bind-spec-conflict", ["AC-1"], [{
+            "id": "AC-1", "statement": "Restated by grill",
+            "decided_by": "owner@baidu.com", "evidence": ["icafe://BGW-1#comment-1"],
+        }])
+
+        result = self.validate_draft(action, specialized_examples()["spec"])
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason_code"], "ACCEPTANCE_DELTA_CONFLICT")
+
     def test_task_dag_coverage_is_bound_to_predecessor_spec(self):
         run_id = "run-bind-dag"
         action = self.action_for(run_id, "TASKS", "SPEC", specialized_examples()["spec"])
@@ -1152,3 +1191,52 @@ class PhaseProtocolPredecessorBindingTests(PhaseProtocolFrontierAndControllerTes
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
+    """A code-only repair must not drag the Spec and the DAG through their gates again."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        root = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        self.protocol = PhaseProtocol(
+            state_store=StateStore(root / "state.sqlite"),
+            artifact_store=ArtifactStore(root / "artifacts"),
+            knowledge_sync=ProductionShapeKnowledgeSync(),
+            approval_ledger=BoundApprovalLedger(),
+            evidence_gate=EvidenceGate(),
+            transition_policy=TransitionPolicy(),
+        )
+
+    def _diagnosis(self, scope=None):
+        diagnosis = specialized_examples()["diagnosis"]
+        diagnosis["route"] = "REPAIR"
+        if scope is not None:
+            diagnosis["repair_scope"] = scope
+        return diagnosis
+
+    def test_code_only_repair_reenters_at_plan_and_keeps_the_task(self):
+        action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-scope"}
+        target = self.protocol._completion_target(
+            action, {"content": self._diagnosis("CODE_ONLY")}
+        )
+
+        self.assertEqual(target, ("PLAN", "T-1", "OK"))
+
+    def test_spec_amendment_and_missing_scope_both_reenter_at_spec(self):
+        action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-scope"}
+        amended = self.protocol._completion_target(
+            action, {"content": self._diagnosis("SPEC_AMENDMENT")}
+        )
+        silent = self.protocol._completion_target(action, {"content": self._diagnosis()})
+
+        self.assertEqual(amended, ("SPEC", None, "OK"))
+        self.assertEqual(silent, ("SPEC", None, "OK"))
+
+    def test_policy_allows_the_plan_reentry_edge(self):
+        allowed = self.protocol.transitions.validate("DIAGNOSE", "PLAN")
+        still_allowed = self.protocol.transitions.validate("DIAGNOSE", "SPEC")
+
+        self.assertTrue(allowed["allowed"], allowed)
+        self.assertTrue(still_allowed["allowed"], still_allowed)

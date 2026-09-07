@@ -9,13 +9,21 @@ from typing import Any, Callable
 
 from approval_ledger import ApprovalLedger
 from clients.ipipe_client import IpipeTransportError
+from phase_protocol import _registered_pipeline
 from project_registry import validate_profile
 from state_store import StateStore
 
 
-_FAILURE = frozenset({"FAIL", "FAILED", "ERROR", "ABORTED", "CANCELLED"})
-_SUCCESS = frozenset({"SUCCESS", "SUCC", "SUCCEEDED", "PASSED", "PASS"})
-_MANUAL = frozenset({"WAITING_FOR_MANUAL", "MANUAL", "PAUSED", "WAITING_INPUT", "WAITING_FOR_CONFIRM"})
+# iPipe reports the terminal verdict in both a gerund and a short form
+# (`FAILING`/`FAIL`, `SUCCEEDING`/`SUCC`), and a stage that is waiting on a person is
+# `PENDING_FOR_USER`. All three spellings appear on real builds.
+_FAILURE = frozenset({"FAIL", "FAILING", "FAILED", "ERROR", "ABORTED", "CANCELLED", "CANCEL"})
+_SUCCESS = frozenset({"SUCCESS", "SUCCEEDING", "SUCC", "SUCCEEDED", "PASSED", "PASS"})
+_MANUAL = frozenset({
+    "WAITING_FOR_MANUAL", "MANUAL", "PAUSED", "WAITING_INPUT", "WAITING_FOR_CONFIRM",
+    "PENDING_FOR_USER",
+})
+_SKIPPED = frozenset({"SKIP", "SKIPPED"})
 
 
 class IpipeRuntime:
@@ -50,8 +58,10 @@ class IpipeRuntime:
         self._build_bindings: dict[str, dict[str, Any]] = {}
         self._stage_bindings: dict[str, dict[str, Any]] = {}
 
-    def discover(self, profile: dict[str, Any], revision_set: dict[str, Any]) -> dict[str, Any]:
-        context = self._context(profile, revision_set)
+    def discover(
+        self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None
+    ) -> dict[str, Any]:
+        context = self._context(profile, revision_set, module)
         if context.get("reason_code") != "OK":
             return context
         try:
@@ -60,7 +70,7 @@ class IpipeRuntime:
             return _failure(_transport_reason(error, "PIPELINE_QUERY_FAILED"))
         if (
             str(pipeline.get("id") or pipeline.get("pipelineConfId") or "") != context["pipeline_id"]
-            or str(pipeline.get("module") or pipeline.get("space") or "") != context["module"]
+            or context["module"] not in _pipeline_modules(pipeline)
         ):
             return _failure("PIPELINE_IDENTITY_MISMATCH")
         primary_revision = context["revision_map"][context["module"]]
@@ -89,9 +99,13 @@ class IpipeRuntime:
         }
 
     def trigger(
-        self, profile: dict[str, Any], revision_set: dict[str, Any], approval: dict[str, Any]
+        self,
+        profile: dict[str, Any],
+        revision_set: dict[str, Any],
+        approval: dict[str, Any],
+        module: Any = None,
     ) -> dict[str, Any]:
-        context = self._context(profile, revision_set)
+        context = self._context(profile, revision_set, module)
         if context.get("reason_code") != "OK":
             return context
         forbidden = set(context["parameters"]) - set(context["allowed_parameters"])
@@ -123,10 +137,10 @@ class IpipeRuntime:
             return dict(completed["receipt"]["response"])
         intent = claim["intent"]
 
-        existing = self.discover(profile, revision_set)
+        existing = self.discover(profile, revision_set, context["module"])
         if existing.get("reason_code") == "OK":
             try:
-                candidate = self.api.build_by_id(existing["build_id"])
+                candidate = self.api.build_by_id(existing["build_id"], **self._build_key(context))
             except Exception as error:
                 return _failure(
                     _transport_reason(error, "TRIGGER_CONFIRMATION_REQUIRED"),
@@ -148,10 +162,10 @@ class IpipeRuntime:
                 return _failure(
                     error.reason_code, intent_id=intent["intent_id"], retry_allowed=False
                 )
-            reconciled = self.discover(profile, revision_set)
+            reconciled = self.discover(profile, revision_set, context["module"])
             if reconciled.get("reason_code") == "OK":
                 try:
-                    candidate = self.api.build_by_id(reconciled["build_id"])
+                    candidate = self.api.build_by_id(reconciled["build_id"], **self._build_key(context))
                 except Exception:
                     candidate = None
                 if candidate is not None:
@@ -161,7 +175,7 @@ class IpipeRuntime:
         if not build_id:
             return _failure("TRIGGER_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
         try:
-            candidate = self.api.build_by_id(build_id)
+            candidate = self.api.build_by_id(build_id, **self._build_key(context))
         except Exception as error:
             return _failure(
                 _transport_reason(error, "TRIGGER_CONFIRMATION_REQUIRED"),
@@ -181,8 +195,8 @@ class IpipeRuntime:
             return _failure("DEADLINE_INVALID")
         for poll in range(self.max_polls):
             try:
-                build = self.api.build_by_id(build_id)
-                stages = self.api.pipeline_stage_info(build_id)
+                build = self.api.build_by_id(build_id, **self._build_key(binding))
+                stages = self._build_stages(build_id, build)
             except Exception as error:
                 return _failure(_transport_reason(error, "PIPELINE_TRANSIENT"), status="TRANSIENT")
             if _build_id(build) != build_id:
@@ -218,7 +232,7 @@ class IpipeRuntime:
                     "environment_fingerprint": binding["environment_fingerprint"],
                     "evidence_refs": _build_evidence(build_id, binding) + [f"ipipe:stage/{stage['stage_build_id']}"],
                 }
-            if aggregate in _SUCCESS and all(stage["status"] in _SUCCESS for stage in normalized_stages):
+            if aggregate in _SUCCESS and all(_stage_passed(stage) for stage in normalized_stages):
                 return {
                     "ok": True,
                     "reason_code": "OK",
@@ -316,7 +330,7 @@ class IpipeRuntime:
         if response_stage != stage_build_id:
             return _failure("RERUN_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
         try:
-            current = self.api.build_by_id(build_id)
+            current = self.api.build_by_id(build_id, **self._build_key(binding))
         except Exception as error:
             return _failure(
                 _transport_reason(error, "RERUN_CONFIRMATION_REQUIRED"),
@@ -352,7 +366,7 @@ class IpipeRuntime:
     def _reconcile_rerun(self, intent: dict[str, Any]) -> dict[str, Any] | None:
         payload = intent["payload"]
         try:
-            build = self.api.build_by_id(payload["build_id"])
+            build = self.api.build_by_id(payload["build_id"], **self._build_key(payload))
         except Exception as error:
             if isinstance(error, IpipeTransportError):
                 return _failure(
@@ -391,7 +405,7 @@ class IpipeRuntime:
         if revision_set.get("repositories") != binding["repositories"]:
             return _failure("REVISION_MISMATCH")
         try:
-            current = self.api.build_by_id(build_id)
+            current = self.api.build_by_id(build_id, **self._build_key(binding))
         except Exception as error:
             return _failure(_transport_reason(error, "BUILD_QUERY_FAILED"))
         if _build_id(current) != build_id:
@@ -401,13 +415,13 @@ class IpipeRuntime:
         if _status(current) not in _SUCCESS:
             return _failure("PIPELINE_NOT_SUCCESSFUL")
         try:
-            stages = [_normalize_stage(stage) for stage in self.api.pipeline_stage_info(build_id)]
+            stages = [_normalize_stage(stage) for stage in self._build_stages(build_id, current)]
         except Exception as error:
             return _failure(_transport_reason(error, "STAGE_QUERY_FAILED"))
         stage_identity_failure = _stage_identity_failure(stages)
         if stage_identity_failure is not None:
             return _failure(stage_identity_failure)
-        if any(stage["status"] not in _SUCCESS for stage in stages):
+        if any(not _stage_passed(stage) for stage in stages):
             return _failure("PIPELINE_NOT_SUCCESSFUL")
         try:
             releases = self.api.release_info(binding["module"], binding["target_branch"])
@@ -475,7 +489,9 @@ class IpipeRuntime:
         self.state.receipt(intent_id, response, response["evidence_refs"])
         return response
 
-    def _context(self, profile: dict[str, Any], revision_set: dict[str, Any]) -> dict[str, Any]:
+    def _context(
+        self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None
+    ) -> dict[str, Any]:
         if not isinstance(self.validated_profile, dict) or not _nonempty(self.profile_hash):
             return _failure("PROFILE_BINDING_REQUIRED")
         if profile != self.validated_profile:
@@ -483,10 +499,50 @@ class IpipeRuntime:
         validation = validate_profile(profile, check_paths=False)
         if not validation.get("ready"):
             return _failure("PROJECT_NOT_READY")
-        context = _context(profile, revision_set, self.run_id)
+        context = _context(profile, revision_set, self.run_id, module)
         if context.get("reason_code") == "OK":
             context["profile_hash"] = self.profile_hash
         return context
+
+    def _build_stages(self, build_id: str, build: dict[str, Any]) -> list[dict[str, Any]]:
+        """The build's stages, preferring the stage endpoint and falling back to the
+        stages the build record already embeds.
+
+        A failed stage query is only recoverable when the build record itself names
+        stages; otherwise the typed failure is re-raised so its reason survives.
+        """
+        try:
+            stages = self.api.pipeline_stage_info(build_id)
+        except Exception:
+            embedded = _embedded_stages(build)
+            if not embedded:
+                raise
+            stages = embedded
+        if not stages:
+            stages = _embedded_stages(build)
+        return [stage for stage in stages if isinstance(stage, dict)]
+
+    def _build_key(self, source: Any) -> dict[str, Any]:
+        """The module, revision and pipeline a build record is looked up by.
+
+        The gateway has no per-build resource, so reading one build means selecting it
+        out of the listing for its own revision; every binding this runtime writes
+        already carries that revision, either mapped or as a repository list.
+        """
+        if not isinstance(source, dict):
+            return {"module": "", "revision": "", "pipeline_id": ""}
+        module = source.get("module")
+        revision = (source.get("revision_map") or {}).get(module)
+        if not _nonempty(revision):
+            for repository in source.get("repositories") or []:
+                if isinstance(repository, dict) and repository.get("module") == module:
+                    revision = repository.get("revision")
+                    break
+        return {
+            "module": str(module or ""),
+            "revision": str(revision or ""),
+            "pipeline_id": str(source.get("pipeline_id") or ""),
+        }
 
     def _bind_build(self, build_id: str, context: dict[str, Any], build: dict[str, Any]) -> None:
         binding = {
@@ -563,7 +619,7 @@ class IpipeRuntime:
         }
 
 
-def _context(profile: Any, revisions: Any, run_id: str) -> dict[str, Any]:
+def _context(profile: Any, revisions: Any, run_id: str, module: Any = None) -> dict[str, Any]:
     if not isinstance(profile, dict) or not isinstance(revisions, dict):
         return _failure("PROJECT_NOT_READY")
     pipeline = profile.get("pipeline_profile")
@@ -580,10 +636,30 @@ def _context(profile: Any, revisions: Any, run_id: str) -> dict[str, Any]:
         return _failure("PROJECT_NOT_READY")
     if not all(isinstance(item, dict) for item in business + [test_repo]) or not all(isinstance(item, dict) for item in repositories):
         return _failure("PROJECT_NOT_READY")
-    pipeline_id = str(pipeline.get("pipeline_id") or "")
-    allowed = pipeline.get("allowed_parameters")
+    # A requirement that spans repositories has one pipeline per module, so the caller
+    # names the repository this context is about. The first business repository stays
+    # the default, which is the only answer for a single-repository profile. The test
+    # repository is addressable too: its pipeline is registered like any other, and
+    # leaving it out of the lookup made its own build impossible to bind.
+    target = next(
+        (item for item in business + [test_repo] if item.get("module") == module),
+        None if module is not None else business[0],
+    )
+    if not isinstance(target, dict):
+        return _failure("PIPELINE_IDENTITY_MISMATCH")
+    pipeline_id = str(_registered_pipeline(pipeline, target.get("module")) or "")
+    # A registered pipeline carries its own parameter and stage vocabulary, since two
+    # pipelines over the same requirement rarely have the same stages.
+    registered = next(
+        (
+            entry for entry in pipeline.get("pipelines") or []
+            if isinstance(entry, dict) and entry.get("module") == target.get("module")
+        ),
+        {},
+    )
+    allowed = registered.get("allowed_parameters", pipeline.get("allowed_parameters"))
     parameters = revisions.get("parameters", {})
-    stage_classes = pipeline.get("stage_classes")
+    stage_classes = registered.get("stage_classes", pipeline.get("stage_classes"))
     release_rule = pipeline.get("release_rule")
     if not pipeline_id or not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed) or not isinstance(parameters, dict) or not isinstance(stage_classes, list) or not _nonempty(release_rule):
         return _failure("PROJECT_NOT_READY")
@@ -593,13 +669,12 @@ def _context(profile: Any, revisions: Any, run_id: str) -> dict[str, Any]:
     if expected != actual or any(not _nonempty(item.get("revision")) for item in repositories):
         return _failure("REVISION_SET_MISMATCH")
     revision_map = {item["module"]: item["revision"] for item in repositories}
-    module = str(business[0].get("module") or "")
     return {
         "ok": True,
         "reason_code": "OK",
         "pipeline_id": pipeline_id,
-        "module": module,
-        "target_branch": str(business[0].get("branch") or ""),
+        "module": str(target.get("module") or ""),
+        "target_branch": str(target.get("branch") or ""),
         "revision_set_id": revisions["revision_set_id"],
         "repositories": repositories,
         "revision_map": revision_map,
@@ -611,22 +686,44 @@ def _context(profile: Any, revisions: Any, run_id: str) -> dict[str, Any]:
     }
 
 
+def _pipeline_modules(pipeline: Any) -> set[str]:
+    """The repositories a pipeline configuration is bound to.
+
+    A module pipeline names its repositories under `sources[].path`; the flat
+    `module`/`space` fields only appear on build records, so both are accepted.
+    """
+    if not isinstance(pipeline, dict):
+        return set()
+    modules = {
+        str(pipeline.get(key)) for key in ("module", "space")
+        if _nonempty(pipeline.get(key))
+    }
+    for source in pipeline.get("sources") or []:
+        if isinstance(source, dict) and _nonempty(source.get("path")):
+            modules.add(str(source["path"]))
+    return modules
+
+
 def _matches_build(build: Any, context: dict[str, Any]) -> bool:
     if not isinstance(build, dict):
         return False
     pipeline_id = str(build.get("pipelineConfId") or build.get("pipeline_id") or "")
     module = str(build.get("module") or build.get("space") or "")
+    if pipeline_id != context["pipeline_id"] or module != context["module"]:
+        return False
+    # A build record reports the revision it was triggered on, and only sometimes a map
+    # over every repository or the parameters it ran with. Absent fields are not
+    # evidence of a mismatch, so each is compared only when the record states it.
     revisions = build.get("revisions")
-    if not isinstance(revisions, dict):
-        revisions = {module: build.get("revision") or (build.get("trigger") or {}).get("revision")}
+    if isinstance(revisions, dict) and revisions != context["revision_map"]:
+        return False
     primary_revision = build.get("revision") or (build.get("trigger") or {}).get("revision")
-    return (
-        pipeline_id == context["pipeline_id"]
-        and module == context["module"]
-        and revisions == context["revision_map"]
-        and (primary_revision is None or primary_revision == context["revision_map"].get(context["module"]))
-        and build.get("params", build.get("parameters", {})) == context["parameters"]
-    )
+    if primary_revision is not None and primary_revision != context["revision_map"].get(module):
+        return False
+    if primary_revision is None and not isinstance(revisions, dict):
+        return False
+    parameters = build.get("params", build.get("parameters"))
+    return parameters is None or parameters == context["parameters"]
 
 
 def _build_id(build: Any) -> str:
@@ -644,14 +741,46 @@ def _stage_identity_failure(stages: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _stage_id_from_jobs(value: dict[str, Any]) -> str:
+    """The stage build id as reported by the stage's own jobs.
+
+    The stage listing identifies a stage by its *configuration* id and only names the
+    stage build on each job underneath it, so that is where the identity comes from.
+    """
+    for job in value.get("jobBuildBeans") or []:
+        if isinstance(job, dict) and str(job.get("stageBuildId") or "").strip():
+            return str(job["stageBuildId"])
+    return ""
+
+
 def _normalize_stage(value: dict[str, Any]) -> dict[str, Any]:
-    stage_id = str(value.get("id") or value.get("stageBuildId") or "")
+    stage_id = str(value.get("id") or value.get("stageBuildId") or _stage_id_from_jobs(value) or "")
     return {
         "stage_build_id": stage_id,
         "name": str(value.get("stageName") or value.get("name") or stage_id),
         "status": _status(value),
         "class": str(value.get("class") or value.get("stageClass") or ""),
+        "job_statuses": [
+            _status(job) for job in value.get("jobBuildBeans") or [] if isinstance(job, dict)
+        ],
     }
+
+
+def _stage_passed(stage: dict[str, Any]) -> bool:
+    """Whether a stage counts as passing evidence.
+
+    A stage is reported SKIPPED as soon as any job under it is skipped, even when the
+    rest ran and succeeded: BGW skips its 100G jobs and runs the 25G ones in the same
+    unit-test stage. That is passing evidence, so a skipped stage is accepted when a job
+    under it succeeded and none failed. A stage with no job that ran is not evidence.
+    """
+    status = stage.get("status")
+    if status in _SUCCESS:
+        return True
+    if status not in _SKIPPED:
+        return False
+    jobs = stage.get("job_statuses") or []
+    return any(job in _SUCCESS for job in jobs) and not any(job in _FAILURE for job in jobs)
 
 
 def _normalize_job(value: dict[str, Any]) -> dict[str, Any]:

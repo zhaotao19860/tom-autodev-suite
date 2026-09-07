@@ -9,10 +9,21 @@ INTAKE -> GRILL -> SPEC -> TASKS -> WORKSPACE -> PLAN -> IMPLEMENT
 
 Each arrow requires a persisted event and `EvidenceGate` result. Approval states suspend the run without losing locks or artifact references.
 
+`INTAKE` accepts a card whose `acceptance` list is empty, so a run may start from a plain requirement card. `GRILL` then collects the missing criteria into `acceptance_delta`. The snapshot is never rewritten, so the G0 approval stays bound to the original card hash; the union of snapshot `acceptance` and `acceptance_delta` is what Spec traceability must cover. The threshold therefore sits at the exit of `GRILL`, not at the entry of `INTAKE`.
+
+`WORKSPACE` may also go back to `TASKS`. The WorkspaceGate binds exactly one business repository per task, so a node that spans two repositories is only provably wrong at binding time; without this edge the sole remedy would be discarding a run that already holds approved phases. Re-entry is not a rewind: it needs the G2-approved spec as evidence, the new DAG must win its own G3, and the discarded DAG stays in the ledger next to the approval it no longer justifies.
+
+A KU phase document is immutable — it carries the hash of what was written to it — so the second attempt at a phase cannot publish over the first one's title. `_phase_title` appends the attempt (`03-tasks-r2`), counted per phase *and* task so the second task's first plan is not mistaken for the first task's second attempt. Both documents stay in the run index, which is what makes the discarded artifact auditable. A title KU refuses (`KU_IMMUTABLE_CONFLICT`) writes nothing, so `KnowledgeSync` closes that operation's intent instead of leaving the run parked in `RECOVERY_REQUIRED`; every other failure, including any unknown result, stays open for recovery to query.
+
+KU holds an edit separately from what a query returns: `edit-content` and `edit-mdsl-content` land in the edit state, `query-content` answers from the preview, and only `publish-doc` moves one to the other. So a publish receipt records that one preview text was published, not that the edit state is empty — `_publish` keyed only on the preview hash would short-circuit on that receipt and strand every edit made since, which wedges the run while each retry adds another copy to the edit state. When the receipt exists but verification fails, the publish is repeated (`ku.document.publish.reflush`, journalled under the observed version so a crash re-uses the same intent) and the entry is verified against the fresh preview.
+
 ## Failure Transitions
 
 | Reason | Next state |
 |---|---|
+| `ACCEPTANCE_CRITERIA_MISSING` | Return to `GRILL`; Spec cannot start without at least one criterion. |
+| `ACCEPTANCE_REQUIRED` | Stay in `GRILL`; `tom-grill` stopped before emitting an artifact because the union would stay empty. |
+| `ACCEPTANCE_DELTA_CONFLICT` | Return to `GRILL`; an `acceptance_delta` id already exists in the snapshot. |
 | `REQUIREMENT_CHANGED` | Invalidate downstream approvals and return to `GRILL`. |
 | `BASELINE_UNVERIFIED` | Stop for human baseline decision; high-risk changes remain stopped. |
 | `REVIEW_FAILED` | Validate the finding, then enter `DIAGNOSE`. |

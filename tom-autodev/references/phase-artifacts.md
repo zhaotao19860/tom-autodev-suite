@@ -2,7 +2,7 @@
 
 | Artifact | Producer | Required fields |
 |---|---|---|
-| Decision Result | `tom-grill` | result, decision log, glossary delta, evidence refs, input hash |
+| Decision Result | `tom-grill` | result, decision log, acceptance delta when the card had none, glossary delta, evidence refs, input hash |
 | Spec | `tom-spec` | version, content hash, behaviors, test interface, environment requirements, traceability |
 | Task DAG | `tom-tasks` | nodes, edges, acceptance coverage, completion evidence, G3 hash |
 | Task Plan | `tom-plan` | exact repositories/files/symbols, interfaces, test cases, iPipe parameters, checklist, G4 hash |

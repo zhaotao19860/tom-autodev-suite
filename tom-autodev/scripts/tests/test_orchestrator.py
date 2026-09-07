@@ -794,6 +794,26 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(recovery_event_count_after_wrong_gate, recovery_event_count)
         self.assertEqual(recovery_advanced["state"], "IPIPE")
 
+    def test_a_mis_cut_dag_can_be_re_cut_from_workspace_but_not_for_free(self):
+        """A DAG defect surfaces at binding time, so WORKSPACE must be able to go back.
+
+        The edge exists only to avoid discarding a run over a re-cuttable DAG; it must
+        not hand out a rewind, so re-entry still needs the G2-approved spec and the new
+        DAG still has to win its own G3.
+        """
+        from evidence_policy import requirement_for
+        from transition_policy import TransitionPolicy
+
+        policy = TransitionPolicy()
+
+        self.assertTrue(policy.validate("WORKSPACE", "TASKS")["allowed"])
+        self.assertTrue(policy.validate("WORKSPACE", "PLAN")["allowed"])
+        self.assertEqual(
+            policy.validate("WORKSPACE", "IMPLEMENT")["reason_code"], "INVALID_TRANSITION"
+        )
+        requirement = requirement_for("TASKS", "WORKSPACE")
+        self.assertEqual((requirement.artifacts, requirement.approval_gate), (("spec",), "G2"))
+
     def test_route_failure_rejects_an_illegal_transition(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -834,6 +854,198 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(code["state"], "DIAGNOSE")
         self.assertEqual(environment["state"], "ENVIRONMENT_BLOCKED")
         self.assertEqual(changed["state"], "GRILL")
+
+
+class SubmitDescriptorWiringTests(unittest.TestCase):
+    """A passed Review must archive the descriptor the iCode boundary binds to."""
+
+    def _orchestrator(self, root: Path, completion: dict):
+        _write_profile(root, PROFILE)
+        orchestrator = Orchestrator(root)
+
+        class _Protocol:
+            def complete(self, run_id, envelope):
+                return completion
+
+        orchestrator.phase_protocol = lambda *args, **kwargs: _Protocol()
+        return orchestrator
+
+    def test_passed_review_builds_the_descriptor(self):
+        import submit_descriptor
+
+        calls = []
+        original = submit_descriptor.build_and_archive
+        submit_descriptor.build_and_archive = lambda orchestrator, run_id, task_id: (
+            calls.append((run_id, task_id)) or {"ok": True, "reason_code": "OK"}
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                orchestrator = self._orchestrator(
+                    Path(directory),
+                    {"ok": True, "phase_complete": True, "phase": "REVIEW", "task_id": "T1"},
+                )
+                result = orchestrator.complete_phase("run-1", {}, knowledge_sync=object())
+        finally:
+            submit_descriptor.build_and_archive = original
+
+        self.assertEqual(calls, [("run-1", "T1")])
+        self.assertEqual(result["submit_descriptor"]["reason_code"], "OK")
+
+    def test_other_phases_and_failed_completions_build_nothing(self):
+        import submit_descriptor
+
+        calls = []
+        original = submit_descriptor.build_and_archive
+        submit_descriptor.build_and_archive = lambda orchestrator, run_id, task_id: (
+            calls.append((run_id, task_id)) or {"ok": True, "reason_code": "OK"}
+        )
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                implement = self._orchestrator(
+                    root / "a",
+                    {"ok": True, "phase_complete": True, "phase": "IMPLEMENT", "task_id": "T1"},
+                ).complete_phase("run-1", {}, knowledge_sync=object())
+                rejected = self._orchestrator(
+                    root / "b",
+                    {"ok": False, "phase_complete": False, "reason_code": "SCHEMA_INVALID"},
+                ).complete_phase("run-2", {}, knowledge_sync=object())
+        finally:
+            submit_descriptor.build_and_archive = original
+
+        self.assertEqual(calls, [])
+        self.assertNotIn("submit_descriptor", implement)
+        self.assertNotIn("submit_descriptor", rejected)
+
+
+class MultiRepoSubmitFrontierTests(unittest.TestCase):
+    """SUBMIT may only hand over to IPIPE once every reviewed change set is in."""
+
+    def _orchestrator(self, root):
+        _write_profile(root, PROFILE)
+        return Orchestrator(root)
+
+    @staticmethod
+    def _descriptor(orchestrator, run_id, task_id, change_set_id, verdict="PASS"):
+        content = json.dumps({"change_set_id": change_set_id}, sort_keys=True).encode()
+        return orchestrator.artifacts.put(run_id, "change-set", content, {
+            "verdict": verdict, "task_id": task_id, "revision_set_id": f"RS-{task_id}",
+        })
+
+    @staticmethod
+    def _submission(orchestrator, run_id, change_set_id, module):
+        return orchestrator.artifacts.put(run_id, "submission", b"{}", {
+            "change_set_id": change_set_id, "revision_set_id": "RS",
+            "controller_binding": {"module": module, "pipeline_id": "p"},
+        })
+
+    def test_the_frontier_is_outstanding_until_every_task_is_submitted(self):
+        from orchestrator import _outstanding_submissions, _reviewed_tasks
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+            self._descriptor(orchestrator, run_id, "T0", "CS-0")
+            self._descriptor(orchestrator, run_id, "T1", "CS-1")
+
+            reviewed = _reviewed_tasks(orchestrator, run_id)
+            none_yet = _outstanding_submissions(orchestrator, run_id)
+            self._submission(orchestrator, run_id, "CS-1", "bgw")
+            half = _outstanding_submissions(orchestrator, run_id)
+            self._submission(orchestrator, run_id, "CS-0", "bgw-second")
+            done = _outstanding_submissions(orchestrator, run_id)
+
+        self.assertEqual(reviewed, ["T0", "T1"])
+        self.assertEqual(none_yet, ["T0", "T1"])
+        self.assertEqual(half, ["T0"])
+        self.assertEqual(done, [])
+
+    def test_a_rejected_change_set_is_not_owed_to_icode(self):
+        from orchestrator import _outstanding_submissions
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+            self._descriptor(orchestrator, run_id, "T0", "CS-0")
+            self._descriptor(orchestrator, run_id, "T1", "CS-1", verdict="REJECT")
+            self._submission(orchestrator, run_id, "CS-0", "bgw")
+
+            outstanding = _outstanding_submissions(orchestrator, run_id)
+
+        self.assertEqual(outstanding, [])
+
+    def test_a_run_without_descriptors_keeps_the_single_submission_behaviour(self):
+        from orchestrator import _outstanding_submissions
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+
+            outstanding = _outstanding_submissions(orchestrator, run_id)
+
+        self.assertEqual(outstanding, [])
+
+    def test_the_ipipe_payload_names_the_primary_repository_not_the_last_one(self):
+        from orchestrator import _primary_submission, _recorded_submissions
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+            primary_module = PROFILE["business_repos"][0]["module"]
+            self._submission(orchestrator, run_id, "CS-1", "baidu/other/second")
+            last = self._submission(orchestrator, run_id, "CS-0", primary_module)
+            submissions = _recorded_submissions(orchestrator, run_id)
+
+            chosen = _primary_submission(
+                {"business_repos": [{"module": primary_module}]}, submissions,
+                {"module": "baidu/other/second"}, last,
+            )
+
+        self.assertEqual([item["change_set_id"] for item in submissions], ["CS-0", "CS-1"])
+        self.assertEqual(chosen["controller_binding"]["module"], primary_module)
+
+
+class PerModulePipelineIdentityTests(unittest.TestCase):
+    """A cross-repository run has one pipeline per module, not one per run."""
+
+    REGISTERED = {
+        "pipeline_id": "348102",
+        "pipelines": [
+            {"module": "baidu/sysip/x86bgw", "pipeline_id": "348102",
+             "required_for_release": True},
+            {"module": "baidu/sysip/bgwagent", "pipeline_id": "348142",
+             "required_for_release": True},
+            {"module": "baidu/nsiqa/x86bgw", "pipeline_id": "504074",
+             "required_for_release": False},
+        ],
+    }
+
+    def test_each_module_resolves_to_its_own_pipeline(self):
+        from phase_protocol import _registered_pipeline
+
+        resolved = [
+            _registered_pipeline(self.REGISTERED, "baidu/sysip/x86bgw"),
+            _registered_pipeline(self.REGISTERED, "baidu/sysip/bgwagent"),
+            _registered_pipeline(self.REGISTERED, "baidu/nsiqa/x86bgw"),
+        ]
+
+        self.assertEqual(resolved, ["348102", "348142", "504074"])
+
+    def test_a_profile_registering_none_still_answers_with_its_single_pipeline(self):
+        from phase_protocol import _registered_pipeline
+
+        legacy = {"pipeline_id": "bgw-pipeline"}
+
+        self.assertEqual(_registered_pipeline(legacy, "any/module"), "bgw-pipeline")
+        self.assertEqual(_registered_pipeline(self.REGISTERED, "not/registered"), "348102")
+
+    def test_only_the_release_gating_modules_are_required(self):
+        from phase_protocol import _required_modules
+
+        self.assertEqual(_required_modules(self.REGISTERED), [
+            "baidu/sysip/bgwagent", "baidu/sysip/x86bgw",
+        ])
+        self.assertEqual(_required_modules({"pipeline_id": "p"}), [])
 
 
 def _write_profile(root: Path, profile: dict) -> None:

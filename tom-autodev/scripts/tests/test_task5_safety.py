@@ -1133,16 +1133,22 @@ class ClientAndOrchestratorSafetyTests(unittest.TestCase):
         self.assertEqual({item["channel"] for item in result["delivery_receipts"]}, {"comate", "infoflow"})
         self.assertEqual(changed["reason_code"], "APPROVAL_DELIVERY_CONFLICT")
 
-    def test_group_client_uses_setup_then_concrete_commands_with_fake_transport(self):
-        class Transport:
+    def test_group_client_writes_through_the_bot_gateway(self):
+        class Bot:
             def __init__(self): self.calls = []
-            def run(self, argv, **options):
-                self.calls.append((argv, options))
-                return {"data": {"groupId": 8}} if "group_create.sh" in argv[0] else {"data": {"messageId": 9}}
-        transport = Transport()
-        client = InfoflowGroupClient(transport=transport, script_root="/scripts")
-        client.create_or_reuse({"group_name": "n", "owner": "owner@example.test", "member_snapshot": ["owner@example.test"], "friendlyLevel": 3})
-        client.send_markdown("8", "@owner@example.test body", ["owner@example.test"], "k")
-        self.assertTrue(transport.calls[0][0][0].endswith("setup.sh"))
-        self.assertEqual(transport.calls[1][0][4], "3")
-        self.assertEqual(transport.calls[2][0][2], "MD")
+            def create_group(self, request):
+                self.calls.append(("create", request))
+                return {"group_id": "8"}
+            def send_group_markdown(self, group_id, content, at_users):
+                self.calls.append(("message", group_id, content, at_users))
+                return {"message_id": "9", "group_id": group_id}
+        bot = Bot()
+        client = InfoflowGroupClient(bot_client=bot)
+        group = client.create_or_reuse({"group_name": "n", "owner": "owner@example.test", "member_snapshot": ["owner@example.test"], "friendlyLevel": 3})
+        message = client.send_markdown("8", "@owner@example.test body", ["owner@example.test"], "k")
+        self.assertEqual(group, {"group_id": "8", "group_name": "n"})
+        self.assertEqual(message["message_id"], "9")
+        self.assertEqual(bot.calls[0][1]["friendly_level"], 3)
+        self.assertEqual(bot.calls[1][3], ["owner@example.test"])
+        with self.assertRaisesRegex(ValueError, "MESSAGE_MENTION_MISMATCH"):
+            client.send_markdown("8", "body", ["owner@example.test"], "k")

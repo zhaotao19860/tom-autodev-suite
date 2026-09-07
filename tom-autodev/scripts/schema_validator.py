@@ -275,6 +275,13 @@ def _validate_decision_log(instance: dict[str, Any]) -> list[SchemaIssue]:
                     issues.append(SchemaIssue(f"decisions[{index}].options", "duplicate"))
                 if decision.get("choice") not in options:
                     issues.append(SchemaIssue(f"decisions[{index}].choice", "unknown"))
+    acceptance_delta = instance.get("acceptance_delta")
+    if isinstance(acceptance_delta, list):
+        try:
+            normalized_acceptance_ids(acceptance_delta)
+        except AcceptanceValueError as error:
+            path = "acceptance_delta" if error.index < 0 else f"acceptance_delta[{error.index}].id"
+            issues.append(SchemaIssue(path, error.kind))
     return issues
 
 

@@ -27,6 +27,22 @@ _INTAKE_PREREQUISITE_KEYS = (
     "collaboration_binding",
 )
 _GROUP_TOPIC_MAX = 12
+# Failures the group client raises before it dispatches anything: the request was
+# rejected locally or the gateway was unreachable, so no group can exist yet.
+_UNDISPATCHED = frozenset({
+    "INFOFLOW_GATEWAY_UNAVAILABLE", "INFOFLOW_GATEWAY_MISSING",
+    "INFOFLOW_GATEWAY_INSTALL_FAILED", "INFOFLOW_GATEWAY_JOURNAL_MISMATCH",
+    "GROUP_REQUEST_INVALID", "GROUP_MEMBERS_INVALID", "GROUP_FRIENDLY_LEVEL_INVALID",
+    "MEMBER_CONFIRMATION_REQUIRED",
+})
+
+
+def _reason(error: BaseException) -> str:
+    return str(error) or error.__class__.__name__
+
+
+def _not_dispatched(error: BaseException) -> bool:
+    return _reason(error) in _UNDISPATCHED
 
 
 def resolve_members(members: dict[str, Any]) -> dict[str, Any]:
@@ -89,6 +105,25 @@ def build_collaboration_binding(
             "session_idempotency_key": f"infoflow.group.create:{run_id}",
         },
     }
+
+
+def group_id_for_run(state_store: Any, run_id: Any) -> str | None:
+    """The run's collaboration group, when G0 already created one.
+
+    Approvals and progress belong in that group rather than in private chats: it is
+    where the requirement's people already are, so a decision has the same audience
+    as the work it gates. Returning None keeps the single-chat path available for a
+    run whose group does not exist yet.
+    """
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    found = state_store.result_by_idempotency_key(f"infoflow.group.create:{run_id}")
+    if not isinstance(found, dict):
+        return None
+    receipt = found.get("receipt")
+    response = receipt.get("response") if isinstance(receipt, dict) else None
+    group_id = response.get("group_id") if isinstance(response, dict) else None
+    return group_id if isinstance(group_id, str) and group_id.isdigit() else None
 
 
 def intake_prerequisites(payload: Any) -> dict[str, Any]:
@@ -214,7 +249,12 @@ class CollaborationSession:
             return self._save_group(intent, request, reconciled)
         try:
             response = self.group_client.create_or_reuse(request)
-        except Exception:
+        except Exception as error:
+            if _not_dispatched(error):
+                self.state.withdraw_intent(run_id, "infoflow.group.create", key, request)
+                return {
+                    "run_id": run_id, "reason_code": _reason(error), "retry_allowed": True,
+                }
             reconciled = self.group_client.reconcile_group(request)
             if reconciled is not None:
                 return self._save_group(intent, request, reconciled)

@@ -2,6 +2,11 @@
 
 | Reason | Repair allowed | Route |
 |---|---:|---|
+| `ACCEPTANCE_CRITERIA_MISSING` | no | Return to `tom-grill` and agree criteria with the requirement owner. |
+| `ACCEPTANCE_REQUIRED` | no | `tom-grill` stopped itself because the union would stay empty; agree criteria with the requirement owner. |
+| `ACCEPTANCE_DELTA_CONFLICT` | no | Return to `tom-grill`; a delta id must not redefine a snapshot criterion. |
+| `APPROVAL_CONTENT_INVALID` | yes | `request-approval --content` could not be read or parsed; pass the phase envelope JSON. |
+| `APPROVAL_CONTENT_MISMATCH` | yes | The summarized content does not match the gate's bound hashes; open the gate on the envelope actually being approved. |
 | `LOCAL_EXECUTION_FORBIDDEN` | no | Refuse local project build/test and create an iPipe validation plan. |
 | `REVIEW_FAILED` | after diagnosis | Confirm finding, then diagnose. |
 | `REVIEW_INCOMPLETE` | no | Use human Review fallback. |

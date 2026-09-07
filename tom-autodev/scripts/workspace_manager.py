@@ -149,7 +149,9 @@ class WorkspaceManager:
                 "ACTIVE",
                 "STOP",
             )
-        mismatch = _registered_worktree_mismatch(repo, worktree, expected_revision)
+        mismatch = _registered_worktree_mismatch(
+            repo, worktree, expected_revision, committed=True
+        )
         if mismatch is not None:
             return _reconcile_result(
                 ownership,
@@ -1038,7 +1040,7 @@ def _registered_worktrees(repo: Path) -> set[Path] | None:
 
 
 def _registered_worktree_mismatch(
-    repo: Path, worktree: Path, expected_revision: str | None
+    repo: Path, worktree: Path, expected_revision: str | None, *, committed: bool = False
 ) -> str | None:
     if not expected_revision:
         return "WORKTREE_BASELINE_UNKNOWN"
@@ -1053,7 +1055,22 @@ def _registered_worktree_mismatch(
         or repo_common_dir != worktree_common_dir
     ):
         return "WORKTREE_REPOSITORY_MISMATCH"
-    if _git(worktree, "rev-parse", "HEAD") != expected_revision:
+    head = _git(worktree, "rev-parse", "HEAD")
+    if head is None:
+        return "WORKTREE_REVISION_MISMATCH"
+    # The recorded revision is the baseline the workspace was cut from, and a task
+    # commits its change set on top of it, so HEAD legitimately moves ahead. What has
+    # to stay true is that the baseline is still in this worktree's history: a reset
+    # onto unrelated history, or another repository's history, is not the workspace we
+    # own. Requiring equality modelled a checkout nobody had worked in, which no real
+    # submission could ever satisfy.
+    if head == expected_revision:
+        return None
+    if not committed:
+        # Nothing has handed this workspace to a task yet, so nothing should have moved
+        # HEAD. A worktree registered at some other revision is not ours to adopt.
+        return "WORKTREE_REVISION_MISMATCH"
+    if _git_result(worktree, "merge-base", "--is-ancestor", expected_revision, head) is None:
         return "WORKTREE_REVISION_MISMATCH"
     return None
 

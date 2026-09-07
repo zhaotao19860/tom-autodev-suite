@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -16,6 +18,39 @@ _COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 _UNKNOWN_REASONS = frozenset({"CLI_TIMEOUT", "CLI_PROCESS_FAILED", "CLI_INVALID_JSON"})
 
 
+def resolve_username(repo_paths: Sequence[str] = ()) -> str:
+    """The KU CLI reads documents as a person, so it needs the operator's uuap.
+
+    Without one it silently falls back to app credentials and every query returns
+    `开放应用不存在`, which reads like a broken document rather than a missing identity.
+    Comate normally exports the name; when it does not, the configured repositories
+    know who is committing, and that is the same person.
+    """
+    for name in ("BAIDU_CC_USERNAME", "COMATE_USERNAME", "KU_USERNAME"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    for path in repo_paths:
+        email = _git_email(path)
+        if "@" in email:
+            return email.split("@", 1)[0]
+    return ""
+
+
+def _git_email(path: Any) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path), "config", "user.email"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
 class KuClient:
     def __init__(
         self,
@@ -25,9 +60,10 @@ class KuClient:
         run_id: str | None = None,
         repo_id: str,
         username: str | None = None,
+        repo_paths: Sequence[str] = (),
         binary: str = DEFAULT_KU_BINARY,
     ):
-        self.username = username or os.environ.get("BAIDU_CC_USERNAME") or os.environ.get("COMATE_USERNAME")
+        self.username = username or resolve_username(repo_paths)
         self.transport = transport or CliTransport(
             environment={"BAIDU_CC_USERNAME": self.username or ""}
         )
@@ -205,6 +241,15 @@ class KuClient:
             if not reconciled["ok"]:
                 if reconciled["reason_code"] in {"KU_CHILD_NOT_FOUND", "KU_QUERY_UNKNOWN"}:
                     return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
+                if reconciled["reason_code"] == "KU_CHILD_CONTENT_UNSETTLED":
+                    # The write landed; only the read-back is behind. Retrying this same
+                    # call is the whole recovery, so it stays retryable and the intent
+                    # stays open.
+                    return _failure(
+                        "KU_CHILD_CONTENT_UNSETTLED",
+                        intent_id=intent["intent_id"],
+                        retry_allowed=True,
+                    )
                 return reconciled
             created = self._persist_create_receipt(intent, reconciled, content_hash)
             return self._complete_artifact(created, reconciled, content_hash, marked)
@@ -271,7 +316,7 @@ class KuClient:
         marker = self.index_marker(
             doc_id, entry["title"], entry["doc_id"], entry["content_hash"]
         )
-        state = _index_entry_state(current["text"], entry_markdown, marker)
+        state = _index_entry_state(current["text"], marker)
         if state == "CONFLICT":
             return _failure("KU_INDEX_CONFLICT")
         edit_key = f"ku-index-edit:{doc_id}:{_content_hash(marker)}"
@@ -295,11 +340,17 @@ class KuClient:
                 doc_id,
                 current["content_hash"],
                 verified=current,
-                required_entry=entry_markdown,
+                required_entry=marker,
             )
 
         if pending is not None:
-            return _failure("QUERY_REQUIRED", intent_id=pending["intent_id"], retry_allowed=False)
+            # An mdsl edit lands in KU's edit state, so the preview text a query returns
+            # cannot say whether the claimed insert happened. Publish first, then judge.
+            settled = self._publish_index(doc_id, marker)
+            if not settled["ok"]:
+                return settled["failure"]
+            self._persist_edit_receipt(pending, settled["verified"], entry_markdown)
+            return settled["publish"]
         anchor = _last_markdown_block(current["text"])
         if anchor is None:
             return _failure("KU_INDEX_ANCHOR_MISSING")
@@ -332,16 +383,77 @@ class KuClient:
             if not _unknown_result(edited["reason_code"]):
                 return self._persist_failure(intent, edited["reason_code"])
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-        verified = self._query_document(doc_id)
-        if not verified["ok"] or _index_entry_state(verified["text"], entry_markdown, marker) != "EXACT":
-            return _failure("KU_INDEX_VERIFICATION_FAILED", intent_id=intent["intent_id"])
-        self._persist_edit_receipt(intent, verified, entry_markdown)
-        return self._publish(
-            doc_id,
-            verified["content_hash"],
-            verified=verified,
-            required_entry=entry_markdown,
+        settled = self._publish_index(doc_id, marker)
+        if not settled["ok"]:
+            return settled["failure"]
+        self._persist_edit_receipt(intent, settled["verified"], entry_markdown)
+        return settled["publish"]
+
+    def _republish(
+        self,
+        doc_id: str,
+        content_hash: str,
+        expected_text: str | None,
+        required_entry: str | None,
+    ) -> dict[str, Any]:
+        """Flush KU's edit state again for a document that was already published once.
+
+        The flush is journalled under the version it was observed at, so a retry after
+        a crash re-uses the same intent instead of claiming a new one on every pass.
+        The publish receipt for the original attempt is left untouched: receipts are
+        write-once and that attempt did happen.
+        """
+        observed = self._query_document(doc_id)
+        if not observed["ok"]:
+            return observed
+        key = f"ku-republish:{doc_id}:{content_hash}:{observed['version']}"
+        completed = self.state.result_by_idempotency_key(key)
+        intent = (
+            self.state.intent_by_idempotency_key(key)
+            if completed is not None
+            else self.state.intent(
+                self.run_id,
+                "ku.document.publish.reflush",
+                key,
+                {"doc_id": doc_id, "content_hash": content_hash},
+            )
         )
+        if completed is None:
+            published = self._invoke(
+                [self.binary, "publish-doc", "--doc-id", doc_id, "--username", self.username or ""]
+            )
+            if not published["ok"]:
+                if not _unknown_result(published["reason_code"]):
+                    return self._persist_failure(intent, published["reason_code"])
+                return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
+        remote = self._query_document(doc_id)
+        if not self._publish_verifies(remote, expected_text, required_entry):
+            return _failure("KU_PUBLISH_VERIFICATION_FAILED", intent_id=intent["intent_id"])
+        if completed is not None:
+            return completed["receipt"]["response"]
+        return self._persist_publish_receipt(intent, doc_id, content_hash, remote["version"])
+
+    def _publish_index(self, doc_id: str, marker: str) -> dict[str, Any]:
+        """Publish the index and confirm it carries the entry exactly once.
+
+        KU keeps `edit-content` results in a draft: until the document is published,
+        a query still returns the previous text, so verifying before publishing would
+        reject every successful insert. `_publish` is what queries and verifies after
+        publishing, and its receipt carries the version the edit landed in.
+        """
+        current = self._query_document(doc_id)
+        if not current["ok"]:
+            return {"ok": False, "failure": current}
+        publish = self._publish(
+            doc_id, current["content_hash"], verified=current, required_entry=marker
+        )
+        if not publish["ok"]:
+            return {"ok": False, "failure": publish}
+        return {
+            "ok": True,
+            "publish": publish,
+            "verified": {"doc_id": publish["doc_id"], "version": publish["version"]},
+        }
 
     def _complete_artifact(
         self,
@@ -388,7 +500,12 @@ class KuClient:
             if verified is None:
                 verified = self._query_document(doc_id)
             if not self._publish_verifies(verified, expected_text, required_entry):
-                return _failure("KU_PUBLISH_VERIFICATION_FAILED")
+                # The receipt only says this preview text was published once. KU keeps
+                # later edits in its edit state, which no query returns, so the receipt
+                # cannot be read as "there is nothing left to publish": short-circuiting
+                # here strands every edit made since and the run never advances. A
+                # publish is a flush of the edit state, so repeating it is safe.
+                return self._republish(doc_id, content_hash, expected_text, required_entry)
             return response
 
         pending = self.state.intent_by_idempotency_key(key)
@@ -445,16 +562,28 @@ class KuClient:
         candidates = [document for document in listing["documents"] if document["title"] == title]
         if not candidates:
             return _failure("KU_CHILD_NOT_FOUND")
-        matches: list[dict[str, Any]] = []
+        remotes: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for candidate in candidates:
             remote = self._query_document(candidate["doc_id"])
             if not remote["ok"]:
                 return remote
-            if remote["text"] == marked and remote["url"] == candidate["url"]:
-                matches.append(remote)
-        if len(candidates) != 1 or len(matches) != 1:
-            return _failure("KU_IMMUTABLE_CONFLICT")
-        return matches[0]
+            remotes.append((candidate, remote))
+        matches = [
+            remote
+            for candidate, remote in remotes
+            if _carries_marker(remote["text"], marked) and remote["url"] == candidate["url"]
+        ]
+        if len(candidates) == 1 and len(matches) == 1:
+            return matches[0]
+        # KU serves a freshly created document before its content has propagated, so the
+        # read-back can come back without any marker at all. Calling that an immutable
+        # conflict is wrong twice over: the document was written, and the caller treats
+        # that reason as "nothing was written" and closes the intent, which no later
+        # retry can undo. Only a marker that names this document with a different
+        # content hash is a real conflict.
+        if len(candidates) == 1 and not _conflicting_marker(remotes[0][1]["text"], marked):
+            return _failure("KU_CHILD_CONTENT_UNSETTLED")
+        return _failure("KU_IMMUTABLE_CONFLICT")
 
     def _discover_run_root(
         self, parent_doc_id: str, title: str, marker: str
@@ -659,8 +788,7 @@ class KuClient:
             remote.get("ok") is True
             and remote.get("repo_id") == self.repo_id
             and remote.get("url") == expected_url
-            and remote.get("text") == marked
-            and remote.get("content_hash") == _content_hash(marked)
+            and _carries_marker(remote.get("text", ""), marked)
         )
 
     def _publish_verifies(
@@ -671,7 +799,7 @@ class KuClient:
     ) -> bool:
         if not remote.get("ok") or remote.get("init_type") != 0:
             return False
-        if expected_text is not None and remote.get("text") != expected_text:
+        if expected_text is not None and not _carries_marker(remote.get("text", ""), expected_text):
             return False
         if required_entry is not None and remote.get("text", "").count(required_entry) != 1:
             return False
@@ -851,6 +979,34 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def _carries_marker(remote_text: str, expected_text: str) -> bool:
+    """Whether a stored document still carries the content we published.
+
+    KU does not round-trip markdown byte for byte: it prepends the document title
+    and drops the blank line after a leading heading. Every document written here
+    ends with a marker comment that embeds the hash of the intended content, so the
+    marker is what identity is checked against, not the rendered text.
+    """
+    marker = _trailing_marker(expected_text)
+    if marker is None:
+        return remote_text == expected_text
+    return remote_text.count(marker) == 1
+
+
+def _trailing_marker(text: str) -> str | None:
+    tail = text.rstrip().rsplit("\n", 1)[-1].strip()
+    return tail if tail.startswith("<!--") and tail.endswith("-->") else None
+
+
+def _conflicting_marker(remote_text: str, expected_text: str) -> bool:
+    """Whether the stored document claims the same identity with different content."""
+    marker = _trailing_marker(expected_text)
+    if marker is None:
+        return True
+    identity = marker.rsplit(":", 1)[0]
+    return identity in remote_text and marker not in remote_text
+
+
 def _canonical_ku_url(value: Any, repo_id: str, doc_id: str) -> bool:
     if not isinstance(value, str):
         return False
@@ -867,18 +1023,27 @@ def _canonical_ku_url(value: Any, repo_id: str, doc_id: str) -> bool:
 
 
 def _last_markdown_block(text: str) -> str | None:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # An HTML comment is not a selectable block in KU's editor, so anchoring on the
+    # trailing marker makes `insert_after` succeed without inserting anything.
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("<!--")
+    ]
     return lines[-1] if lines else None
 
 
-def _index_entry_state(text: str, entry_markdown: str, marker: str) -> str:
-    marker_count = text.count(marker)
-    entry_count = text.count(entry_markdown)
-    if marker_count == 0 and entry_count == 0:
+def _index_entry_state(text: str, marker: str) -> str:
+    """Index membership is judged by the entry marker, never by rendered text.
+
+    KU reformats markdown it stores, so the human-readable list item cannot be
+    compared byte for byte. The marker carries the child doc id and content hash,
+    which is what the index actually has to bind.
+    """
+    count = text.count(marker)
+    if count == 0:
         return "ABSENT"
-    if marker_count == 1 and entry_count == 1:
-        return "EXACT"
-    return "CONFLICT"
+    return "EXACT" if count == 1 else "CONFLICT"
 
 
 def _unknown_result(reason_code: str) -> bool:

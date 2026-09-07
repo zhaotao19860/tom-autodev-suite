@@ -67,6 +67,58 @@ REQUIRED_PROFILE = {
 
 
 class ProjectRegistryTests(unittest.TestCase):
+    def _with_pipelines(self, entries):
+        import copy
+
+        profile = copy.deepcopy(REQUIRED_PROFILE)
+        profile["pipeline_profile"]["pipelines"] = entries
+        return validate_profile(profile, check_paths=False)
+
+    def test_per_module_pipelines_are_accepted(self):
+        business = REQUIRED_PROFILE["business_repos"][0]["module"]
+        test_module = REQUIRED_PROFILE["test_repo"]["module"]
+
+        result = self._with_pipelines([
+            {"module": business, "pipeline_id": "348102", "stage_classes": ["compile"],
+             "required_for_release": True},
+            {"module": test_module, "pipeline_id": "504074", "stage_classes": ["compile"],
+             "required_for_release": False},
+        ])
+
+        self.assertEqual(result["reason_code"], "READY")
+        self.assertEqual(result["invalid"], [])
+
+    def test_a_pipeline_for_an_unregistered_module_is_invalid(self):
+        result = self._with_pipelines([
+            {"module": "baidu/nobody/nothing", "pipeline_id": "1", "stage_classes": ["compile"],
+             "required_for_release": True},
+        ])
+
+        self.assertEqual(result["reason_code"], "PROJECT_NOT_READY")
+        self.assertIn("pipeline_profile.pipelines[0].module", result["invalid"])
+
+    def test_two_pipelines_for_one_module_are_invalid(self):
+        business = REQUIRED_PROFILE["business_repos"][0]["module"]
+
+        result = self._with_pipelines([
+            {"module": business, "pipeline_id": "1", "stage_classes": ["compile"],
+             "required_for_release": True},
+            {"module": business, "pipeline_id": "2", "stage_classes": ["compile"],
+             "required_for_release": True},
+        ])
+
+        self.assertIn("pipeline_profile.pipelines[1].module", result["invalid"])
+
+    def test_a_release_no_pipeline_is_required_for_is_invalid(self):
+        business = REQUIRED_PROFILE["business_repos"][0]["module"]
+
+        result = self._with_pipelines([
+            {"module": business, "pipeline_id": "1", "stage_classes": ["compile"],
+             "required_for_release": False},
+        ])
+
+        self.assertIn("pipeline_profile.pipelines.required_for_release", result["invalid"])
+
     def test_complete_profile_is_ready(self):
         result = validate_profile(REQUIRED_PROFILE, check_paths=False)
 

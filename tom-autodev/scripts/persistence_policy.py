@@ -8,7 +8,9 @@ _SECRET_KEY = re.compile(
     r"(?:api[\s_-]*key|authorization|credential|password|private[\s_-]*key|secret|token)",
     re.IGNORECASE,
 )
-_REFERENCE_COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+# KU mints document ids that can start with an underscore, so a reference
+# component may lead with one; a leading dash or dot is still refused.
+_REFERENCE_COMPONENT = r"[A-Za-z0-9_][A-Za-z0-9._-]*"
 _EVIDENCE_REFERENCE = re.compile(
     rf"(?:{_REFERENCE_COMPONENT}|artifact:{_REFERENCE_COMPONENT}|"
     rf"ku:{_REFERENCE_COMPONENT}/{_REFERENCE_COMPONENT}|"

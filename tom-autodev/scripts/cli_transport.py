@@ -27,6 +27,53 @@ _CREDENTIAL_FILE = re.compile(r"(?:auth|credential|password|private[-_.]?key|sec
 _SECRET_ENVIRONMENT = re.compile(r"(?:authorization|credential|password|private[_-]?key|secret|token)", re.I)
 
 
+class ProcessTransport:
+    """Run a CLI in a working directory and report how it exited.
+
+    `CliTransport` speaks the JSON-API shape: it validates argv against the API
+    surface and parses a business envelope out of stdout. `IcodeRuntime` needs the
+    other thing — a plain process run inside a specific worktree, whose exit code and
+    text output are the answer (`git push_cr`, `--help` probing). Passing the JSON
+    transport there raises a `cwd` TypeError that the runtime's discovery loop
+    swallows, so every candidate is skipped and preflight reports
+    ICODE_SUBCOMMAND_MISSING even though the CLI is installed and complete.
+    """
+
+    def __init__(
+        self, *, timeout_seconds: float = 120, environment: Mapping[str, str] | None = None
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.environment = dict(environment or {})
+
+    def run(
+        self, argv: Sequence[str], *, cwd: Any = None, timeout: float | None = None
+    ) -> dict[str, Any]:
+        command = [str(item) for item in argv]
+        if not command:
+            raise ValueError("ARGV_REQUIRED")
+        environment = os.environ.copy()
+        environment.update(self.environment)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(cwd) if cwd is not None else None,
+                capture_output=True,
+                text=True,
+                timeout=timeout or self.timeout_seconds,
+                check=False,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired:
+            # A timeout is an outcome, not a crash. Raising here would be swallowed by
+            # the runtime's discovery loop and read as "command unavailable".
+            return {"returncode": 124, "stdout": "", "stderr": "PROCESS_TIMEOUT"}
+        return {
+            "returncode": completed.returncode,
+            "stdout": completed.stdout or "",
+            "stderr": completed.stderr or "",
+        }
+
+
 class CliTransportError(RuntimeError):
     def __init__(self, reason_code: str, diagnostic: dict[str, Any]):
         super().__init__(reason_code)

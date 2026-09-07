@@ -16,6 +16,35 @@ _PROJECT_KU_TARGETS = {
 }
 
 
+def project_ku_target(profile: Any) -> tuple[str, str] | None:
+    """Where a run publishes its collaboration documents.
+
+    The repository is fixed per project. The directory follows the requirement:
+    when the profile names a primary KU knowledge source in that repository, the
+    run root is created beside the requirement documents it reads, which is where
+    the requirement owner expects to find it. Projects without such a source fall
+    back to the shared project directory.
+    """
+    project_id = profile.get("project_id") if isinstance(profile, dict) else profile
+    default = _PROJECT_KU_TARGETS.get(str(project_id).lower())
+    if default is None or not isinstance(profile, dict):
+        return default
+    repo_id = default[0]
+    sources = [
+        source
+        for source in profile.get("knowledge_sources") or []
+        if isinstance(source, dict)
+        and source.get("provider") == "ku"
+        and source.get("repo_id") == repo_id
+        and isinstance(source.get("parent_doc_id"), str)
+        and source["parent_doc_id"]
+    ]
+    if not sources:
+        return default
+    primary = min(sources, key=lambda source: (source.get("priority", 0), source["parent_doc_id"]))
+    return repo_id, primary["parent_doc_id"]
+
+
 class KnowledgeSync:
     def __init__(
         self,
@@ -51,20 +80,15 @@ class KnowledgeSync:
         username: str | None = None,
         cafe_preflight: bool = True,
     ) -> "KnowledgeSync":
-        project_id = profile.get("project_id") if isinstance(profile, dict) else None
-        expected = _PROJECT_KU_TARGETS.get(str(project_id).lower())
-        sources = profile.get("knowledge_sources") if isinstance(profile, dict) else None
-        ku_sources = [
-            source
-            for source in sources or []
-            if isinstance(source, dict) and source.get("provider") == "ku"
-        ] if isinstance(sources, list) else []
-        if expected is None or len(ku_sources) != 1:
-            raise ValueError("PROJECT_KU_TARGET_INVALID")
-        source = ku_sources[0]
-        if (source.get("repo_id"), source.get("parent_doc_id")) != expected:
+        expected = project_ku_target(profile)
+        if expected is None:
             raise ValueError("PROJECT_KU_TARGET_INVALID")
         repo_id, parent_doc_id = expected
+        repo_paths = [
+            repo["path"]
+            for repo in (profile.get("business_repos") or [])
+            if isinstance(repo, dict) and repo.get("path")
+        ] if isinstance(profile, dict) else []
         root_title = f"{card_id}-{run_id[:12]}-研发测试协作"
         return cls(
             state_store=state_store,
@@ -74,6 +98,7 @@ class KnowledgeSync:
                 run_id=run_id,
                 repo_id=repo_id,
                 username=username,
+                repo_paths=repo_paths,
             ),
             cafe_client=CafeClient(
                 transport=cafe_transport,
@@ -128,14 +153,18 @@ class KnowledgeSync:
         )
 
         child = self.ku.create_artifact(root_doc_id, title, markdown)
-        child_error = self._verify_child(child, content_hash)
+        # The document is verified against what was written to it; the index entry
+        # carries the artifact hash, which is what the control plane records.
+        child_error = self._verify_child(
+            child, hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+        )
         if child_error is not None:
-            return child_error
+            return self._settled(intent, child_error)
         entry = {
             "title": title,
             "doc_id": child["doc_id"],
             "url": child["url"],
-            "content_hash": child["content_hash"],
+            "content_hash": content_hash,
         }
         index = self.ku.update_index(root_doc_id, entry)
         index_error = self._verify_index(index, root_doc_id)
@@ -203,6 +232,32 @@ class KnowledgeSync:
         self.state.save_idempotency_result(result_key, response)
         return response
 
+    # Refusals from the create step that mean no document was written. Anything else —
+    # a verification mismatch, an unknown result — may have left a document behind and
+    # must stay open for recovery to query.
+    _NOTHING_WRITTEN = frozenset({"KU_IMMUTABLE_CONFLICT", "INVALID_INPUT"})
+
+    def _settled(self, intent: dict[str, Any], failure: dict[str, Any]) -> dict[str, Any]:
+        """Close this operation's intent when the create step provably wrote nothing.
+
+        A re-cut phase reuses its predecessor's title, which KU refuses because a phase
+        document is immutable. Nothing is created in that case, so leaving the intent
+        open would park the whole run in RECOVERY_REQUIRED over an operation that did
+        not happen. A pending lower intent still keeps this one open: the sub-operation
+        may yet reconcile, and a receipt is write-once, so a failure recorded over it
+        would make the eventual success unrecordable.
+        """
+        if _reason(failure, "") not in self._NOTHING_WRITTEN:
+            return failure
+        if self._pending_lower_intent(intent["run_id"], intent["intent_id"]) is not None:
+            return failure
+        self.state.receipt(
+            intent["intent_id"],
+            {"ok": False, "reason_code": _reason(failure, "KNOWLEDGE_PUBLISH_INCOMPLETE")},
+            [],
+        )
+        return failure
+
     def _pending_lower_intent(
         self, run_id: str, phase_intent_id: str
     ) -> dict[str, Any] | None:
@@ -225,11 +280,7 @@ class KnowledgeSync:
             or not self.run_root_title
         ):
             return _failure("KNOWLEDGE_TARGET_INVALID")
-        markdown = (
-            f"# {self.run_root_title}\n\n"
-            f"Run: {run_id}\n\n"
-            f"Card: {self.card_id}"
-        )
+        markdown = _run_root_markdown(self.run_root_title, run_id, self.card_id)
         root = self.ku.ensure_run_root(
             self.project_parent_doc_id, self.run_root_title, markdown
         )
@@ -254,6 +305,18 @@ class KnowledgeSync:
             and (not self.project_parent_doc_id or not self.run_root_title)
         ):
             return _failure("KNOWLEDGE_TARGET_INVALID")
+        # A phase document is read by people, so `markdown` may be a rendered view.
+        # What is hashed stays the canonical JSON, and the rendered document has to
+        # carry it verbatim, otherwise the published page and the artifact could drift.
+        canonical = artifact.get("canonical")
+        if canonical is not None:
+            if not isinstance(canonical, str) or not canonical:
+                return _failure("INVALID_INPUT")
+            if artifact["content_hash"] != hashlib.sha256(canonical.encode("utf-8")).hexdigest():
+                return _failure("ARTIFACT_HASH_MISMATCH")
+            if artifact["markdown"].count(canonical) != 1:
+                return _failure("ARTIFACT_HASH_MISMATCH")
+            return None
         actual = hashlib.sha256(artifact["markdown"].encode("utf-8")).hexdigest()
         if artifact["content_hash"] != actual:
             return _failure("ARTIFACT_HASH_MISMATCH")
@@ -292,6 +355,23 @@ class KnowledgeSync:
         if not _exact_evidence(result.get("evidence_refs"), expected):
             return _failure("KNOWLEDGE_EVIDENCE_INVALID")
         return None
+
+
+def _run_root_markdown(title: str, run_id: str, card_id: str) -> str:
+    """The run root is a directory people read, so it says what it is.
+
+    Phase entries are appended after the last block, so the section note below is
+    the anchor the first entry lands after.
+    """
+    return (
+        f"# {title}\n\n"
+        f"本文档由 tom-autodev 自动维护，收录 iCafe 卡片 {card_id} 在本次运行中产出的阶段文档。\n\n"
+        f"* iCafe 卡片：{card_id}\n"
+        f"* 运行编号：{run_id}\n\n"
+        "## 阶段产物\n\n"
+        "每个阶段完成后在下面追加一条。条目后面的 `tom-autodev-index` 注释与文末的 "
+        "`tom-autodev-run-root` 注释是校验标记，工具靠它们核对文档身份与产物哈希，请不要手工修改。"
+    )
 
 
 def _failure(reason_code: str) -> dict[str, Any]:

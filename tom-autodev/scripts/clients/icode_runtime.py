@@ -84,8 +84,11 @@ class IcodeRuntime:
             return _failure("GIT_WORKTREE_INVALID")
         if inside != "true" or top != path:
             return _failure("GIT_WORKTREE_INVALID")
-        if revision != binding.get("baseline_revision"):
-            return _failure("STALE_BASELINE", revision=revision)
+        # HEAD is reported, not required to equal the baseline. The baseline identifies
+        # the workspace we own; HEAD is the commit being submitted, and a change set
+        # always sits on top of its baseline, so requiring them to match would reject
+        # every real submission. `submit` compares HEAD against the change set's own
+        # `commit_revision`, which is the question that actually matters here.
         if not self.system_skill_path.is_dir():
             return _failure("ICODE_SKILL_NOT_FOUND")
         cli_result = self._discover_cli(path)
@@ -285,7 +288,7 @@ class IcodeRuntime:
     def _receipt(self, intent_id: str, change_set: dict[str, Any], change: dict[str, Any]) -> dict[str, Any]:
         number = str(change.get("_number") or change.get("number") or "")
         patchset = str(change.get("current_revision") or "")
-        url = change.get("url") or change.get("change_url")
+        url = change.get("url") or change.get("change_url") or _cr_url(number)
         declared_module = change.get("module") or change.get("project") or change.get("repo")
         if (
             not number.isdigit()
@@ -390,9 +393,32 @@ def _exact_change(change: dict[str, Any], expected: dict[str, Any]) -> bool:
     return (
         change.get("current_revision") == expected["commit_revision"]
         and change.get("branch") == expected["target_branch"]
-        and owner.get("username") == expected["owner"]
+        and _same_account(owner.get("username"), expected["owner"])
         and str(change.get("subject") or "").startswith(expected["card_id"])
     )
+
+
+def _same_account(reported: Any, expected: Any) -> bool:
+    """Whether two spellings of one account match.
+
+    iCode reports an owner as a uuap username (`zhaotao02`) while a profile spells
+    people as addresses (`zhaotao02@baidu.com`). Comparing them literally can never
+    succeed, which made the reconcile path unable to recognise a CR this run had
+    already pushed and report CR_IDENTITY_CONFLICT against its own work.
+    """
+    if not isinstance(reported, str) or not isinstance(expected, str):
+        return False
+    return reported.split("@", 1)[0].strip() == expected.split("@", 1)[0].strip() != ""
+
+
+def _cr_url(change_number: str) -> str:
+    """The canonical review URL for a change.
+
+    `get_repo_reviews` does not return one, and the receipt has to carry a link a
+    person can open, so it is derived from the change number rather than left empty —
+    an absent URL failed `_valid_url` and rejected an otherwise valid receipt.
+    """
+    return f"http://icode.baidu.com/myreview/changes/{change_number}" if change_number.isdigit() else ""
 
 
 def _valid_url(value: Any, change_number: str) -> bool:

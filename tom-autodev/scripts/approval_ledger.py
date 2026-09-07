@@ -151,6 +151,18 @@ class ApprovalLedger:
     def get(self, approval_id: str) -> dict[str, Any] | None:
         with self._connect() as c: row=c.execute("SELECT * FROM approvals WHERE approval_id=?",(approval_id,)).fetchone()
         return _row(row) if row else None
+    def pending(self) -> list[dict[str, Any]]:
+        """Unresolved strict approvals, oldest first, for the reply watcher."""
+        c = self._connect()
+        try:
+            rows = c.execute(
+                "SELECT * FROM approvals WHERE effective_decision IS NULL AND run_id != 'legacy'"
+                " ORDER BY created_at, approval_id"
+            ).fetchall()
+        finally:
+            c.close()
+        return [_row(row) for row in rows]
+
     def for_run(self, run_id: str) -> list[dict[str, Any]]:
         c = self._connect()
         try:
@@ -201,5 +213,8 @@ def _record(c:sqlite3.Connection,approval_id:str,decision:str,input_hash:str,cha
     c.execute("INSERT INTO approval_responses(response_id,approval_id,decision,input_hash,channel,responder,effective,conflict,valid,rejected_reason,late,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",(uuid.uuid4().hex,approval_id,decision,input_hash,channel,responder,int(effective),int(conflict),int(valid),rejected,int(late),now.isoformat()))
 def _row(row:sqlite3.Row)->dict[str,Any]:
     decision=row["effective_decision"]
-    return {"approval_id":row["approval_id"],"run_id":row["run_id"],"action":row["action"],"input_hash":row["input_hash"],"channels":json.loads(row["channels_json"]),"member_policy":json.loads(row["member_policy_json"]),"delivery_receipts":json.loads(row["delivery_receipts_json"]),"deadline_at":row["deadline_at"],"heartbeat_at":row["heartbeat_at"],"status":"TIMEOUT" if decision=="TIMEOUT" else ("RESOLVED" if decision else "PENDING"),"effective_decision":decision,"effective_channel":row["effective_channel"]}
+    return {"approval_id":row["approval_id"],"run_id":row["run_id"],"action":row["action"],"input_hash":row["input_hash"],"channels":json.loads(row["channels_json"]),"member_policy":json.loads(row["member_policy_json"]),"delivery_receipts":json.loads(row["delivery_receipts_json"]),"deadline_at":row["deadline_at"],"heartbeat_at":row["heartbeat_at"],"status":"TIMEOUT" if decision=="TIMEOUT" else ("RESOLVED" if decision else "PENDING"),"effective_decision":decision,"effective_channel":row["effective_channel"],
+    # When the decision landed. A reader has to be able to tell a decision that
+    # answers the current phase from one left over from an earlier attempt at it.
+    "resolved_at":row["resolved_at"]}
 def _now()->str:return datetime.now(timezone.utc).isoformat()

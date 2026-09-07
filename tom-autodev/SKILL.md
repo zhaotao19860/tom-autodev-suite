@@ -20,6 +20,8 @@ This is a Comate-only entrypoint. There is no alternate host or entrypoint. The 
 
 Do not infer projects from directories or bind iCafe cards without confirmation.
 
+A card may start with no acceptance criteria. Accept it, let `tom-grill` agree the criteria with the requirement owner into `acceptance_delta`, and never rewrite the snapshot. Spec traceability must cover the union of snapshot `acceptance` and `acceptance_delta`; an empty union stops the run with `ACCEPTANCE_CRITERIA_MISSING`.
+
 ## Workflow
 
 Advance one frontier task at a time:
@@ -32,9 +34,15 @@ Intake -> tom-grill -> tom-spec -> tom-tasks -> WorkspaceGate
 
 Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; Comate and Infoflow share one `approval_id`, and the first valid response wins.
 
+When a run needs a decision that is not a gate, ask it in 如流 as well as in the IDE (`scripts/ask_infoflow.py`, see `references/approval-policy.md`); a question that only exists in the CLI stays invisible until someone comes back to look.
+
+Telling the operator that a run is parked is a session-stop concern, not a phase concern: register `scripts/ide_turn_hook.py` as the harness `Stop` hook (`~/.claude/settings.json`) so the notice follows the stop rather than a `complete-phase` call, which is how gated stops, questions, errors, and API-driven runs used to go unannounced. `orchestrator.py notify-ide-turn` is the same path by hand; one notice per ledger event, suppressed while an approval card is out.
+
 Call `EvidenceGate` before every checkpoint or external side effect. Block on a changed input hash, missing artifact, unresolved finding, revision mismatch, stale environment fingerprint, or stale verification evidence.
 
 `tom-review` produces evidence only and never grants approval. A dual-axis PASS is a prerequisite for the parent-owned G7 iCode approval, bound to the exact reviewed Change Set hash; `INCOMPLETE`, `NEEDS_CLARIFICATION`, stale/hash-mismatched baselines, and blocking findings stop submission or route to diagnosis.
+
+The platform's own review (小码哥) is a second opinion taken after SUBMIT, while the CR exists and nothing is merged: `orchestrator.py ai-review start RUN --change-number N --revision R`, then `ai-review poll RUN --conversation-id C`. The conversation id comes back once and `get_ai_review` accepts nothing else, so the trigger claims an intent and writes the id into a receipt; a trigger left without one reports `AI_REVIEW_CONVERSATION_LOST` instead of spending a second review to replace a lost one. Verify each finding against the code before changing anything: a report that cannot see the sibling repositories will call a cross-repository contract broken when the other side already enforces it.
 
 ## Hard Boundaries
 

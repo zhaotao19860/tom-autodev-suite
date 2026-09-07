@@ -132,6 +132,19 @@ class RunSummaryTests(unittest.TestCase):
         self.assertEqual(built["approval_metrics"]["pending"], 1)
         self.assertTrue(self.artifacts.get(built["artifact_id"])["valid"])
 
+    def test_a_verification_failure_left_open_is_reported_not_hidden(self):
+        """A read-back failure writes no receipt, so only the open intent shows it."""
+        self.state.transition("run-1", "INTAKE", {"requirement_id": "CARD-1"})
+        self.state.intent("run-1", "knowledge.publish-phase", "knowledge-sync:abc", {})
+        built = self.summary.build("run-1")
+
+        self.assertEqual(built["metrics"]["unreconciled_intent_count"], 1)
+        self.assertEqual(
+            [group["reason_code"] for group in built["failure_groups"]],
+            ["EXTERNAL_INTENT_UNRECONCILED"],
+        )
+        self.assertEqual(built["outcome"], "FAILED")
+
     def test_build_marks_timeout_and_collects_collaboration_and_pipeline_receipts(self):
         self.state.transition("run-1", "IPIPE", {"pipeline_id": "pipe-1"})
         intent = self.state.intent("run-1", "collaboration.create-group", "group:1", {})
