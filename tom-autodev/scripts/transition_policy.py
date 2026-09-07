@@ -18,7 +18,15 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "PLAN": {"IMPLEMENT"},
     "IMPLEMENT": {"REVIEW"},
     "REVIEW": {"WORKSPACE", "SUBMIT", "DIAGNOSE", "STOPPED"},
-    "SUBMIT": {"IPIPE"},
+    # DIAGNOSE because the CR is where the second opinions arrive: the platform's own
+    # review (小码哥) is taken after SUBMIT by design, and a human reviewer comments on
+    # the same CR. A confirmed defect at that point had nowhere to go — IPIPE or discard
+    # the run — so the choice was to build the known-bad change or throw away a run
+    # holding seven approved phases. The repair leaves through the ordinary
+    # DIAGNOSE -> PLAN/SPEC path and comes back as a new revision on the same CR, which
+    # is why the edge is to DIAGNOSE and not back to IMPLEMENT: nothing may be repaired
+    # before the finding is root-caused.
+    "SUBMIT": {"IPIPE", "DIAGNOSE"},
     "IPIPE": {"RELEASE", "DIAGNOSE", "ENVIRONMENT_BLOCKED"},
     "RELEASE": {"RELEASE_SUCCESS", "DIAGNOSE", "ENVIRONMENT_BLOCKED"},
     # PLAN is reachable from DIAGNOSE only for a code-only repair, i.e. one whose

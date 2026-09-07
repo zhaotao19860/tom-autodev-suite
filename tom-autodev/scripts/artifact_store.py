@@ -307,7 +307,12 @@ class ArtifactStore:
         """List only integrity-checked artifacts so summaries never trust the index alone."""
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, artifact_id", (run_id,)
+                # `rowid` rather than `artifact_id` as the tiebreaker: callers read the
+                # last artifact of a kind as the current one, and `created_at` has
+                # microsecond resolution, so two puts inside the same microsecond would
+                # otherwise be ordered by a content hash — an arbitrary answer to
+                # "which of these two change sets is the one to submit".
+                "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, rowid", (run_id,)
             ).fetchall()
         return [self._load(row) for row in rows]
 

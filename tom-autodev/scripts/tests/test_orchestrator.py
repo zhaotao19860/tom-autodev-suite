@@ -814,6 +814,31 @@ class OrchestratorTests(unittest.TestCase):
         requirement = requirement_for("TASKS", "WORKSPACE")
         self.assertEqual((requirement.artifacts, requirement.approval_gate), (("spec",), "G2"))
 
+    def test_a_defect_found_on_the_cr_can_be_repaired_instead_of_built(self):
+        """SUBMIT has to be able to reach DIAGNOSE, because the CR is where second opinions arrive.
+
+        The platform's own review is taken *after* SUBMIT by design, and a human
+        reviewer comments on the same CR. With `SUBMIT -> {IPIPE}` as the only edge, a
+        confirmed defect at that point left two options: run the pipelines over code
+        somebody had just said was wrong, or discard a run holding seven approved
+        phases. Neither is a repair.
+
+        The edge goes to DIAGNOSE and not to IMPLEMENT: a finding is root-caused before
+        anything is changed, which is the same rule the REVIEW edge follows.
+        """
+        from transition_policy import TransitionPolicy
+
+        policy = TransitionPolicy()
+
+        self.assertTrue(policy.validate("SUBMIT", "DIAGNOSE")["allowed"])
+        self.assertTrue(policy.validate("SUBMIT", "IPIPE")["allowed"])
+        self.assertEqual(
+            policy.validate("SUBMIT", "IMPLEMENT")["reason_code"], "INVALID_TRANSITION"
+        )
+        self.assertEqual(
+            policy.failure_target("SUBMIT", "REVIEW_FAILED"), "DIAGNOSE"
+        )
+
     def test_route_failure_rejects_an_illegal_transition(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -984,6 +1009,33 @@ class MultiRepoSubmitFrontierTests(unittest.TestCase):
             outstanding = _outstanding_submissions(orchestrator, run_id)
 
         self.assertEqual(outstanding, [])
+
+    def test_a_repaired_task_owes_icode_its_new_change_set_not_its_old_receipt(self):
+        """The join is against the task's current change set, not any it ever passed with.
+
+        A repair out of SUBMIT gives a task a second passing change set. Matching on
+        "some change set of this task was submitted" would let the first one's receipt
+        answer for the second: the run would transition to IPIPE on a sibling task's
+        submission while the repaired code sat unsubmitted, and the pipelines would
+        build the defect the repair existed to remove.
+        """
+        from orchestrator import _outstanding_submissions
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+            self._descriptor(orchestrator, run_id, "T0", "CS-0")
+            self._submission(orchestrator, run_id, "CS-0", "bgw")
+            settled = _outstanding_submissions(orchestrator, run_id)
+
+            self._descriptor(orchestrator, run_id, "T0", "CS-0-repaired")
+            after_repair = _outstanding_submissions(orchestrator, run_id)
+            self._submission(orchestrator, run_id, "CS-0-repaired", "bgw")
+            resubmitted = _outstanding_submissions(orchestrator, run_id)
+
+        self.assertEqual(settled, [])
+        self.assertEqual(after_repair, ["T0"])
+        self.assertEqual(resubmitted, [])
 
     def test_a_run_without_descriptors_keeps_the_single_submission_behaviour(self):
         from orchestrator import _outstanding_submissions

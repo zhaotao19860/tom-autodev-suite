@@ -1623,15 +1623,22 @@ def _recorded_submissions(orchestrator: Any, run_id: str) -> list[dict[str, Any]
 
 
 def _outstanding_submissions(orchestrator: Any, run_id: str) -> list[str]:
-    """Reviewed tasks that have not reached iCode yet.
+    """Reviewed tasks whose current change set has not reached iCode yet.
 
     A submission records the change set it carried, and the descriptor records which
     task that change set belongs to, so the two are joined through `change_set_id`.
     A run with no descriptors at all cannot be judged this way — it predates the
     descriptor step — and is left with the original behaviour of transitioning on its
     first submission rather than being deadlocked by a rule it cannot satisfy.
+
+    The join is against the task's *current* change set, not any change set it ever
+    passed a Review with. A repair out of SUBMIT gives a task a second passing change
+    set, and matching on "some change set of this task was submitted" would let the
+    first one's receipt answer for the second: the run would transition to IPIPE on a
+    sibling task's submission while the repaired code sat in the worktree, and the
+    pipelines would build the defect the repair existed to remove.
     """
-    task_by_change_set: dict[str, str] = {}
+    current_change_set: dict[str, str] = {}
     for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
         if artifact.get("kind") != "change-set":
             continue
@@ -1642,14 +1649,19 @@ def _outstanding_submissions(orchestrator: Any, run_id: str) -> list[str]:
         except (AttributeError, KeyError, ValueError, UnicodeDecodeError):
             continue
         if metadata.get("verdict") == "PASS" and isinstance(task_id, str) and task_id:
-            task_by_change_set[str(change_set_id)] = task_id
-    if not task_by_change_set:
+            # `artifacts_for_run` is ordered by creation, so the last descriptor for a
+            # task is the one the current Review passed.
+            current_change_set[task_id] = str(change_set_id)
+    if not current_change_set:
         return []
-    submitted = {
-        task_by_change_set.get(str(item.get("change_set_id")))
-        for item in _recorded_submissions(orchestrator, run_id)
+    submitted_change_sets = {
+        str(item.get("change_set_id")) for item in _recorded_submissions(orchestrator, run_id)
     }
-    return sorted(set(_reviewed_tasks(orchestrator, run_id)) - {task for task in submitted if task})
+    return sorted(
+        task
+        for task in set(_reviewed_tasks(orchestrator, run_id))
+        if current_change_set.get(task) not in submitted_change_sets
+    )
 
 
 def _primary_submission(
