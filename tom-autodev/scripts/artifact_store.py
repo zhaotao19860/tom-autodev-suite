@@ -9,13 +9,14 @@ import sqlite3
 import tempfile
 from contextlib import contextmanager
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from persistence_policy import ensure_persistable, validate_evidence_refs
-from schema_validator import validate_named_schema
+from schema_validator import load_named_schema, validate_named_schema, validate_schema
 
 
 _COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -492,7 +493,16 @@ def _validate_final_envelope(envelope: Any) -> None:
         raise ValueError("ARTIFACT_ENVELOPE_INVALID")
     if envelope.get("content_hash") != _envelope_hash(envelope):
         raise ValueError("CONTENT_HASH_MISMATCH")
-    issues = validate_named_schema(envelope.get("content"), _PHASE_SCHEMAS[phase])
+    content = envelope.get("content")
+    schema_name = _PHASE_SCHEMAS[phase]
+    issues = validate_named_schema(content, schema_name)
+    # Schema additions must not make an already persisted run unrecoverable. The
+    # envelope hash is over the original bytes, so upgrade only the validation view and
+    # keep the stored content unchanged.
+    if issues and envelope.get("schema_version") == "1":
+        legacy = _legacy_schema_view(content, schema_name)
+        if legacy is not None and not validate_schema(legacy, _legacy_schema(schema_name)):
+            issues = []
     if issues:
         raise ValueError("SCHEMA_INVALID")
     try:
@@ -510,3 +520,42 @@ def _validate_final_envelope(envelope: Any) -> None:
     parsed = urlsplit(url)
     if parsed.scheme != "https" or parsed.netloc != "ku.baidu-int.com" or not parsed.path.rstrip("/").endswith(f"/{doc_id}") or parsed.query or parsed.fragment:
         raise ValueError("KNOWLEDGE_RECEIPT_INVALID")
+
+
+def _legacy_schema(name: str) -> dict[str, Any]:
+    schema = deepcopy(load_named_schema(name))
+    if name == "review":
+        finding = schema.get("$defs", {}).get("finding", {})
+        finding["required"] = [
+            field for field in finding.get("required", []) if field != "classification"
+        ]
+        finding.get("properties", {}).pop("classification", None)
+        finding.get("properties", {}).pop("disposition_reason", None)
+    elif name == "change-set":
+        schema["required"] = [
+            field for field in schema.get("required", []) if field != "deviations"
+        ]
+        schema.get("properties", {}).pop("deviations", None)
+    return schema
+
+
+def _legacy_schema_view(content: Any, name: str) -> Any | None:
+    if not isinstance(content, dict) or name not in {"review", "change-set"}:
+        return None
+    view = deepcopy(content)
+    if name == "review":
+        findings = view.get("findings")
+        if not isinstance(findings, list):
+            return None
+        view["findings"] = [
+            {
+                key: value
+                for key, value in finding.items()
+                if key not in {"classification", "disposition_reason"}
+            }
+            if isinstance(finding, dict) else finding
+            for finding in findings
+        ]
+    else:
+        view.pop("deviations", None)
+    return view

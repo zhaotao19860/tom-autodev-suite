@@ -988,11 +988,27 @@ class PhaseProtocol:
         binding_error = self._ipipe_binding_error(events, payload, content)
         if binding_error is not None:
             return _failure(binding_error, run_id=run_id)
-        revisions = payload.get("source_revisions")
-        artifact_id = payload.get("submission_artifact_id")
-        submission = self.artifacts.get(artifact_id) if isinstance(artifact_id, str) else {"valid": False}
-        if not submission.get("valid") or submission.get("sha256") != payload.get("submission_hash"):
+        profile = load_profile(payload["profile_path"], check_paths=False).get("profile")
+        expected_pipeline = _registered_pipeline(
+            profile.get("pipeline_profile") if isinstance(profile, dict) else {},
+            content.get("module"),
+        )
+        target_submission = self._evidence_submission(
+            payload, content.get("module"), expected_pipeline, events
+        )
+        target_artifact = (
+            self.artifacts.get(target_submission.get("artifact_id"))
+            if isinstance(target_submission, dict)
+            and isinstance(target_submission.get("artifact_id"), str)
+            else {"valid": False}
+        )
+        if (
+            not isinstance(target_submission, dict)
+            or not target_artifact.get("valid")
+            or target_artifact.get("sha256") != target_submission.get("sha256")
+        ):
             return _failure("PREDECESSOR_REQUIRED", run_id=run_id)
+        revisions = target_submission["source_revisions"]
         approval_error = self._controller_approval_error(run_id, payload, "G7")
         if approval_error is not None:
             return _failure(approval_error, run_id=run_id)
@@ -1000,7 +1016,7 @@ class PhaseProtocol:
             "action_id": action["action_id"], "source_event_id": action["source_event_id"],
             "host": "comate", "run_id": run_id, "phase": "IPIPE", "task_id": None,
             "schema_version": "1", "input_hash": action["input_hash"], "content_hash": content_hash,
-            "source_revisions": revisions, "parent_artifact_hash": submission["sha256"],
+            "source_revisions": revisions, "parent_artifact_hash": target_submission["sha256"],
             "knowledge_doc_id": None, "knowledge_url": None, "knowledge_version": None,
             "icafe_comment_id": None, "evidence_refs": content.get("remote_evidence_refs", []),
             "approval_id": payload.get("approval_id"),
@@ -1037,10 +1053,19 @@ class PhaseProtocol:
         binding_error = self._ipipe_binding_error(events, payload, content)
         if binding_error is not None:
             return _failure(binding_error, run_id=run_id)
-        current_submission = self.artifacts.get(payload.get("submission_artifact_id"))
+        current_target = self._evidence_submission(
+            payload, content.get("module"), expected_pipeline, events
+        )
+        current_submission = (
+            self.artifacts.get(current_target.get("artifact_id"))
+            if isinstance(current_target, dict)
+            and isinstance(current_target.get("artifact_id"), str)
+            else {"valid": False}
+        )
         if (
             not current_submission.get("valid")
-            or current_submission.get("sha256") != payload.get("submission_hash")
+            or not isinstance(current_target, dict)
+            or current_submission.get("sha256") != current_target.get("sha256")
             or current_submission.get("sha256") != final["parent_artifact_hash"]
         ):
             return _failure("PREDECESSOR_REQUIRED", run_id=run_id)
@@ -1125,13 +1150,38 @@ class PhaseProtocol:
             return []
         run_id = events[0].get("run_id") if events else None
         passed = {str(content.get("module"))}
-        for artifact in self.artifacts.artifacts_for_run(run_id) if run_id else []:
-            envelope = artifact.get("envelope")
-            if not isinstance(envelope, dict) or envelope.get("phase") != "IPIPE":
+        payload = events[-1].get("payload") if events else None
+        if not isinstance(payload, dict):
+            return [module for module in required if module not in passed]
+        loaded = load_profile(profile_path, check_paths=False)
+        profile = loaded.get("profile") if loaded.get("ready") else None
+        pipeline = profile.get("pipeline_profile") if isinstance(profile, dict) else None
+        environment = profile.get("environment_profile") if isinstance(profile, dict) else None
+        expected_environment = _canonical_hash(environment)
+        for artifact in self.artifacts.phase_artifacts(run_id, "IPIPE") if run_id else []:
+            if not artifact.get("valid"):
                 continue
-            stored = envelope.get("content")
-            if isinstance(stored, dict) and stored.get("status") == "SUCCESS":
-                passed.add(str(stored.get("module")))
+            envelope = artifact.get("envelope")
+            stored = envelope.get("content") if isinstance(envelope, dict) else None
+            if not isinstance(stored, dict) or stored.get("status") != "SUCCESS":
+                continue
+            module = stored.get("module")
+            if module not in required:
+                continue
+            expected_pipeline = _registered_pipeline(pipeline, module)
+            expected_release_rule = _registered_release_rule(pipeline, module)
+            target = self._evidence_submission(payload, module, expected_pipeline, events)
+            if not isinstance(target, dict):
+                continue
+            if (
+                envelope.get("parent_artifact_hash") != target.get("sha256")
+                or stored.get("pipeline_id") != expected_pipeline
+                or stored.get("release_rule") != expected_release_rule
+                or stored.get("environment_fingerprint") != expected_environment
+                or stored.get("revisions") != target.get("source_revisions")
+            ):
+                continue
+            passed.add(str(module))
         return [module for module in required if module not in passed]
 
     def _ipipe_binding_error(
@@ -1159,8 +1209,8 @@ class PhaseProtocol:
             repository.get("module") for repository in repositories
             if isinstance(repository, dict) and isinstance(repository.get("module"), str)
         }
-        expected_release_rule = pipeline.get("release_rule")
         payload_module = payload.get("module")
+        expected_release_rule = _registered_release_rule(pipeline, payload_module)
         # A cross-repository requirement has one pipeline per module, so identity is
         # checked against the pipeline registered for *this* module. The single
         # `pipeline_id` remains the answer for a profile that registers none.
@@ -1183,6 +1233,7 @@ class PhaseProtocol:
         if module not in modules:
             return "PIPELINE_IDENTITY_MISMATCH"
         expected_pipeline = _registered_pipeline(pipeline, module)
+        expected_release_rule = _registered_release_rule(pipeline, module)
         target = self._evidence_submission(payload, module, expected_pipeline, events)
         if target is None:
             return "PIPELINE_IDENTITY_MISMATCH"
@@ -1385,6 +1436,14 @@ def _registered_pipeline(pipeline: Any, module: Any) -> Any:
         if isinstance(entry, dict) and entry.get("module") == module:
             return entry.get("pipeline_id")
     return pipeline.get("pipeline_id") if isinstance(pipeline, dict) else None
+
+
+def _registered_release_rule(pipeline: Any, module: Any) -> Any:
+    entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get("module") == module:
+            return entry.get("release_rule", pipeline.get("release_rule"))
+    return pipeline.get("release_rule") if isinstance(pipeline, dict) else None
 
 
 def _required_modules(pipeline: Any) -> list[str]:

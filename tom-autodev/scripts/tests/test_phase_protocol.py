@@ -528,6 +528,155 @@ class PhaseArtifactIndexIntegrityTests(unittest.TestCase):
         self.assertFalse(loaded["valid"])
         self.assertEqual(loaded["reason_code"], "ARTIFACT_INDEX_MISMATCH")
 
+    def test_v1_review_and_change_set_without_later_fields_remain_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ArtifactStore(Path(directory) / "artifacts")
+            review = copy.deepcopy(specialized_examples()["review"])
+            for finding in review["findings"]:
+                finding.pop("classification", None)
+                finding.pop("disposition_reason", None)
+            change_set = copy.deepcopy(specialized_examples()["change-set"])
+            change_set.pop("deviations", None)
+            change_set["candidate_hash"] = canonical_hash({
+                key: value for key, value in change_set.items() if key != "candidate_hash"
+            })
+
+            review_id = store.put_envelope(_seed_envelope("legacy-review", "REVIEW", "T-1", review))
+            change_id = store.put_envelope(_seed_envelope("legacy-change", "IMPLEMENT", "T-1", change_set))
+
+            self.assertTrue(store.phase_artifact(review_id["artifact_id"])["valid"])
+            self.assertTrue(store.phase_artifact(change_id["artifact_id"])["valid"])
+
+
+class IpipeEvidenceAggregationTests(unittest.TestCase):
+    def test_required_module_success_is_read_from_phase_envelopes_and_bound_to_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = StateStore(root / "state.sqlite")
+            artifacts = ArtifactStore(root / "artifacts")
+            profile = production_profile()
+            profile["business_repos"] = [
+                {"path": "/repo/x86", "module": "x86bgw", "branch": "main", "lock": "x86-main"},
+                {"path": "/repo/agent", "module": "bgwagent", "branch": "main", "lock": "agent-main"},
+            ]
+            profile["pipeline_profile"]["pipelines"] = [
+                {"module": "x86bgw", "pipeline_id": "pipe-x86", "stage_classes": ["unit"], "release_rule": "x86-rule", "required_for_release": True},
+                {"module": "bgwagent", "pipeline_id": "pipe-agent", "stage_classes": ["unit"], "release_rule": "agent-rule", "required_for_release": True},
+            ]
+            profile_path = root / "profile.json"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            run_id = "run-ipipe-aggregate"
+            bindings = {}
+            submissions = []
+            for module, revision, pipeline_id in (
+                ("x86bgw", "x86-rev", "pipe-x86"),
+                ("bgwagent", "agent-rev", "pipe-agent"),
+            ):
+                binding = {
+                    "pipeline_id": pipeline_id, "module": module,
+                    "release_rule": "x86-rule" if module == "x86bgw" else "agent-rule",
+                    "source_revisions": {"business": revision, "tests": "tests-rev"},
+                    "environment_fingerprint": canonical_hash(profile["environment_profile"]),
+                }
+                stored = artifacts.put(run_id, "submission", module.encode(), {"controller_binding": binding})
+                submissions.append({
+                    "artifact_id": stored["artifact_id"], "sha256": stored["sha256"],
+                    "controller_binding": binding,
+                })
+                bindings[module] = (stored, binding)
+            payload = {
+                "profile_path": str(profile_path), "submissions": submissions,
+                "module": "x86bgw", "pipeline_id": "pipe-x86",
+                "source_revisions": bindings["x86bgw"][1]["source_revisions"],
+                "submission_artifact_id": bindings["x86bgw"][0]["artifact_id"],
+                "submission_hash": bindings["x86bgw"][0]["sha256"],
+            }
+            state.transition(run_id, "IPIPE", payload)
+            previous = copy.deepcopy(specialized_examples()["ipipe-evidence"])
+            previous.update({
+                "pipeline_id": "pipe-x86", "build_id": "build-x86", "module": "x86bgw",
+                "release_rule": "x86-rule",
+                "revisions": bindings["x86bgw"][1]["source_revisions"],
+                "environment_fingerprint": bindings["x86bgw"][1]["environment_fingerprint"],
+            })
+            previous_envelope = _seed_envelope(run_id, "IPIPE", None, previous)
+            previous_envelope["parent_artifact_hash"] = bindings["x86bgw"][0]["sha256"]
+            artifacts.put_envelope(previous_envelope)
+            current = copy.deepcopy(specialized_examples()["ipipe-evidence"])
+            current.update({
+                "pipeline_id": "pipe-agent", "build_id": "build-agent", "module": "bgwagent",
+                "release_rule": "agent-rule",
+                "revisions": bindings["bgwagent"][1]["source_revisions"],
+                "environment_fingerprint": bindings["bgwagent"][1]["environment_fingerprint"],
+            })
+            protocol = PhaseProtocol(
+                state_store=state, artifact_store=artifacts,
+                knowledge_sync=FakeKnowledgeSync(), evidence_gate=EvidenceGate(),
+                transition_policy=TransitionPolicy(), approval_ledger=None,
+            )
+
+            self.assertEqual(protocol._ipipe_outstanding_modules(state.events(run_id), current), [])
+
+    def test_success_from_an_old_revision_does_not_satisfy_the_current_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = StateStore(root / "state.sqlite")
+            artifacts = ArtifactStore(root / "artifacts")
+            profile = production_profile()
+            profile["business_repos"].append(
+                {"path": "/repo/agent", "module": "agent", "branch": "main", "lock": "agent-main"}
+            )
+            profile["pipeline_profile"]["pipelines"] = [
+                {"module": "resolver", "pipeline_id": "pipe-1", "stage_classes": ["unit"], "required_for_release": True},
+                {"module": "agent", "pipeline_id": "pipe-agent", "stage_classes": ["unit"], "required_for_release": True},
+            ]
+            profile_path = root / "profile.json"
+            profile_path.write_text(json.dumps(profile), encoding="utf-8")
+            run_id = "run-ipipe-stale"
+            current_binding = {
+                "pipeline_id": "pipe-1", "module": "resolver", "release_rule": "all stages pass",
+                "source_revisions": {"business": "new", "tests": "tests-new"},
+                "environment_fingerprint": canonical_hash(profile["environment_profile"]),
+            }
+            stored = artifacts.put(run_id, "submission", b"current", {"controller_binding": current_binding})
+            agent_binding = {
+                "pipeline_id": "pipe-agent", "module": "agent", "release_rule": "all stages pass",
+                "source_revisions": {"business": "agent-new", "tests": "tests-new"},
+                "environment_fingerprint": current_binding["environment_fingerprint"],
+            }
+            agent_submission = artifacts.put(run_id, "submission", b"agent-current", {"controller_binding": agent_binding})
+            old = copy.deepcopy(specialized_examples()["ipipe-evidence"])
+            old.update({"revisions": {"business": "old", "tests": "tests-old"}, "environment_fingerprint": current_binding["environment_fingerprint"]})
+            envelope = _seed_envelope(run_id, "IPIPE", None, old)
+            envelope["parent_artifact_hash"] = stored["sha256"]
+            artifacts.put_envelope(envelope)
+            payload = {
+                "profile_path": str(profile_path), "module": "resolver", "pipeline_id": "pipe-1",
+                "source_revisions": current_binding["source_revisions"],
+                "submission_artifact_id": stored["artifact_id"], "submission_hash": stored["sha256"],
+                "submissions": [{
+                    "artifact_id": stored["artifact_id"], "sha256": stored["sha256"],
+                    "controller_binding": current_binding,
+                }, {
+                    "artifact_id": agent_submission["artifact_id"], "sha256": agent_submission["sha256"],
+                    "controller_binding": agent_binding,
+                }],
+            }
+            state.transition(run_id, "IPIPE", payload)
+            current = copy.deepcopy(specialized_examples()["ipipe-evidence"])
+            current.update({
+                "module": "agent", "pipeline_id": "pipe-agent",
+                "revisions": agent_binding["source_revisions"],
+                "environment_fingerprint": agent_binding["environment_fingerprint"],
+            })
+            protocol = PhaseProtocol(
+                state_store=state, artifact_store=artifacts,
+                knowledge_sync=FakeKnowledgeSync(), evidence_gate=EvidenceGate(),
+                transition_policy=TransitionPolicy(), approval_ledger=None,
+            )
+
+            self.assertEqual(protocol._ipipe_outstanding_modules(state.events(run_id), current), ["resolver"])
+
 
 def _seed_envelope(run_id, phase, task_id, content):
     envelope = {

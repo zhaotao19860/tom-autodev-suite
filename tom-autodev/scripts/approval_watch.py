@@ -20,6 +20,35 @@ _NUDGE_BUCKETS = ((1800, 3), (7200, 2), (21600, 1))
 _TERMINAL_STATES = frozenset({"RELEASE_SUCCESS", "STOPPED"})
 
 
+def _claim_action(state: Any, run_id: str, operation: str, key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Claim an outbound action, preserving compatibility with test/legacy stores."""
+    claim_intent = getattr(state, "claim_intent", None)
+    lookup = getattr(state, "result_by_idempotency_key", None)
+    if callable(claim_intent):
+        claim = claim_intent(run_id, operation, key, payload)
+        if claim.get("status") == "CONFLICT":
+            return claim
+        if claim.get("status") == "EXISTING":
+            completed = lookup(key) if callable(lookup) else None
+            if completed is not None:
+                receipt = completed.get("receipt") if isinstance(completed, dict) else None
+                response = receipt.get("response") if isinstance(receipt, dict) else None
+                return {"status": "DONE", "response": response}
+            return {"status": "QUERY", "intent": claim.get("intent")}
+        return claim
+    legacy = state.idempotency_result(key)
+    if legacy is not None:
+        return {"status": "DONE", "response": legacy}
+    return {"status": "CLAIMED_LEGACY"}
+
+
+def _record_action(state: Any, claim: dict[str, Any], key: str, response: dict[str, Any]) -> None:
+    if claim.get("status") == "CLAIMED":
+        state.receipt(claim["intent"]["intent_id"], response, [])
+    else:
+        state.save_idempotency_result(key, response)
+
+
 class ApprovalWatcher:
     """Land journalled 如流 decisions without anyone poking the CLI.
 
@@ -113,6 +142,21 @@ class ApprovalWatcher:
             recipients = sorted(approval.get("member_policy", {}).get("infoflow", []))
             if not recipients:
                 continue
+            claim = _claim_action(
+                self.orchestrator.state,
+                run_id,
+                "approval.resume_notice",
+                key,
+                {"run_id": run_id, "event_id": latest["event_id"], "approval_id": approval["approval_id"]},
+            )
+            if claim["status"] == "DONE":
+                continue
+            if claim["status"] in {"QUERY", "CONFLICT"}:
+                notices.append({
+                    "reason_code": "RESUME_NOTICE_QUERY_REQUIRED" if claim["status"] == "QUERY" else "RESUME_NOTICE_CONFLICT",
+                    "run_id": run_id,
+                })
+                continue
             try:
                 receipt = deliver_markdown(
                     self.notify_client,
@@ -126,7 +170,7 @@ class ApprovalWatcher:
             except Exception as error:  # noqa: BLE001 - any failure here is operational
                 notices.append({"reason_code": "RESUME_NOTICE_FAILED", "detail": str(error)})
                 continue
-            self.orchestrator.state.save_idempotency_result(key, {"receipt": receipt})
+            _record_action(self.orchestrator.state, claim, key, {"receipt": receipt})
             notices.append(
                 {
                     "reason_code": "RESUME_NOTICE_SENT",
@@ -188,6 +232,21 @@ class ApprovalWatcher:
             recipients = self._recipients(run_id)
             if not recipients:
                 continue
+            claim = _claim_action(
+                self.orchestrator.state,
+                run_id,
+                "approval.progress_notice",
+                key,
+                {"run_id": run_id, "event_id": latest["event_id"], "state": latest["state"]},
+            )
+            if claim["status"] == "DONE":
+                continue
+            if claim["status"] in {"QUERY", "CONFLICT"}:
+                notices.append({
+                    "reason_code": "PROGRESS_NOTICE_QUERY_REQUIRED" if claim["status"] == "QUERY" else "PROGRESS_NOTICE_CONFLICT",
+                    "run_id": run_id,
+                })
+                continue
             try:
                 # Position goes to the owner privately; the group carries the gates,
                 # and a per-phase status line for everyone would drown them.
@@ -195,9 +254,7 @@ class ApprovalWatcher:
             except Exception as error:  # noqa: BLE001 - any failure here is operational
                 notices.append({"reason_code": "PROGRESS_NOTICE_FAILED", "detail": str(error)})
                 continue
-            self.orchestrator.state.save_idempotency_result(
-                key, {"run_id": run_id, "state": latest["state"]}
-            )
+            _record_action(self.orchestrator.state, claim, key, {"run_id": run_id, "state": latest["state"]})
             notices.append(
                 {
                     "reason_code": "PROGRESS_NOTICE_SENT",
@@ -280,12 +337,23 @@ class ApprovalWatcher:
             "effective_decision": decision,
         }
         if reason == "OK" and decision in {"APPROVE", "REJECT"}:
-            self._acknowledge(approval, decision, self._responder(approval_id))
+            acknowledgement = self._acknowledge(approval, decision, self._responder(approval_id))
+            if acknowledgement is not None and acknowledgement.get("reason_code") not in {
+                "ACKNOWLEDGED", "ALREADY_ACKNOWLEDGED",
+            }:
+                outcome["acknowledgement_reason_code"] = acknowledgement["reason_code"]
         elif reason == "APPROVAL_TIMEOUT":
-            self._acknowledge(approval, "TIMEOUT", None)
+            acknowledgement = self._acknowledge(approval, "TIMEOUT", None)
+            if acknowledgement is not None and acknowledgement.get("reason_code") not in {
+                "ACKNOWLEDGED", "ALREADY_ACKNOWLEDGED",
+            }:
+                outcome["acknowledgement_reason_code"] = acknowledgement["reason_code"]
             reissued = self._reissue(approval, client)
             if reissued is not None:
-                outcome["reissued_approval_id"] = reissued
+                if reissued.get("approval_id"):
+                    outcome["reissued_approval_id"] = reissued["approval_id"]
+                if reissued.get("reason_code") not in {"REISSUED", "ALREADY_REISSUED"}:
+                    outcome["reissue_reason_code"] = reissued["reason_code"]
         return outcome
 
     def _nudge(self, approval: dict[str, Any], client: Any) -> dict[str, Any] | None:
@@ -298,11 +366,28 @@ class ApprovalWatcher:
             return None
         approval_id = approval["approval_id"]
         key = f"{_NUDGE_KEY}:{approval_id}:{bucket}"
-        if self.orchestrator.state.idempotency_result(key) is not None:
-            return None
         recipients = sorted(approval.get("member_policy", {}).get("infoflow", []))
         if not recipients:
             return None
+        claim = _claim_action(
+            self.orchestrator.state,
+            approval["run_id"],
+            "approval.nudge",
+            key,
+            {"approval_id": approval_id, "bucket": bucket, "input_hash": approval["input_hash"]},
+        )
+        if claim["status"] == "DONE":
+            return None
+        if claim["status"] == "QUERY":
+            return {
+                "run_id": approval["run_id"], "approval_id": approval_id,
+                "action": approval.get("action"), "reason_code": "APPROVAL_REMINDER_QUERY_REQUIRED",
+            }
+        if claim["status"] == "CONFLICT":
+            return {
+                "run_id": approval["run_id"], "approval_id": approval_id,
+                "action": approval.get("action"), "reason_code": "APPROVAL_REMINDER_CONFLICT",
+            }
         card = _delivered_content(client, approval)
         try:
             receipt = deliver_markdown(
@@ -320,7 +405,7 @@ class ApprovalWatcher:
                 "reason_code": "APPROVAL_REMINDER_FAILED",
                 "detail": str(error),
             }
-        self.orchestrator.state.save_idempotency_result(key, {"receipt": receipt})
+        _record_action(self.orchestrator.state, claim, key, {"receipt": receipt})
         return {
             "run_id": approval["run_id"],
             "approval_id": approval_id,
@@ -329,27 +414,44 @@ class ApprovalWatcher:
             "reminder": bucket,
         }
 
-    def _reissue(self, approval: dict[str, Any], client: Any) -> str | None:
+    def _reissue(self, approval: dict[str, Any], client: Any) -> dict[str, Any] | None:
         """A timed-out approval is terminal, so recovery means a fresh bound attempt."""
         if not self.reissue:
             return None
         approval_id = approval["approval_id"]
         key = f"{_REISSUE_KEY}:{approval_id}"
-        if self.orchestrator.state.idempotency_result(key) is not None:
-            return None
-        payload = _delivered_payload(client, approval)
-        result = self.orchestrator.reissue_infoflow_approval(
+        claim = _claim_action(
+            self.orchestrator.state,
             approval["run_id"],
-            str(approval.get("action") or ""),
-            approval["input_hash"],
-            member_policy=approval.get("member_policy") or {},
-            evidence=payload.get("evidence") or {},
-            infoflow_client=self.client_factory(),
+            "approval.reissue",
+            key,
+            {"approval_id": approval_id, "action": approval.get("action"), "input_hash": approval["input_hash"]},
         )
-        self.orchestrator.state.save_idempotency_result(
-            key, {"reason_code": result.get("reason_code"), "approval_id": result.get("approval_id")}
-        )
-        return result.get("approval_id") if result.get("reason_code") in {None, "OK", "PENDING"} else None
+        if claim["status"] == "DONE":
+            response = claim.get("response") or {}
+            return {"reason_code": "ALREADY_REISSUED", "approval_id": response.get("approval_id")}
+        if claim["status"] == "QUERY":
+            return {"reason_code": "APPROVAL_REISSUE_QUERY_REQUIRED"}
+        if claim["status"] == "CONFLICT":
+            return {"reason_code": "APPROVAL_REISSUE_CONFLICT"}
+        payload = _delivered_payload(client, approval)
+        try:
+            result = self.orchestrator.reissue_infoflow_approval(
+                approval["run_id"],
+                str(approval.get("action") or ""),
+                approval["input_hash"],
+                member_policy=approval.get("member_policy") or {},
+                evidence=payload.get("evidence") or {},
+                infoflow_client=self.client_factory(),
+            )
+        except Exception as error:  # noqa: BLE001 - the external outcome is unknown
+            return {"reason_code": "APPROVAL_REISSUE_QUERY_REQUIRED", "detail": str(error)}
+        if not isinstance(result, dict):
+            return {"reason_code": "APPROVAL_REISSUE_QUERY_REQUIRED"}
+        _record_action(self.orchestrator.state, claim, key, result)
+        if result.get("reason_code") in {None, "OK", "PENDING"}:
+            return {"reason_code": "REISSUED", "approval_id": result.get("approval_id")}
+        return {"reason_code": result.get("reason_code")}
 
     def _remaining(self, deadline_at: Any) -> float | None:
         try:
@@ -368,7 +470,7 @@ class ApprovalWatcher:
         ]
         return effective[-1].get("responder") if effective else None
 
-    def _acknowledge(self, approval: dict[str, Any], decision: str, responder: str | None) -> None:
+    def _acknowledge(self, approval: dict[str, Any], decision: str, responder: str | None) -> dict[str, Any] | None:
         """Tell the approvers the decision landed; send it once per approval.
 
         The decision is already in the ledger by the time this runs, so a failed
@@ -377,11 +479,25 @@ class ApprovalWatcher:
         """
         approval_id = approval["approval_id"]
         key = f"{_ACK_KEY}:{approval_id}:{decision}"
-        if self.orchestrator.state.idempotency_result(key) is not None:
-            return
         recipients = sorted(approval.get("member_policy", {}).get("infoflow", []))
         if not recipients:
-            return
+            return None
+        claim = _claim_action(
+            self.orchestrator.state,
+            approval["run_id"],
+            "approval.ack",
+            key,
+            {
+                "approval_id": approval_id, "decision": decision,
+                "responder": responder, "recipients": recipients,
+            },
+        )
+        if claim["status"] == "DONE":
+            return {"reason_code": "ALREADY_ACKNOWLEDGED"}
+        if claim["status"] == "QUERY":
+            return {"reason_code": "APPROVAL_ACK_QUERY_REQUIRED"}
+        if claim["status"] == "CONFLICT":
+            return {"reason_code": "APPROVAL_ACK_CONFLICT"}
         try:
             receipt = deliver_markdown(
                 self.notify_client,
@@ -390,9 +506,10 @@ class ApprovalWatcher:
                 recipients,
                 lambda mention: _ack_markdown(approval, decision, responder),
             )
-        except Exception:  # noqa: BLE001 - the ledger already holds the decision
-            return
-        self.orchestrator.state.save_idempotency_result(key, {"receipt": receipt})
+        except Exception as error:  # noqa: BLE001 - the ledger already holds the decision
+            return {"reason_code": "APPROVAL_ACK_FAILED", "detail": str(error)}
+        _record_action(self.orchestrator.state, claim, key, {"receipt": receipt})
+        return {"reason_code": "ACKNOWLEDGED"}
 
 
 def _delivered_payload(client: Any, approval: dict[str, Any]) -> dict[str, Any]:
@@ -587,6 +704,19 @@ def notify_ide_turn(orchestrator: Any, run_id: str, notify_client: Any) -> dict[
     recipients = sorted(_ide_turn_recipients(orchestrator, run_id))
     if not recipients:
         return {"ok": True, "reason_code": "NO_RECIPIENTS", "run_id": run_id}
+    claim = _claim_action(
+        orchestrator.state,
+        run_id,
+        "approval.ide_turn_notice",
+        key,
+        {"run_id": run_id, "event_id": events[-1]["event_id"], "recipients": recipients},
+    )
+    if claim["status"] == "DONE":
+        return {"ok": True, "reason_code": "ALREADY_NOTIFIED", "run_id": run_id}
+    if claim["status"] == "QUERY":
+        return {"ok": False, "reason_code": "IDE_TURN_NOTICE_QUERY_REQUIRED", "run_id": run_id}
+    if claim["status"] == "CONFLICT":
+        return {"ok": False, "reason_code": "IDE_TURN_NOTICE_CONFLICT", "run_id": run_id}
     try:
         receipt = deliver_markdown(
             notify_client,
@@ -597,7 +727,7 @@ def notify_ide_turn(orchestrator: Any, run_id: str, notify_client: Any) -> dict[
         )
     except Exception as error:  # noqa: BLE001 - a missed notice must not fail the phase
         return {"ok": False, "reason_code": "IDE_TURN_NOTICE_FAILED", "detail": str(error)}
-    orchestrator.state.save_idempotency_result(key, {"receipt": receipt})
+    _record_action(orchestrator.state, claim, key, {"receipt": receipt})
     return {"ok": True, "reason_code": "OK", "run_id": run_id, "receipt": receipt}
 
 

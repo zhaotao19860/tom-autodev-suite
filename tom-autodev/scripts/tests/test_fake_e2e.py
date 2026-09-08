@@ -745,7 +745,7 @@ class FakeE2ETests(unittest.TestCase):
         api.on_trigger = crash_after_remote_trigger
         runtime = self.orchestrator.ipipe_runtime(run_id, api, sleeper=lambda _seconds: None)
         g8_hash = canonical_hash(trigger_binding(profile, revisions))
-        g8 = self._approval(run_id, "G8", g8_hash)
+        g8 = self._approval(run_id, "G7", g8_hash)
         with self.assertRaises(SystemExit):
             runtime.trigger(profile, revisions, g8)
         restarted = Orchestrator(self.root)

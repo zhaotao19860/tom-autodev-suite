@@ -644,37 +644,39 @@ class Orchestrator:
         if not gate["passed"]:
             return {"run_id": run_id, "state": current_state, **gate}
 
-        event = self.state.transition(
-            run_id,
-            next_state,
-            {
-                "previous_state": current_state,
-                "input_hash": canonical_input_hash,
-                "evidence": gate_context,
-                "policy_decision": transition,
-                "operation_identity": operation_identity,
-                **(
-                    {"task_id": gate_context["task_id"]}
-                    if isinstance(gate_context.get("task_id"), str) and gate_context["task_id"]
-                    else {}
-                ),
-                **(
-                    {"source_revisions": dict(gate_context["source_revisions"])}
-                    if _valid_source_revisions(gate_context.get("source_revisions"))
-                    and not (current_state == "WORKSPACE" and next_state == "PLAN" and bound_workspace is None)
-                    else {}
-                ),
-                **({"workspace_binding": bound_workspace} if bound_workspace is not None else {}),
-            },
-        )
+        transition_payload = {
+            "previous_state": current_state,
+            "input_hash": canonical_input_hash,
+            "evidence": gate_context,
+            "policy_decision": transition,
+            "operation_identity": operation_identity,
+            **(
+                {"task_id": gate_context["task_id"]}
+                if isinstance(gate_context.get("task_id"), str) and gate_context["task_id"]
+                else {}
+            ),
+            **(
+                {"source_revisions": dict(gate_context["source_revisions"])}
+                if _valid_source_revisions(gate_context.get("source_revisions"))
+                and not (current_state == "WORKSPACE" and next_state == "PLAN" and bound_workspace is None)
+                else {}
+            ),
+            **({"workspace_binding": bound_workspace} if bound_workspace is not None else {}),
+        }
         result = {
             "run_id": run_id,
             "state": next_state,
-            "event_id": event["event_id"],
             "reason_code": "OK",
         }
-        self.state.save_idempotency_result(idempotency_key, result)
-        return result
+        committed = self.state.commit_transition_result(
+            run_id, current["events"][-1]["event_id"], next_state,
+            transition_payload, idempotency_key, result,
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return {"run_id": run_id, "state": current_state, "reason_code": "ADVANCE_CONFLICT"}
+        return {"run_id": run_id, "state": current_state, "reason_code": "STALE_ACTION"}
 
     def route_failure(
         self,
@@ -711,20 +713,22 @@ class Orchestrator:
                 **transition,
             }
 
-        event = self.state.transition(
-            run_id,
-            next_state,
-            {"reason_code": reason_code, "evidence": routed_evidence, "policy_decision": transition},
-        )
         result = {
             "run_id": run_id,
             "state": next_state,
-            "event_id": event["event_id"],
             "reason_code": reason_code,
             "collaboration_category": collaboration_category,
         }
-        self.state.save_idempotency_result(idempotency_key, result)
-        return result
+        committed = self.state.commit_transition_result(
+            run_id, current["events"][-1]["event_id"], next_state,
+            {"reason_code": reason_code, "evidence": routed_evidence, "policy_decision": transition},
+            idempotency_key, result,
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return {"run_id": run_id, "state": current["state"], "reason_code": "FAILURE_CONFLICT"}
+        return {"run_id": run_id, "state": current["state"], "reason_code": "STALE_ACTION"}
 
     def stop(self, run_id: str) -> dict[str, Any]:
         current = self.status(run_id)
@@ -1736,7 +1740,16 @@ def _submission_controller_binding(
     from phase_protocol import _registered_pipeline
 
     pipeline_id = _registered_pipeline(pipeline, receipt.get("module"))
-    release_rule = pipeline.get("release_rule")
+    entries = pipeline.get("pipelines") or []
+    module_entry = next(
+        (entry for entry in entries if isinstance(entry, dict) and entry.get("module") == receipt.get("module")),
+        None,
+    )
+    release_rule = (
+        module_entry.get("release_rule", pipeline.get("release_rule"))
+        if isinstance(module_entry, dict)
+        else pipeline.get("release_rule")
+    )
     if not all(isinstance(value, str) and value for value in (pipeline_id, release_rule)):
         return "PROJECT_NOT_READY", {}
     environment = profile.get("environment_profile")
@@ -1824,6 +1837,14 @@ def main(argv: list[str] | None = None) -> int:
     watch_ipipe = subparsers.add_parser("watch-ipipe")
     watch_ipipe.add_argument("--interval", type=float, default=60)
     watch_ipipe.add_argument("--once", action="store_true")
+
+    ipipe_rerun = subparsers.add_parser(
+        "ipipe-rerun", help="用已批准的 G8 重跑失败阶段或继续人工阶段"
+    )
+    ipipe_rerun.add_argument("run_id")
+    ipipe_rerun.add_argument("stage_build_id")
+    ipipe_rerun.add_argument("approval_id")
+    ipipe_rerun.add_argument("input_hash")
 
     # Callable with no arguments so a session-stop hook can drive it: whoever stopped
     # the IDE may never have run a phase, which is exactly when the notice was missing.
@@ -1960,6 +1981,12 @@ def main(argv: list[str] | None = None) -> int:
         result = _watch_approvals(orchestrator, args.interval, args.once)
     elif args.command == "watch-ipipe":
         result = _watch_ipipe(orchestrator, args.interval, args.once)
+    elif args.command == "ipipe-rerun":
+        runtime = _cli_ipipe_runtime(orchestrator, args.run_id)
+        result = runtime if isinstance(runtime, dict) else runtime.rerun(
+            args.stage_build_id,
+            {"approval_id": args.approval_id, "input_hash": args.input_hash},
+        )
     elif args.command == "ai-review":
         from cli_transport import ProcessTransport
 
@@ -2221,24 +2248,10 @@ def _watch_approvals(orchestrator: Orchestrator, interval: float, once: bool) ->
 
 def _watch_ipipe(orchestrator: Orchestrator, interval: float, once: bool) -> dict[str, Any]:
     """Report a build's outcome while nobody is watching the CLI."""
-    from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport
-    from clients.ku_client import resolve_username
     from ipipe_watch import IpipeWatcher
 
     def runtime(run_id: str) -> Any:
-        # The api client refuses to exist without a current user, and an empty
-        # `resolve_username()` is exactly what it gets when no repo is handed to it.
-        # Returning the refusal as a reason code keeps it a reported outcome instead
-        # of an exception that takes the whole watch down on its first observation.
-        pinned = orchestrator._runtime_profile(run_id)
-        if not pinned.get("ok"):
-            return pinned
-        repos = pinned["profile"].get("business_repos") or []
-        user = resolve_username([item["path"] for item in repos if item.get("path")])
-        if not user:
-            return {"ok": False, "reason_code": "IPIPE_CURRENT_USER_REQUIRED"}
-        api = IpipeApiClient(IpipeHttpTransport(), current_user=user)
-        return orchestrator.ipipe_runtime(run_id, api)
+        return _cli_ipipe_runtime(orchestrator, run_id)
 
     watcher = IpipeWatcher(
         orchestrator,
@@ -2248,6 +2261,22 @@ def _watch_ipipe(orchestrator: Orchestrator, interval: float, once: bool) -> dic
     )
     settled = watcher.run(interval, iterations=1 if once else None)
     return {"ok": True, "reason_code": "OK", "settled": settled}
+
+
+def _cli_ipipe_runtime(orchestrator: Orchestrator, run_id: str) -> Any:
+    """Build the run-bound iPipe runtime for explicit CLI actions."""
+    from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport
+    from clients.ku_client import resolve_username
+
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    repos = pinned["profile"].get("business_repos") or []
+    user = resolve_username([item["path"] for item in repos if item.get("path")])
+    if not user:
+        return {"ok": False, "reason_code": "IPIPE_CURRENT_USER_REQUIRED", "run_id": run_id}
+    api = IpipeApiClient(IpipeHttpTransport(), current_user=user)
+    return orchestrator.ipipe_runtime(run_id, api)
 
 
 def _icafe_url(card_id: Any) -> str:

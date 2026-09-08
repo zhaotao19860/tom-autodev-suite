@@ -217,6 +217,29 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         )
         self.assertEqual(stored["card"], {"error": "MESSAGE_REJECTED:GATEWAY"})
 
+    def test_card_type_error_does_not_replay_the_markdown_message(self):
+        notify = FakeCardClient(error=TypeError("card signature mismatch"))
+        state, transport = self._transport(notify)
+        self._with_group(state)
+
+        first = transport.request(_envelope())
+        second = transport.request(_envelope())
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(notify.group_sends), 1)
+        self.assertEqual(len(notify.cards), 1)
+
+    def test_card_runtime_error_is_recorded_as_best_effort_failure(self):
+        notify = FakeCardClient(error=RuntimeError("card gateway down"))
+        state, transport = self._transport(notify)
+        self._with_group(state)
+
+        result = transport.request(_envelope())
+        stored = state.idempotency_result(f"approval.gateway.infoflow:{result['request_id']}")
+
+        self.assertEqual(result["status"], "PENDING")
+        self.assertEqual(stored["card"], {"error": "card gateway down"})
+
     def test_a_run_without_a_group_still_goes_to_private_chats(self):
         notify = FakeNotifyClient()
         _, transport = self._transport(notify)

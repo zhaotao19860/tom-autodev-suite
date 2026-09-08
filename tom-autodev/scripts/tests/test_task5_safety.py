@@ -1150,7 +1150,7 @@ class ClientAndOrchestratorSafetyTests(unittest.TestCase):
             def __init__(self): self.calls = []
             def create_group(self, request):
                 self.calls.append(("create", request))
-                return {"group_id": "8"}
+                return {"group_id": "8", "bot_id": "bot-1"}
             def send_group_markdown(self, group_id, content, at_users):
                 self.calls.append(("message", group_id, content, at_users))
                 return {"message_id": "9", "group_id": group_id}
@@ -1158,10 +1158,24 @@ class ClientAndOrchestratorSafetyTests(unittest.TestCase):
         client = InfoflowGroupClient(bot_client=bot)
         group = client.create_or_reuse({"group_name": "n", "owner": "owner@example.test", "member_snapshot": ["owner@example.test"], "friendlyLevel": 3})
         message = client.send_markdown("8", "@owner@example.test body", ["owner@example.test"], "k")
-        self.assertEqual(group, {"group_id": "8", "group_name": "n"})
+        self.assertEqual(group, {"group_id": "8", "group_name": "n", "bot_id": "bot-1"})
         self.assertEqual(message["message_id"], "9")
         self.assertEqual(bot.calls[0][1]["friendly_level"], 3)
         self.assertEqual(bot.calls[1][3], ["owner@example.test"])
+
+    def test_group_client_rejects_a_group_receipt_without_its_bot(self):
+        class Bot:
+            def create_group(self, _request):
+                return {"group_id": "41"}
+
+        client = InfoflowGroupClient(bot_client=Bot())
+        with self.assertRaisesRegex(ValueError, "BOT_AGENT_ID_UNAVAILABLE"):
+            client.create_or_reuse({
+                "group_name": "BGW-19-Login-flow",
+                "owner": "owner@example.test",
+                "member_snapshot": ["owner@example.test"],
+                "friendlyLevel": 3,
+            })
         with self.assertRaisesRegex(ValueError, "MESSAGE_MENTION_MISMATCH"):
             client.send_markdown("8", "body", ["owner@example.test"], "k")
 

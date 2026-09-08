@@ -158,6 +158,30 @@ class CliOperationTests(unittest.TestCase):
         self.assertNotIn("content", result)
         self.assertEqual((missing_code, missing["reason_code"]), (1, "ARTIFACT_NOT_FOUND"))
 
+    def test_ipipe_rerun_has_an_explicit_cli_path_and_passes_the_bound_g8_fields(self):
+        class Runtime:
+            def __init__(self):
+                self.calls = []
+
+            def rerun(self, stage_build_id, approval):
+                self.calls.append((stage_build_id, approval))
+                return {"ok": True, "reason_code": "OK", "stage_build_id": stage_build_id}
+
+        runtime = Runtime()
+        output = io.StringIO()
+        with (
+            patch("orchestrator.Orchestrator", return_value=self.orchestrator),
+            patch("orchestrator._cli_ipipe_runtime", return_value=runtime),
+            contextlib.redirect_stdout(output),
+        ):
+            code = main([
+                "--config-root", str(self.root), "ipipe-rerun", self.run_id,
+                "stage-9", "approval-9", "hash-9",
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(runtime.calls, [("stage-9", {"approval_id": "approval-9", "input_hash": "hash-9"})])
+
 
 if __name__ == "__main__":
     unittest.main()

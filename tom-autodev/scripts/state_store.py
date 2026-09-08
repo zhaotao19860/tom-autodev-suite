@@ -215,6 +215,7 @@ class StateStore:
         encoded = _encode(result)
         created_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT result_json FROM idempotency_results WHERE idempotency_key = ?",
                 (key,),

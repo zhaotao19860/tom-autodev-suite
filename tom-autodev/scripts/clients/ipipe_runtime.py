@@ -123,7 +123,7 @@ class IpipeRuntime:
         }
         input_hash = _canonical_hash(binding)
         approval_failure = _approved_record(
-            self.approvals, approval, run_id=self.run_id, action="G8", input_hash=input_hash
+            self.approvals, approval, run_id=self.run_id, action="G7", input_hash=input_hash
         )
         if approval_failure is not None:
             return approval_failure
@@ -208,11 +208,7 @@ class IpipeRuntime:
             if stage_identity_failure is not None:
                 return _failure(stage_identity_failure, status="INVALID")
             for stage in normalized_stages:
-                self._stage_bindings[stage["stage_build_id"]] = {
-                    "build_id": build_id,
-                    "context": binding,
-                    "stage": stage,
-                }
+                self._bind_stage(build_id, binding, stage)
             failed = [stage for stage in normalized_stages if stage["status"] in _FAILURE]
             manual = [stage for stage in normalized_stages if stage["status"] in _MANUAL]
             aggregate = _status(build)
@@ -230,7 +226,7 @@ class IpipeRuntime:
                     "stage_build_id": stage["stage_build_id"],
                     "stages": normalized_stages,
                     "environment_fingerprint": binding["environment_fingerprint"],
-                    "evidence_refs": _build_evidence(build_id, binding) + [f"ipipe:stage/{stage['stage_build_id']}"],
+                    "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
                 }
             if aggregate in _SUCCESS and all(_stage_passed(stage) for stage in normalized_stages):
                 return {
@@ -241,7 +237,7 @@ class IpipeRuntime:
                     "build_id": build_id,
                     "stages": normalized_stages,
                     "environment_fingerprint": binding["environment_fingerprint"],
-                    "evidence_refs": _build_evidence(build_id, binding),
+                    "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
                 }
             if self.clock().astimezone(timezone.utc) >= parsed_deadline:
                 return {
@@ -252,7 +248,7 @@ class IpipeRuntime:
                     "build_id": build_id,
                     "stages": normalized_stages,
                     "environment_fingerprint": binding["environment_fingerprint"],
-                    "evidence_refs": _build_evidence(build_id, binding),
+                    "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
                 }
             if poll + 1 < self.max_polls:
                 self.sleeper(self.poll_interval)
@@ -279,7 +275,7 @@ class IpipeRuntime:
                 return reconciled
             return _failure("QUERY_REQUIRED", intent_id=existing["intent_id"], retry_allowed=False)
 
-        stage_binding = self._stage_bindings.get(stage_build_id)
+        stage_binding = self._load_stage_binding(stage_build_id)
         if stage_binding is None:
             return _failure("STAGE_OWNERSHIP_UNVERIFIED")
         stage = stage_binding["stage"]
@@ -339,8 +335,21 @@ class IpipeRuntime:
             )
         if not _matches_build(current, context):
             return _failure("REVISION_MISMATCH", intent_id=intent["intent_id"], retry_allowed=False)
+        try:
+            current_stages = _embedded_stages(current)
+            if not current_stages:
+                current_stages = self._build_stages(build_id, current)
+        except Exception as error:
+            return _failure(
+                _transport_reason(error, "RERUN_CONFIRMATION_REQUIRED"),
+                intent_id=intent["intent_id"], retry_allowed=False,
+            )
         current_stage = next(
-            (item for item in _embedded_stages(current) if str(item.get("id") or item.get("stageBuildId") or "") == stage_build_id),
+            (
+                _normalize_stage(item) for item in current_stages
+                if isinstance(item, dict)
+                and str(item.get("id") or item.get("stageBuildId") or "") == stage_build_id
+            ),
             None,
         )
         if current_stage is None or _status(current_stage) in _FAILURE | _MANUAL:
@@ -348,6 +357,15 @@ class IpipeRuntime:
         return self._save_rerun_receipt(intent["intent_id"], payload)
 
     def _save_rerun_receipt(self, intent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        context = {
+            "module": payload.get("module"),
+            "revision_map": {
+                item.get("module"): item.get("revision")
+                for item in payload.get("repositories", [])
+                if isinstance(item, dict) and item.get("module") and item.get("revision")
+            },
+        }
+        evidence_refs = _build_evidence(payload["build_id"], context, [{"stage_build_id": payload["stage_build_id"]}])
         receipt = {
             "ok": True,
             "reason_code": "OK",
@@ -355,10 +373,7 @@ class IpipeRuntime:
             "build_id": payload["build_id"],
             "stage_build_id": payload["stage_build_id"],
             "revision_set_id": payload["revision_set_id"],
-            "evidence_refs": [
-                f"ipipe:build/{payload['build_id']}",
-                f"ipipe:stage/{payload['stage_build_id']}",
-            ],
+            "evidence_refs": evidence_refs,
         }
         self.state.receipt(intent_id, receipt, receipt["evidence_refs"])
         return receipt
@@ -385,10 +400,17 @@ class IpipeRuntime:
             return _failure("REVISION_MISMATCH", intent_id=intent["intent_id"], retry_allowed=False)
         if payload.get("module") and str(build.get("module") or build.get("space") or "") != payload["module"]:
             return _failure("REVISION_MISMATCH", intent_id=intent["intent_id"], retry_allowed=False)
+        try:
+            stages = _embedded_stages(build)
+            if not stages:
+                stages = self._build_stages(payload["build_id"], build)
+        except Exception:
+            return None
         current_stage = next(
             (
-                item for item in _embedded_stages(build)
-                if str(item.get("id") or item.get("stageBuildId") or "") == payload["stage_build_id"]
+                _normalize_stage(item) for item in stages
+                if isinstance(item, dict)
+                and str(item.get("id") or item.get("stageBuildId") or "") == payload["stage_build_id"]
             ),
             None,
         )
@@ -513,7 +535,16 @@ class IpipeRuntime:
         """
         try:
             stages = self.api.pipeline_stage_info(build_id)
-        except Exception:
+        except (KeyError, TypeError, ValueError):
+            embedded = _embedded_stages(build)
+            if not embedded:
+                raise
+            stages = embedded
+        except IpipeTransportError as error:
+            if error.status not in {404, 405} and error.reason_code not in {
+                "STAGE_ENDPOINT_UNSUPPORTED", "OBJECT_NOT_FOUND",
+            }:
+                raise
             embedded = _embedded_stages(build)
             if not embedded:
                 raise
@@ -558,6 +589,52 @@ class IpipeRuntime:
         )
         self._build_bindings[build_id] = binding
 
+    def _bind_stage(self, build_id: str, context: dict[str, Any], stage: dict[str, Any]) -> None:
+        stage_build_id = stage.get("stage_build_id")
+        if not isinstance(stage_build_id, str) or not stage_build_id:
+            return
+        durable = {
+            "run_id": self.run_id,
+            "stage_build_id": stage_build_id,
+            "build_id": build_id,
+            "context": context,
+            "stage": stage,
+        }
+        try:
+            self.state.save_idempotency_result(
+                f"ipipe.stage-binding:{self.run_id}:{stage_build_id}", durable
+            )
+        except ValueError:
+            # The immutable binding is already owned by this run. Status changes are
+            # recorded separately by _failure_evidence; ownership itself must not move.
+            pass
+        self._stage_bindings[stage_build_id] = {**durable, "stage": stage}
+
+    def _load_stage_binding(self, stage_build_id: str) -> dict[str, Any] | None:
+        binding = self._stage_bindings.get(stage_build_id)
+        if binding is None:
+            binding = self.state.idempotency_result(
+                f"ipipe.stage-binding:{self.run_id}:{stage_build_id}"
+            )
+            if (
+                not isinstance(binding, dict)
+                or binding.get("run_id") != self.run_id
+                or binding.get("stage_build_id") != stage_build_id
+                or not isinstance(binding.get("context"), dict)
+            ):
+                return None
+            stage = binding.get("stage")
+            if not isinstance(stage, dict):
+                return None
+            failure = self.state.idempotency_result(
+                f"ipipe.stage-failure:{self.run_id}:{stage_build_id}"
+            )
+            if isinstance(failure, dict) and isinstance(failure.get("failure_signature"), str):
+                stage = {**stage, "status": "FAIL", "failure_signature": failure["failure_signature"]}
+            binding = {**binding, "stage": stage}
+            self._stage_bindings[stage_build_id] = binding
+        return binding
+
     def _load_build_binding(self, build_id: str) -> dict[str, Any] | None:
         binding = self._build_bindings.get(build_id)
         if binding is not None:
@@ -596,8 +673,12 @@ class IpipeRuntime:
         for stage in failed_stages:
             stage["failure_signature"] = signature
             self._stage_bindings[stage["stage_build_id"]]["stage"] = stage
+            self.state.save_idempotency_result(
+                f"ipipe.stage-failure:{self.run_id}:{stage['stage_build_id']}",
+                {"failure_signature": signature},
+            )
         classification = _classification(failed_stages, jobs, binding["stage_classes"])
-        refs = _build_evidence(build_id, binding)
+        refs = _build_evidence(build_id, binding, stages)
         refs.extend(f"ipipe:stage/{stage['stage_build_id']}" for stage in failed_stages)
         refs.extend(
             f"ipipe:job/{job['job_build_id']}"
@@ -660,7 +741,7 @@ def _context(profile: Any, revisions: Any, run_id: str, module: Any = None) -> d
     allowed = registered.get("allowed_parameters", pipeline.get("allowed_parameters"))
     parameters = revisions.get("parameters", {})
     stage_classes = registered.get("stage_classes", pipeline.get("stage_classes"))
-    release_rule = pipeline.get("release_rule")
+    release_rule = registered.get("release_rule", pipeline.get("release_rule"))
     if not pipeline_id or not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed) or not isinstance(parameters, dict) or not isinstance(stage_classes, list) or not _nonempty(release_rule):
         return _failure("PROJECT_NOT_READY")
     expected = [("business", item.get("module"), item.get("branch")) for item in business]
@@ -874,8 +955,36 @@ def _contains_secret_material(value: Any) -> bool:
     return False
 
 
-def _build_evidence(build_id: str, context: dict[str, Any]) -> list[str]:
-    return [f"ipipe:build/{build_id}"] + [f"revision-{revision}" for revision in context["revision_map"].values()]
+def _build_evidence(
+    build_id: str, context: dict[str, Any], stages: list[dict[str, Any]] | None = None
+) -> list[str]:
+    """Expose the complete module/build/stage binding in every remote receipt."""
+    module = str(context.get("module") or "")
+    refs = [f"ipipe:build/{build_id}"]
+    if module:
+        module_token = _evidence_token(module)
+        refs.append(f"ipipe:module-build/{module_token}-{build_id}")
+    for repo_module, revision in sorted((context.get("revision_map") or {}).items()):
+        refs.append(f"revision-{revision}")
+        refs.append(f"ipipe:module-revision/{_evidence_token(repo_module)}-{revision}")
+    for stage in stages or []:
+        stage_id = stage.get("stage_build_id") if isinstance(stage, dict) else None
+        if stage_id:
+            refs.append(f"ipipe:stage/{stage_id}")
+            refs.append(f"ipipe:module-stage/{_evidence_token(module)}-{build_id}-{stage_id}")
+    return list(dict.fromkeys(refs))
+
+
+def _registered_release_rule(pipeline: Any, module: Any) -> Any:
+    entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
+    for entry in entries or []:
+        if isinstance(entry, dict) and entry.get("module") == module:
+            return entry.get("release_rule", pipeline.get("release_rule"))
+    return pipeline.get("release_rule") if isinstance(pipeline, dict) else None
+
+
+def _evidence_token(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or ""))
 
 
 def _approved_record(

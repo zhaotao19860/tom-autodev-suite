@@ -254,10 +254,10 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "PIPELINE_PARAMETER_FORBIDDEN")
         self.assertFalse(any(call[0] == "trigger_by_revision" for call in self.api.calls))
 
-    def test_trigger_requires_exact_run_bound_g8_hash(self):
+    def test_trigger_requires_exact_run_bound_g7_hash(self):
         input_hash = canonical_hash(trigger_binding())
-        wrong_gate = approved(self.ledger, "G7", input_hash)
-        wrong_hash = approved(self.ledger, "G8", "0" * 64)
+        wrong_gate = approved(self.ledger, "G8", input_hash)
+        wrong_hash = approved(self.ledger, "G7", "0" * 64)
         first = self.runtime.trigger(PROFILE, REVISIONS, wrong_gate)
         second = self.runtime.trigger(PROFILE, REVISIONS, wrong_hash)
         self.assertEqual(first["reason_code"], "APPROVAL_GATE_MISMATCH")
@@ -265,7 +265,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "trigger_by_revision" for call in self.api.calls))
 
     def test_trigger_verifies_response_and_unknown_result_is_never_replayed(self):
-        approval = approved(self.ledger, "G8", canonical_hash(trigger_binding()))
+        approval = approved(self.ledger, "G7", canonical_hash(trigger_binding()))
         self.api.trigger_result = TimeoutError("unknown")
         first = self.runtime.trigger(PROFILE, REVISIONS, approval)
         second = self.runtime.trigger(PROFILE, REVISIONS, approval)
@@ -286,7 +286,7 @@ class IpipeRuntimeTests(unittest.TestCase):
                 api = FakeApi()
                 runtime = pinned_runtime(state, ledger, api)
                 runtime.discover = lambda _profile, _revisions, _module=None, reason=reason: {"ok": False, "reason_code": reason}
-                approval = approved(ledger, "G8", canonical_hash(trigger_binding()))
+                approval = approved(ledger, "G7", canonical_hash(trigger_binding()))
 
                 result = runtime.trigger(PROFILE, REVISIONS, approval)
 
@@ -331,6 +331,24 @@ class IpipeRuntimeTests(unittest.TestCase):
             unknown = runtime.discover(profile, revisions, "baidu/team/absent")
             self.assertEqual(unknown["reason_code"], "PIPELINE_IDENTITY_MISMATCH", unknown)
 
+    def test_registered_module_release_rule_overrides_profile_default(self):
+        profile = json.loads(json.dumps(PROFILE))
+        profile["pipeline_profile"]["pipelines"] = [{
+            "module": "baidu/team/app", "pipeline_id": "pipe-1",
+            "stage_classes": ["compile", "unit"], "required_for_release": True,
+            "release_rule": "app-specific",
+        }]
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")
+            runtime = IpipeRuntime(
+                state, ledger, "run-1", FakeApi(),
+                validated_profile=json.loads(json.dumps(profile)),
+                profile_hash=canonical_hash(profile),
+            )
+            context = runtime._context(profile, REVISIONS)
+            self.assertEqual(context["release_rule"], "app-specific")
+
     def test_typed_transport_failure_is_preserved_by_discovery(self):
         def denied(_pipeline_id):
             raise IpipeTransportError("AUTH_REQUIRED", status=401, transient=False)
@@ -340,7 +358,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "AUTH_REQUIRED")
 
     def test_concurrent_trigger_allows_one_writer_then_replays_receipt(self):
-        approval = approved(self.ledger, "G8", canonical_hash(trigger_binding()))
+        approval = approved(self.ledger, "G7", canonical_hash(trigger_binding()))
         entered, release = threading.Event(), threading.Event()
 
         def finish():
@@ -373,6 +391,8 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["classification"], "TEST_FAILURE")
         self.assertLessEqual(len(result["log_excerpt"]), 4096)
         self.assertIn("ipipe:job/job-1", result["evidence_refs"])
+        self.assertIn("ipipe:module-stage/baidu_team_app-build-1-stage-1", result["evidence_refs"])
+        self.assertIn("ipipe:module-revision/baidu_team_app-app-rev", result["evidence_refs"])
         names = [call[0] for call in self.api.calls]
         self.assertLess(names.index("pipeline_stage_info"), names.index("failed_jobs"))
 
@@ -422,6 +442,19 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(anonymous["reason_code"], "STAGE_IDENTITY_MISSING")
         self.assertEqual(duplicate["reason_code"], "STAGE_IDENTITY_MISMATCH")
 
+    def test_stage_permission_failure_is_not_hidden_by_embedded_stage_fallback(self):
+        self.bind_build(status="SUCCESS", stages=[{"id": "stage-1", "status": "SUCCESS"}])
+        self.api.stages["build-1"] = [{"id": "stage-1", "status": "SUCCESS"}]
+        self.api.pipeline_stage_info = lambda _build_id: (_ for _ in ()).throw(
+            IpipeTransportError("PERMISSION_DENIED", status=403, transient=False)
+        )
+
+        result = self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+
+        self.assertEqual(result["reason_code"], "PERMISSION_DENIED")
+
     def test_rerun_requires_owned_failed_stage_exact_g8_and_has_durable_budget(self):
         failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
         self.bind_build(status="FAIL", stages=[failed])
@@ -429,6 +462,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         monitored = self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
         approval = approved(self.ledger, "G8", canonical_hash(rerun_binding(monitored["failure_signature"])))
         self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        self.api.stages["build-1"] = [{"id": "stage-1", "status": "RUNNING"}]
         first = self.runtime.rerun("stage-1", approval)
         replay = pinned_runtime(self.state, self.ledger, self.api).rerun("stage-1", approval)
         changed = dict(approval, input_hash="changed")
@@ -441,6 +475,24 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(conflict["reason_code"], "RERUN_CONFLICT")
         self.assertEqual(forged["reason_code"], "RERUN_CONFLICT")
         self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
+
+    def test_rerun_after_monitor_restart_rebuilds_stage_ownership(self):
+        failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        monitored = self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+        approval = approved(self.ledger, "G8", canonical_hash(rerun_binding(monitored["failure_signature"])))
+        self.api.builds["build-1"] = build(
+            status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}]
+        )
+        self.api.stages["build-1"] = [{"id": "stage-1", "status": "RUNNING"}]
+
+        restarted = pinned_runtime(self.state, self.ledger, self.api)
+        result = restarted.rerun("stage-1", approval)
+
+        self.assertEqual(result["reason_code"], "OK")
 
     def test_rerun_g8_hash_binds_complete_pipeline_and_environment_identity(self):
         failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
@@ -548,7 +600,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(released["reason_code"], "PERMISSION_DENIED")
 
     def test_definite_typed_trigger_and_rerun_write_failures_are_preserved_without_replay(self):
-        trigger_approval = approved(self.ledger, "G8", canonical_hash(trigger_binding()))
+        trigger_approval = approved(self.ledger, "G7", canonical_hash(trigger_binding()))
         self.api.trigger_result = IpipeTransportError(
             "PERMISSION_DENIED", status=403, transient=False
         )
@@ -574,7 +626,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
 
     def test_typed_confirmation_query_failures_are_preserved_after_single_write(self):
-        trigger_approval = approved(self.ledger, "G8", canonical_hash(trigger_binding()))
+        trigger_approval = approved(self.ledger, "G7", canonical_hash(trigger_binding()))
         original_build_by_id = self.api.build_by_id
         self.api.build_by_id = lambda _build_id, **_key: (_ for _ in ()).throw(
             IpipeTransportError("OBJECT_NOT_FOUND", status=404, transient=False)
@@ -604,7 +656,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.api.build_by_id = lambda _build_id, **_key: (_ for _ in ()).throw(
             IpipeTransportError("OBJECT_NOT_FOUND", status=404, transient=False)
         )
-        trigger_approval = approved(self.ledger, "G8", canonical_hash(trigger_binding()))
+        trigger_approval = approved(self.ledger, "G7", canonical_hash(trigger_binding()))
         existing = self.runtime.trigger(PROFILE, REVISIONS, trigger_approval)
 
         self.api.build_by_id = FakeApi.build_by_id.__get__(self.api, FakeApi)

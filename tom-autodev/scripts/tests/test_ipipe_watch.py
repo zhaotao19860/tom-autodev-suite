@@ -41,6 +41,39 @@ class _State:
         return None
 
 
+class _ClaimingState(_State):
+    """StateStore's intent/receipt surface, kept tiny for watcher concurrency tests."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.intents = {}
+        self.receipts = {}
+
+    def claim_intent(self, run_id, operation, key, payload):
+        existing = self.intents.get(key)
+        if existing is not None:
+            return {"status": "EXISTING", "intent": existing}
+        intent = {
+            "intent_id": f"intent-{len(self.intents) + 1}",
+            "run_id": run_id,
+            "operation": operation,
+            "idempotency_key": key,
+            "payload": payload,
+        }
+        self.intents[key] = intent
+        return {"status": "CLAIMED", "intent": intent}
+
+    def result_by_idempotency_key(self, key):
+        intent = self.intents.get(key)
+        receipt = self.receipts.get(intent["intent_id"]) if intent else None
+        if intent is None or receipt is None:
+            return None
+        return {"operation": intent["operation"], "intent": intent, "receipt": {"response": receipt}}
+
+    def receipt(self, intent_id, response, _evidence_refs):
+        self.receipts[intent_id] = response
+
+
 class _Orchestrator:
     def __init__(self, state):
         self.state = state
@@ -97,6 +130,22 @@ class IpipeWatcherTests(unittest.TestCase):
         self.assertEqual(len(notify.sent), 1)
         self.assertIn("iPipe 通过", notify.sent[0][1])
         self.assertIn("继续", notify.sent[0][1])
+
+    def test_claimed_notice_uses_a_receipt_and_is_recovered_after_restart(self):
+        result = {"ok": True, "status": "SUCCESS", "build_id": "b-1", "stages": []}
+        state = _ClaimingState()
+        watcher, _state, notify = self._watcher(result, state=state)
+
+        first = watcher.tick()
+        restarted = IpipeWatcher(
+            _Orchestrator(state), lambda _run_id: _Runtime(result), notify,
+            clock=lambda: _NOW, sleeper=lambda _seconds: None,
+        )
+        second = restarted.tick()
+
+        self.assertEqual(first[0]["reason_code"], "OK")
+        self.assertEqual(second[0]["reason_code"], "ALREADY_NOTIFIED")
+        self.assertEqual(len(notify.sent), 1)
 
     def test_failure_carries_its_classification_and_repair_direction(self):
         result = {"ok": False, "status": "FAILURE", "build_id": "b-1",
@@ -183,6 +232,37 @@ class IpipeWatcherTests(unittest.TestCase):
 
         self.assertEqual(outcome[0]["reason_code"], "MONITOR_CALL_FAILED")
         self.assertEqual(notify.sent, [])
+
+    def test_all_triggered_builds_are_monitored_and_notified(self):
+        class _MultiState(_State):
+            def external_results(self, _run_id):
+                return [
+                    {"intent": {"operation": "ipipe.trigger", "payload": {"module": "x86bgw"}},
+                     "receipt": {"response": {"ok": True, "build_id": "b-1"}}},
+                    {"intent": {"operation": "ipipe.trigger", "payload": {"module": "bgwagent"}},
+                     "receipt": {"response": {"ok": True, "build_id": "b-2"}}},
+                ]
+
+        state = _MultiState()
+        notify = _Notify()
+
+        class _MultiRuntime:
+            def monitor(self, build_id, _deadline):
+                return {
+                    "ok": True, "status": "SUCCESS", "build_id": build_id,
+                    "stages": [{"name": "编译", "status": "SUCC"}],
+                }
+
+        watcher = IpipeWatcher(
+            _Orchestrator(state), lambda _run_id: _MultiRuntime(), notify,
+            clock=lambda: _NOW, sleeper=lambda _seconds: None,
+        )
+
+        outcomes = watcher.tick()
+
+        self.assertEqual(len(outcomes), 2)
+        self.assertEqual({outcome["reason_code"] for outcome in outcomes}, {"OK"})
+        self.assertEqual(len(notify.sent), 2)
 
 
 if __name__ == "__main__":

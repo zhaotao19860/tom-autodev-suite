@@ -69,7 +69,7 @@ def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[
             question="点「同意」或「驳回」即可，无需再输入 approval_id；详情见上一条消息。",
             lines=[line for line in lines if line],
         )
-    except (ValueError, OSError) as error:
+    except Exception as error:  # noqa: BLE001 - the card is best effort; markdown is authoritative
         return {"error": str(error)}
 
 

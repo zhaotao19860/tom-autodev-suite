@@ -218,10 +218,12 @@ def _broken_submission_bindings(
     pipeline = new_profile.get("pipeline_profile")
     pipeline = pipeline if isinstance(pipeline, dict) else {}
     offered = {str(pipeline.get("pipeline_id") or "")}
+    rules_by_pipeline = {str(pipeline.get("pipeline_id") or ""): pipeline.get("release_rule")}
     for entry in pipeline.get("pipelines") or []:
         if isinstance(entry, dict) and entry.get("pipeline_id"):
-            offered.add(str(entry["pipeline_id"]))
-    rule = pipeline.get("release_rule")
+            pipeline_id = str(entry["pipeline_id"])
+            offered.add(pipeline_id)
+            rules_by_pipeline[pipeline_id] = entry.get("release_rule", pipeline.get("release_rule"))
     broken = []
     for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
         if artifact.get("kind") != "submission":
@@ -229,7 +231,8 @@ def _broken_submission_bindings(
         binding = (artifact.get("metadata") or {}).get("controller_binding")
         if not isinstance(binding, dict):
             continue
-        if str(binding.get("pipeline_id") or "") not in offered or binding.get("release_rule") != rule:
+        pipeline_id = str(binding.get("pipeline_id") or "")
+        if pipeline_id not in offered or binding.get("release_rule") != rules_by_pipeline.get(pipeline_id):
             broken.append({
                 "artifact_id": artifact.get("artifact_id"),
                 "pipeline_id": binding.get("pipeline_id"),

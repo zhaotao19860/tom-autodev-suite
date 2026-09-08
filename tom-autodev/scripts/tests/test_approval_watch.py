@@ -280,6 +280,9 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertEqual(
             self.orchestrator.approvals.get(approval_id)["effective_decision"], "APPROVE"
         )
+        self.assertEqual(settled[0]["acknowledgement_reason_code"], "APPROVAL_ACK_FAILED")
+        pending = self.orchestrator.state.pending_intents("run-1")
+        self.assertEqual([item["operation"] for item in pending], ["approval.ack"])
 
     def test_a_rejection_says_the_run_will_not_continue(self):
         approval_id = self._request()
@@ -336,6 +339,46 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.now = datetime.fromisoformat(self.deadline) - timedelta(hours=1)
         self.watcher.tick()
         self.assertEqual(len(self.notify.sends), 2)
+
+    def test_a_failed_reminder_is_not_blindly_resent(self):
+        approval_id = self._request()
+        self.now = datetime.fromisoformat(self.deadline) - timedelta(hours=5)
+        calls = []
+
+        def refuse(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise RuntimeError("delivery outcome unknown")
+
+        self.notify.send_markdown = refuse
+
+        first = self.watcher.tick()
+        second = self.watcher.tick()
+
+        self.assertEqual(first[0]["reason_code"], "APPROVAL_REMINDER_FAILED")
+        self.assertEqual(second[0]["reason_code"], "APPROVAL_REMINDER_QUERY_REQUIRED")
+        self.assertEqual(len(calls), 1)
+        pending = self.orchestrator.state.pending_intents("run-1")
+        self.assertEqual([item["operation"] for item in pending], ["approval.nudge"])
+
+    def test_a_claimed_reissue_is_not_executed_by_a_second_watcher(self):
+        approval_id = self._request()
+        approval = self.orchestrator.approvals.get(approval_id)
+        key = f"approval.reissue:{approval_id}"
+        payload = {
+            "approval_id": approval_id,
+            "action": approval["action"],
+            "input_hash": approval["input_hash"],
+        }
+        self.orchestrator.state.claim_intent("run-1", "approval.reissue", key, payload)
+        calls = []
+        original = self.orchestrator.reissue_infoflow_approval
+        self.orchestrator.reissue_infoflow_approval = lambda *_args, **_kwargs: calls.append(1)
+        self.addCleanup(setattr, self.orchestrator, "reissue_infoflow_approval", original)
+
+        result = self.watcher._reissue(approval, self._client())
+
+        self.assertEqual(result["reason_code"], "APPROVAL_REISSUE_QUERY_REQUIRED")
+        self.assertEqual(calls, [])
 
     def test_a_timed_out_gate_is_reissued_once_against_the_same_input_hash(self):
         self.deadline = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()

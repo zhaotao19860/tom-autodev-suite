@@ -3,6 +3,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -47,6 +48,27 @@ class StateAndArtifactTests(unittest.TestCase):
             )
             with self.assertRaises(ValueError):
                 store.save_idempotency_result("submit:run-1", {"revision": "r2"})
+
+    def test_concurrent_same_idempotency_result_has_one_winner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            results = []
+            errors = []
+
+            def write(value):
+                try:
+                    results.append(StateStore(database).save_idempotency_result("same", value))
+                except Exception as error:  # pragma: no cover - assertion below records it
+                    errors.append(error)
+
+            threads = [threading.Thread(target=write, args=({"value": 1},)) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(results, [{"value": 1}, {"value": 1}])
 
     def test_external_intent_is_durable_and_idempotency_key_is_immutable(self):
         with tempfile.TemporaryDirectory() as directory:

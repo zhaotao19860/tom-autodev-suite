@@ -202,11 +202,12 @@ function groupReceipt(payload) {
 
 async function createGroup(request) {
   const self = await botAgentId()
+  if (self === null) throw new Error('BOT_AGENT_ID_UNAVAILABLE')
   const body = JSON.stringify({
     groupName: request.group_name,
     groupOwner: request.owner,
     memberList: request.members,
-    robotList: self === null ? [] : [self],
+    robotList: [self],
     friendlyLevel: request.friendly_level,
     searchAbility: 0,
     managers: [],

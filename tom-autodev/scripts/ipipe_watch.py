@@ -14,6 +14,8 @@ deciding engineering on its own is the one thing this must not do.
 from __future__ import annotations
 
 import time
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -72,49 +74,59 @@ class IpipeWatcher:
         for latest in self.orchestrator.state.latest_states():
             if latest.get("state") != "IPIPE":
                 continue
-            outcome = self._observe(latest["run_id"])
-            if outcome is None:
-                continue
-            outcomes.append(outcome)
-            if self.reporter is not None:
-                self.reporter(outcome)
+            for outcome in self._observe(latest["run_id"]):
+                outcomes.append(outcome)
+                if self.reporter is not None:
+                    self.reporter(outcome)
         return outcomes
 
-    def _observe(self, run_id: str) -> dict[str, Any] | None:
-        build_id = self._build_id(run_id)
-        if build_id is None:
-            return {"ok": True, "reason_code": "NO_BUILD_YET", "run_id": run_id}
+    def _observe(self, run_id: str) -> list[dict[str, Any]]:
+        build_ids = self._build_ids(run_id)
+        if not build_ids:
+            return [{"ok": True, "reason_code": "NO_BUILD_YET", "run_id": run_id}]
         runtime = self.runtime_factory(run_id)
         if isinstance(runtime, dict):
-            return {**runtime, "run_id": run_id}
-        deadline = (self.clock() + timedelta(seconds=self.window_seconds)).isoformat()
-        try:
-            result = runtime.monitor(build_id, deadline)
-        except Exception as error:  # noqa: BLE001 - a poll must not kill the watcher
-            return {"ok": False, "reason_code": "MONITOR_CALL_FAILED", "run_id": run_id,
-                    "detail": str(error)}
-        status = result.get("status")
-        if status == "SUCCESS":
-            return self._notice(run_id, f"success:{build_id}", _success_markdown, result)
-        if status == "FAILURE":
-            token = f"failure:{build_id}:{result.get('failure_signature') or ''}"
-            return self._notice(run_id, token, _failure_markdown, result)
-        if status == "MANUAL_WAIT":
-            return self._manual(run_id, result)
-        # TIMEOUT and the transport refusals are transient by construction: the next
-        # tick asks again, and a notice per poll would train everyone to ignore them.
-        return {"ok": True, "reason_code": f"NO_NOTICE_{status or 'UNKNOWN'}", "run_id": run_id}
+            return [{**runtime, "run_id": run_id}]
+        outcomes = []
+        for build_id in build_ids:
+            deadline = (self.clock() + timedelta(seconds=self.window_seconds)).isoformat()
+            try:
+                result = runtime.monitor(build_id, deadline)
+            except Exception as error:  # noqa: BLE001 - a poll must not kill the watcher
+                outcomes.append({"ok": False, "reason_code": "MONITOR_CALL_FAILED", "run_id": run_id,
+                                 "build_id": build_id, "detail": str(error)})
+                continue
+            status = result.get("status")
+            if status == "SUCCESS":
+                outcomes.append(self._notice(run_id, f"success:{build_id}", _success_markdown, result))
+            elif status == "FAILURE":
+                token = f"failure:{build_id}:{result.get('failure_signature') or ''}"
+                outcomes.append(self._notice(run_id, token, _failure_markdown, result))
+            elif status == "MANUAL_WAIT":
+                outcomes.append(self._manual(run_id, result))
+            else:
+                # TIMEOUT and transport refusals are transient by construction: the next
+                # tick asks again, and a notice per poll would train everyone to ignore them.
+                outcomes.append({"ok": True, "reason_code": f"NO_NOTICE_{status or 'UNKNOWN'}", "run_id": run_id,
+                                 "build_id": build_id})
+        return outcomes
 
-    def _build_id(self, run_id: str) -> str | None:
-        """The build this run triggered, from the trigger receipt rather than a guess."""
-        found = None
+    def _build_ids(self, run_id: str) -> list[str]:
+        """All builds this run triggered, from receipts rather than a latest-build guess."""
+        found = []
         for item in self.orchestrator.state.external_results(run_id):
             if item.get("intent", {}).get("operation") != "ipipe.trigger":
                 continue
             response = item.get("receipt", {}).get("response")
             if isinstance(response, dict) and response.get("build_id"):
-                found = str(response["build_id"])
+                build_id = str(response["build_id"])
+                if build_id not in found:
+                    found.append(build_id)
         return found
+
+    def _build_id(self, run_id: str) -> str | None:
+        """Compatibility helper for callers that still ask for one build."""
+        return next(iter(self._build_ids(run_id)), None)
 
     def _notice(self, run_id: str, token: str, render: Any, result: dict[str, Any]) -> dict[str, Any]:
         key = f"{_NOTICE_KEY}:{run_id}:{token}"
@@ -125,6 +137,17 @@ class IpipeWatcher:
         recipients = sorted(_ide_turn_recipients(self.orchestrator, run_id))
         if not recipients:
             return {"ok": True, "reason_code": "NO_RECIPIENTS", "run_id": run_id}
+        claim = self._claim_notice(run_id, key, token, result)
+        if claim is not None:
+            if claim.get("status") == "EXISTING":
+                existing = self.orchestrator.state.result_by_idempotency_key(key)
+                if existing is not None:
+                    response = existing.get("receipt", {}).get("response", {})
+                    return {"ok": True, "reason_code": "ALREADY_NOTIFIED", "run_id": run_id,
+                            "first_at": response.get("at")}
+                return {"ok": False, "reason_code": "NOTICE_QUERY_REQUIRED", "run_id": run_id}
+            if claim.get("status") != "CLAIMED":
+                return {"ok": False, "reason_code": "IPIPE_NOTICE_CONFLICT", "run_id": run_id}
         at = self.clock().isoformat()
         try:
             receipt = deliver_markdown(
@@ -134,9 +157,23 @@ class IpipeWatcher:
         except Exception as error:  # noqa: BLE001 - a missed notice must not stop the watch
             return {"ok": False, "reason_code": "IPIPE_NOTICE_FAILED", "run_id": run_id,
                     "detail": str(error)}
-        self.orchestrator.state.save_idempotency_result(key, {"receipt": receipt, "at": at})
+        if claim is not None:
+            self.orchestrator.state.receipt(
+                claim["intent"]["intent_id"], {"ok": True, "receipt": receipt, "at": at}, []
+            )
+        else:
+            self.orchestrator.state.save_idempotency_result(key, {"receipt": receipt, "at": at})
         return {"ok": True, "reason_code": "OK", "run_id": run_id, "status": result.get("status"),
                 "receipt": receipt}
+
+    def _claim_notice(self, run_id: str, key: str, token: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        claim_intent = getattr(self.orchestrator.state, "claim_intent", None)
+        if not callable(claim_intent):
+            return None
+        return claim_intent(
+            run_id, "ipipe.notice", key,
+            {"run_id": run_id, "token": token, "result_hash": _result_hash(result)},
+        )
 
     def _manual(self, run_id: str, result: dict[str, Any]) -> dict[str, Any]:
         """One notice when the stage opens, then a private nudge every half hour.
@@ -159,11 +196,23 @@ class IpipeWatcher:
         if bucket < 1:
             return {"ok": True, "reason_code": "MANUAL_WAIT_TOO_EARLY", "run_id": run_id}
         key = f"{_NUDGE_KEY}:{run_id}:{token}:{bucket}"
-        if self.orchestrator.state.idempotency_result(key) is not None:
-            return {"ok": True, "reason_code": "NUDGE_ALREADY_SENT", "run_id": run_id}
         recipients = sorted(_ide_turn_recipients(self.orchestrator, run_id))
         if not recipients:
             return {"ok": True, "reason_code": "NO_RECIPIENTS", "run_id": run_id}
+        if self.orchestrator.state.idempotency_result(key) is not None:
+            return {"ok": True, "reason_code": "NUDGE_ALREADY_SENT", "run_id": run_id}
+        claim = self._claim_notice(
+            run_id, key, f"nudge:{token}:{bucket}",
+            {"run_id": run_id, "token": token, "bucket": bucket},
+        )
+        if claim is not None:
+            if claim.get("status") == "EXISTING":
+                existing = self.orchestrator.state.result_by_idempotency_key(key)
+                if existing is not None:
+                    return {"ok": True, "reason_code": "NUDGE_ALREADY_SENT", "run_id": run_id}
+                return {"ok": False, "reason_code": "IPIPE_NUDGE_QUERY_REQUIRED", "run_id": run_id}
+            if claim.get("status") != "CLAIMED":
+                return {"ok": False, "reason_code": "IPIPE_NUDGE_CONFLICT", "run_id": run_id}
         try:
             # Single chat on purpose: the group already carries the first notice, and a
             # reminder is addressed at one person's inbox, not at everyone again.
@@ -173,7 +222,10 @@ class IpipeWatcher:
         except Exception as error:  # noqa: BLE001
             return {"ok": False, "reason_code": "IPIPE_NUDGE_FAILED", "run_id": run_id,
                     "detail": str(error)}
-        self.orchestrator.state.save_idempotency_result(key, {"receipt": receipt})
+        if claim is not None:
+            self.orchestrator.state.receipt(claim["intent"]["intent_id"], {"receipt": receipt}, [])
+        else:
+            self.orchestrator.state.save_idempotency_result(key, {"receipt": receipt})
         return {"ok": True, "reason_code": "NUDGED", "run_id": run_id, "minutes": int(elapsed // 60)}
 
 
@@ -183,6 +235,12 @@ def _parsed(value: Any) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _result_hash(result: Any) -> str:
+    """Stable identity for the observed result stored in a notice intent."""
+    encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _head(brief: dict[str, Any], run_id: str, mention: Any) -> list[str]:

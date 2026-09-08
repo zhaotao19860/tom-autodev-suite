@@ -34,8 +34,9 @@ class InfoflowGroupClient:
             }
         )
         result = {"group_id": receipt["group_id"], "group_name": group_name}
-        if isinstance(receipt.get("bot_id"), str) and receipt["bot_id"]:
-            result["bot_id"] = receipt["bot_id"]
+        if not isinstance(receipt.get("bot_id"), str) or not receipt["bot_id"]:
+            raise ValueError("BOT_AGENT_ID_UNAVAILABLE")
+        result["bot_id"] = receipt["bot_id"]
         return result
 
     def send_markdown(
