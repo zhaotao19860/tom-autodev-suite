@@ -215,12 +215,12 @@ class ChangeClass:
                     no gate (the state's output gate is waived). Only fits a phase whose
                     content is derivable without reasoning (GRILL when acceptance exists).
       - "ungated" : the skill/model still produces the artifact, but its human gate is
-                    waived (used where the content needs reasoning — a task DAG — yet the
-                    small-change owner's G0 declaration covers the sign-off).
-    The true "one model step produces spec+dag as two artifacts" merge is deferred to the
-    DraftContent submission path (Phase 1c); until then express keeps SPEC full and only
-    waives the TASKS gate. PLAN/IMPLEMENT/REVIEW and every code/side-effect gate
-    (G4/G5/G7/G9) are always "full".
+                    waived (the small-change owner's G0 declaration covers the sign-off).
+      - "merged"  : the model produces this artifact together with the next phase's in one
+                    DraftContent ({spec, dag}); submit_draft completes both — this phase
+                    keeps its gate, the tail phase is "ungated". Cuts one model turn and
+                    one gate while still writing both artifacts (downstream unchanged).
+    PLAN/IMPLEMENT/REVIEW and every code/side-effect gate (G4/G5/G7/G9) are always "full".
     """
 
     name: str
@@ -230,10 +230,10 @@ class ChangeClass:
 CHANGE_CLASSES: dict[str, ChangeClass] = {
     # The full path exactly as today: every phase is skill-produced with its own gate.
     "standard": ChangeClass("standard", phase_modes={}),
-    # A small change: GRILL auto-derived (acceptance already present) and the task DAG
-    # produced by the model but without its own G3 gate. SPEC stays full for now; the
-    # spec+dag artifact merge lands with the Phase 1c DraftContent path.
-    "express": ChangeClass("express", phase_modes={"GRILL": "auto", "TASKS": "ungated"}),
+    # A small change: GRILL auto-derived (acceptance already present); SPEC produced
+    # together with the task DAG in one gated ({spec, dag}) step; TASKS ungated, filled
+    # from that same draft. One model turn and one gate (G2) for the whole design front.
+    "express": ChangeClass("express", phase_modes={"GRILL": "auto", "SPEC": "merged", "TASKS": "ungated"}),
 }
 DEFAULT_CHANGE_CLASS = "standard"
 

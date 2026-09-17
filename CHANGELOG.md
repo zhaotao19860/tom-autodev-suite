@@ -16,15 +16,18 @@ standard 类保持不变;新增能力靠全量测试证等价。
   机械化替代所有“keep in step”注释,消除 437/641 那类漂移。区分 `entry_gate` 与
   `output_gate` 两义(澄清 IMPLEMENT 的 G4/G5)。
 - **1b 变更类自适应路由**:iCafe 卡片类型确定性映射出建议类别、由 owner 在 G0 确认/覆盖
-  (不新增审批点)。`express` 小改:GRILL 在验收项已存在时自动派生(无模型、免 G1),
-  TASKS 免 G3(ungated,模型仍产 DAG);SPEC 与全部代码/副作用闸门(G4/G5/G7/G9)保持。
+  (不新增审批点)。`express` 小改:GRILL 在验收项已存在时自动派生(无模型、免 G1);
+  SPEC 与 TASKS 由**一次模型步产 `{spec, dag}`**、经 `submit-draft` 一并落成(SPEC 绑
+  G2、TASKS ungated 免 G3),spec 与 task-dag 仍是两份独立产物、下游不变;全部代码/副作用
+  闸门(G4/G5/G7/G9)保持。
 - **1c WorkerDriver 安全半**:`classify_next`(只读决策)、`execute_auto`(自主完成 auto
   阶段、拒绝非 auto)、`advance`(自动推进确定性阶段 + park + 入队幂等 ProducerJob)、
   `submit-draft`(模型交 DraftContent → 服务端建 envelope → gated 阶段绑定审批后完成,
-  无审批则只记草案并返回待批 hash)。确定性步骤零 Agent 唤醒。
+  无审批则只记草案并返回待批 hash;`express` SPEC 的 `{spec, dag}` 合并在此完成两份产物)。
+  确定性步骤零 Agent 唤醒。
 - **尚未接线**:自主 CONTROLLER_STEP 执行(worker 直接 submit iCode / 触发 iPipe /
-  release)刻意保留,待明确确认后单独实现;handoff 消费方由 Stop-hook 迁至 worker、以及
-  express `merged`(spec+dag 一步两产物)一并留待该阶段。
+  release)刻意保留,待明确确认后单独实现;handoff 消费方由 Stop-hook 迁至 worker 亦留待
+  该阶段。
 
 ## 2026-09-17 — 控制面加固基线收绿 (Phase 0)
 

@@ -169,6 +169,11 @@ def submit_draft(
     expected_job = f"producer:{action['action_id']}"
     if job_id != expected_job:
         return {"ok": False, "reason_code": "STALE_PRODUCER_JOB", "expected_job_id": expected_job}
+
+    change_class = workflow_spec.change_class_of(orchestrator.state.events(run_id))
+    if workflow_spec.phase_mode(change_class, action["phase"]) == "merged":
+        return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync)
+
     orchestrator.state.fulfill_producer_job(job_id, draft)
     envelope = build_envelope(action, draft)
     gate = action.get("required_human_gate")
@@ -179,6 +184,43 @@ def submit_draft(
                     "approval_input_hash": envelope["approval_input_hash"], "job_id": job_id}
         envelope["approval_id"] = approval_id
     return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
+
+
+def _submit_merged(
+    orchestrator: Any, run_id: str, job_id: str, action: dict[str, Any],
+    draft: dict[str, Any], knowledge_sync: Any | None,
+) -> dict[str, Any]:
+    """Complete a merged design front (SPEC + TASKS) from one {spec, dag} DraftContent.
+
+    SPEC is gated (its own gate binds the spec content); TASKS is ungated (the owner's
+    express declaration covers it). Both artifacts are still written and validated against
+    their own schemas, so everything downstream reads a normal spec and a normal task-dag.
+    """
+    if not (isinstance(draft, dict) and isinstance(draft.get("spec"), dict) and isinstance(draft.get("dag"), dict)):
+        return {"ok": False, "reason_code": "MERGED_DRAFT_INVALID", "job_id": job_id}
+    orchestrator.state.fulfill_producer_job(job_id, draft)
+
+    spec_envelope = build_envelope(action, draft["spec"])
+    gate = action.get("required_human_gate")
+    if gate is not None:
+        approval_id = _settled_approval_id(orchestrator, run_id, gate, spec_envelope["approval_input_hash"])
+        if approval_id is None:
+            return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": gate,
+                    "approval_input_hash": spec_envelope["approval_input_hash"], "job_id": job_id}
+        spec_envelope["approval_id"] = approval_id
+    spec_result = orchestrator.complete_phase(run_id, spec_envelope, knowledge_sync=knowledge_sync)
+    if not spec_result.get("ok"):
+        return {"ok": False, "reason_code": "MERGED_SPEC_FAILED", "detail": spec_result}
+
+    tasks_action = orchestrator.next(run_id)
+    if not tasks_action.get("ok") or tasks_action.get("phase") != "TASKS":
+        return {"ok": False, "reason_code": "MERGED_TASKS_UNAVAILABLE", "detail": tasks_action}
+    tasks_envelope = build_envelope(tasks_action, draft["dag"])
+    tasks_result = orchestrator.complete_phase(run_id, tasks_envelope, knowledge_sync=knowledge_sync)
+    if not tasks_result.get("ok"):
+        return {"ok": False, "reason_code": "MERGED_TASKS_FAILED", "detail": tasks_result}
+    return {"ok": True, "reason_code": "MERGED_COMPLETE", "run_id": run_id,
+            "spec": spec_result, "tasks": tasks_result}
 
 
 # States a deterministic auto-advance may complete on its own. Controller side effects
@@ -227,6 +269,9 @@ def _enqueue_producer_job(orchestrator: Any, run_id: str, decision: dict[str, An
     payload = {
         "phase": action.get("phase"),
         "skill": decision.get("skill"),
+        "mode": workflow_spec.phase_mode(
+            workflow_spec.change_class_of(orchestrator.state.events(run_id)), action.get("phase")
+        ),
         "result_schema": action.get("result_schema"),
         "input_hash": action.get("input_hash"),
         "action_id": action.get("action_id"),

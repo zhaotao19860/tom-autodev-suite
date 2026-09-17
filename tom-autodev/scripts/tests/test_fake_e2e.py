@@ -496,29 +496,37 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(parked["parked"], worker_driver.PRODUCER_WAIT)
         self.assertEqual(parked["auto_completed"], [])
 
-    def test_submit_draft_completes_a_gated_model_phase(self):
-        # express run auto-advances to the SPEC producer frontier.
+    def test_submit_draft_merges_spec_and_dag_for_express(self):
+        # express run auto-advances to the merged SPEC producer frontier; its job says merged.
         run_id, knowledge, _req = self._run_to_grill_action("BGW-917", "I15ClP2KW4ZGAK", "express")
         parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
         job_id = parked["producer_job"]["job_id"]
-        draft = copy.deepcopy(specialized_examples()["spec"])
+        self.assertEqual(parked["producer_job"]["payload"]["mode"], "merged")
+        draft = {
+            "spec": copy.deepcopy(specialized_examples()["spec"]),
+            "dag": copy.deepcopy(specialized_examples()["task-dag"]),
+        }
 
-        # Without the G2 approval, submit-draft records the draft but refuses to complete,
-        # returning the exact hash to approve — a model phase is never completed ungated.
+        # Without the G2 approval, the merged submit records the draft but refuses to
+        # complete, returning the spec's hash to approve.
         pending = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
-        self.assertEqual(pending["reason_code"], "APPROVAL_REQUIRED")
-        self.assertEqual(pending["gate"], "G2")
-        self.assertEqual(self.orchestrator.state.producer_job(job_id)["status"], "FULFILLED")
+        self.assertEqual((pending["reason_code"], pending["gate"]), ("APPROVAL_REQUIRED", "G2"))
 
-        # After the operator approves that hash, submit-draft completes into TASKS.
+        # After approving that one hash, the single call writes BOTH the spec and the
+        # task-dag (TASKS ungated) and lands the frontier at WORKSPACE.
         self._approval(run_id, "G2", pending["approval_input_hash"])
         done = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
-        self.assertTrue(done["ok"], done)
-        self.assertEqual(self.orchestrator.next(run_id)["phase"], "TASKS")
+        self.assertEqual((done["ok"], done["reason_code"]), (True, "MERGED_COMPLETE"))
+        self.assertTrue(self.orchestrator.artifacts.latest_phase(run_id, "SPEC", None)["valid"])
+        self.assertTrue(self.orchestrator.artifacts.latest_phase(run_id, "TASKS", None)["valid"])
+        self.assertEqual(self.orchestrator.next(run_id)["state"], "WORKSPACE")
 
-        # A stale job id (not the current frontier) is refused.
-        stale = worker_driver.submit_draft(self.orchestrator, run_id, "producer:deadbeef", draft, knowledge_sync=knowledge)
-        self.assertIn(stale["reason_code"], ("STALE_PRODUCER_JOB", "NOT_PRODUCER"))
+        # A malformed merged draft (missing dag) is refused before any write.
+        run2, k2, _ = self._run_to_grill_action("BGW-918", "I15ClP2KW4ZGAK", "express")
+        p2 = worker_driver.advance(self.orchestrator, run2, knowledge_sync=k2)
+        bad = worker_driver.submit_draft(self.orchestrator, run2, p2["producer_job"]["job_id"],
+                                         {"spec": copy.deepcopy(specialized_examples()["spec"])}, knowledge_sync=k2)
+        self.assertEqual(bad["reason_code"], "MERGED_DRAFT_INVALID")
 
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
