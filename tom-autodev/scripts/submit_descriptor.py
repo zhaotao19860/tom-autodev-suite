@@ -147,6 +147,24 @@ def _ownership_rows(orchestrator: Any, run_id: str) -> dict[tuple[str, str], dic
         connection.close()
 
 
+def owned_row(
+    rows: dict[tuple[str, str], dict[str, Any]], task_id: str, path: Any
+) -> dict[str, Any] | None:
+    """Look up an ACTIVE worktree-ownership row for (task_id, repo path).
+
+    The ownership map is keyed by the fully resolved repo path (`_ownership_rows`
+    reflects `workspace_manager`, which always stores
+    `str(Path(...).expanduser().resolve())`), so every reader must resolve the profile
+    path the same way before the lookup. Doing it here — in one shared helper both the
+    descriptor build and `orchestrator._submit` call — keeps the canonical form defined
+    once; a symlinked repo root (e.g. macOS `/var` -> `/private/var`), a `~`-relative
+    path, or a trailing slash otherwise misses every row and reports WORKTREE_NOT_OWNED.
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    return rows.get((task_id, str(Path(path).expanduser().resolve())))
+
+
 def build_and_archive(orchestrator: Any, run_id: str, task_id: str) -> dict[str, Any]:
     """Archive the descriptor for one task, or say precisely why it cannot be built."""
     try:
@@ -173,25 +191,18 @@ def _build_and_archive(orchestrator: Any, run_id: str, task_id: str) -> dict[str
         return {"ok": False, "reason_code": pinned.get("reason_code", "PROJECT_NOT_READY")}
     profile = pinned["profile"]
     rows = _ownership_rows(orchestrator, run_id)
-    # Ownership rows are keyed by the fully resolved repo path (workspace_manager
-    # always stores `Path(...).expanduser().resolve()`), so the profile path has to be
-    # resolved the same way before the lookup. Without this a symlinked repo root — e.g.
-    # macOS `/var` -> `/private/var` — misses every row and reports WORKTREE_NOT_OWNED.
-    def _owned(path: Any) -> dict[str, Any] | None:
-        if not isinstance(path, str) or not path:
-            return None
-        return rows.get((task_id, str(Path(path).expanduser().resolve())))
-
+    # Ownership rows are keyed by the fully resolved repo path; `owned_row` resolves the
+    # profile path the same way workspace_manager stored it (see its docstring).
     business = next(
         (
-            (repository, _owned(repository["path"]))
+            (repository, owned_row(rows, task_id, repository["path"]))
             for repository in profile.get("business_repos", [])
-            if _owned(repository["path"]) is not None
+            if owned_row(rows, task_id, repository["path"]) is not None
         ),
         None,
     )
     test_repository = profile.get("test_repo") or {}
-    test_row = _owned(test_repository.get("path"))
+    test_row = owned_row(rows, task_id, test_repository.get("path"))
     if business is None or test_row is None:
         return {"ok": False, "reason_code": "WORKTREE_NOT_OWNED", "task_id": task_id}
     repository, business_row = business

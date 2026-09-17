@@ -88,6 +88,22 @@ class StageParameterTests(unittest.TestCase):
         self.assertIn("<IREPO-TOKEN>", safe["get_bgwagent"])
         self.assertEqual(safe["test_cr_id"], "122402145")
 
+    def test_evidence_redacts_a_non_uuid_token(self):
+        # load_tokens accepts any non-empty string, so redaction must not depend on the
+        # token being UUID-shaped: a hex blob / JWT / opaque token must still be scrubbed.
+        opaque = "gho_ABCdef0123456789ghIJKLmnopQRSTuvwx4242"
+        values = stage_parameters.resolve(
+            ["get_bgwagent"],
+            change_number=None,
+            product_urls={"baidu/sysip/bgwagent": URL},
+            tokens={"baidu/sysip/bgwagent": opaque},
+        )["parameters"]
+
+        safe = stage_parameters.redacted(values)
+
+        self.assertNotIn(opaque, str(safe))
+        self.assertIn('--header "IREPO-TOKEN:<IREPO-TOKEN>"', safe["get_bgwagent"])
+
     def test_a_world_readable_token_file_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

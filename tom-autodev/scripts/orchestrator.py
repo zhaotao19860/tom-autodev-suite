@@ -2870,7 +2870,7 @@ def _submit(
     pressure. It is derived here instead, from the artifacts and the pinned profile.
     """
     from cli_transport import ProcessTransport
-    from submit_descriptor import _ownership_rows, build_and_archive
+    from submit_descriptor import _ownership_rows, build_and_archive, owned_row
 
     # Reject impossible invocations before descriptor construction can commit either
     # repository. Exact input-hash validation still happens after the descriptor is built.
@@ -2900,7 +2900,7 @@ def _submit(
         None,
     )
     rows = _ownership_rows(orchestrator, run_id)
-    row = rows.get((task_id, repository.get("path"))) if isinstance(repository, dict) else None
+    row = owned_row(rows, task_id, repository.get("path")) if isinstance(repository, dict) else None
     if not isinstance(row, dict):
         return {"ok": False, "reason_code": "WORKTREE_NOT_OWNED", "run_id": run_id, "task_id": task_id}
     # Descriptor construction may select a clean same-workspace checkout whose HEAD

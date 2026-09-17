@@ -64,5 +64,22 @@ class SubmitDescriptorCommitTests(unittest.TestCase):
         self.assertNotIn("t3-rebuild", found)
 
 
+class OwnedRowLookupTests(unittest.TestCase):
+    def test_owned_row_resolves_symlinked_and_relative_paths(self):
+        # Ownership rows are keyed by the fully resolved repo path; a lookup with a
+        # symlinked root (macOS /var -> /private/var) or a trailing slash must still hit.
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory).resolve() / "repo"
+            real.mkdir()
+            link = Path(directory).resolve() / "link"
+            link.symlink_to(real, target_is_directory=True)
+            rows = {("T-1", str(real)): {"worktree_path": "/wt", "repo_path": str(real)}}
+
+            self.assertIsNotNone(submit_descriptor.owned_row(rows, "T-1", str(link)))
+            self.assertIsNotNone(submit_descriptor.owned_row(rows, "T-1", str(real) + "/"))
+            self.assertIsNone(submit_descriptor.owned_row(rows, "T-2", str(real)))
+            self.assertIsNone(submit_descriptor.owned_row(rows, "T-1", None))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,7 +26,11 @@ from typing import Any
 
 _TOKEN_FILE = "credentials/irepo-tokens.yaml"
 _REDACTED = "<IREPO-TOKEN>"
-_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+# Redact by the token's known LOCATION, not its shape: product_command always embeds the
+# credential as `--header "IREPO-TOKEN:<token>"`, so scrub everything from `IREPO-TOKEN:`
+# up to the closing quote. A shape-based (UUID-only) rule leaked any hex/JWT/opaque token
+# verbatim into the G8 approval binding and evidence.
+_TOKEN_HEADER = re.compile(r'(IREPO-TOKEN:)[^"]*')
 
 
 def load_tokens(config_root: Path | str) -> dict[str, str]:
@@ -98,9 +102,9 @@ def resolve(
 
 
 def redacted(values: dict[str, Any]) -> dict[str, Any]:
-    """The same mapping with every token-shaped value replaced, for evidence."""
+    """The same mapping with every embedded irepo token replaced, for evidence."""
     return {
-        key: _UUID.sub(_REDACTED, value) if isinstance(value, str) else value
+        key: _TOKEN_HEADER.sub(r"\1" + _REDACTED, value) if isinstance(value, str) else value
         for key, value in (values or {}).items()
     }
 
