@@ -458,6 +458,20 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(spec_decision["kind"], worker_driver.PRODUCER_WAIT)
         self.assertEqual(spec_decision["skill"], "tom-spec")
 
+    def test_worker_executes_auto_grill_without_an_agent_turn(self):
+        # The worker builds the envelope itself and completes express auto-GRILL — no
+        # agent turn, no approval — then the run sits at the SPEC frontier.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-913", "I15ClP2KW4ZGAK", "express")
+        result = worker_driver.execute_auto(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.orchestrator.next(run_id)["phase"], "SPEC")
+
+        # Safety: a standard run's GRILL needs the model, so execute_auto refuses it —
+        # the worker can never use this path for a gated or model-authored phase.
+        std_run, _k, _r = self._run_to_grill_action("BGW-914", "I15ClP2KW4ZGAK", "standard")
+        refused = worker_driver.execute_auto(self.orchestrator, std_run)
+        self.assertEqual(refused["reason_code"], "NOT_AUTO")
+
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

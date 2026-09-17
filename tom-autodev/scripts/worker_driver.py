@@ -23,9 +23,11 @@ Decision kinds:
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import workflow_spec
+from phase_protocol import _canonical_hash
 
 TERMINAL = "TERMINAL"
 BLOCKED = "BLOCKED"
@@ -73,3 +75,59 @@ def classify_next(orchestrator: Any, run_id: str) -> dict[str, Any]:
     if gate is not None and not _gate_settled(orchestrator, run_id, gate, action.get("input_hash")):
         return {"kind": APPROVAL_WAIT, "gate": gate, "action": action}
     return {"kind": CONTROLLER_STEP, "controller": action.get("controller"), "action": action}
+
+
+def build_envelope(action: dict[str, Any]) -> dict[str, Any]:
+    """Build the ArtifactEnvelope for an auto/controller-authored action server-side.
+
+    This is the "server builds the envelope from pinned content" seam: for an auto phase
+    the content is already in the action, so the worker constructs the full envelope the
+    same way the agent would for a no-gate phase (approval_id None), and `complete_phase`
+    validates it unchanged. Only defined for auto actions (content present, no gate).
+    """
+    content = action["content"]
+    content_hash = _canonical_hash(content)
+    source_revisions = action.get("source_revisions")
+    approval_input_hash = _canonical_hash({
+        "action_id": action["action_id"],
+        "task_id": action.get("task_id"),
+        "parent_artifact_hash": action.get("parent_artifact_hash"),
+        "source_revisions": source_revisions,
+        "content_hash": content_hash,
+    })
+    return {
+        "action_id": action["action_id"],
+        "source_event_id": action["source_event_id"],
+        "host": "comate",
+        "run_id": action["run_id"],
+        "phase": action["phase"],
+        "task_id": action.get("task_id"),
+        "schema_version": "1",
+        "input_hash": action["input_hash"],
+        "content_hash": content_hash,
+        "source_revisions": source_revisions,
+        "parent_artifact_hash": action.get("parent_artifact_hash"),
+        "knowledge_doc_id": None,
+        "knowledge_url": None,
+        "knowledge_version": None,
+        "icafe_comment_id": None,
+        "evidence_refs": copy.deepcopy(action.get("source_evidence_refs") or []),
+        "approval_id": None,
+        "approval_input_hash": approval_input_hash,
+        "content": content,
+    }
+
+
+def execute_auto(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None) -> dict[str, Any]:
+    """Complete one AUTO_COMPLETE phase without an agent turn.
+
+    The smallest executor step: only a deterministic, ungated auto phase (e.g. express
+    GRILL) is completed here — the content is pinned in the action, so there is no model
+    call and no approval. Any other frontier is refused (NOT_AUTO), so the worker can
+    never use this path to perform a gated or model-authored step.
+    """
+    decision = classify_next(orchestrator, run_id)
+    if decision["kind"] != AUTO_COMPLETE:
+        return {"ok": False, "reason_code": "NOT_AUTO", "decision_kind": decision["kind"]}
+    envelope = build_envelope(decision["action"])
+    return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
