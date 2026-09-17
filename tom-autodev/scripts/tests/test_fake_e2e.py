@@ -557,6 +557,28 @@ class FakeE2ETests(unittest.TestCase):
         self.assertIn("workspace", [step.get("controller") for step in result["auto_completed"]])
         self.assertEqual(self.orchestrator.next(run_id)["phase"], "PLAN")
 
+    def test_worker_resume_is_run_scoped_and_drives_forward(self):
+        # No handoff -> nothing to resume.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-560", "I15ClP2KW4ZGAK", "express")
+        self.assertEqual(worker_driver.resume(self.orchestrator, run_id)["reason_code"], "NO_RESUME_HANDOFF")
+
+        # A settled-approval resume handoff for THIS run: resume completes it and drives
+        # the run forward (auto-GRILL) itself, parking at the SPEC model frontier. Scoping
+        # to run_id is the fix for the Stop-hook's global scan (review #3).
+        g0 = next(
+            record for record in self.orchestrator.approvals.for_run(run_id)
+            if record.get("action") == "G0" and record.get("effective_decision") == "APPROVE"
+        )
+        self.orchestrator.state.record_handoff(
+            run_id, f"approval-resume-{g0['approval_id']}",
+            {"kind": "APPROVAL_RESUME", "run_id": run_id,
+             "approval_id": g0["approval_id"], "input_hash": g0["input_hash"]},
+        )
+        result = worker_driver.resume(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertEqual((result["ok"], result["parked"]), (True, worker_driver.PRODUCER_WAIT))
+        self.assertEqual(result["decision"]["skill"], "tom-spec")
+        self.assertEqual(self.orchestrator.state.incomplete_handoffs(run_id), [])
+
     def _drive_to_submit(self, card):
         run_id, knowledge = self._run_to_workspace(card, "bgw", "I15ClP2KW4ZGAK")
         requirement = snapshot(card)

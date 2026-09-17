@@ -401,6 +401,40 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             "auto_completed": steps}
 
 
+def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
+           icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+           icode_runtime: Any | None = None) -> dict[str, Any]:
+    """Consume a run's settled approval-resume handoff and drive it forward.
+
+    Run-scoped by construction (it only looks at this run's handoffs), which is the fix
+    for the Stop-hook's global scan that stalled when two runs were parked (review #3):
+    the worker resumes a specific run rather than guessing from a session-less Stop event.
+    Verifies the handoff's approval is still APPROVE and bound to its input_hash, completes
+    the handoff (idempotent), then hands off to advance().
+    """
+    candidates = [
+        handoff for handoff in orchestrator.state.incomplete_handoffs(run_id)
+        if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
+    ]
+    if not candidates:
+        return {"ok": False, "reason_code": "NO_RESUME_HANDOFF", "run_id": run_id}
+    if len(candidates) > 1:
+        return {"ok": False, "reason_code": "MULTIPLE_RESUME_HANDOFFS", "run_id": run_id}
+    handoff = candidates[0]
+    data = handoff.get("payload") or {}
+    approval = orchestrator.approvals.get(data.get("approval_id"))
+    if not (
+        isinstance(approval, dict)
+        and approval.get("run_id") == run_id
+        and approval.get("effective_decision") == "APPROVE"
+        and approval.get("input_hash") == data.get("input_hash")
+    ):
+        return {"ok": False, "reason_code": "RESUME_HANDOFF_STALE", "run_id": run_id}
+    orchestrator.state.complete_handoff(handoff["handoff_id"])
+    return advance(orchestrator, run_id, knowledge_sync=knowledge_sync,
+                   icode_skill=icode_skill, icode_runtime=icode_runtime)
+
+
 def _enqueue_producer_job(orchestrator: Any, run_id: str, decision: dict[str, Any]) -> dict[str, Any]:
     """Record a ProducerJob for a PRODUCER_WAIT frontier (idempotent on the action id)."""
     action = decision["action"]

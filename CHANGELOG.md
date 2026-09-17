@@ -27,10 +27,15 @@ standard 类保持不变;新增能力靠全量测试证等价。
   确定性步骤零 Agent 唤醒。
 - **1c 控制器执行(经确认)**:worker 现在自主执行 WORKSPACE(切 owned worktree、推导 G4
   binding hash、compute-then-approve、批准后 advance WORKSPACE→PLAN)与 SUBMIT(推导评审
-  描述符、按其 input_hash 要 G7、批准后提交 iCode)。二者均 compute-then-approve、全程受
-  各自闸门约束(G4/G7),worker 只在人批准了那笔精确提交后才动作。
-- **尚未接线**:IPIPE(触发/监控流水线)与 RELEASE 的自主执行(需各自 runtime),以及
-  handoff 消费方由 Stop-hook 迁至 worker,留待后续。
+  描述符、按其 input_hash 要 G7、批准后提交 iCode)。`advance()` 会自主串联已结算的这两个
+  控制器直到下一个模型阶段/未结算闸门/IPIPE。二者均 compute-then-approve、全程受各自闸门
+  约束(G4/G7),worker 只在人批准了那笔精确提交后才动作。
+- **1c resume(化解 review #3)**:新增 run 级 `resume()`——只看该 run 的 APPROVAL_RESUME
+  handoff、校验审批仍有效后完成 handoff 并交给 `advance()`。这修掉了 Stop-hook 全局扫描在
+  两个 run 并行时卡死的问题;worker 成为审批结算后的续跑驱动。
+- **尚未接线**:IPIPE(触发/监控流水线 + 构造 ipipe-evidence)与 RELEASE 的自主执行——
+  这需要新写"从流水线结果构造证据"的逻辑(安全攸关、当前仅测试里手工拼装),宜先设计+评审
+  再实现,不在无人值守回合里拼;以及 Stop-hook→worker 的生产接线(把 `resume()` 挂上)。
 
 ## 2026-09-17 — 控制面加固基线收绿 (Phase 0)
 
