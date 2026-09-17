@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from orchestrator import Orchestrator
 from orchestrator import main as cli_main
+import worker_driver
 from clients.icafe_client import CafeClient
 from knowledge_sync import KnowledgeSync
 
@@ -436,6 +437,26 @@ class FakeE2ETests(unittest.TestCase):
         grill = self.orchestrator.next(run_id)
         self.assertEqual((grill["child_skill"], grill["required_human_gate"]), ("tom-grill", "G1"))
         self.assertNotIn("content", grill)
+
+    def test_worker_classify_next_reads_the_frontier(self):
+        # standard GRILL needs the model -> PRODUCER_WAIT.
+        run_id, _knowledge, _req = self._run_to_grill_action("BGW-911", "I15ClP2KW4ZGAK", "standard")
+        decision = worker_driver.classify_next(self.orchestrator, run_id)
+        self.assertEqual(decision["kind"], worker_driver.PRODUCER_WAIT)
+        self.assertEqual(decision["skill"], "tom-grill")
+
+        # express GRILL is auto-derived -> AUTO_COMPLETE; after completing it the SPEC
+        # frontier again needs the model -> PRODUCER_WAIT.
+        run_id, knowledge, requirement = self._run_to_grill_action("BGW-912", "I15ClP2KW4ZGAK", "express")
+        decision = worker_driver.classify_next(self.orchestrator, run_id)
+        self.assertEqual(decision["kind"], worker_driver.AUTO_COMPLETE)
+
+        grill = self.orchestrator.next(run_id)
+        envelope = self._phase_envelope(grill, self._phase_content(grill, requirement), run_id)
+        self.assertTrue(self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)["ok"])
+        spec_decision = worker_driver.classify_next(self.orchestrator, run_id)
+        self.assertEqual(spec_decision["kind"], worker_driver.PRODUCER_WAIT)
+        self.assertEqual(spec_decision["skill"], "tom-spec")
 
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
