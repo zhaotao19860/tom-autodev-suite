@@ -4,6 +4,19 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-17 — 控制面加固基线收绿 (Phase 0)
+
+把 2026-09-07 的加固工作(iCode/iPipe/KU 运行时客户端、提交描述符、iPipe watcher、
+审批投递/摘要/watch、阶段文档渲染、profile 重钉、run brief、stage 参数等)收尾到全绿
+基线,并修复独立评审发现的两个 CONFIRMED 问题:
+
+- `submit_descriptor` 在查 worktree ownership 前先解析 profile 仓库路径。此前软链根目录
+  (macOS `/var`→`/private/var`)会在 `build_and_archive` 已提交评审字节之后仍报
+  `WORKTREE_NOT_OWNED`,导致 CLI `submit` 卡死。
+- `stage_parameters.redacted()` 改为按 `IREPO-TOKEN:` 头的位置脱敏,不再依赖 UUID 形状
+  正则——非 UUID 的 irepo token 不再泄漏进 G8 审批绑定与证据。
+- 对齐测试计数,去掉不实的“不再产生 ResourceWarning”表述。
+
 ## 2026-09-07
 
 The x86bgw CDN-URL requirement (iCafe `BGW-1956`) was the suite's first end-to-end run. It
