@@ -11,20 +11,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Subject and effect per gate. Keep these in step with `phase_protocol._PHASES`.
-_GATES: dict[str, tuple[str, str]] = {
-    "G0": ("需求快照与协作绑定（群名、成员、角色）", "建协作群，进入 GRILL 澄清"),
-    "G1": ("GRILL 决策日志：澄清结论、决策、验收点", "发布决策日志，进入 SPEC 起草"),
-    "G2": ("Spec：行为、验收场景、测试接口、环境要求", "发布 Spec，进入 TASKS 拆解"),
-    "G3": ("任务 DAG 与验收点覆盖", "创建工作区，进入 PLAN"),
-    "G4": ("单个任务的实现计划", "按计划生成业务代码与测试代码"),
-    "G5": ("候选改动集：业务 diff 与测试 diff", "进入标准与 Spec 双轴 Review"),
-    "G6": ("诊断结论与修复方向", "按修复方向执行修复"),
-    "G7": ("提交 iCode 并触发 iPipe 的固定版本", "提交 CR，触发允许的流水线"),
-    "G8": ("重跑失败的流水线阶段", "按当前远程证据重跑该阶段"),
-    "G9": ("正式发布", "执行发布阶段"),
-    "G10": ("控制面优化建议", "应用优化建议"),
-}
+import workflow_spec
+
+# Subject and effect per gate, from the single workflow spec (workflow_spec.py).
+_GATES: dict[str, tuple[str, str]] = workflow_spec.GATE_LABELS
 
 
 def gate_intent(action: Any) -> dict[str, str]:

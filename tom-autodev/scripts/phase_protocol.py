@@ -18,6 +18,8 @@ from project_registry import load_profile
 from requirement_snapshot import AcceptanceValueError, normalized_acceptance_ids
 from schema_validator import validate_named_schema
 
+import workflow_spec
+
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _STABLE_DEPENDENCY_REASONS = frozenset({
@@ -36,33 +38,18 @@ _DRAFT_KEYS = frozenset(
     }
 )
 
-_PHASES: dict[str, dict[str, Any]] = {
-    "INTAKE": {"controller": "intake", "schema": "requirement-snapshot", "gate": "G0", "target": "GRILL"},
-    "GRILL": {"skill": "tom-grill", "schema": "decision-log", "gate": "G1", "target": "SPEC", "predecessor": "INTAKE"},
-    "SPEC": {"skill": "tom-spec", "schema": "spec", "gate": "G2", "target": "TASKS", "predecessor": "GRILL"},
-    "TASKS": {"skill": "tom-tasks", "schema": "task-dag", "gate": "G3", "target": "WORKSPACE", "predecessor": "SPEC"},
-    "PLAN": {"skill": "tom-plan", "schema": "task-plan", "gate": "G4", "target": "IMPLEMENT", "predecessor": "TASKS", "revisions": True},
-    "IMPLEMENT": {"skill": "tom-implement", "schema": "change-set", "gate": "G5", "target": "REVIEW", "predecessor": "PLAN", "revisions": True},
-    "REVIEW": {"skill": "tom-review", "schema": "review", "gate": None, "target": "SUBMIT", "predecessor": "IMPLEMENT", "revisions": True},
-    "DIAGNOSE": {"skill": "tom-diagnose", "schema": "diagnosis", "gate": "G6", "target": None, "predecessor": ("REVIEW", "IPIPE", "IMPLEMENT"), "revisions": True},
-}
+# Phase / controller definitions, KU titles and task-scoped titles are all derived from
+# the single workflow spec (workflow_spec.py). Editing a phase's skill/schema/gate/target
+# means editing the spec; tests/test_workflow_spec.py pins the reconstruction.
+_PHASES: dict[str, dict[str, Any]] = workflow_spec.phase_definitions()
 
-_CONTROLLERS = {
-    "WORKSPACE": {"controller": "workspace", "target": "PLAN", "gate": "G4", "predecessor": "TASKS"},
-    "SUBMIT": {"controller": "submit", "target": "IPIPE", "gate": "G7", "predecessor": "REVIEW"},
-    "IPIPE": {"controller": "ipipe", "target": None, "gate": None, "revisions": True},
-    "RELEASE": {"controller": "release", "target": None, "gate": "G9", "predecessor": "IPIPE", "revisions": True},
-}
+_CONTROLLERS = workflow_spec.controller_definitions()
 
-_TITLE = {
-    "INTAKE": "00-requirement-snapshot", "GRILL": "01-grill", "SPEC": "02-spec",
-    "TASKS": "03-tasks", "PLAN": "04-task-plan", "IMPLEMENT": "05-change-set",
-    "REVIEW": "06-review", "DIAGNOSE": "07-diagnosis", "IPIPE": "08-ipipe-evidence",
-}
+_TITLE = workflow_spec.titles()
 # Phases whose KU title carries the task id. Everything else is run scoped, and
 # `_phase_attempt` has to count in the same scope or a re-entered phase would claim a
 # title that already exists.
-_TASK_SCOPED_TITLES = frozenset({"PLAN", "IMPLEMENT", "REVIEW"})
+_TASK_SCOPED_TITLES = workflow_spec.task_scoped_titles()
 
 # Operations that a fresh `publish_phase` for the same artifact drives again by itself.
 # Every one of them is keyed on the artifact's own content, so calling `publish_phase`
@@ -174,7 +161,7 @@ class PhaseProtocol:
             return _failure("RUN_NOT_FOUND", run_id=run_id)
         current = events[-1]
         state = current.get("state")
-        if state in {"RELEASE_SUCCESS", "STOPPED"}:
+        if state in workflow_spec.terminal_states():
             return {
                 **_failure("TERMINAL_STATE", run_id=run_id),
                 "state": state,

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import workflow_spec
+
 
 @dataclass(frozen=True)
 class EvidenceRequirement:
@@ -12,35 +14,26 @@ class EvidenceRequirement:
     requires_environment: bool = False
 
 
-# These requirements are owned by the controller. A caller may add evidence
-# requirements for a narrower operation, but cannot remove these baseline ones.
+# Derived from the single workflow spec (workflow_spec.py). A state's entry evidence is
+# its spec entry_artifacts + entry_gate + evidence_requires_* flags; the generic G0..G10
+# actions remain for adapters. Editing a requirement means editing the spec.
 REQUIREMENTS: dict[str, EvidenceRequirement] = {
-    "GRILL": EvidenceRequirement(("requirement-snapshot", "collaboration-session"), "G0"),
-    "SPEC": EvidenceRequirement(("grill",), "G1"),
-    "TASKS": EvidenceRequirement(("spec",), "G2"),
-    "WORKSPACE": EvidenceRequirement(("task-dag",), "G3"),
-    "PLAN": EvidenceRequirement(("workspace", "task-plan"), "G4"),
-    "IMPLEMENT": EvidenceRequirement(("task-plan",), "G4"),
-    "REVIEW": EvidenceRequirement(("change-set",), "G5"),
-    "SUBMIT": EvidenceRequirement(("review",), "G7"),
-    "IPIPE": EvidenceRequirement(("submission",), "G7"),
-    "RELEASE": EvidenceRequirement(
-        ("ipipe-evidence",), "G9", requires_revisions=True, requires_environment=True
-    ),
-    "RELEASE_SUCCESS": EvidenceRequirement(
-        ("release-evidence",), "G9", requires_revisions=True, requires_environment=True
-    ),
-    # Generic gate actions remain useful to adapters. Every human gate binds
-    # an approval record to the canonical input hash.
+    **{
+        state: EvidenceRequirement(
+            artifacts=spec.entry_artifacts,
+            approval_gate=spec.entry_gate,
+            requires_revisions=spec.evidence_requires_revisions,
+            requires_environment=spec.evidence_requires_environment,
+        )
+        for state, spec in workflow_spec.STATES.items()
+        if spec.entry_gate or spec.entry_artifacts
+    },
     **{f"G{number}": EvidenceRequirement(approval_gate=f"G{number}") for number in range(11)},
 }
 
 TRANSITION_REQUIREMENTS: dict[tuple[str, str], EvidenceRequirement] = {
-    ("REVIEW", "WORKSPACE"): EvidenceRequirement(("review",)),
-    ("REVIEW", "STOPPED"): EvidenceRequirement(("review",)),
-    ("DIAGNOSE", "SPEC"): EvidenceRequirement(("failure-bundle",), "G6"),
-    ("DIAGNOSE", "ARCHITECTURE_REVIEW"): EvidenceRequirement(("failure-bundle",), "G6"),
-    ("ENVIRONMENT_BLOCKED", "IPIPE"): EvidenceRequirement(("submission",), "G8"),
+    key: EvidenceRequirement(artifacts=artifacts, approval_gate=gate)
+    for key, (artifacts, gate) in workflow_spec.TRANSITION_REQUIREMENTS.items()
 }
 
 

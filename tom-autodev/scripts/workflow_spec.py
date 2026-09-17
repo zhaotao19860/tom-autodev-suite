@@ -63,6 +63,18 @@ class StateSpec:
 
 
 # placeholder-states
+# The non-obvious transition edges and why they exist (moved here with the graph):
+#   WORKSPACE -> TASKS: a DAG defect is only provable at bind time (one business repo
+#     per task), so a node spanning two repos is re-cut rather than discarding a run
+#     with approved phases. Re-entry needs the G2 spec as evidence and a fresh G3.
+#   REVIEW -> DIAGNOSE: the CR is where second opinions (小码哥 + human) arrive after
+#     SUBMIT; a confirmed defect is root-caused before anything is repaired, so it
+#     leaves via DIAGNOSE -> PLAN/SPEC and returns as a new revision on the same CR.
+#   REVIEW/SUBMIT -> WORKSPACE: a PASS submits that task immediately; the CR can land
+#     while later DAG nodes are open, so the frontier rebinds instead of running IPIPE
+#     over a half-written requirement.
+#   DIAGNOSE -> PLAN: only for a CODE_ONLY repair (spec + DAG still hold), decided by
+#     phase_protocol._completion_target(); a spec/scope repair re-enters at SPEC.
 STATES: dict[str, StateSpec] = {
     "INTAKE": StateSpec(
         registry="phase", controller="intake", schema="requirement-snapshot",
@@ -208,6 +220,42 @@ def failure_target(reason_code: str) -> str:
 
 def gate_label(gate: str) -> tuple[str, str]:
     return GATE_LABELS.get(gate, ("", ""))
+
+
+def _definition(spec: StateSpec) -> dict[str, Any]:
+    """Reconstruct one phase_protocol._PHASES/_CONTROLLERS entry from a StateSpec.
+
+    Only the keys the legacy dicts carried are emitted (all reads use .get()), so the
+    reconstructed definition behaves identically to the old literal.
+    """
+    definition: dict[str, Any] = {
+        "schema": spec.schema, "gate": spec.output_gate, "target": spec.target,
+    }
+    if spec.skill is not None:
+        definition["skill"] = spec.skill
+    if spec.controller is not None:
+        definition["controller"] = spec.controller
+    if spec.predecessor is not None:
+        definition["predecessor"] = spec.predecessor
+    if spec.envelope_revisions:
+        definition["revisions"] = True
+    return definition
+
+
+def phase_definitions() -> dict[str, dict[str, Any]]:
+    return {s: _definition(spec) for s, spec in STATES.items() if spec.registry == "phase"}
+
+
+def controller_definitions() -> dict[str, dict[str, Any]]:
+    return {s: _definition(spec) for s, spec in STATES.items() if spec.registry == "controller"}
+
+
+def titles() -> dict[str, str]:
+    return {s: spec.title for s, spec in STATES.items() if spec.title is not None}
+
+
+def task_scoped_titles() -> frozenset[str]:
+    return frozenset(s for s, spec in STATES.items() if spec.task_scoped)
 
 
 def canonical_hash() -> str:
