@@ -25,9 +25,12 @@ standard 类保持不变;新增能力靠全量测试证等价。
   `submit-draft`(模型交 DraftContent → 服务端建 envelope → gated 阶段绑定审批后完成,
   无审批则只记草案并返回待批 hash;`express` SPEC 的 `{spec, dag}` 合并在此完成两份产物)。
   确定性步骤零 Agent 唤醒。
-- **尚未接线**:自主 CONTROLLER_STEP 执行(worker 直接 submit iCode / 触发 iPipe /
-  release)刻意保留,待明确确认后单独实现;handoff 消费方由 Stop-hook 迁至 worker 亦留待
-  该阶段。
+- **1c 控制器执行(经确认)**:worker 现在自主执行 WORKSPACE(切 owned worktree、推导 G4
+  binding hash、compute-then-approve、批准后 advance WORKSPACE→PLAN)与 SUBMIT(推导评审
+  描述符、按其 input_hash 要 G7、批准后提交 iCode)。二者均 compute-then-approve、全程受
+  各自闸门约束(G4/G7),worker 只在人批准了那笔精确提交后才动作。
+- **尚未接线**:IPIPE(触发/监控流水线)与 RELEASE 的自主执行(需各自 runtime),以及
+  handoff 消费方由 Stop-hook 迁至 worker,留待后续。
 
 ## 2026-09-17 — 控制面加固基线收绿 (Phase 0)
 

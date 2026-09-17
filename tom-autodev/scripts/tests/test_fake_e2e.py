@@ -544,6 +544,49 @@ class FakeE2ETests(unittest.TestCase):
         self.assertTrue(done["ok"], done)
         self.assertEqual(self.orchestrator.next(run_id)["phase"], "PLAN")
 
+    def _drive_to_submit(self, card):
+        run_id, knowledge = self._run_to_workspace(card, "bgw", "I15ClP2KW4ZGAK")
+        requirement = snapshot(card)
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+        self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"], "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"], "workspace_receipts": receipts,
+        })
+        reviewed_revisions = None
+        for phase in ("PLAN", "IMPLEMENT", "REVIEW"):
+            action = self.orchestrator.next(run_id)
+            self.assertEqual(action["phase"], phase, action)
+            if phase == "IMPLEMENT":
+                reviewed_revisions = self._commit_reviewed_worktrees(receipts)
+            content = self._phase_content(action, requirement, reviewed_revisions)
+            envelope = self._phase_envelope(action, content, run_id)
+            self.assertTrue(self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)["ok"])
+        self.assertEqual(self.orchestrator.next(run_id)["controller"], "submit")
+        return run_id, knowledge
+
+    def test_worker_submits_to_icode_under_g7(self):
+        # A run parked at SUBMIT: the worker derives the reviewed descriptor and, since G7
+        # is not yet APPROVE for that descriptor, returns the exact hash to approve — it
+        # never opens a CR without the gate.
+        run_id, knowledge = self._drive_to_submit("BGW-530")
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge,
+            icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
+        )
+        self.assertEqual(need["reason_code"], "APPROVAL_REQUIRED")
+
+        # After the operator approves that descriptor, the worker submits to iCode itself
+        # (fake runtime here) and the single-task frontier advances to IPIPE.
+        self._approval(run_id, "G7", need["approval_input_hash"])
+        done = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge,
+            icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
+        )
+        self.assertTrue(done["ok"], done)
+        self.assertEqual(self.orchestrator.next(run_id)["controller"], "ipipe")
+
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

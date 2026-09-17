@@ -2867,7 +2867,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _submit(
-    orchestrator: Any, run_id: str, task_id: str, approval_id: str | None, icode_skill: str
+    orchestrator: Any, run_id: str, task_id: str, approval_id: str | None, icode_skill: str,
+    icode_runtime: Any | None = None,
 ) -> dict[str, Any]:
     """Drive one task's submission end to end.
 
@@ -2875,6 +2876,9 @@ def _submit(
     preflights, a process transport -- was previously assembled by hand for every
     submission, which is both tedious and the kind of step that gets a detail wrong under
     pressure. It is derived here instead, from the artifacts and the pinned profile.
+
+    `icode_runtime` is normally None (the real runtime is constructed here); the durable
+    worker and tests pass one in so the same derivation drives a supplied runtime.
     """
     from cli_transport import ProcessTransport
     from submit_descriptor import _ownership_rows, build_and_archive, owned_row
@@ -2930,7 +2934,7 @@ def _submit(
     if approval is None:
         return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id,
                 "input_hash": descriptor["input_hash"]}
-    runtime = orchestrator.icode_runtime(
+    runtime = icode_runtime if icode_runtime is not None else orchestrator.icode_runtime(
         run_id,
         worktree_bindings={descriptor["repo_path"]: binding},
         owner=descriptor["owner"],

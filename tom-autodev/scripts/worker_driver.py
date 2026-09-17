@@ -225,22 +225,46 @@ def _submit_merged(
             "spec": spec_result, "tasks": tasks_result}
 
 
-def execute_controller(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None) -> dict[str, Any]:
+def execute_controller(
+    orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
+    icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+    icode_runtime: Any | None = None,
+) -> dict[str, Any]:
     """Execute the current controller transition, if it is one the worker owns.
 
-    Only the WORKSPACE binding is executed here (local, reversible worktree creation +
-    the gated WORKSPACE->PLAN advance). The external controllers — SUBMIT (opens a CR),
-    IPIPE (triggers a pipeline), RELEASE — touch outside systems and need their runtimes
-    injected, so they return CONTROLLER_NEEDS_RUNTIME and are driven by their dedicated
-    paths, not this generic executor. Every path still goes through the orchestrator's own
-    gate enforcement, so nothing here can perform an un-approved external action.
+    WORKSPACE (local, reversible worktree binding + gated WORKSPACE->PLAN) and SUBMIT
+    (derive the reviewed descriptor and submit it to iCode under G7) are executed here.
+    IPIPE (triggers a pipeline) and RELEASE still return CONTROLLER_NEEDS_RUNTIME and are
+    driven by their dedicated runtime-injected paths. Every path goes through the
+    orchestrator's own gate enforcement, so nothing performs an un-approved action; SUBMIT
+    in particular only opens/updates a CR once G7 is APPROVE for that exact descriptor.
     """
     decision = classify_next(orchestrator, run_id)
     if decision["kind"] not in (CONTROLLER_STEP, APPROVAL_WAIT):
         return {"ok": False, "reason_code": "NOT_CONTROLLER", "decision_kind": decision["kind"]}
-    controller = (decision.get("action") or {}).get("controller")
+    action = decision.get("action") or {}
+    controller = action.get("controller")
     if controller == "workspace":
-        return _execute_workspace(orchestrator, run_id, decision["action"])
+        return _execute_workspace(orchestrator, run_id, action)
+    if controller == "submit":
+        from submit_descriptor import build_and_archive
+        from orchestrator import _submit, _latest_unsubmitted_reviewed_task
+
+        task_id = action.get("task_id") or _latest_unsubmitted_reviewed_task(orchestrator, run_id)
+        if not task_id:
+            return {"ok": False, "reason_code": "SUBMIT_FRONTIER_EMPTY", "run_id": run_id}
+        # Derive the reviewed descriptor (idempotent) to learn its input_hash, so G7 can be
+        # approved for the exact submission before iCode is ever touched. Only once G7 is
+        # APPROVE for that hash does the worker submit.
+        built = build_and_archive(orchestrator, run_id, task_id)
+        if not built.get("ok"):
+            return {"ok": False, "reason_code": "SUBMIT_DESCRIPTOR_UNAVAILABLE", "detail": built}
+        input_hash = built["descriptor"]["input_hash"]
+        approval_id = _settled_approval_id(orchestrator, run_id, "G7", input_hash)
+        if approval_id is None:
+            return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G7",
+                    "approval_input_hash": input_hash, "task_id": task_id}
+        return _submit(orchestrator, run_id, task_id, approval_id, icode_skill, icode_runtime=icode_runtime)
     return {"ok": False, "reason_code": "CONTROLLER_NEEDS_RUNTIME", "controller": controller}
 
 
