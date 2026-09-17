@@ -136,6 +136,17 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS optimization_proposals_run_id
                     ON optimization_proposals(run_id, created_at);
+                CREATE TABLE IF NOT EXISTS producer_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    draft_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS producer_jobs_run_id
+                    ON producer_jobs(run_id, job_id);
                 """
             )
             _optimization_migrate(connection)
@@ -706,6 +717,80 @@ class StateStore:
             ).fetchall()
         return [_handoff_row(row) for row in rows]
 
+    def record_producer_job(
+        self, run_id: str, job_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Enqueue a request for model-authored DraftContent for one phase.
+
+        Idempotent on job_id: a replay with the same run/payload returns the existing
+        row; a conflicting replay raises, so a re-issued `next` cannot fork the job.
+        """
+        encoded = _encode(payload)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing["run_id"] != run_id or existing["payload_json"] != encoded:
+                    raise ValueError("PRODUCER_JOB_CONFLICT")
+                return _producer_job_row(existing)
+            created_at = _now()
+            connection.execute(
+                """
+                INSERT INTO producer_jobs(
+                    job_id, run_id, payload_json, status, draft_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'PENDING', NULL, ?, ?)
+                """,
+                (job_id, run_id, encoded, created_at, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return _producer_job_row(row)
+
+    def fulfill_producer_job(self, job_id: str, draft: dict[str, Any]) -> dict[str, Any]:
+        """Record the DraftContent a producer returned; idempotent on identical draft."""
+        encoded = _encode(draft)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("PRODUCER_JOB_NOT_FOUND")
+            if row["status"] == "FULFILLED":
+                if row["draft_json"] != encoded:
+                    raise ValueError("PRODUCER_JOB_CONFLICT")
+                return _producer_job_row(row)
+            connection.execute(
+                "UPDATE producer_jobs SET status = 'FULFILLED', draft_json = ?, updated_at = ? WHERE job_id = ?",
+                (encoded, _now(), job_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return _producer_job_row(row)
+
+    def producer_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return _producer_job_row(row) if row is not None else None
+
+    def pending_producer_jobs(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM producer_jobs
+                WHERE run_id = ? AND status = 'PENDING'
+                ORDER BY job_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_producer_job_row(row) for row in rows]
+
     def save_optimization_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
         """Persist one immutable G10 candidate and its mutable result status."""
         required = ("proposal_id", "run_id", "candidate_hash", "envelope_hash")
@@ -958,6 +1043,18 @@ def _handoff_row(row: sqlite3.Row) -> dict[str, Any]:
         "run_id": row["run_id"],
         "payload": json.loads(row["payload_json"]),
         "status": row["status"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _producer_job_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "job_id": row["job_id"],
+        "run_id": row["run_id"],
+        "payload": json.loads(row["payload_json"]),
+        "status": row["status"],
+        "draft": json.loads(row["draft_json"]) if row["draft_json"] is not None else None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

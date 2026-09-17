@@ -374,6 +374,31 @@ class StateAndArtifactTests(unittest.TestCase):
             )
             self.assertFalse(sentinel.encode() in persisted)
 
+    def test_producer_job_lifecycle_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite")
+            payload = {"phase": "SPEC", "input_hash": "h1", "result_schema": "spec"}
+            job = store.record_producer_job("run-1", "job-1", payload)
+            self.assertEqual((job["status"], job["draft"]), ("PENDING", None))
+            # Replaying the same enqueue returns the same row; a conflicting one raises.
+            self.assertEqual(store.record_producer_job("run-1", "job-1", payload), job)
+            with self.assertRaises(ValueError):
+                store.record_producer_job("run-1", "job-1", {**payload, "input_hash": "h2"})
+
+            self.assertEqual([j["job_id"] for j in store.pending_producer_jobs("run-1")], ["job-1"])
+
+            draft = {"behaviors": [], "acceptance_scenarios": []}
+            fulfilled = store.fulfill_producer_job("job-1", draft)
+            self.assertEqual(fulfilled["status"], "FULFILLED")
+            self.assertEqual(fulfilled["draft"], draft)
+            # Fulfilled jobs drop out of the pending queue; re-fulfilling identically is a
+            # no-op, a different draft conflicts.
+            self.assertEqual(store.pending_producer_jobs("run-1"), [])
+            self.assertEqual(store.fulfill_producer_job("job-1", draft)["status"], "FULFILLED")
+            with self.assertRaises(ValueError):
+                store.fulfill_producer_job("job-1", {"behaviors": ["x"]})
+            self.assertIsNone(store.producer_job("missing"))
+
 
 class AbandonIntentTests(unittest.TestCase):
     """Unsticking a run without punching a hole in the account of what it asked for.
