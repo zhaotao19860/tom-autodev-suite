@@ -528,6 +528,22 @@ class FakeE2ETests(unittest.TestCase):
                                          {"spec": copy.deepcopy(specialized_examples()["spec"])}, knowledge_sync=k2)
         self.assertEqual(bad["reason_code"], "MERGED_DRAFT_INVALID")
 
+    def test_worker_executes_workspace_binding(self):
+        # A run parked at WORKSPACE: the worker cuts the owned worktrees, derives the G4
+        # binding hash, and — since G4 is not yet approved for it — returns the hash to
+        # approve (worktree creation is local and reversible, so the prep runs first).
+        run_id, knowledge = self._run_to_workspace("BGW-520", "bgw", "I15ClP2KW4ZGAK")
+        need = worker_driver.execute_controller(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertEqual((need["reason_code"], need["gate"]), ("APPROVAL_REQUIRED", "G4"))
+        self.assertEqual(set(need["workspace_receipts"]), {"business", "tests"})
+
+        # After approving that binding hash, the worker advances WORKSPACE -> PLAN itself,
+        # and the frontier is the PLAN model phase.
+        self._approval(run_id, "G4", need["approval_input_hash"])
+        done = worker_driver.execute_controller(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertTrue(done["ok"], done)
+        self.assertEqual(self.orchestrator.next(run_id)["phase"], "PLAN")
+
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

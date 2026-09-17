@@ -24,6 +24,8 @@ Decision kinds:
 from __future__ import annotations
 
 import copy
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import workflow_spec
@@ -221,6 +223,94 @@ def _submit_merged(
         return {"ok": False, "reason_code": "MERGED_TASKS_FAILED", "detail": tasks_result}
     return {"ok": True, "reason_code": "MERGED_COMPLETE", "run_id": run_id,
             "spec": spec_result, "tasks": tasks_result}
+
+
+def execute_controller(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None) -> dict[str, Any]:
+    """Execute the current controller transition, if it is one the worker owns.
+
+    Only the WORKSPACE binding is executed here (local, reversible worktree creation +
+    the gated WORKSPACE->PLAN advance). The external controllers — SUBMIT (opens a CR),
+    IPIPE (triggers a pipeline), RELEASE — touch outside systems and need their runtimes
+    injected, so they return CONTROLLER_NEEDS_RUNTIME and are driven by their dedicated
+    paths, not this generic executor. Every path still goes through the orchestrator's own
+    gate enforcement, so nothing here can perform an un-approved external action.
+    """
+    decision = classify_next(orchestrator, run_id)
+    if decision["kind"] not in (CONTROLLER_STEP, APPROVAL_WAIT):
+        return {"ok": False, "reason_code": "NOT_CONTROLLER", "decision_kind": decision["kind"]}
+    controller = (decision.get("action") or {}).get("controller")
+    if controller == "workspace":
+        return _execute_workspace(orchestrator, run_id, decision["action"])
+    return {"ok": False, "reason_code": "CONTROLLER_NEEDS_RUNTIME", "controller": controller}
+
+
+def _execute_workspace(orchestrator: Any, run_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    """Create the task's owned worktrees, then advance WORKSPACE->PLAN once G4 is settled.
+
+    The WORKSPACE gate binds the *binding* hash, which is only known after the worktrees
+    are cut — so this does the deterministic, local prep (worktree creation is reversible)
+    and then, like submit_draft, returns APPROVAL_REQUIRED with the exact hash to approve
+    if G4 is not yet settled for it.
+    """
+    task_id = action.get("task_id")
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    profile = pinned["profile"]
+    selected = {"business": (profile.get("business_repos") or [None])[0], "tests": profile.get("test_repo")}
+    if not all(isinstance(repository, dict) and repository.get("path") for repository in selected.values()):
+        return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
+    receipts: dict[str, Any] = {}
+    from submit_descriptor import _ownership_rows, owned_row
+
+    for role, repository in selected.items():
+        repo = Path(repository["path"])
+        try:
+            revision = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError) as error:
+            return {"ok": False, "reason_code": "WORKSPACE_BASELINE_UNVERIFIED", "detail": str(error)}
+        baseline = orchestrator.workspaces.inspect(repo, run_id, task_id, baseline_evidence={"revision": revision})
+        created = orchestrator.workspaces.create(repo, run_id, task_id, baseline)
+        if created.get("status") == "CREATED":
+            reservation = created
+        elif created.get("reason_code") == "WORKTREE_ALREADY_RESERVED":
+            # This is the second pass of the compute-then-approve flow: the worktrees are
+            # already cut, so reuse the recorded reservation. Identical receipts keep the
+            # binding hash stable, so the G4 approval still matches.
+            reservation = owned_row(_ownership_rows(orchestrator, run_id), task_id, repository["path"])
+            if not isinstance(reservation, dict):
+                return {"ok": False, "reason_code": "WORKSPACE_CREATE_FAILED", "role": role, "detail": created}
+        else:
+            return {"ok": False, "reason_code": "WORKSPACE_CREATE_FAILED", "role": role, "detail": created}
+        receipts[role] = {
+            "role": role, "module": repository.get("module"), "repo_path": str(repo.resolve()),
+            "worktree_path": reservation["worktree_path"],
+            "baseline_revision": reservation["baseline_revision"],
+            "owner_token": reservation["owner_token"],
+        }
+    binding = orchestrator.workspace_binding(run_id, receipts)
+    if not binding.get("ok"):
+        return binding
+    gate_hash = binding["input_hash"]
+    approval_id = _settled_approval_id(orchestrator, run_id, "G4", gate_hash)
+    if approval_id is None:
+        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G4",
+                "approval_input_hash": gate_hash, "workspace_receipts": receipts}
+    workspace_binding = binding["workspace_binding"]
+    revisions = workspace_binding["source_revisions"]
+    result = orchestrator.advance(run_id, "PLAN", {
+        "input_hash": gate_hash, "approval_id": approval_id,
+        "artifacts": ["workspace", "task-plan"], "workspace_receipts": receipts,
+        "task_id": workspace_binding["task_id"], "source_revisions": revisions,
+        "repo_revisions": revisions, "evidence_revisions": revisions,
+    })
+    landed = orchestrator.status(run_id).get("state")
+    if landed != "PLAN":
+        return {"ok": False, "reason_code": "CONTROLLER_ADVANCE_FAILED", "state": landed, "detail": result}
+    return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": "PLAN", "result": result}
 
 
 # States a deterministic auto-advance may complete on its own. Controller side effects
