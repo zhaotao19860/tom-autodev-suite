@@ -388,6 +388,16 @@ class FakeE2ETests(unittest.TestCase):
         self.assertTrue(completed["ok"], completed)
         self.assertEqual(self.orchestrator.next(run_id)["phase"], "SPEC")
 
+        # SPEC stays a full gated phase for express; TASKS still runs the model but its
+        # G3 gate is waived (ungated), so the DAG needs no separate human approval.
+        spec_action = self.orchestrator.next(run_id)
+        spec_env = self._phase_envelope(spec_action, self._phase_content(spec_action, _req), run_id)
+        self.assertEqual(spec_action["required_human_gate"], "G2")
+        self.assertTrue(self.orchestrator.complete_phase(run_id, spec_env, knowledge_sync=knowledge)["ok"])
+        tasks = self.orchestrator.next(run_id)
+        self.assertEqual((tasks["phase"], tasks["child_skill"]), ("TASKS", "tom-tasks"))
+        self.assertIsNone(tasks["required_human_gate"])
+
     def test_express_falls_back_to_full_grill_when_acceptance_absent(self):
         # express is only auto when the card already carries acceptance; with none, GRILL
         # must fall back to the full skill path so the model can clarify.

@@ -167,8 +167,8 @@ class ChangeClassTests(unittest.TestCase):
         for state in ("GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "REVIEW"):
             self.assertEqual(ws.phase_mode("standard", state), "full", state)
         self.assertEqual(ws.phase_mode("express", "GRILL"), "auto")
-        self.assertEqual(ws.phase_mode("express", "SPEC"), "merged")
-        self.assertEqual(ws.phase_mode("express", "TASKS"), "auto")
+        self.assertEqual(ws.phase_mode("express", "SPEC"), "full")
+        self.assertEqual(ws.phase_mode("express", "TASKS"), "ungated")
         self.assertEqual(ws.phase_mode("express", "PLAN"), "full")
         self.assertEqual(ws.phase_mode("express", "IMPLEMENT"), "full")
 
@@ -181,7 +181,7 @@ class ChangeClassTests(unittest.TestCase):
     def test_change_class_modes_are_valid_and_reference_real_states(self):
         for change_class, spec in ws.CHANGE_CLASSES.items():
             for state, mode in spec.phase_modes.items():
-                self.assertIn(mode, ("full", "auto", "merged"), (change_class, state))
+                self.assertIn(mode, ("full", "auto", "ungated"), (change_class, state))
                 self.assertIn(state, ws.STATES, (change_class, state))
                 # Only the skill-backed clarify/design front is ever reshaped.
                 self.assertEqual(ws.STATES[state].registry, "phase", (change_class, state))

@@ -225,20 +225,23 @@ class PhaseProtocol:
             if state == "INTAKE"
             else _canonical_hash(action_inputs)
         )
-        # express auto-derivation: when the card already carries acceptance, GRILL needs
-        # no clarification, so the controller emits a deterministic decision-log with no
-        # model and no G1 gate. If acceptance is absent, fall back to the full skill path
-        # so the model can clarify and add acceptance_delta.
+        # Change-class routing. express GRILL is auto-derived (deterministic decision-log,
+        # no model, no G1) when the card already carries acceptance — otherwise it falls
+        # back to the full skill path. An "ungated" phase (express TASKS) still runs the
+        # model but waives its human gate; the owner's G0 express declaration covers it.
+        mode = workflow_spec.phase_mode(workflow_spec.change_class_of(events), state)
         child_skill = selected.get("skill")
         human_gate = selected.get("gate")
         auto_content: dict[str, Any] | None = None
-        if state == "GRILL" and workflow_spec.phase_mode(workflow_spec.change_class_of(events), "GRILL") == "auto":
+        if mode == "auto" and state == "GRILL":
             snapshot = _intake_snapshot(events)
             acceptance = snapshot.get("acceptance") if isinstance(snapshot, dict) else None
             if isinstance(acceptance, list) and acceptance:
                 auto_content = _auto_grill_decision_log(snapshot)
                 child_skill = None
                 human_gate = None
+        elif mode == "ungated":
+            human_gate = None
         action = {
             "ok": True,
             "reason_code": "OK",

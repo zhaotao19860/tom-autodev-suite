@@ -209,14 +209,18 @@ class ChangeClass:
     """How a change class routes through the phases.
 
     `phase_modes[state]` is one of:
-      - "full"   : the skill/model produces the artifact and its normal gate applies
-                   (the default for any state not listed).
-      - "auto"   : the controller produces the artifact deterministically — no model,
-                   no gate (the state's gate is waived).
-      - "merged" : the artifact is produced together with a sibling state in one model
-                   step under one gate (kept), and the sibling is "auto".
-    Only the clarify/design front (GRILL/SPEC/TASKS) varies; PLAN/IMPLEMENT/REVIEW and
-    every code/side-effect gate (G4/G5/G7/G9) are always "full".
+      - "full"    : the skill/model produces the artifact and its normal gate applies
+                    (the default for any state not listed).
+      - "auto"    : the controller produces the artifact deterministically — no model,
+                    no gate (the state's output gate is waived). Only fits a phase whose
+                    content is derivable without reasoning (GRILL when acceptance exists).
+      - "ungated" : the skill/model still produces the artifact, but its human gate is
+                    waived (used where the content needs reasoning — a task DAG — yet the
+                    small-change owner's G0 declaration covers the sign-off).
+    The true "one model step produces spec+dag as two artifacts" merge is deferred to the
+    DraftContent submission path (Phase 1c); until then express keeps SPEC full and only
+    waives the TASKS gate. PLAN/IMPLEMENT/REVIEW and every code/side-effect gate
+    (G4/G5/G7/G9) are always "full".
     """
 
     name: str
@@ -226,9 +230,10 @@ class ChangeClass:
 CHANGE_CLASSES: dict[str, ChangeClass] = {
     # The full path exactly as today: every phase is skill-produced with its own gate.
     "standard": ChangeClass("standard", phase_modes={}),
-    # A small change: GRILL auto-derived (acceptance already present), SPEC produced
-    # together with the task-dag in one gated step, TASKS auto-derived from that dag.
-    "express": ChangeClass("express", phase_modes={"GRILL": "auto", "SPEC": "merged", "TASKS": "auto"}),
+    # A small change: GRILL auto-derived (acceptance already present) and the task DAG
+    # produced by the model but without its own G3 gate. SPEC stays full for now; the
+    # spec+dag artifact merge lands with the Phase 1c DraftContent path.
+    "express": ChangeClass("express", phase_modes={"GRILL": "auto", "TASKS": "ungated"}),
 }
 DEFAULT_CHANGE_CLASS = "standard"
 
@@ -245,7 +250,7 @@ def phase_mode(change_class: str, state: str) -> str:
 
 
 def waived_gates(change_class: str) -> frozenset[str]:
-    """Gates a class waives = the OUTPUT gate of each "auto" state.
+    """Gates a class waives = the OUTPUT gate of each "auto" or "ungated" state.
 
     Only the output gate (the human sign-off on that phase's own artifact) is waived; the
     entry gate is the predecessor's output and stays — notably GRILL's entry G0, the
@@ -254,7 +259,7 @@ def waived_gates(change_class: str) -> frozenset[str]:
     modes = (CHANGE_CLASSES.get(change_class) or CHANGE_CLASSES[DEFAULT_CHANGE_CLASS]).phase_modes
     gates: set[str] = set()
     for state, mode in modes.items():
-        if mode == "auto":
+        if mode in ("auto", "ungated"):
             spec = STATES.get(state)
             if spec is not None and spec.output_gate:
                 gates.add(spec.output_gate)
