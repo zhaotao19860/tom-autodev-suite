@@ -472,6 +472,24 @@ class FakeE2ETests(unittest.TestCase):
         refused = worker_driver.execute_auto(self.orchestrator, std_run)
         self.assertEqual(refused["reason_code"], "NOT_AUTO")
 
+    def test_worker_advance_auto_completes_then_parks_at_the_model(self):
+        # express: advance() auto-completes GRILL and parks at the SPEC model frontier;
+        # it does not autonomously run controller side effects.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-915", "I15ClP2KW4ZGAK", "express")
+        result = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertEqual((result["ok"], result["reason_code"]), (True, "PARKED"))
+        self.assertEqual(result["parked"], worker_driver.PRODUCER_WAIT)
+        self.assertEqual(result["decision"]["skill"], "tom-spec")
+        self.assertEqual([step["phase"] for step in result["auto_completed"]], ["GRILL"])
+        self.assertEqual(self.orchestrator.next(run_id)["phase"], "SPEC")
+
+        # standard: nothing is auto — advance() parks immediately at GRILL with no
+        # auto-completed steps.
+        std_run, _k, _r = self._run_to_grill_action("BGW-916", "I15ClP2KW4ZGAK", "standard")
+        parked = worker_driver.advance(self.orchestrator, std_run)
+        self.assertEqual(parked["parked"], worker_driver.PRODUCER_WAIT)
+        self.assertEqual(parked["auto_completed"], [])
+
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

@@ -131,3 +131,34 @@ def execute_auto(orchestrator: Any, run_id: str, knowledge_sync: Any | None = No
         return {"ok": False, "reason_code": "NOT_AUTO", "decision_kind": decision["kind"]}
     envelope = build_envelope(decision["action"])
     return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
+
+
+# States a deterministic auto-advance may complete on its own. Controller side effects
+# (submit / iPipe / release) are deliberately NOT auto-run here: they touch external
+# systems and each keeps its own gate, so the loop parks on them for an explicit step.
+def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
+            max_steps: int = 32) -> dict[str, Any]:
+    """Drive a run forward through deterministic auto phases, then park.
+
+    Loops: complete every AUTO_COMPLETE frontier itself (no agent, no gate), and stop as
+    soon as the frontier needs the model (PRODUCER_WAIT), a human gate (APPROVAL_WAIT), a
+    controller side effect (CONTROLLER_STEP), reaches a terminal state (TERMINAL), or is
+    blocked (BLOCKED). The returned `parked` decision says what the caller must arrange
+    next. `max_steps` bounds the loop against a mis-specced auto cycle.
+
+    This is the safe half of the driver: it never autonomously submits to iCode, triggers
+    iPipe, or releases — those CONTROLLER_STEP decisions are surfaced, not executed.
+    """
+    steps: list[dict[str, Any]] = []
+    for _ in range(max_steps):
+        decision = classify_next(orchestrator, run_id)
+        if decision["kind"] != AUTO_COMPLETE:
+            return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                    "parked": decision["kind"], "decision": decision, "auto_completed": steps}
+        result = execute_auto(orchestrator, run_id, knowledge_sync=knowledge_sync)
+        if not result.get("ok"):
+            return {"ok": False, "reason_code": "AUTO_COMPLETE_FAILED", "run_id": run_id,
+                    "detail": result, "auto_completed": steps}
+        steps.append({"phase": decision["action"].get("phase"), "result": result})
+    return {"ok": False, "reason_code": "MAX_STEPS_EXCEEDED", "run_id": run_id,
+            "auto_completed": steps}
