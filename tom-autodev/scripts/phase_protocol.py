@@ -225,6 +225,20 @@ class PhaseProtocol:
             if state == "INTAKE"
             else _canonical_hash(action_inputs)
         )
+        # express auto-derivation: when the card already carries acceptance, GRILL needs
+        # no clarification, so the controller emits a deterministic decision-log with no
+        # model and no G1 gate. If acceptance is absent, fall back to the full skill path
+        # so the model can clarify and add acceptance_delta.
+        child_skill = selected.get("skill")
+        human_gate = selected.get("gate")
+        auto_content: dict[str, Any] | None = None
+        if state == "GRILL" and workflow_spec.phase_mode(workflow_spec.change_class_of(events), "GRILL") == "auto":
+            snapshot = _intake_snapshot(events)
+            acceptance = snapshot.get("acceptance") if isinstance(snapshot, dict) else None
+            if isinstance(acceptance, list) and acceptance:
+                auto_content = _auto_grill_decision_log(snapshot)
+                child_skill = None
+                human_gate = None
         action = {
             "ok": True,
             "reason_code": "OK",
@@ -234,7 +248,7 @@ class PhaseProtocol:
             "state": state,
             "phase": state,
             "host": "comate",
-            "child_skill": selected.get("skill"),
+            "child_skill": child_skill,
             "controller": selected.get("controller"),
             "task_id": task_id,
             "input_artifacts": input_artifacts,
@@ -244,12 +258,15 @@ class PhaseProtocol:
             **({"baseline_revisions": source_revisions} if state == "IMPLEMENT" else {}),
             **({"controller_binding": _ipipe_controller_binding(current.get("payload"))} if state == "IPIPE" else {}),
             "source_evidence_refs": _source_evidence_refs(events, predecessor),
-            "required_human_gate": selected.get("gate"),
+            "required_human_gate": human_gate,
             "allowed_side_effects": _allowed_side_effects(state, controller_definition is not None),
             "completion_predicate": _completion_predicate(state, selected.get("schema")),
             "result_schema": selected.get("schema"),
             "target_state": target,
-            **({"content": _intake_snapshot(events)} if state == "INTAKE" else {}),
+            **(
+                {"content": _intake_snapshot(events)} if state == "INTAKE"
+                else ({"content": auto_content} if auto_content is not None else {})
+            ),
         }
         key = _action_key(run_id, current["event_id"], state, task_id,
                           _pinned_profile_hash(events, self._repin(events)))
@@ -333,6 +350,15 @@ class PhaseProtocol:
             return _failure(predecessor_error)
         if action.get("phase") == "INTAKE" and content != action.get("content"):
             return _failure("REQUIREMENT_CHANGED")
+        # A controller-authored action carries the exact content it expects back (INTAKE's
+        # snapshot, an express auto-derived GRILL log). The submitted content must match it
+        # so the deterministic artifact cannot be tampered on the way to completion.
+        if (
+            action.get("phase") != "INTAKE"
+            and action.get("content") is not None
+            and content != action.get("content")
+        ):
+            return _failure("AUTO_CONTENT_MISMATCH")
         expected_hash = _canonical_hash(content)
         if result.get("content_hash") != expected_hash:
             return _failure("CONTENT_HASH_MISMATCH")
@@ -1661,6 +1687,26 @@ def _intake_snapshot(events: list[dict[str, Any]]) -> dict[str, Any] | None:
 def _intake_prerequisites(events: list[dict[str, Any]]) -> dict[str, Any]:
     payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
     return intake_prerequisites(payload)
+
+
+def _auto_grill_decision_log(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """Deterministic GRILL decision-log for the express class.
+
+    Only used when the card already carries acceptance criteria (guarded in `_next`),
+    so there are no open decisions and nothing is added to the acceptance union — the
+    Spec traceability still covers the snapshot's own acceptance points.
+    """
+    card_id = snapshot.get("canonical_card_id") if isinstance(snapshot, dict) else None
+    return {
+        "decision_result": "NO_OPEN_DECISIONS",
+        "status": "COMPLETE",
+        "decisions": [],
+        "unresolved_frontier": [],
+        "glossary_delta": {},
+        "adr_candidates": [],
+        "source_evidence": [f"icafe:{card_id}/snapshot"],
+        "acceptance_delta": [],
+    }
 
 
 def _ipipe_controller_binding(payload: Any) -> dict[str, Any]:

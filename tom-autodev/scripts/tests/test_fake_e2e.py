@@ -332,6 +332,102 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(result["recovered_trigger"], result["replayed_trigger"])
         self.assertEqual(result["pending_after_recovery"], [])
 
+    def _run_to_grill_action(self, card, parent, change_class):
+        profile = self._integrated_profile("bgw")
+        raw_snapshot = snapshot(card)
+        raw_snapshot.pop("content_hash")
+        cafe = CafeClient(fetcher=lambda requested: copy.deepcopy(raw_snapshot))
+        requirement = cafe.snapshot(card)
+        started = self.orchestrator.start(
+            card, "bgw", requirement_snapshot=requirement, change_class=change_class
+        )
+        run_id = started["run_id"]
+        collaboration = self.orchestrator.collaboration_session(
+            FakeGroupClient(create_result={"group_id": f"group-{card}"})
+        )
+        prepared = collaboration.prepare_g0(
+            run_id, "bgw", {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+        )
+        g0 = self._approval(run_id, "G0", prepared["input_hash"])
+        collaboration.create(
+            run_id, "bgw", {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+            approval_id=g0["approval_id"], input_hash=prepared["input_hash"],
+        )
+        knowledge = KnowledgeSync(
+            state_store=self.orchestrator.state, ku_client=FakeKuBoundary("bgw"),
+            cafe_client=FakeCafeBoundary(), parent_doc_id=None, project_parent_doc_id=parent,
+            run_root_title=f"{card}-{run_id[:12]}-fixture", card_id=card, run_id=run_id,
+        )
+        intake = self.orchestrator.next(run_id)
+        self.assertEqual(intake["phase"], "INTAKE", intake)
+        envelope = self._phase_envelope(intake, self._phase_content(intake, requirement), run_id)
+        self.assertTrue(self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)["ok"])
+        return run_id, knowledge, requirement
+
+    def test_express_auto_derives_grill_while_standard_uses_the_model(self):
+        # standard: GRILL is a full skill phase gated by G1.
+        run_id, _knowledge, _req = self._run_to_grill_action("BGW-902", "I15ClP2KW4ZGAK", "standard")
+        grill = self.orchestrator.next(run_id)
+        self.assertEqual((grill["phase"], grill["child_skill"], grill["required_human_gate"]), ("GRILL", "tom-grill", "G1"))
+        self.assertNotIn("content", grill)
+
+        # express (acceptance already present): GRILL is auto — no model, no G1, and the
+        # controller supplies a NO_OPEN_DECISIONS decision-log that completes into SPEC.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-901", "I15ClP2KW4ZGAK", "express")
+        grill = self.orchestrator.next(run_id)
+        self.assertEqual(grill["phase"], "GRILL")
+        self.assertIsNone(grill["child_skill"])
+        self.assertIsNone(grill["required_human_gate"])
+        self.assertEqual(grill["content"]["decision_result"], "NO_OPEN_DECISIONS")
+
+        envelope = self._phase_envelope(grill, self._phase_content(grill, _req), run_id)
+        self.assertIsNone(envelope["approval_id"])
+        completed = self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)
+        self.assertTrue(completed["ok"], completed)
+        self.assertEqual(self.orchestrator.next(run_id)["phase"], "SPEC")
+
+    def test_express_falls_back_to_full_grill_when_acceptance_absent(self):
+        # express is only auto when the card already carries acceptance; with none, GRILL
+        # must fall back to the full skill path so the model can clarify.
+        profile = self._integrated_profile("bgw")
+        raw_snapshot = snapshot("BGW-903")
+        raw_snapshot["acceptance"] = []
+        raw_snapshot.pop("content_hash")
+        cafe = CafeClient(fetcher=lambda requested: copy.deepcopy(raw_snapshot))
+        requirement = cafe.snapshot("BGW-903")
+        started = self.orchestrator.start(
+            "BGW-903", "bgw", requirement_snapshot=requirement, change_class="express"
+        )
+        run_id = started["run_id"]
+        collaboration = self.orchestrator.collaboration_session(
+            FakeGroupClient(create_result={"group_id": "group-BGW-903"})
+        )
+        prepared = collaboration.prepare_g0(
+            run_id, "bgw", {"id": "BGW-903", "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+        )
+        g0 = self._approval(run_id, "G0", prepared["input_hash"])
+        collaboration.create(
+            run_id, "bgw", {"id": "BGW-903", "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+            approval_id=g0["approval_id"], input_hash=prepared["input_hash"],
+        )
+        knowledge = KnowledgeSync(
+            state_store=self.orchestrator.state, ku_client=FakeKuBoundary("bgw"),
+            cafe_client=FakeCafeBoundary(), parent_doc_id=None, project_parent_doc_id="I15ClP2KW4ZGAK",
+            run_root_title=f"BGW-903-{run_id[:12]}-fixture", card_id="BGW-903", run_id=run_id,
+        )
+        intake = self.orchestrator.next(run_id)
+        envelope = self._phase_envelope(intake, self._phase_content(intake, requirement), run_id)
+        self.assertTrue(self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)["ok"])
+
+        grill = self.orchestrator.next(run_id)
+        self.assertEqual((grill["child_skill"], grill["required_human_gate"]), ("tom-grill", "G1"))
+        self.assertNotIn("content", grill)
+
+
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")
         approval = self._approval(run_id, "G4", "approved-hash")
@@ -883,6 +979,10 @@ class FakeE2ETests(unittest.TestCase):
         content = copy.deepcopy(action.get("content") or specialized_examples()[action["result_schema"]])
         if action["phase"] == "INTAKE":
             return copy.deepcopy(requirement)
+        # An auto/controller-authored phase (child_skill None with content in the action)
+        # is submitted verbatim — the controller already produced the exact bytes.
+        if action.get("content") is not None and action.get("child_skill") is None:
+            return content
         if action["phase"] == "GRILL":
             content["source_evidence"] = [f"icafe:{requirement['canonical_card_id']}/snapshot-1"]
         elif action["phase"] == "PLAN":

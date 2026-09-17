@@ -32,6 +32,7 @@ from recovery import Recovery
 from state_store import StateStore
 from transition_policy import ALLOWED_TRANSITIONS, TransitionPolicy
 from workspace_manager import WorkspaceManager
+import workflow_spec
 
 
 _PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -71,6 +72,7 @@ class Orchestrator:
         project: str,
         *,
         requirement_snapshot: dict[str, Any] | None = None,
+        change_class: str | None = None,
     ) -> dict[str, Any]:
         configured_profile_path = profile_path(project, self.config_root)
         profile_result = load_profile(configured_profile_path)
@@ -121,6 +123,11 @@ class Orchestrator:
             "collaboration_binding": prepared["binding"],
         }
         payload["g0_input_hash"] = intake_input_hash(payload)
+        # The change class is metadata, added AFTER the G0 hash so standard runs hash
+        # exactly as before. classify_change suggests from the card; an explicit override
+        # (owner's call, confirmed at G0) wins. next/complete read it back via
+        # workflow_spec.change_class_of.
+        payload["change_class"] = workflow_spec.classify_change(requirement_snapshot, change_class)
         event = self.state.transition(
             run_id,
             "INTAKE",

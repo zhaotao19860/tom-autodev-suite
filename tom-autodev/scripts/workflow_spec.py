@@ -277,6 +277,16 @@ def classify_change(snapshot: Any, override: str | None = None) -> str:
     return DEFAULT_CHANGE_CLASS
 
 
+def change_class_of(events: list[dict[str, Any]] | None) -> str:
+    """The class a run was started under, read from its INTAKE event; standard for legacy
+    runs (no `change_class` field) so existing behaviour is preserved."""
+    if not events:
+        return DEFAULT_CHANGE_CLASS
+    payload = events[0].get("payload") or {}
+    change_class = payload.get("change_class")
+    return change_class if change_class in CHANGE_CLASSES else DEFAULT_CHANGE_CLASS
+
+
 # helpers
 def allowed_transitions() -> dict[str, set[str]]:
     """Reconstruct transition_policy.ALLOWED_TRANSITIONS."""
