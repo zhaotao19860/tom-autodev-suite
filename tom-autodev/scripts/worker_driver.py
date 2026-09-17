@@ -341,37 +341,62 @@ def _execute_workspace(orchestrator: Any, run_id: str, action: dict[str, Any]) -
 # (submit / iPipe / release) are deliberately NOT auto-run here: they touch external
 # systems and each keeps its own gate, so the loop parks on them for an explicit step.
 def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
-            max_steps: int = 32) -> dict[str, Any]:
-    """Drive a run forward through deterministic auto phases, then park.
+            max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+            icode_runtime: Any | None = None) -> dict[str, Any]:
+    """Drive a run forward through every step the worker can take on its own, then park.
 
-    Loops: complete every AUTO_COMPLETE frontier itself (no agent, no gate), and stop as
-    soon as the frontier needs the model (PRODUCER_WAIT), a human gate (APPROVAL_WAIT), a
-    controller side effect (CONTROLLER_STEP), reaches a terminal state (TERMINAL), or is
-    blocked (BLOCKED). The returned `parked` decision says what the caller must arrange
-    next. `max_steps` bounds the loop against a mis-specced auto cycle.
+    Loops: completes AUTO_COMPLETE frontiers, and executes the WORKSPACE and SUBMIT
+    controllers when their gate is already settled (the compute-then-approve executors
+    park with the exact hash when it is not). It parks — returning the decision the caller
+    must arrange next — on a model phase (PRODUCER_WAIT, enqueuing a ProducerJob), an
+    unsettled controller gate, an IPIPE/RELEASE controller (needs its runtime), a terminal
+    state, or a block. `max_steps` bounds the loop.
 
-    This is the safe half of the driver: it never autonomously submits to iCode, triggers
-    iPipe, or releases — those CONTROLLER_STEP decisions are surfaced, not executed.
+    Only WORKSPACE (local) and SUBMIT (G7-gated CR) are ever executed here; IPIPE and
+    RELEASE are surfaced, not run. Every controller execution goes through the
+    orchestrator's own gate enforcement.
     """
     steps: list[dict[str, Any]] = []
     for _ in range(max_steps):
         decision = classify_next(orchestrator, run_id)
-        if decision["kind"] == PRODUCER_WAIT:
-            # Durably record what the model must produce, so parking is actionable and
-            # idempotent: the agent (or a headless producer) fulfils this job later via
-            # submit-draft. Enqueuing is a local, idempotent write — no external effect.
+        kind = decision["kind"]
+        if kind == AUTO_COMPLETE:
+            result = execute_auto(orchestrator, run_id, knowledge_sync=knowledge_sync)
+            if not result.get("ok"):
+                return {"ok": False, "reason_code": "AUTO_COMPLETE_FAILED", "run_id": run_id,
+                        "detail": result, "auto_completed": steps}
+            steps.append({"phase": decision["action"].get("phase"), "result": result})
+            continue
+        if kind == PRODUCER_WAIT:
             job = _enqueue_producer_job(orchestrator, run_id, decision)
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
                     "parked": PRODUCER_WAIT, "producer_job": job, "decision": decision,
                     "auto_completed": steps}
-        if decision["kind"] != AUTO_COMPLETE:
+        if kind in (CONTROLLER_STEP, APPROVAL_WAIT):
+            controller = (decision.get("action") or {}).get("controller")
+            if controller in ("workspace", "submit"):
+                result = execute_controller(
+                    orchestrator, run_id, knowledge_sync=knowledge_sync,
+                    icode_skill=icode_skill, icode_runtime=icode_runtime,
+                )
+                if result.get("ok"):
+                    steps.append({"controller": controller, "result": result})
+                    continue
+                if result.get("reason_code") == "APPROVAL_REQUIRED":
+                    return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                            "parked": APPROVAL_WAIT, "controller": controller,
+                            "gate": result.get("gate"),
+                            "approval_input_hash": result.get("approval_input_hash"),
+                            "auto_completed": steps}
+                return {"ok": False, "reason_code": "CONTROLLER_STEP_FAILED", "run_id": run_id,
+                        "controller": controller, "detail": result, "auto_completed": steps}
+            # intake / ipipe / release: not executed by the worker loop.
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
-                    "parked": decision["kind"], "decision": decision, "auto_completed": steps}
-        result = execute_auto(orchestrator, run_id, knowledge_sync=knowledge_sync)
-        if not result.get("ok"):
-            return {"ok": False, "reason_code": "AUTO_COMPLETE_FAILED", "run_id": run_id,
-                    "detail": result, "auto_completed": steps}
-        steps.append({"phase": decision["action"].get("phase"), "result": result})
+                    "parked": kind, "controller": controller, "decision": decision,
+                    "auto_completed": steps}
+        # TERMINAL / BLOCKED
+        return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                "parked": kind, "decision": decision, "auto_completed": steps}
     return {"ok": False, "reason_code": "MAX_STEPS_EXCEEDED", "run_id": run_id,
             "auto_completed": steps}
 

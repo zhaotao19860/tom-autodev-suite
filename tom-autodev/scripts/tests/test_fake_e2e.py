@@ -544,6 +544,19 @@ class FakeE2ETests(unittest.TestCase):
         self.assertTrue(done["ok"], done)
         self.assertEqual(self.orchestrator.next(run_id)["phase"], "PLAN")
 
+    def test_worker_advance_chains_through_a_settled_workspace(self):
+        # Once G4 is settled for the binding, advance() executes the WORKSPACE controller
+        # itself and keeps going, parking at the next model frontier (PLAN).
+        run_id, knowledge = self._run_to_workspace("BGW-540", "bgw", "I15ClP2KW4ZGAK")
+        need = worker_driver.execute_controller(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self._approval(run_id, "G4", need["approval_input_hash"])
+        result = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertEqual((result["ok"], result["reason_code"], result["parked"]),
+                         (True, "PARKED", worker_driver.PRODUCER_WAIT))
+        self.assertEqual(result["decision"]["skill"], "tom-plan")
+        self.assertIn("workspace", [step.get("controller") for step in result["auto_completed"]])
+        self.assertEqual(self.orchestrator.next(run_id)["phase"], "PLAN")
+
     def _drive_to_submit(self, card):
         run_id, knowledge = self._run_to_workspace(card, "bgw", "I15ClP2KW4ZGAK")
         requirement = snapshot(card)
