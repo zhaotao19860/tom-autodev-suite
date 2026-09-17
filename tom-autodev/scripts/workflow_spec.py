@@ -204,6 +204,79 @@ FAILURE_TARGETS: dict[str, str] = {
 _FAILURE_DEFAULT = "STOPPED"
 
 
+@dataclass(frozen=True)
+class ChangeClass:
+    """How a change class routes through the phases.
+
+    `phase_modes[state]` is one of:
+      - "full"   : the skill/model produces the artifact and its normal gate applies
+                   (the default for any state not listed).
+      - "auto"   : the controller produces the artifact deterministically — no model,
+                   no gate (the state's gate is waived).
+      - "merged" : the artifact is produced together with a sibling state in one model
+                   step under one gate (kept), and the sibling is "auto".
+    Only the clarify/design front (GRILL/SPEC/TASKS) varies; PLAN/IMPLEMENT/REVIEW and
+    every code/side-effect gate (G4/G5/G7/G9) are always "full".
+    """
+
+    name: str
+    phase_modes: dict[str, str]
+
+
+CHANGE_CLASSES: dict[str, ChangeClass] = {
+    # The full path exactly as today: every phase is skill-produced with its own gate.
+    "standard": ChangeClass("standard", phase_modes={}),
+    # A small change: GRILL auto-derived (acceptance already present), SPEC produced
+    # together with the task-dag in one gated step, TASKS auto-derived from that dag.
+    "express": ChangeClass("express", phase_modes={"GRILL": "auto", "SPEC": "merged", "TASKS": "auto"}),
+}
+DEFAULT_CHANGE_CLASS = "standard"
+
+# iCafe card types that deterministically SUGGEST the express class (owner confirms /
+# overrides at G0). Everything else — including an unknown/missing type — defaults to
+# standard, so the safe full path is the fallback.
+_EXPRESS_CARD_TYPES = frozenset({"bug", "缺陷", "缺陷修复", "fix", "hotfix", "defect"})
+
+
+def phase_mode(change_class: str, state: str) -> str:
+    """Production mode of a state for a change class; "full" unless the class overrides."""
+    spec = CHANGE_CLASSES.get(change_class) or CHANGE_CLASSES[DEFAULT_CHANGE_CLASS]
+    return spec.phase_modes.get(state, "full")
+
+
+def waived_gates(change_class: str) -> frozenset[str]:
+    """Gates a class waives = the OUTPUT gate of each "auto" state.
+
+    Only the output gate (the human sign-off on that phase's own artifact) is waived; the
+    entry gate is the predecessor's output and stays — notably GRILL's entry G0, the
+    collaboration/class-declaration approval, is never waived.
+    """
+    modes = (CHANGE_CLASSES.get(change_class) or CHANGE_CLASSES[DEFAULT_CHANGE_CLASS]).phase_modes
+    gates: set[str] = set()
+    for state, mode in modes.items():
+        if mode == "auto":
+            spec = STATES.get(state)
+            if spec is not None and spec.output_gate:
+                gates.add(spec.output_gate)
+    return frozenset(gates)
+
+
+def classify_change(snapshot: Any, override: str | None = None) -> str:
+    """Suggested change class from the requirement snapshot; an explicit override wins.
+
+    Deterministic: a known express-ish card type suggests express, everything else is
+    standard. The G0 approver confirms or overrides — nothing here decides on its own.
+    """
+    if isinstance(override, str) and override in CHANGE_CLASSES:
+        return override
+    card_type = ""
+    if isinstance(snapshot, dict):
+        card_type = str(snapshot.get("type") or "").strip().lower()
+    if card_type and any(keyword in card_type for keyword in _EXPRESS_CARD_TYPES):
+        return "express"
+    return DEFAULT_CHANGE_CLASS
+
+
 # helpers
 def allowed_transitions() -> dict[str, set[str]]:
     """Reconstruct transition_policy.ALLOWED_TRANSITIONS."""

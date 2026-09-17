@@ -145,5 +145,47 @@ class LegacyStructureConsistencyTests(unittest.TestCase):
         self.assertEqual(ws.GATE_LABELS, approval_summary._GATES)
 
 
+class ChangeClassTests(unittest.TestCase):
+    def test_classify_defaults_to_standard(self):
+        self.assertEqual(ws.classify_change({"type": "feature"}), "standard")
+        self.assertEqual(ws.classify_change({"type": "epic"}), "standard")
+        self.assertEqual(ws.classify_change({}), "standard")
+        self.assertEqual(ws.classify_change(None), "standard")
+
+    def test_classify_suggests_express_for_small_card_types(self):
+        self.assertEqual(ws.classify_change({"type": "bug"}), "express")
+        self.assertEqual(ws.classify_change({"type": "缺陷"}), "express")
+        self.assertEqual(ws.classify_change({"type": "HotFix"}), "express")
+
+    def test_explicit_override_wins_but_invalid_falls_through(self):
+        self.assertEqual(ws.classify_change({"type": "bug"}, "standard"), "standard")
+        self.assertEqual(ws.classify_change({"type": "feature"}, "express"), "express")
+        # An override that is not a known class is ignored; type-based suggestion stands.
+        self.assertEqual(ws.classify_change({"type": "bug"}, "nonsense"), "express")
+
+    def test_phase_mode(self):
+        for state in ("GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "REVIEW"):
+            self.assertEqual(ws.phase_mode("standard", state), "full", state)
+        self.assertEqual(ws.phase_mode("express", "GRILL"), "auto")
+        self.assertEqual(ws.phase_mode("express", "SPEC"), "merged")
+        self.assertEqual(ws.phase_mode("express", "TASKS"), "auto")
+        self.assertEqual(ws.phase_mode("express", "PLAN"), "full")
+        self.assertEqual(ws.phase_mode("express", "IMPLEMENT"), "full")
+
+    def test_waived_gates(self):
+        self.assertEqual(ws.waived_gates("standard"), frozenset())
+        # GRILL auto waives its output G1; TASKS auto waives its output G3; G0 stays.
+        self.assertEqual(ws.waived_gates("express"), frozenset({"G1", "G3"}))
+        self.assertNotIn("G0", ws.waived_gates("express"))
+
+    def test_change_class_modes_are_valid_and_reference_real_states(self):
+        for change_class, spec in ws.CHANGE_CLASSES.items():
+            for state, mode in spec.phase_modes.items():
+                self.assertIn(mode, ("full", "auto", "merged"), (change_class, state))
+                self.assertIn(state, ws.STATES, (change_class, state))
+                # Only the skill-backed clarify/design front is ever reshaped.
+                self.assertEqual(ws.STATES[state].registry, "phase", (change_class, state))
+
+
 if __name__ == "__main__":
     unittest.main()

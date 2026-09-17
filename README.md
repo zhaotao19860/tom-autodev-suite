@@ -135,7 +135,7 @@ cd tom-autodev/scripts
 python3 -m unittest discover -s tests -q
 ```
 
-739 tests, no network access required. Run them from `scripts/` so sibling test modules
+745 tests, no network access required. Run them from `scripts/` so sibling test modules
 resolve.
 
 ## Boundaries worth remembering
