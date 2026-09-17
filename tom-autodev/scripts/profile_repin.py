@@ -30,11 +30,14 @@ from project_registry import load_profile
 
 _REPIN_KEY = "profile-repin"
 ACTION = "PROFILE_REPIN"
-# Only the pipeline registration may move. Every other top-level key is either
+# Only the pipeline registration and the submission policy may move. Every other key is either
 # hashed into an existing binding (`environment_profile` becomes the environment
 # fingerprint) or names something a produced artifact already points at
 # (`business_repos`, `test_repo`, `approval_channels`, `knowledge_sources`).
-_ALLOWED_KEYS = frozenset({"pipeline_profile"})
+# `submission_policy` joins it for the same reason: it decides how a *future* submission
+# is shaped and is hashed into nothing already produced, so moving it cannot retroactively
+# change what any approval was granted against.
+_ALLOWED_KEYS = frozenset({"pipeline_profile", "submission_policy"})
 
 
 def pinned_hash(events: list[dict[str, Any]], repin: Any) -> str | None:
@@ -57,8 +60,33 @@ def record_for(state: Any, run_id: str) -> Any:
     store to hand, so both checks have to be able to reach this record. A pin that
     only one of them honours is worse than no re-pin at all: the run would look
     healthy through one door and conflicted through the other.
+
+    A run may need the pin to move more than once -- a pipeline gets registered, and
+    later the submission policy changes -- so the moves form a chain: each one is stored
+    under a key naming the pin it replaced, and the newest is the end of the chain.
+    Storing them all under one key made the second move impossible, and left the run
+    reporting PROFILE_CONFLICT with no way out but a new run.
     """
-    return state.idempotency_result(f"{_REPIN_KEY}:{run_id}")
+    latest = None
+    key = f"{_REPIN_KEY}:{run_id}"
+    for _ in range(16):
+        record = state.idempotency_result(key)
+        if not isinstance(record, dict):
+            return latest
+        latest = record
+        key = f"{_REPIN_KEY}:{run_id}:after:{record['new_hash']}"
+    return latest
+
+
+def _next_repin_key(state: Any, run_id: str) -> str:
+    """The key the next move is stored under: the first free slot in the chain."""
+    key = f"{_REPIN_KEY}:{run_id}"
+    for _ in range(16):
+        record = state.idempotency_result(key)
+        if not isinstance(record, dict):
+            return key
+        key = f"{_REPIN_KEY}:{run_id}:after:{record['new_hash']}"
+    return key
 
 
 def plan(orchestrator: Any, run_id: str, previous_path: str | Path) -> dict[str, Any]:
@@ -124,8 +152,8 @@ def plan(orchestrator: Any, run_id: str, previous_path: str | Path) -> dict[str,
 
 
 def apply(orchestrator: Any, run_id: str, approval_id: str, previous_path: str | Path) -> dict[str, Any]:
-    """Move the pin, once, against an approval bound to this exact move."""
-    key = f"{_REPIN_KEY}:{run_id}"
+    """Move the pin against an approval bound to this exact move."""
+    key = _next_repin_key(orchestrator.state, run_id)
     prepared = plan(orchestrator, run_id, previous_path)
     existing = record(orchestrator, run_id)
     if prepared.get("reason_code") == "NOTHING_TO_REPIN" and isinstance(existing, dict):

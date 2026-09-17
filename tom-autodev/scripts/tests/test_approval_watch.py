@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from approval_delivery import ComateApprovalClient, InfoflowApprovalTransport
-from approval_watch import ApprovalWatcher
+from approval_watch import ApprovalWatcher, auto_resume_from_hook
 from clients.infoflow_approval_client import InfoflowApprovalClient
 from clients.infoflow_reply_client import InfoflowReplyConsumer
 from orchestrator import Orchestrator
@@ -221,6 +221,10 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertIn("G0 已通过", notices[0])
         self.assertIn("**当前阶段** INTAKE", notices[0])
         self.assertIn("@owner", notices[0])
+        handoffs = self.orchestrator.state.incomplete_handoffs("run-1")
+        self.assertEqual(len(handoffs), 1)
+        self.assertEqual(handoffs[0]["payload"]["approval_id"], approval_id)
+        self.assertEqual(handoffs[0]["payload"]["input_hash"], "hash-a")
         # The position is announced once; a watcher round must not repeat it.
         self.assertNotIn("RESUME_NOTICE_SENT", repeat)
 
@@ -590,3 +594,89 @@ class IdeTurnNoticeTests(unittest.TestCase):
         self.assertEqual(len(notify.sent), 1)
         self.assertIn("等你在 IDE 继续", notify.sent[0][1])
         self.assertIn("之后要批** G5", notify.sent[0][1])
+
+
+class AutoResumeHookTests(unittest.TestCase):
+    class _State:
+        def __init__(self, handoff):
+            self.handoff = handoff
+            self.completed = []
+
+        def latest_states(self):
+            return [{"run_id": "run-1", "state": "PLAN"}]
+
+        def incomplete_handoffs(self, run_id):
+            return [self.handoff] if run_id == "run-1" and self.handoff else []
+
+        def complete_handoff(self, handoff_id):
+            self.completed.append(handoff_id)
+            self.handoff = None
+
+    class _Approvals:
+        def __init__(self, approval):
+            self.approval = approval
+
+        def get(self, approval_id):
+            return self.approval if approval_id == self.approval["approval_id"] else None
+
+    class _Orchestrator:
+        def __init__(self, approval):
+            self.state = AutoResumeHookTests._State({
+                "handoff_id": "approval-resume-ap-1",
+                "payload": {
+                    "kind": "APPROVAL_RESUME",
+                    "run_id": "run-1",
+                    "event_id": "event-1",
+                    "approval_id": "ap-1",
+                    "input_hash": "hash-a",
+                    "action": "G4",
+                },
+                "status": "PENDING",
+            })
+            self.approvals = AutoResumeHookTests._Approvals(approval)
+
+    def _orchestrator(self, **changes):
+        approval = {
+            "approval_id": "ap-1",
+            "run_id": "run-1",
+            "input_hash": "hash-a",
+            "effective_decision": "APPROVE",
+        }
+        approval.update(changes)
+        return self._Orchestrator(approval)
+
+    def test_stop_hook_returns_hash_bound_continuation_and_completes_once(self):
+        orchestrator = self._orchestrator()
+
+        result = auto_resume_from_hook(orchestrator, {
+            "hook_event_name": "Stop",
+            "status": "completed",
+        })
+
+        self.assertEqual(result["reason_code"], "AUTO_RESUME")
+        self.assertEqual(result["decision"], "block")
+        self.assertTrue(result["continue"])
+        self.assertIn("run-1", result["additionalContext"])
+        self.assertEqual(orchestrator.state.completed, ["approval-resume-ap-1"])
+
+    def test_stop_hook_ignores_hash_mismatched_approval(self):
+        orchestrator = self._orchestrator(input_hash="different")
+
+        result = auto_resume_from_hook(orchestrator, {
+            "hook_event_name": "Stop",
+            "status": "completed",
+        })
+
+        self.assertEqual(result["reason_code"], "RESUME_HANDOFF_STALE")
+        self.assertEqual(orchestrator.state.completed, [])
+
+    def test_cancelled_stop_never_consumes_resume_handoff(self):
+        orchestrator = self._orchestrator()
+
+        result = auto_resume_from_hook(orchestrator, {
+            "hook_event_name": "Stop",
+            "status": "cancelled",
+        })
+
+        self.assertEqual(result["reason_code"], "SESSION_CANCELLED")
+        self.assertEqual(orchestrator.state.completed, [])

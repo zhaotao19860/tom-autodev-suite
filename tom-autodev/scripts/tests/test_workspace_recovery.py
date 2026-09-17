@@ -419,11 +419,20 @@ class WorkspaceCreationTests(unittest.TestCase):
                         },
                     )
                     worktree = Path(created["worktree_path"])
-                    (repo / "tracked.txt").write_text("moved\n", encoding="utf-8")
-                    _git(repo, "add", "tracked.txt")
-                    _git(repo, "commit", "-m", "move source")
-                    different_revision = _git(repo, "rev-parse", "HEAD")
-                    _git(worktree, "checkout", "--detach", different_revision)
+                    # Unrelated history (not a descendant of the recorded baseline).
+                    # REMOVING allows descendants (same as ACTIVE remove); FAILED/CLEANING
+                    # still require exact HEAD. An orphan commit blocks all three.
+                    orphan = root / "orphan"
+                    orphan.mkdir()
+                    _git(orphan, "init")
+                    _git(orphan, "config", "user.email", "test@example.com")
+                    _git(orphan, "config", "user.name", "Test User")
+                    (orphan / "tracked.txt").write_text("orphan\n", encoding="utf-8")
+                    _git(orphan, "add", "tracked.txt")
+                    _git(orphan, "commit", "-m", "orphan")
+                    orphan_revision = _git(orphan, "rev-parse", "HEAD")
+                    _git(repo, "fetch", str(orphan), "HEAD:refs/tom-autodev-orphan")
+                    _git(worktree, "checkout", "--detach", orphan_revision)
                     marker = worktree / "uncommitted.txt"
                     marker.write_text("must survive\n", encoding="utf-8")
                     database = root / ".worktrees.tom-autodev-ownership.sqlite"
@@ -449,7 +458,7 @@ class WorkspaceCreationTests(unittest.TestCase):
                     self.assertEqual(blocked["owner_token"], created["owner_token"])
                     self.assertTrue(marker.is_file())
                     self.assertEqual(
-                        _git(worktree, "rev-parse", "HEAD"), different_revision
+                        _git(worktree, "rev-parse", "HEAD"), orphan_revision
                     )
                     self.assertIn(
                         str(worktree), _git(repo, "worktree", "list", "--porcelain")
@@ -785,6 +794,72 @@ class WorkspaceCreationTests(unittest.TestCase):
             self.assertEqual(
                 history,
                 ["RESERVED", "ACTIVE", "REMOVING", "REMOVED", "RESERVED", "ACTIVE"],
+            )
+
+    def test_active_worktree_with_advanced_head_can_be_removed_and_recreated(self):
+        """ACTIVE remove/reconcile must match query_ownership: HEAD may be a
+        descendant of the recorded baseline, and remove→create must still work
+        when recreating onto a newer source HEAD."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = _git_repo(root)
+            baseline_revision = _git(repo, "rev-parse", "HEAD")
+            worktree_root = root / "worktrees"
+            manager = WorkspaceManager(worktree_root)
+            created = manager.create(
+                repo,
+                "run-advanced",
+                "task-advanced",
+                {"baseline_status": "READY", "baseline_revision": baseline_revision},
+            )
+            worktree = Path(created["worktree_path"])
+            owner_token = created["owner_token"]
+
+            (worktree / "task.txt").write_text("task commit\n", encoding="utf-8")
+            _git(worktree, "add", "task.txt")
+            _git(worktree, "commit", "-m", "task advance")
+            advanced_head = _git(worktree, "rev-parse", "HEAD")
+            self.assertNotEqual(advanced_head, baseline_revision)
+
+            verified = manager.query_ownership(
+                repo, "run-advanced", "task-advanced", owner_token
+            )
+            self.assertEqual(verified["status"], "VERIFIED")
+            self.assertEqual(verified["ownership_status"], "ACTIVE")
+
+            reconciled = manager.reconcile(
+                repo, "run-advanced", "task-advanced", owner_token
+            )
+            self.assertEqual(reconciled["status"], "RECONCILED")
+            self.assertEqual(reconciled["ownership_status"], "ACTIVE")
+
+            (repo / "tracked.txt").write_text("newer baseline\n", encoding="utf-8")
+            _git(repo, "add", "tracked.txt")
+            _git(repo, "commit", "-m", "move source baseline")
+            new_baseline = _git(repo, "rev-parse", "HEAD")
+            self.assertNotEqual(new_baseline, baseline_revision)
+
+            removed = WorkspaceManager(worktree_root).remove(
+                repo, worktree, owner_token
+            )
+            self.assertEqual(removed["status"], "REMOVED")
+            self.assertFalse(worktree.exists())
+            self.assertNotIn(
+                str(worktree), _git(repo, "worktree", "list", "--porcelain")
+            )
+
+            recreated = WorkspaceManager(worktree_root).create(
+                repo,
+                "run-advanced",
+                "task-advanced",
+                {"baseline_status": "READY", "baseline_revision": new_baseline},
+                owner_token=owner_token,
+            )
+            self.assertEqual(recreated["status"], "CREATED")
+            self.assertEqual(recreated["owner_token"], owner_token)
+            self.assertEqual(
+                _git(Path(recreated["worktree_path"]), "rev-parse", "HEAD"),
+                new_baseline,
             )
 
     def test_legacy_active_receipt_without_revision_fails_closed_on_remove(self):

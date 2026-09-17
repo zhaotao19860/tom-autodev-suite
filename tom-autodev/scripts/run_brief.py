@@ -41,23 +41,54 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     if not events:
         return {"run_id": run_id, "state": "RUN_NOT_FOUND", "waiting_on": [], "blocked": None}
     current = events[-1]
+    action = orchestrator.next(run_id)
+    current_gate = action.get("required_human_gate") if action.get("ok") else None
     approvals = orchestrator.approvals.for_run(run_id)
-    open_gates = [
-        {
-            "action": row.get("action"),
-            "approval_id": row.get("approval_id"),
-            "input_hash": row.get("input_hash"),
-            "deadline_at": row.get("deadline_at"),
-        }
-        for row in approvals
-        if not row.get("effective_decision")
-    ]
+    # A PENDING card is superseded only when a *later* APPROVE of the same action
+    # already exists. Counting any historical APPROVE hid the live G4 after
+    # BGW-1956 re-entered PLAN, while still leaving the dead G2 e133d87e visible
+    # until it was REJECT-closed.
+    latest_approve_at: dict[str, str] = {}
+    for row in approvals:
+        if row.get("effective_decision") != "APPROVE":
+            continue
+        action_name = row.get("action")
+        resolved = row.get("resolved_at") or ""
+        if action_name and resolved >= latest_approve_at.get(action_name, ""):
+            latest_approve_at[action_name] = resolved
+    open_gates = []
+    for row in approvals:
+        if row.get("effective_decision"):
+            continue
+        action_name = row.get("action")
+        if current_gate is not None and action_name != current_gate:
+            continue
+        created = row.get("created_at") or row.get("deadline_at") or ""
+        if action_name in latest_approve_at and latest_approve_at[action_name] >= created:
+            continue
+        open_gates.append(
+            {
+                "action": action_name,
+                "approval_id": row.get("approval_id"),
+                "input_hash": row.get("input_hash"),
+                "deadline_at": row.get("deadline_at"),
+            }
+        )
     pending = [
         {"operation": item.get("operation"), "intent_id": item.get("intent_id")}
         for item in orchestrator.state.pending_intents(run_id)
     ]
-    action = orchestrator.next(run_id)
     blocked = None if action.get("ok") else action.get("reason_code")
+    # This is a presentation hint, not approval authorization. The completion
+    # validator still checks the exact candidate hash against the ledger.
+    approved = next((
+        row for row in reversed(approvals)
+        if current_gate and row.get("action") == current_gate
+        and row.get("effective_decision") == "APPROVE"
+        and row.get("created_at") and current.get("created_at")
+        and row["created_at"] >= current["created_at"]
+        and row.get("resolved_at")
+    ), None)
     return {
         "run_id": run_id,
         "state": current["state"],
@@ -69,7 +100,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         # The gate this phase will have to pass, so a caller can tell an unanswered
         # gate from one that is already approved while the phase has not landed.
         "gate": action.get("required_human_gate"),
-        "next": _next_step(action, current["state"], open_gates, pending, blocked),
+        "next": _next_step(action, current["state"], open_gates, pending, blocked, approved),
     }
 
 
@@ -79,6 +110,7 @@ def _next_step(
     open_gates: list[dict[str, Any]],
     pending: list[dict[str, Any]],
     blocked: str | None,
+    approved: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Who acts next, and what exactly they do.
 
@@ -99,9 +131,33 @@ def _next_step(
         return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
     if blocked:
         return {"owner": "你", "text": _BLOCKED_HINT.get(blocked, f"处理 {blocked}")}
+    if approved:
+        gate = approved.get("action") or action.get("required_human_gate")
+        if gate == "G7" or state == "SUBMIT":
+            return {
+                "owner": "Comate",
+                "text": (
+                    f"{approved['action']} 已批准待提交：核验审批 "
+                    f"{approved['approval_id']} 与 submit descriptor 的 input_hash 完全一致后 "
+                    "执行 cli.py submit（iCode 提交，不是 complete-phase）；"
+                    "缺失或不匹配则阻塞，不要重复 resume 或开同一审批"
+                ),
+            }
+        return {
+            "owner": "Comate",
+            "text": (
+                f"{approved['action']} 已批准待提交：读取已保存的真实产物，核验审批 "
+                f"{approved['approval_id']} 与候选 approval_input_hash 完全一致后 "
+                "complete-phase（不是 iCode 提交）；缺失或不匹配则阻塞，"
+                "不要重复 resume、生成产物或开同一审批"
+            ),
+        }
     work = _WORK.get(state, state)
     gate = action.get("required_human_gate")
-    tail = f"，完成后开 {gate} 门等你批" if gate else ""
+    if state == "IMPLEMENT":
+        tail = "，当前为待生成；生成真实 change-set 后开 G5 门等你批"
+    else:
+        tail = f"，完成后开 {gate} 门等你批" if gate else ""
     return {"owner": "Comate", "text": f"{work}{tail}"}
 
 

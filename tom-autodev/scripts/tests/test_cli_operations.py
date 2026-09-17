@@ -57,6 +57,25 @@ class CliOperationTests(unittest.TestCase):
         self.assertEqual(recorded["input_hash"], "grill-hash")
         self.assertEqual(recorded["evidence"]["approval_id"], approval["approval_id"])
 
+    def test_resume_is_inspection_not_execution_and_replay_does_not_advance(self):
+        before = self.orchestrator.state.events(self.run_id)
+        for _ in range(2):
+            code, result = self._run("resume", self.run_id)
+            self.assertEqual(code, 0)
+            self.assertEqual(result["status"], "READY")
+            self.assertFalse(result["phase_complete"])
+            self.assertFalse(result["execution_performed"])
+            self.assertIn("current Agent", result["next_step"])
+        self.assertEqual(self.orchestrator.state.events(self.run_id), before)
+
+    def test_resume_pending_intent_still_requires_recovery(self):
+        self.orchestrator.state.intent(self.run_id, "icode.submit", "pending", {})
+        code, result = self._run("resume", self.run_id)
+        self.assertEqual(result["status"], "QUERY_REQUIRED")
+        self.assertFalse(result["retry_allowed"])
+        self.assertFalse(result["execution_performed"])
+        self.assertEqual(len(result["actions"]), 1)
+
     def test_advance_without_an_approved_gate_asks_for_it_rather_than_guessing_a_hash(self):
         code, result = self._run(
             "advance", self.run_id, "GRILL",
@@ -158,13 +177,55 @@ class CliOperationTests(unittest.TestCase):
         self.assertNotIn("content", result)
         self.assertEqual((missing_code, missing["reason_code"]), (1, "ARTIFACT_NOT_FOUND"))
 
+    def test_recover_rebuilt_change_set_cli_uses_only_explicit_local_arguments(self):
+        self.orchestrator.state.transition(self.run_id, "PLAN", {"task_id": "T-1"})
+        output = io.StringIO()
+        with (
+            patch("orchestrator.Orchestrator", return_value=self.orchestrator),
+            patch.object(
+                self.orchestrator, "recover_rebuilt_change_set",
+                return_value={"ok": True, "reason_code": "REBUILT_CHANGE_SET_RECOVERED"},
+            ) as recover,
+            contextlib.redirect_stdout(output),
+        ):
+            code = main([
+                "--config-root", str(self.root), "recover-rebuilt-change-set",
+                self.run_id, "T-1", "artifact-plan-1",
+            ])
+
+        self.assertEqual((code, json.loads(output.getvalue())["reason_code"]), (0, "REBUILT_CHANGE_SET_RECOVERED"))
+        recover.assert_called_once_with(self.run_id, "T-1", "artifact-plan-1")
+
+    def test_recover_stale_rebuilt_plan_cli_requires_explicit_state_and_revisions(self):
+        output = io.StringIO()
+        with (
+            patch("orchestrator.Orchestrator", return_value=self.orchestrator),
+            patch.object(
+                self.orchestrator, "recover_stale_rebuilt_plan",
+                return_value={"ok": True, "reason_code": "STALE_REBUILT_PLAN_RECOVERED"},
+            ) as recover,
+            contextlib.redirect_stdout(output),
+        ):
+            code = main([
+                "--config-root", str(self.root), "recover-stale-rebuilt-plan",
+                "run-7", "T3", "plan-7", "--expected-state", "SUBMIT",
+                "--business-revision", "008f38ba",
+                "--tests-revision", "8696dccb13487a1920c4efd468bbdff9ae8df495",
+            ])
+
+        self.assertEqual((code, json.loads(output.getvalue())["reason_code"]), (0, "STALE_REBUILT_PLAN_RECOVERED"))
+        recover.assert_called_once_with(
+            "run-7", "T3", "SUBMIT", "plan-7",
+            {"business": "008f38ba", "tests": "8696dccb13487a1920c4efd468bbdff9ae8df495"},
+        )
+
     def test_ipipe_rerun_has_an_explicit_cli_path_and_passes_the_bound_g8_fields(self):
         class Runtime:
             def __init__(self):
                 self.calls = []
 
-            def rerun(self, stage_build_id, approval):
-                self.calls.append((stage_build_id, approval))
+            def rerun(self, stage_build_id, approval, *, parameters=None):
+                self.calls.append((stage_build_id, approval, parameters))
                 return {"ok": True, "reason_code": "OK", "stage_build_id": stage_build_id}
 
         runtime = Runtime()
@@ -180,7 +241,11 @@ class CliOperationTests(unittest.TestCase):
             ])
 
         self.assertEqual(code, 0)
-        self.assertEqual(runtime.calls, [("stage-9", {"approval_id": "approval-9", "input_hash": "hash-9"})])
+        # No --parameter given, so the stage is continued with nothing filled in.
+        self.assertEqual(
+            runtime.calls,
+            [("stage-9", {"approval_id": "approval-9", "input_hash": "hash-9"}, None)],
+        )
 
 
 if __name__ == "__main__":

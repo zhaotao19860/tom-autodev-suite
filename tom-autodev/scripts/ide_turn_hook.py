@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Session-stop hook: tell 如流 that a parked run is waiting for the IDE.
+"""Session-stop hook: resume an approved live run or notify 如流.
 
 The notice used to hang off `orchestrator.py complete-phase`, so it only fired when a
 phase happened to land through the CLI. Every other way a turn ends -- stopping to ask
@@ -34,17 +34,27 @@ def _log(payload: dict[str, object]) -> None:
 
 def main() -> int:
     try:
-        sys.stdin.read()
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw else {}
     except Exception:
-        pass
+        payload = {}
     if not (_CONFIG_ROOT / "state.sqlite").is_file():
         return 0
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
-        from approval_watch import notify_every_parked_run
+        from approval_watch import auto_resume_from_hook, notify_every_parked_run
         from orchestrator import Orchestrator, _infoflow_notify_client
 
         orchestrator = Orchestrator()
+        if payload.get("hook_event_name") == "Stop":
+            resumed = auto_resume_from_hook(orchestrator, payload)
+            if resumed.get("reason_code") == "AUTO_RESUME":
+                print(json.dumps({
+                    key: resumed[key]
+                    for key in ("decision", "continue", "reason", "additionalContext")
+                    if key in resumed
+                }, ensure_ascii=False))
+                return 0
         result = notify_every_parked_run(
             orchestrator, _infoflow_notify_client(orchestrator)
         )

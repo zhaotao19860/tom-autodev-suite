@@ -30,12 +30,17 @@ except ModuleNotFoundError:
 class FakeTransport:
     skip_preflight = True
 
-    def __init__(self, responses):
+    def __init__(self, responses, watcher=None):
         self.responses = list(responses)
         self.calls = []
+        # A body handed over as a file only exists while the call is in flight, so a test
+        # that wants to read it has to look during the call rather than after it.
+        self.watcher = watcher
 
     def run(self, argv, **options):
         self.calls.append((list(argv), dict(options)))
+        if self.watcher is not None:
+            self.watcher(list(argv))
         if not self.responses:
             raise AssertionError(f"unexpected transport call: {argv!r}")
         response = self.responses.pop(0)
@@ -935,6 +940,65 @@ class KuClientTests(unittest.TestCase):
         self.assertEqual(transport.calls[4][0][1], "publish-doc")
         self.assertEqual(result["evidence_refs"], ["ku:child-1/4"])
 
+    def test_the_document_body_is_handed_to_ku_as_a_file_not_an_argument(self):
+        # `--content` put the whole document on the command line. A change-set document
+        # carries a unified diff whose lines start with `---`, `+++` and `@@`, and on
+        # 2026-09-09 that created a document holding nothing but its 21-character title
+        # line -- unrecoverable, because KU has no delete. The body goes through a file.
+        markdown = "# Spec\n\n--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n"
+        seen = {}
+
+        def watcher(argv):
+            if argv[1] == "create-doc":
+                index = argv.index("--md-file")
+                seen["argv"] = list(argv)
+                seen["body"] = Path(argv[index + 1]).read_text(encoding="utf-8")
+                seen["existed"] = Path(argv[index + 1]).exists()
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            transport = FakeTransport(
+                [
+                    ku_repo(),
+                    {
+                        "returnCode": 200,
+                        "success": True,
+                        "result": {
+                            "docGuid": "child-1",
+                            "repositoryGuid": "repo-1",
+                            "url": ku_url("child-1"),
+                            "title": "01-spec",
+                        },
+                    },
+                    ku_content("child-1", KuClient.marked_markdown("root-1", "01-spec", markdown)),
+                    ku_version("child-1", 1, 1),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "child-1"}},
+                    ku_content("child-1", KuClient.marked_markdown("root-1", "01-spec", markdown)),
+                    ku_version("child-1", 4, 0),
+                ],
+                watcher=watcher,
+            )
+            client = KuClient(
+                transport=transport,
+                state_store=state,
+                run_id="run-md-file",
+                repo_id="repo-1",
+                username="tester",
+            )
+
+            result = client.create_artifact("root-1", "01-spec", markdown)
+
+        self.assertTrue(result["ok"], result)
+        self.assertNotIn("--content", seen["argv"])
+        self.assertIn("--md-file", seen["argv"])
+        self.assertTrue(seen["existed"])
+        self.assertEqual(seen["body"], KuClient.marked_markdown("root-1", "01-spec", markdown))
+        # Nothing the diff contains may reach argv, where a leading dash is an option.
+        self.assertFalse(any(argument.startswith("---") for argument in seen["argv"]))
+        # The temporary file is removed once KU has read it.
+        index = seen["argv"].index("--md-file")
+        self.assertFalse(Path(seen["argv"][index + 1]).exists())
+
     def test_unknown_create_reconciles_remote_child_by_parent_title_and_marker_without_recreate(self):
         markdown = "# Spec"
         marked = KuClient.marked_markdown("root-1", "01-spec", markdown)
@@ -1166,11 +1230,124 @@ class KuClientTests(unittest.TestCase):
                 run_id="run-query-identity",
                 repo_id="repo-1",
                 username="tester",
+                # A wrong repository is a real identity mismatch, not a slow read, so
+                # there is nothing for a re-read to settle.
+                settle_attempts=1,
             )
 
             result = client.create_artifact("root-1", "01-spec", markdown)
 
         self.assertEqual(result["reason_code"], "KU_CREATE_VERIFICATION_FAILED")
+
+    def test_a_create_read_back_without_the_marker_yet_settles_on_a_re_read(self):
+        markdown = "# Spec"
+        marked = KuClient.marked_markdown("root-1", "01-spec", markdown)
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            transport = FakeTransport(
+                [
+                    ku_repo(),
+                    {
+                        "returnCode": 200,
+                        "success": True,
+                        "result": {
+                            "docGuid": "child-1",
+                            "repositoryGuid": "repo-1",
+                            "url": ku_url("child-1"),
+                            "title": "01-spec",
+                        },
+                    },
+                    # First read-back: KU serves the document before its content lands.
+                    ku_content("child-1", ""),
+                    ku_version("child-1", 1, 1),
+                    ku_content("child-1", marked),
+                    ku_version("child-1", 3, 1),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "child-1"}},
+                    ku_content("child-1", marked),
+                    ku_version("child-1", 4, 0),
+                ]
+            )
+            waits: list[float] = []
+            client = KuClient(
+                transport=transport,
+                state_store=state,
+                run_id="run-settle",
+                repo_id="repo-1",
+                username="tester",
+                sleeper=waits.append,
+            )
+
+            result = client.create_artifact("root-1", "01-spec", markdown)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["doc_id"], "child-1")
+        self.assertEqual(waits, [6.0])
+
+    def test_a_create_read_back_whose_version_api_lags_settles_on_a_re_read(self):
+        # BGW-1956 T3 PLAN v4: query-content already returned the marker, but
+        # query-version answered 20113 文档不存在. CliTransport raised
+        # CLI_BUSINESS_FAILURE, _query_document forwarded it, and _settled_child
+        # treated that as a hard miss even though the body was there. Version
+        # lag is the same class of KU propagation as a missing marker.
+        markdown = "# Spec"
+        marked = KuClient.marked_markdown("root-1", "01-spec", markdown)
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            transport = FakeTransport(
+                [
+                    ku_repo(),
+                    {
+                        "returnCode": 200,
+                        "success": True,
+                        "result": {
+                            "docGuid": "child-1",
+                            "repositoryGuid": "repo-1",
+                            "url": ku_url("child-1"),
+                            "title": "01-spec",
+                        },
+                    },
+                    ku_content("child-1", marked),
+                    {"returnCode": 20113, "success": False, "result": None},
+                    ku_content("child-1", marked),
+                    ku_version("child-1", 1, 1),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "child-1"}},
+                    ku_content("child-1", marked),
+                    ku_version("child-1", 2, 0),
+                ]
+            )
+            waits: list[float] = []
+            client = KuClient(
+                transport=transport,
+                state_store=state,
+                run_id="run-version-lag",
+                repo_id="repo-1",
+                username="tester",
+                sleeper=waits.append,
+            )
+
+            result = client.create_artifact("root-1", "01-spec", markdown)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["doc_id"], "child-1")
+        self.assertEqual(result["version"], "2")
+        self.assertEqual(waits, [6.0])
+
+    def test_the_settle_window_covers_a_minute_of_ku_propagation(self):
+        # Measured propagation on 2026-09-09 was tens of seconds for a phase document and
+        # longer for a change set carrying a 60 KB patch. A six-second window turned every
+        # phase completion into two or three manual retries, so the default bound is
+        # asserted here rather than left to whoever edits the constructor next.
+        with tempfile.TemporaryDirectory() as directory:
+            client = KuClient(
+                transport=FakeTransport([]),
+                state_store=StateStore(Path(directory) / "state.sqlite"),
+                run_id="run-window",
+                repo_id="repo-1",
+                username="tester",
+            )
+
+        self.assertGreaterEqual(client.settle_attempts * client.settle_wait_seconds, 60.0)
+        self.assertGreaterEqual(client.settle_attempts, 6)
 
     def test_existing_child_hash_mismatch_is_an_immutable_conflict(self):
         if KuClient is None:
@@ -1487,6 +1664,103 @@ class KuClientTests(unittest.TestCase):
             [item["operation"] for item in pending],
             ["ku.index.edit", "ku.document.publish"],
         )
+
+    def test_run_root_replay_keeps_the_query_reason_when_readback_fails(self):
+        # BGW-1956 T3 REVIEW: complete-phase replayed ensure_run_root against a
+        # document that already had a receipt. The query failed (empty username
+        # fell through to AK/SK, 60103) and the completed-key branch collapsed
+        # that into KU_RUN_ROOT_VERIFICATION_FAILED, so the operator could not
+        # see it was an identity/query miss rather than a missing marker.
+        if KuClient is None:
+            self.fail("KuClient is not implemented")
+        title = "BGW-1-run-root"
+        markdown = "# BGW-1-run-root\n\nindex"
+        initial = KuClient.run_root_markdown("parent-1", title, markdown)
+        marker = initial.rsplit("\n", 1)[-1]
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            client = KuClient(
+                transport=FakeTransport(
+                    [
+                        ku_repo(),
+                        {
+                            "returnCode": 200,
+                            "success": True,
+                            "result": {
+                                "docGuid": "root-1",
+                                "repositoryGuid": "repo-1",
+                                "url": ku_url("root-1"),
+                                "title": title,
+                            },
+                        },
+                        ku_content("root-1", initial),
+                        ku_version("root-1", 1, 1),
+                        {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                        ku_content("root-1", initial),
+                        ku_version("root-1", 2, 0),
+                    ]
+                ),
+                state_store=state,
+                run_id="run-root-replay",
+                repo_id="repo-1",
+                username="tester",
+            )
+            first = client.ensure_run_root("parent-1", title, markdown)
+            self.assertTrue(first["ok"], first)
+
+            client.transport = FakeTransport(
+                [{"returnCode": 60103, "success": False, "result": None}]
+            )
+            replay = client.ensure_run_root("parent-1", title, markdown)
+
+        self.assertFalse(replay["ok"])
+        self.assertEqual(replay["reason_code"], "KU_BUSINESS_FAILURE")
+        self.assertNotEqual(replay["reason_code"], "KU_RUN_ROOT_VERIFICATION_FAILED")
+        self.assertEqual(marker.count("tom-autodev-run-root"), 1)
+
+    def test_run_root_create_accepts_ku_reformatting_when_the_marker_is_intact(self):
+        # KU prepends the title and drops the blank line after H1, so a byte
+        # comparison of the just-created body against what we wrote always fails.
+        # The trailing run-root marker is the identity check, same as children.
+        if KuClient is None:
+            self.fail("KuClient is not implemented")
+        title = "BGW-1-run-root"
+        markdown = f"# {title}\n\nindex"
+        initial = KuClient.run_root_markdown("parent-1", title, markdown)
+        marker = initial.rsplit("\n", 1)[-1]
+        reformatted = f"{title}\n\n# {title}\nindex\n\n{marker}"
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            client = KuClient(
+                transport=FakeTransport(
+                    [
+                        ku_repo(),
+                        {
+                            "returnCode": 200,
+                            "success": True,
+                            "result": {
+                                "docGuid": "root-1",
+                                "repositoryGuid": "repo-1",
+                                "url": ku_url("root-1"),
+                                "title": title,
+                            },
+                        },
+                        ku_content("root-1", reformatted),
+                        ku_version("root-1", 1, 1),
+                        {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                        ku_content("root-1", reformatted),
+                        ku_version("root-1", 2, 0),
+                    ]
+                ),
+                state_store=state,
+                run_id="run-root-reformat",
+                repo_id="repo-1",
+                username="tester",
+            )
+            result = client.ensure_run_root("parent-1", title, markdown)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["doc_id"], "root-1")
 
 
 class IcodeClientTests(unittest.TestCase):

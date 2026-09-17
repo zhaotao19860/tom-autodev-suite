@@ -377,6 +377,30 @@ class StateStore:
             ).fetchone()
         return _intent_row(row) if row is not None else None
 
+    def live_idempotency_key(self, base_key: str, *, depth: int = 8) -> str:
+        """The key a fresh attempt should claim, skipping abandoned predecessors.
+
+        An abandonment says "we stopped waiting on that write", not "that write
+        succeeded" and not "nothing was written". Its receipt is write-once, so an
+        operation keyed only by its own content can never be attempted again: the
+        replay finds the abandoned receipt and returns it forever, which is how a
+        knowledge publish for change set T3 wedged a run that had already been fixed.
+        Chaining the next attempt off the intent it supersedes keeps both accounts —
+        the closed attempt keeps its intent and receipt — while making the retry
+        itself idempotent.
+        """
+        key = base_key
+        for _ in range(depth):
+            completed = self.result_by_idempotency_key(key)
+            response = completed["receipt"]["response"] if isinstance(completed, dict) else None
+            if not _superseded_external_receipt(response):
+                return key
+            prior = self.intent_by_idempotency_key(key)
+            if not isinstance(prior, dict):
+                return key
+            key = f"{base_key}:after:{prior['intent_id']}"
+        return key
+
     def withdraw_intent(
         self,
         run_id: str,
@@ -888,6 +912,24 @@ def _claim_journal_matches(journal: Any, expected: dict[str, Any]) -> bool:
         return True
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _superseded_external_receipt(response: Any) -> bool:
+    """Whether a receipt closes an attempt without proving the write landed.
+
+    Abandonment is one such close. A local SUBMIT_REJECTED that never created a CR
+    is another: replaying it forever would hide a later skill fix behind the first
+    failed push_cr.
+    """
+    if not isinstance(response, dict):
+        return False
+    if response.get("abandoned") is True:
+        return True
+    return (
+        response.get("ok") is False
+        and response.get("reason_code") == "SUBMIT_REJECTED"
+        and not response.get("change_number")
+    )
 
 
 def _intent_row(row: sqlite3.Row) -> dict[str, Any]:

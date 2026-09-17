@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from copy import deepcopy
 import re
 from pathlib import Path
 from typing import Any
@@ -144,7 +145,340 @@ class Orchestrator:
 
     def next(self, run_id: str) -> dict[str, Any]:
         """Return the next Comate-owned phase/controller action without remote writes."""
+        was_submit = self.status(run_id).get("state") == "SUBMIT"
+        recovered = self._recover_skipped_submit(run_id)
+        if isinstance(recovered, dict) and not recovered.get("ok"):
+            return recovered
+        if was_submit:
+            stale = self._stale_submit_evidence(run_id)
+            if stale is not None:
+                return stale
         return self.phase_protocol().next(run_id)
+
+    def _stale_submit_evidence(self, run_id: str) -> dict[str, Any] | None:
+        """Refuse a SUBMIT action whose Review no longer covers its Change Set."""
+        current = self.status(run_id)
+        if current.get("state") != "SUBMIT":
+            return None
+        action = self.phase_protocol().next(run_id)
+        if not action.get("ok") or action.get("phase") != "SUBMIT":
+            return None
+        review = action.get("input_artifacts") or []
+        if not review:
+            return None
+        review_artifact = self.artifacts.phase_artifact(review[0].get("artifact_id"))
+        if not review_artifact or not review_artifact.get("valid"):
+            return {"ok": False, "reason_code": "REVIEW_REFRESH_REQUIRED", "run_id": run_id}
+        review_envelope = review_artifact.get("envelope")
+        if not isinstance(review_envelope, dict):
+            return {"ok": False, "reason_code": "REVIEW_REFRESH_REQUIRED", "run_id": run_id}
+        review_revisions = review_envelope.get("source_revisions") or {}
+        task_id = action.get("task_id")
+        changes = [
+            artifact for artifact in self.artifacts.artifacts_for_run(run_id)
+            if artifact.get("kind") == "change-set"
+            and (artifact.get("metadata") or {}).get("task_id") == task_id
+            and (artifact.get("metadata") or {}).get("verdict") == "PASS"
+        ]
+        if not changes:
+            return None
+        try:
+            change = json.loads(changes[-1]["content"].decode("utf-8"))
+        except (AttributeError, KeyError, UnicodeDecodeError, ValueError):
+            return {"ok": False, "reason_code": "REVIEW_REFRESH_REQUIRED", "run_id": run_id}
+        revisions = change.get("revision_set") or {}
+        current_revisions = {
+            "business": (revisions.get("business") or {}).get("revision"),
+            "tests": (revisions.get("test") or {}).get("revision"),
+        }
+        if not all(isinstance(value, str) and value for value in current_revisions.values()):
+            return None
+        if review_revisions != current_revisions:
+            return {
+                "ok": False,
+                "reason_code": "REVIEW_REFRESH_REQUIRED",
+                "run_id": run_id,
+                "task_id": task_id,
+                "review_revisions": review_revisions,
+                "change_set_revisions": current_revisions,
+            }
+        return None
+
+    def _recover_skipped_submit(self, run_id: str) -> dict[str, Any] | None:
+        """Move a WORKSPACE that skipped SUBMIT back onto the reviewed task.
+
+        A PASS used to jump to the next DAG node's WORKSPACE. The reviewed
+        Change Set then sat unsubmitted while next() asked for a sibling's G4.
+        New completions go to SUBMIT; this corrects a checkpoint that already
+        took the old edge. It is a ledger repair, not a legal WORKSPACE→SUBMIT
+        advance.
+        """
+        current = self.status(run_id)
+        if current.get("state") != "WORKSPACE":
+            return None
+        events = current.get("events") or []
+        if not events:
+            return None
+        payload = events[-1].get("payload") if isinstance(events[-1].get("payload"), dict) else {}
+        if payload.get("previous_state") != "REVIEW":
+            return None
+        task_id = _latest_unsubmitted_reviewed_task(self, run_id)
+        if task_id is None:
+            # Legacy skipped-submit checkpoints may predate IMPLEMENT predecessor
+            # metadata; recovery must still repair the already-recorded REVIEW edge.
+            reviews = self.phase_protocol()._passing_reviews(run_id)
+            if reviews:
+                task_id = max(reviews, key=reviews.get)
+        if task_id is None:
+            return None
+        source_event_id = events[-1]["event_id"]
+        result_key = f"recover-skipped-submit:{run_id}:{source_event_id}"
+        payload = {
+            "previous_state": "WORKSPACE",
+            "task_id": task_id,
+            "reason_code": "SKIPPED_SUBMIT_RECOVERED",
+        }
+        result = {
+            "ok": True,
+            "reason_code": "SKIPPED_SUBMIT_RECOVERED",
+            "task_id": task_id,
+        }
+        committed = self.state.commit_transition_result(
+            run_id, source_event_id, "SUBMIT", payload, result_key, result,
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return None
+        if committed.get("status") == "RESULT_CONFLICT":
+            return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
+        return None
+
+    def recover_rebuilt_change_set(
+        self, run_id: str, task_id: str, plan_artifact_id: str
+    ) -> dict[str, Any]:
+        """Re-enter IMPLEMENT from PLAN with one verified, immutable Plan pin.
+
+        This is a local ledger repair for a change set that must be rebuilt.  It
+        neither opens a worktree nor calls a remote adapter: the existing approved
+        Plan is selected by artifact id, then its identity is carried into IMPLEMENT
+        so a later Plan for the same task cannot silently replace its predecessor.
+        """
+        current = self.status(run_id)
+        if current.get("state") == "RUN_NOT_FOUND":
+            return current
+        if not isinstance(task_id, str) or not task_id or not isinstance(plan_artifact_id, str) or not plan_artifact_id:
+            return {"ok": False, "reason_code": "INVALID_INPUT", "run_id": run_id}
+        latest = current.get("events", [])[-1] if current.get("events") else {}
+        replay_payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+        if (
+            current.get("state") == "IMPLEMENT"
+            and replay_payload.get("reason_code") == "REBUILT_CHANGE_SET_RECOVERED"
+            and replay_payload.get("task_id") == task_id
+            and replay_payload.get("plan_artifact_id") == plan_artifact_id
+        ):
+            return {
+                "ok": True, "reason_code": "REBUILT_CHANGE_SET_RECOVERED", "run_id": run_id,
+                "state": "IMPLEMENT", "event_id": latest.get("event_id"), "task_id": task_id,
+                "plan_artifact_id": plan_artifact_id,
+                "plan_content_hash": replay_payload.get("plan_content_hash"),
+            }
+        if current.get("state") != "PLAN":
+            return {
+                "ok": False, "reason_code": "RECOVERY_STATE_INVALID", "run_id": run_id,
+                "state": current.get("state"),
+            }
+        plan = self.artifacts.phase_artifact(plan_artifact_id)
+        envelope = plan.get("envelope") if plan.get("valid") else None
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("run_id") != run_id
+            or envelope.get("phase") != "PLAN"
+            or envelope.get("task_id") != task_id
+        ):
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": run_id}
+        transition = self.transition_policy.validate("PLAN", "IMPLEMENT")
+        if not transition.get("allowed"):
+            return {"ok": False, "reason_code": transition.get("reason_code"), "run_id": run_id}
+        source_event_id = current["events"][-1]["event_id"]
+        plan_hash = envelope.get("content_hash")
+        result_key = f"recover-rebuilt-change-set:{run_id}:{source_event_id}:{task_id}:{plan_artifact_id}"
+        result = {
+            "ok": True, "reason_code": "REBUILT_CHANGE_SET_RECOVERED", "run_id": run_id,
+            "task_id": task_id, "plan_artifact_id": plan_artifact_id, "plan_content_hash": plan_hash,
+        }
+        payload = {
+            "previous_state": "PLAN", "task_id": task_id,
+            "plan_artifact_id": plan_artifact_id, "plan_content_hash": plan_hash,
+            "reason_code": "REBUILT_CHANGE_SET_RECOVERED", "policy_decision": transition,
+        }
+        committed = self.state.commit_transition_result(
+            run_id, source_event_id, "IMPLEMENT", payload, result_key, result
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
+        return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
+
+    def recover_stale_rebuilt_plan(
+        self,
+        run_id: str,
+        task_id: str,
+        expected_state: str,
+        source_plan_artifact_id: str,
+        source_revisions: dict[str, str],
+    ) -> dict[str, Any]:
+        """Locally replace a stale task Plan after explicit rebuilt revisions.
+
+        This recovery deliberately does not publish, submit, request approval, or invoke a
+        runtime adapter.  It creates a new immutable PLAN envelope from a verified prior
+        Plan, removes its approval binding, and atomically moves only the explicitly named
+        stale IMPLEMENT/SUBMIT checkpoint back to PLAN.  The resulting PLAN state therefore
+        requires a normal fresh G4 approval before IMPLEMENT can resume.
+        """
+        current = self.status(run_id)
+        if current.get("state") == "RUN_NOT_FOUND":
+            return current
+        if not isinstance(task_id, str) or not task_id or not isinstance(source_plan_artifact_id, str):
+            return {"ok": False, "reason_code": "INVALID_INPUT", "run_id": run_id}
+        latest = current.get("events", [])[-1] if current.get("events") else {}
+        replay_payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+        if (
+            current.get("state") == "PLAN"
+            and replay_payload.get("reason_code") == "STALE_REBUILT_PLAN_RECOVERED"
+            and replay_payload.get("previous_state") == expected_state
+            and replay_payload.get("task_id") == task_id
+            and replay_payload.get("source_plan_artifact_id") == source_plan_artifact_id
+            and replay_payload.get("source_revisions") == source_revisions
+        ):
+            return {
+                "ok": True, "reason_code": "STALE_REBUILT_PLAN_RECOVERED", "run_id": run_id,
+                "state": "PLAN", "event_id": latest.get("event_id"), "task_id": task_id,
+                "source_plan_artifact_id": source_plan_artifact_id,
+                "plan_artifact_id": replay_payload.get("plan_artifact_id"),
+                "plan_content_hash": replay_payload.get("plan_content_hash"),
+                "source_revisions": dict(source_revisions), "approval_required": "G4",
+            }
+        if expected_state not in {"IMPLEMENT", "REVIEW", "SUBMIT"} or current.get("state") != expected_state:
+            return {"ok": False, "reason_code": "RECOVERY_STATE_MISMATCH", "run_id": run_id,
+                    "state": current.get("state")}
+        if not isinstance(task_id, str) or not task_id or not isinstance(source_plan_artifact_id, str):
+            return {"ok": False, "reason_code": "INVALID_INPUT", "run_id": run_id}
+        if not _valid_source_revisions(source_revisions):
+            return {"ok": False, "reason_code": "SOURCE_REVISION_REQUIRED", "run_id": run_id}
+        events = current.get("events", [])
+        payload = latest.get("payload") if isinstance(latest.get("payload"), dict) else {}
+        if payload.get("task_id") != task_id:
+            return {"ok": False, "reason_code": "RECOVERY_TASK_MISMATCH", "run_id": run_id}
+        active_plan_id = _stale_checkpoint_plan(events, task_id)
+        if active_plan_id != source_plan_artifact_id:
+            return {"ok": False, "reason_code": "RECOVERY_PLAN_MISMATCH", "run_id": run_id}
+        source = self.artifacts.phase_artifact(source_plan_artifact_id)
+        envelope = source.get("envelope") if source.get("valid") else None
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("run_id") != run_id
+            or envelope.get("phase") != "PLAN"
+            or envelope.get("task_id") != task_id
+        ):
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": run_id}
+        content = deepcopy(envelope.get("content"))
+        if not isinstance(content, dict):
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": run_id}
+        repositories = content.get("repositories")
+        if not isinstance(repositories, list):
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": run_id}
+        roles = {item.get("role") for item in repositories if isinstance(item, dict)}
+        if roles != {"business", "tests"} or len(repositories) != 2:
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": run_id}
+        for repository in repositories:
+            if not isinstance(repository, dict):
+                return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": run_id}
+            repository["revision"] = source_revisions[repository["role"]]
+        # This is intentionally a new plan candidate rather than a re-approved document.
+        # A fresh PLAN action will calculate its own G4 hash and approval binding.
+        content["g4_input_hash"] = _canonical_hash({
+            "recovery": "rebuilt-plan", "source_plan_content_hash": envelope["content_hash"],
+            "source_revisions": source_revisions,
+        })
+        content_hash = _canonical_hash(content)
+        action_id = _canonical_hash({
+            "recovery": "stale-rebuilt-plan", "run_id": run_id, "task_id": task_id,
+            "source_event_id": latest["event_id"], "source_plan_artifact_id": source_plan_artifact_id,
+            "source_revisions": source_revisions,
+        })
+        cloned = {
+            **deepcopy(envelope), "action_id": action_id, "source_event_id": latest["event_id"],
+            "input_hash": content["g4_input_hash"], "content_hash": content_hash,
+            "source_revisions": dict(source_revisions), "parent_artifact_hash": envelope["content_hash"],
+            "approval_id": None, "approval_input_hash": None, "content": content,
+        }
+        try:
+            archived = self.artifacts.put_envelope(cloned)
+        except ValueError as error:
+            return {"ok": False, "reason_code": str(error), "run_id": run_id}
+        result_key = (
+            f"recover-stale-rebuilt-plan:{run_id}:{latest['event_id']}:{task_id}:"
+            f"{source_plan_artifact_id}:{source_revisions['business']}:{source_revisions['tests']}"
+        )
+        result = {
+            "ok": True, "reason_code": "STALE_REBUILT_PLAN_RECOVERED", "run_id": run_id,
+            "task_id": task_id, "source_plan_artifact_id": source_plan_artifact_id,
+            "plan_artifact_id": archived["artifact_id"], "plan_content_hash": content_hash,
+            "source_revisions": dict(source_revisions), "approval_required": "G4",
+        }
+        transition_payload = {
+            "previous_state": expected_state, "task_id": task_id,
+            "source_plan_artifact_id": source_plan_artifact_id,
+            "plan_artifact_id": archived["artifact_id"], "plan_content_hash": content_hash,
+            "source_revisions": dict(source_revisions),
+            "reason_code": "STALE_REBUILT_PLAN_RECOVERED", "approval_required": "G4",
+        }
+        committed = self.state.commit_transition_result(
+            run_id, latest["event_id"], "PLAN", transition_payload, result_key, result
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
+        return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
+
+    def recover_stale_submit(
+        self, run_id: str, task_id: str, plan_artifact_id: str
+    ) -> dict[str, Any]:
+        """Return a stale SUBMIT checkpoint to PLAN before rebuilding IMPLEMENT."""
+        current = self.status(run_id)
+        if current.get("state") != "SUBMIT":
+            return {"ok": False, "reason_code": "RECOVERY_STATE_INVALID",
+                    "run_id": run_id, "state": current.get("state")}
+        plan = self.artifacts.phase_artifact(plan_artifact_id)
+        envelope = plan.get("envelope") if plan.get("valid") else None
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("run_id") != run_id
+            or envelope.get("phase") != "PLAN"
+            or envelope.get("task_id") != task_id
+        ):
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": run_id}
+        source_event_id = current["events"][-1]["event_id"]
+        payload = {
+            "previous_state": "SUBMIT", "task_id": task_id,
+            "plan_artifact_id": plan_artifact_id,
+            "plan_content_hash": envelope.get("content_hash"),
+            "source_revisions": dict(envelope.get("source_revisions") or {}),
+            "reason_code": "REVIEW_REFRESH_REQUIRED",
+        }
+        result = {"ok": True, "reason_code": "STALE_SUBMIT_RECOVERED",
+                  "run_id": run_id, "state": "PLAN", "task_id": task_id,
+                  "plan_artifact_id": plan_artifact_id}
+        key = f"recover-stale-submit:{run_id}:{source_event_id}:{task_id}:{plan_artifact_id}"
+        committed = self.state.commit_transition_result(
+            run_id, source_event_id, "PLAN", payload, key, result
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
+        return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
 
     def complete_phase(
         self,
@@ -334,7 +668,12 @@ class Orchestrator:
             return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
         recorded_path = intake.get("profile_path")
         recorded_project = intake.get("project")
-        recorded_hash = intake.get("profile_hash")
+        # The pin can have moved since INTAKE: `repin-profile` accepts an edited profile
+        # under its own approval, and `_runtime_profile` already reads the moved pin.
+        # Reading INTAKE's hash here instead left the run healthy through one door and
+        # PROFILE_CONFLICT through the other, which blocked every phase completion after
+        # a legitimate re-pin.
+        recorded_hash = _pinned_profile_hash(self, run_id, events)
         card_id = intake.get("requirement_id")
         if (
             not isinstance(recorded_path, str)
@@ -928,7 +1267,13 @@ class Orchestrator:
             return submitted if isinstance(submitted, dict) else {
                 "ok": False, "reason_code": "ICODE_RECEIPT_INVALID", "run_id": run_id,
             }
-        submit_key = f"icode.submit:{run_id}:{change_set_id}:{revision_set_id}"
+        # The receipt names the intent lineage it landed under. An attempt that
+        # supersedes an abandoned one lives under a chained key, so the base key alone
+        # would look for a record that is not there; walking the abandoned lineage finds
+        # it for receipts written before the key was reported.
+        submit_key = submitted.get("submit_key") or _live_submit_key(
+            self.state, f"icode.submit:{run_id}:{change_set_id}:{revision_set_id}"
+        )
         durable = self.state.result_by_idempotency_key(submit_key)
         if (
             not isinstance(durable, dict)
@@ -996,7 +1341,8 @@ class Orchestrator:
         # change. So the transition waits for the last submission instead of firing on
         # the first, and the submissions in between are recorded and replayable.
         outstanding = _outstanding_submissions(self, run_id)
-        if outstanding:
+        followup = _submit_followup_state(self, run_id)
+        if followup == "SUBMIT":
             recorded = {
                 "ok": True, "reason_code": "SUBMISSION_RECORDED", "run_id": run_id,
                 "state": "SUBMIT",
@@ -1006,6 +1352,40 @@ class Orchestrator:
             }
             self.state.save_idempotency_result(result_key, recorded)
             return recorded
+        if followup == "WORKSPACE":
+            # This task is in iCode, but open DAG nodes still owe a Review.
+            # Staying in SUBMIT would park the frontier; jumping to IPIPE
+            # would build a half-written requirement.
+            transition = self.transition_policy.validate("SUBMIT", "WORKSPACE")
+            if not transition.get("allowed"):
+                return {"run_id": run_id, "state": "SUBMIT", **transition, "ok": False}
+            workspace_payload = {
+                "previous_state": "SUBMIT",
+                "outstanding_tasks": outstanding,
+                "submission_artifact_id": submission["artifact_id"],
+                "submission_hash": submission["sha256"],
+                "policy_decision": transition,
+            }
+            workspace_result = {
+                "ok": True,
+                "reason_code": "SUBMISSION_RECORDED",
+                "submission_artifact_id": submission["artifact_id"],
+                "submission_hash": submission["sha256"],
+                "outstanding_tasks": outstanding,
+            }
+            committed_workspace = self.state.commit_transition_result(
+                run_id,
+                events[-1]["event_id"],
+                "WORKSPACE",
+                workspace_payload,
+                result_key,
+                workspace_result,
+            )
+            if committed_workspace.get("status") in {"COMMITTED", "REPLAY"}:
+                return committed_workspace["result"]
+            if committed_workspace.get("status") == "RESULT_CONFLICT":
+                return {"ok": False, "reason_code": "SUBMISSION_CONFLICT", "run_id": run_id}
+            return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
         gate_context = self._ledger_backed_evidence(run_id, "SUBMIT", "IPIPE", {
             "input_hash": input_hash,
             "approval_id": approval_id,
@@ -1544,6 +1924,17 @@ def _roles_for_category(category: str) -> list[str]:
     return ["development", "test"]
 
 
+def _stale_checkpoint_plan(events: list[dict[str, Any]], task_id: str) -> str | None:
+    """Find the exact Plan pin carried by the stale task's latest IMPLEMENT event."""
+    for event in reversed(events):
+        if event.get("state") != "IMPLEMENT":
+            continue
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if payload.get("task_id") == task_id and isinstance(payload.get("plan_artifact_id"), str):
+            return payload["plan_artifact_id"]
+    return None
+
+
 def _valid_source_revisions(value: Any) -> bool:
     return (
         isinstance(value, dict)
@@ -1641,7 +2032,20 @@ def _outstanding_submissions(orchestrator: Any, run_id: str) -> list[str]:
     first one's receipt answer for the second: the run would transition to IPIPE on a
     sibling task's submission while the repaired code sat in the worktree, and the
     pipelines would build the defect the repair existed to remove.
+
+    An amendment republishes the DAG. A Review older than that DAG does not close
+    the new scope, so a sibling's historical PASS descriptor cannot answer IPIPE
+    either: BGW-1956 T0's empty submit otherwise jumped while T1/T2 predated the
+    DAG and T3's latest Review was REJECT.
     """
+    protocol = orchestrator.phase_protocol()
+    dag = orchestrator.artifacts.latest_phase(run_id, "TASKS", None)
+    dag_nodes: list[str] = []
+    if dag.get("valid"):
+        for node in dag["envelope"].get("content", {}).get("nodes") or []:
+            if isinstance(node, dict) and isinstance(node.get("task_id"), str) and node["task_id"]:
+                dag_nodes.append(node["task_id"])
+    current_passing = protocol._current_passing(run_id) if dag_nodes else set()
     current_change_set: dict[str, str] = {}
     for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
         if artifact.get("kind") != "change-set":
@@ -1654,18 +2058,314 @@ def _outstanding_submissions(orchestrator: Any, run_id: str) -> list[str]:
             continue
         if metadata.get("verdict") == "PASS" and isinstance(task_id, str) and task_id:
             # `artifacts_for_run` is ordered by creation, so the last descriptor for a
-            # task is the one the current Review passed.
+            # task is the one the current Review passed. Against a live DAG, a PASS
+            # older than that DAG is not current and must not close the node.
+            if dag_nodes and not protocol._task_reviewed(run_id, task_id):
+                continue
             current_change_set[task_id] = str(change_set_id)
-    if not current_change_set:
-        return []
     submitted_change_sets = {
         str(item.get("change_set_id")) for item in _recorded_submissions(orchestrator, run_id)
     }
+    if dag_nodes:
+        open_nodes = [task for task in dag_nodes if task not in current_passing]
+        unsubmitted = [
+            task for task in current_passing
+            if current_change_set.get(task) not in submitted_change_sets
+        ]
+        return sorted(set(open_nodes) | set(unsubmitted))
+    if not current_change_set:
+        return []
     return sorted(
         task
         for task in set(_reviewed_tasks(orchestrator, run_id))
         if current_change_set.get(task) not in submitted_change_sets
     )
+
+
+def _current_pass_change_sets(orchestrator: Any, run_id: str) -> dict[str, str]:
+    """task_id -> current PASS change_set_id for tasks whose Review covers the DAG."""
+    protocol = orchestrator.phase_protocol()
+    dag = orchestrator.artifacts.latest_phase(run_id, "TASKS", None)
+    dag_nodes = bool(dag.get("valid"))
+    found: dict[str, str] = {}
+    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+        if artifact.get("kind") != "change-set":
+            continue
+        metadata = artifact.get("metadata") or {}
+        task_id = metadata.get("task_id")
+        try:
+            change_set_id = json.loads(artifact["content"].decode("utf-8"))["change_set_id"]
+        except (AttributeError, KeyError, ValueError, UnicodeDecodeError):
+            continue
+        if metadata.get("verdict") != "PASS" or not isinstance(task_id, str) or not task_id:
+            continue
+        if dag_nodes and not protocol._task_reviewed(run_id, task_id):
+            continue
+        found[task_id] = str(change_set_id)
+    return found
+
+
+def _latest_unsubmitted_reviewed_task(orchestrator: Any, run_id: str) -> str | None:
+    """The newest DAG-covering PASS whose current Change Set is not in iCode."""
+    submitted = {
+        str(item.get("change_set_id")) for item in _recorded_submissions(orchestrator, run_id)
+    }
+    current = _current_pass_change_sets(orchestrator, run_id)
+    unsubmitted = [
+        task_id for task_id, change_set_id in current.items()
+        if change_set_id not in submitted
+    ]
+    if not unsubmitted:
+        return None
+    protocol = orchestrator.phase_protocol()
+    reviews = protocol._passing_reviews(run_id)
+    return max(unsubmitted, key=lambda task_id: reviews.get(task_id, 0))
+
+
+def _submit_followup_state(orchestrator: Any, run_id: str) -> str:
+    """Where SUBMIT goes after this change set is recorded.
+
+    Stay in SUBMIT while another already-reviewed change set still owes iCode.
+    Return to WORKSPACE when later DAG nodes still need a Review. Only go to
+    IPIPE when every current PASS is in and the DAG has no open nodes.
+    """
+    outstanding = _outstanding_submissions(orchestrator, run_id)
+    if not outstanding:
+        return "IPIPE"
+    submitted = {
+        str(item.get("change_set_id")) for item in _recorded_submissions(orchestrator, run_id)
+    }
+    current = _current_pass_change_sets(orchestrator, run_id)
+    if any(current.get(task) not in submitted for task in outstanding if task in current):
+        return "SUBMIT"
+    return "WORKSPACE"
+
+
+def _stage_parameters(
+    orchestrator: Any, runtime: Any, run_id: str, names: list[str]
+) -> dict[str, Any]:
+    """Derive the values a manual stage would otherwise ask a person to type.
+
+    The CR id is the submission this run made; the product download is the compile job's
+    published URL plus the per-repository irepo token. Both follow each CR's current
+    patchset, so the product a stage downloads is the one the pipeline is actually
+    building. Nothing is guessed: an input that cannot be derived is reported by name.
+    """
+    if not names:
+        return {"ok": True, "reason_code": "OK", "parameters": {}}
+    from stage_parameters import load_tokens, resolve
+
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    profile = pinned["profile"]
+    derived = _ipipe_revision_set(orchestrator, run_id, profile)
+    if not derived.get("ok"):
+        return derived
+    revisions = {
+        str(item["module"]): str(item["revision"])
+        for item in derived["revisions"]["repositories"]
+    }
+    change_number = None
+    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+        if artifact.get("kind") != "submission":
+            continue
+        try:
+            submitted = json.loads(artifact["content"].decode("utf-8"))
+        except (AttributeError, KeyError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        change_number = submitted.get("change_number") or change_number
+    # A fold changes which CR carries the work: T3's own CR was superseded by the one the
+    # requirement already had open in that repository, so the newest receipt names a CR
+    # that no longer exists. The open CR list is authoritative, and the receipt is the
+    # cross-check.
+    open_cr = _open_test_repo_cr(profile, run_id)
+    if open_cr is not None:
+        change_number = open_cr
+    product_urls: dict[str, str] = {}
+    pipeline = profile.get("pipeline_profile") or {}
+    from phase_protocol import _registered_pipeline
+
+    for module, revision in revisions.items():
+        found = runtime.product_url(module, revision, _registered_pipeline(pipeline, module))
+        # A known module with no published product keeps an empty entry, so the failure
+        # names the module and revision instead of "not derivable".
+        product_urls[module] = found["product_url"] if found.get("ok") else ""
+    try:
+        tokens = load_tokens(orchestrator.config_root)
+    except ValueError as error:
+        return {"ok": False, "reason_code": str(error), "run_id": run_id}
+    return resolve(
+        list(names), change_number=change_number, product_urls=product_urls, tokens=tokens
+    )
+
+
+def _open_repo_reviews(module: Any, path: Any) -> list[dict[str, Any]] | None:
+    """The open CRs of one repository, or None when iCode cannot be asked."""
+    from cli_transport import ProcessTransport
+
+    if not module or not path:
+        return None
+    for candidate in ("/Users/tom/.icode/bin/icode-cli", "icode-cli"):
+        try:
+            result = ProcessTransport().run(
+                [candidate, "api", "get_repo_reviews", "--repo", str(module), "--status", "NEW", "-o", "json"],
+                cwd=str(path), timeout=60,
+            )
+        except Exception:
+            continue
+        if result["returncode"] != 0:
+            continue
+        try:
+            changes = json.loads(result["stdout"]).get("data", {}).get("changes", [])
+        except (AttributeError, json.JSONDecodeError):
+            return None
+        return [change for change in changes if isinstance(change, dict)]
+    return None
+
+
+def _open_test_repo_cr(profile: dict[str, Any], run_id: str) -> str | None:
+    """The requirement's still-open CR in the test repository, if exactly one is open."""
+    repository = profile.get("test_repo") or {}
+    changes = _open_repo_reviews(repository.get("module"), repository.get("path"))
+    if changes is None:
+        return None
+    numbers = [str(change.get("_number")) for change in changes if change.get("_number")]
+    return numbers[0] if len(numbers) == 1 else None
+
+
+def _current_patchset(module: Any, path: Any, change_number: Any) -> str | None:
+    """The revision iCode currently serves for one still-open CR.
+
+    A submission receipt records the revision that was pushed at the time. Every later
+    patchset -- a repair, a fold of a sibling CR -- moves the CR forward without writing a
+    new receipt, so the receipt alone cannot say what the pipeline is building.
+    """
+    changes = _open_repo_reviews(module, path)
+    if changes is None or not change_number:
+        return None
+    for change in changes:
+        if str(change.get("_number")) == str(change_number):
+            revision = change.get("current_revision")
+            return str(revision) if revision else None
+    return None
+
+
+def _ipipe_revision_set(
+    orchestrator: Any, run_id: str, profile: dict[str, Any]
+) -> dict[str, Any]:
+    """The repositories and revisions the pipeline is building for this run.
+
+    Build ownership has to be anchored to something the run can prove is its own: the CR
+    number comes from a submission receipt, and the revision comes from that CR's current
+    patchset. A repair or a fold that adds a patchset therefore stays ownable, while a
+    build of somebody else's change still fails to match.
+    """
+    business = [item for item in (profile.get("business_repos") or []) if isinstance(item, dict)]
+    test_repo = profile.get("test_repo") or {}
+    if not business or not test_repo:
+        return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
+    pinned: dict[str, str] = {}
+    change_numbers: dict[str, str] = {}
+    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+        if artifact.get("kind") != "submission":
+            continue
+        try:
+            submitted = json.loads(artifact["content"].decode("utf-8"))
+        except (AttributeError, KeyError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        for entry in (submitted.get("revision_set") or {}).values():
+            if isinstance(entry, dict) and entry.get("module") and entry.get("revision"):
+                pinned[str(entry["module"])] = str(entry["revision"])
+        if submitted.get("module") and submitted.get("change_number"):
+            change_numbers[str(submitted["module"])] = str(submitted["change_number"])
+    # The newest receipt can name a CR that was folded away; the open list is authoritative.
+    open_test = _open_test_repo_cr(profile, run_id)
+    if open_test:
+        change_numbers[str(test_repo.get("module"))] = open_test
+    repositories: list[dict[str, Any]] = []
+    drift: dict[str, Any] = {}
+    for kind, repository in [("business", item) for item in business] + [("test", test_repo)]:
+        module = str(repository.get("module") or "")
+        revision = pinned.get(module)
+        current = _current_patchset(module, repository.get("path"), change_numbers.get(module))
+        if current and current != revision:
+            drift[module] = {"submitted": revision, "current": current}
+            revision = current
+        if not revision:
+            return {"ok": False, "reason_code": "REVISION_UNRESOLVED", "run_id": run_id,
+                    "module": module}
+        repositories.append({
+            "kind": kind, "module": module,
+            "branch": repository.get("branch"), "revision": revision,
+        })
+    revision_set_id = hashlib.sha256(
+        json.dumps(repositories, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return {
+        "ok": True, "reason_code": "OK", "drift": drift,
+        "revisions": {
+            "run_id": run_id,
+            "revision_set_id": revision_set_id,
+            "repositories": repositories,
+            "parameters": {},
+        },
+    }
+
+
+def _ipipe_adopt(
+    orchestrator: Any, runtime: Any, run_id: str, module: Any, window_seconds: float
+) -> dict[str, Any]:
+    """Bind the build the platform already ran for this run's CRs, and bind its stages.
+
+    Reads only: `discover` selects the build whose repositories and revisions match, and
+    one `monitor` pass records the stage ownership that a later G8 re-run checks. Without
+    this step a build triggered from the iPipe page is invisible to the run, and every
+    stage operation refuses with `STAGE_OWNERSHIP_UNVERIFIED`.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    profile = pinned["profile"]
+    derived = _ipipe_revision_set(orchestrator, run_id, profile)
+    if not derived.get("ok"):
+        return derived
+    found = runtime.discover(profile, derived["revisions"], module)
+    if not found.get("ok"):
+        return {**found, "drift": derived["drift"], "run_id": run_id}
+    deadline = (datetime.now(timezone.utc) + timedelta(seconds=window_seconds)).isoformat()
+    observed = runtime.monitor(found["build_id"], deadline)
+    return {
+        "ok": True, "reason_code": "OK", "run_id": run_id,
+        "build_id": found["build_id"], "drift": derived["drift"],
+        "monitor": {key: observed.get(key) for key in ("ok", "reason_code", "status")},
+        "stages": [
+            {"stage_build_id": stage.get("stage_build_id"), "name": stage.get("name"),
+             "status": stage.get("status")}
+            for stage in observed.get("stages") or [] if isinstance(stage, dict)
+        ],
+    }
+
+
+def _live_submit_key(state: Any, base_key: str) -> str:
+    """The key the current submission attempt lives under.
+
+    Abandoning an attempt leaves its intent and receipt in place and chains the next
+    attempt off it, so the newest attempt is the end of that chain.
+    """
+    key = base_key
+    for _ in range(8):
+        stored = state.result_by_idempotency_key(key)
+        response = stored["receipt"]["response"] if isinstance(stored, dict) else None
+        if not (isinstance(response, dict) and response.get("abandoned") is True):
+            return key
+        prior = state.intent_by_idempotency_key(key)
+        if not isinstance(prior, dict):
+            return key
+        key = f"{base_key}:after:{prior['intent_id']}"
+    return key
 
 
 def _primary_submission(
@@ -1713,19 +2413,31 @@ def _submission_controller_binding(
     tests = revision_set.get("test")
     if not isinstance(business, dict) or not isinstance(tests, dict):
         return "SOURCE_REVISION_REQUIRED", {}
+    # A task that only touches the test repository submits that repository, so the
+    # receipt's module and revision belong to the test entry. Checking them against the
+    # business entry regardless refused those submissions with SOURCE_REVISION_MISMATCH.
+    # The role is derived from which entry the receipt matches, so the canonical
+    # descriptor bytes stay unchanged.
+    primary = next((
+        entry for entry in (business, tests)
+        if entry.get("module") == change_set.get("module")
+        and entry.get("revision") == change_set.get("commit_revision")
+    ), None)
+    if primary is None:
+        return "SOURCE_REVISION_MISMATCH", {}
     owned_business = next((
         repository for repository in repositories
-        if isinstance(repository, dict) and repository.get("module") == receipt.get("module")
+        if isinstance(repository, dict) and repository.get("module") == business.get("module")
     ), None)
     if (
         not isinstance(owned_business, dict)
-        or business.get("module") != owned_business.get("module")
         or business.get("branch") != owned_business.get("branch")
         or tests.get("module") != test_repository.get("module")
         or tests.get("branch") != test_repository.get("branch")
         or receipt.get("module") != change_set.get("module")
-        or receipt.get("commit_revision") != business.get("revision")
-        or receipt.get("patchset") != business.get("revision")
+        or receipt.get("module") != primary.get("module")
+        or receipt.get("commit_revision") != primary.get("revision")
+        or receipt.get("patchset") != primary.get("revision")
         or receipt.get("revision_set") != change_set.get("revision_set")
     ):
         return "SOURCE_REVISION_MISMATCH", {}
@@ -1802,6 +2514,33 @@ def main(argv: list[str] | None = None) -> int:
     complete.add_argument("run_id")
     complete.add_argument("envelope")
 
+    recover_change_set = subparsers.add_parser(
+        "recover-rebuilt-change-set",
+        help="从已归档的 Plan 本地恢复 IMPLEMENT，并固定该 Plan 前驱",
+    )
+    recover_change_set.add_argument("run_id")
+    recover_change_set.add_argument("task_id")
+    recover_change_set.add_argument("plan_artifact_id")
+    recover_stale = subparsers.add_parser(
+        "recover-stale-submit", help="将旧 SUBMIT 检查点安全退回 PLAN"
+    )
+    recover_stale.add_argument("run_id")
+    recover_stale.add_argument("task_id")
+    recover_stale.add_argument("plan_artifact_id")
+
+    recover_rebuilt_plan = subparsers.add_parser(
+        "recover-stale-rebuilt-plan",
+        help="本地克隆已验证 Plan 并将指定的旧 IMPLEMENT/SUBMIT 退回待重新 G4 审批的 PLAN",
+    )
+    recover_rebuilt_plan.add_argument("run_id")
+    recover_rebuilt_plan.add_argument("task_id")
+    recover_rebuilt_plan.add_argument("source_plan_artifact_id")
+    recover_rebuilt_plan.add_argument(
+        "--expected-state", required=True, choices=("IMPLEMENT", "REVIEW", "SUBMIT")
+    )
+    recover_rebuilt_plan.add_argument("--business-revision", required=True)
+    recover_rebuilt_plan.add_argument("--tests-revision", required=True)
+
     optimize = subparsers.add_parser("optimize")
     optimize.add_argument("run_id")
     optimize.add_argument("operation", choices=("build", "propose", "apply"))
@@ -1845,6 +2584,32 @@ def main(argv: list[str] | None = None) -> int:
     ipipe_rerun.add_argument("stage_build_id")
     ipipe_rerun.add_argument("approval_id")
     ipipe_rerun.add_argument("input_hash")
+    ipipe_rerun.add_argument(
+        "--parameter",
+        action="append",
+        default=[],
+        dest="parameters",
+        help="人工阶段要填的参数名，可重复；取值由本 run 自动求出（CR 号取提交回执，"
+             "产出下载命令取编译 job 的 productHttpUrl 加本地 irepo token）",
+    )
+    ipipe_rerun.add_argument(
+        "--print-parameters",
+        action="store_true",
+        help="只打印求出的参数（token 脱敏），不执行阶段",
+    )
+    ipipe_rerun.add_argument(
+        "--print-input-hash",
+        action="store_true",
+        help="只打印本次执行的 G8 绑定哈希，用于 request-approval",
+    )
+
+    adopt = subparsers.add_parser(
+        "ipipe-adopt",
+        help="认领平台已为本 run 的 CR 触发的 build 并绑定其 stage（只读）",
+    )
+    adopt.add_argument("run_id")
+    adopt.add_argument("--module", default=None, help="要认领的模块，默认第一个业务仓")
+    adopt.add_argument("--window-seconds", type=float, default=30)
 
     # Callable with no arguments so a session-stop hook can drive it: whoever stopped
     # the IDE may never have run a phase, which is exactly when the notice was missing.
@@ -1881,6 +2646,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     advance.add_argument("--evidence", help="其余证据上下文 JSON：workspace 收据、revision、环境指纹")
     advance.add_argument("--approval-id", help="省略则取该门最近一条 APPROVE 台账")
+
+    submit = subparsers.add_parser("submit", help="把已评审并获 G7 的变更集提交到 iCode")
+    submit.add_argument("run_id")
+    submit.add_argument("--task", required=True, help="要提交的任务 id，例如 T3")
+    submit.add_argument("--approval-id", help="省略则取该 run 最近一条 APPROVE 的 G7")
+    submit.add_argument(
+        "--icode-skill",
+        default="/Users/tom/.comate/skills/.system/icode",
+        help="system iCode skill 目录",
+    )
 
     abandon = subparsers.add_parser("abandon-intent", help="放弃一条外部写意图，写审计收据而不是删行")
     abandon.add_argument("intent_id")
@@ -1924,6 +2699,19 @@ def main(argv: list[str] | None = None) -> int:
         result = orchestrator.stop(args.run_id)
     elif args.command == "next":
         result = orchestrator.next(args.run_id)
+    elif args.command == "recover-rebuilt-change-set":
+        result = orchestrator.recover_rebuilt_change_set(
+            args.run_id, args.task_id, args.plan_artifact_id
+        )
+    elif args.command == "recover-stale-submit":
+        result = orchestrator.recover_stale_submit(
+            args.run_id, args.task_id, args.plan_artifact_id
+        )
+    elif args.command == "recover-stale-rebuilt-plan":
+        result = orchestrator.recover_stale_rebuilt_plan(
+            args.run_id, args.task_id, args.expected_state, args.source_plan_artifact_id,
+            {"business": args.business_revision, "tests": args.tests_revision},
+        )
     elif args.command == "complete-phase":
         envelope = _json_file(args.envelope)
         result = (
@@ -1983,9 +2771,33 @@ def main(argv: list[str] | None = None) -> int:
         result = _watch_ipipe(orchestrator, args.interval, args.once)
     elif args.command == "ipipe-rerun":
         runtime = _cli_ipipe_runtime(orchestrator, args.run_id)
-        result = runtime if isinstance(runtime, dict) else runtime.rerun(
-            args.stage_build_id,
-            {"approval_id": args.approval_id, "input_hash": args.input_hash},
+        if isinstance(runtime, dict):
+            result = runtime
+        else:
+            resolved = _stage_parameters(orchestrator, runtime, args.run_id, args.parameters)
+            if not resolved.get("ok"):
+                result = resolved
+            elif args.print_input_hash:
+                result = runtime.rerun_input_hash(
+                    args.stage_build_id, parameters=resolved["parameters"] or None
+                )
+            elif args.print_parameters:
+                from stage_parameters import redacted
+
+                result = {
+                    "ok": True, "reason_code": "OK",
+                    "parameters": redacted(resolved["parameters"]),
+                }
+            else:
+                result = runtime.rerun(
+                    args.stage_build_id,
+                    {"approval_id": args.approval_id, "input_hash": args.input_hash},
+                    parameters=resolved["parameters"] or None,
+                )
+    elif args.command == "ipipe-adopt":
+        runtime = _cli_ipipe_runtime(orchestrator, args.run_id)
+        result = runtime if isinstance(runtime, dict) else _ipipe_adopt(
+            orchestrator, runtime, args.run_id, args.module, args.window_seconds
         )
     elif args.command == "ai-review":
         from cli_transport import ProcessTransport
@@ -2035,6 +2847,8 @@ def main(argv: list[str] | None = None) -> int:
         result = _advance(
             orchestrator, args.run_id, args.state, args.artifacts, args.evidence, args.approval_id
         )
+    elif args.command == "submit":
+        result = _submit(orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
     elif args.command == "abandon-intent":
         result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor)
     elif args.command == "artifact":
@@ -2045,6 +2859,98 @@ def main(argv: list[str] | None = None) -> int:
     return _cli_exit_code(result)
 
 
+def _submit(
+    orchestrator: Any, run_id: str, task_id: str, approval_id: str | None, icode_skill: str
+) -> dict[str, Any]:
+    """Drive one task's submission end to end.
+
+    The wiring this needs -- the reviewed descriptor, the worktree binding the boundary
+    preflights, a process transport -- was previously assembled by hand for every
+    submission, which is both tedious and the kind of step that gets a detail wrong under
+    pressure. It is derived here instead, from the artifacts and the pinned profile.
+    """
+    from cli_transport import ProcessTransport
+    from submit_descriptor import _ownership_rows, build_and_archive
+
+    # Reject impossible invocations before descriptor construction can commit either
+    # repository. Exact input-hash validation still happens after the descriptor is built.
+    current = orchestrator.status(run_id)
+    if current.get("state") != "SUBMIT":
+        return {"ok": False, "reason_code": "INVALID_STATE", "run_id": run_id,
+                "state": current.get("state")}
+    if not any(
+        isinstance(record, dict)
+        and record.get("action") == "G7"
+        and record.get("effective_decision") == "APPROVE"
+        for record in orchestrator.approvals.for_run(run_id)
+    ):
+        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id}
+
+    built = build_and_archive(orchestrator, run_id, task_id)
+    if not built.get("ok"):
+        return built
+    descriptor = built["descriptor"]
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    profile = pinned["profile"]
+    repositories = [*(profile.get("business_repos") or []), profile.get("test_repo") or {}]
+    repository = next(
+        (item for item in repositories if isinstance(item, dict) and item.get("module") == descriptor["module"]),
+        None,
+    )
+    rows = _ownership_rows(orchestrator, run_id)
+    row = rows.get((task_id, repository.get("path"))) if isinstance(repository, dict) else None
+    if not isinstance(row, dict):
+        return {"ok": False, "reason_code": "WORKTREE_NOT_OWNED", "run_id": run_id, "task_id": task_id}
+    # Descriptor construction may select a clean same-workspace checkout whose HEAD
+    # exactly matches the reviewed revision. Keep the durable ownership row as the
+    # authority, while bind the runtime to the actual descriptor path; otherwise the
+    # runtime looks up the fallback path in the ownership map and rejects a valid
+    # reviewed checkout as WORKTREE_NOT_REGISTERED.
+    binding = {
+        "run_id": run_id,
+        "baseline_revision": row["baseline_revision"],
+        "module": repository["module"],
+        "target_branch": repository["branch"],
+        "repo_path": row["repo_path"],
+        "task_id": task_id,
+        "owner_token": row["owner_token"],
+        "worktree_path": descriptor["repo_path"],
+        "ownership_worktree_path": row["worktree_path"],
+    }
+    approval = _g7_approval(orchestrator, run_id, approval_id, descriptor["input_hash"])
+    if approval is None:
+        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id,
+                "input_hash": descriptor["input_hash"]}
+    runtime = orchestrator.icode_runtime(
+        run_id,
+        worktree_bindings={descriptor["repo_path"]: binding},
+        owner=descriptor["owner"],
+        system_skill_path=icode_skill,
+        argv_transport=ProcessTransport(),
+        submission_policy=profile.get("submission_policy"),
+    )
+    return orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime)
+
+
+def _g7_approval(
+    orchestrator: Any, run_id: str, approval_id: str | None, input_hash: str
+) -> dict[str, Any] | None:
+    """The approved G7 bound to exactly these bytes."""
+    if isinstance(approval_id, str) and approval_id:
+        record = orchestrator.approvals.get(approval_id)
+        return record if isinstance(record, dict) else None
+    for record in reversed(orchestrator.approvals.for_run(run_id)):
+        if (
+            record.get("action") == "G7"
+            and record.get("effective_decision") == "APPROVE"
+            and record.get("input_hash") == input_hash
+        ):
+            return record
+    return None
+
+
 def _cli_exit_code(result: Any) -> int:
     if not isinstance(result, dict):
         return 1
@@ -2053,7 +2959,10 @@ def _cli_exit_code(result: Any) -> int:
     if result.get("state") == "RUN_NOT_FOUND":
         return 1
     reason = result.get("reason_code")
-    return 0 if reason in {None, "OK", "READY"} else 1
+    return 0 if reason in {
+        None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
+        "SUBMISSION_RECORDED",
+    } else 1
 
 
 def _infoflow_notify_client(orchestrator: Orchestrator) -> Any:

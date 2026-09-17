@@ -8,7 +8,7 @@ All external adapters accept injected transports. Unit tests use fake transports
 
 ## iCode
 
-`submit(revision_set)` requires matching current and approved input hashes. It returns CR IDs, revisions, target branches, and a stable Revision Set ID. Never fall back to raw Git push.
+`submit(revision_set)` requires matching current and approved input hashes. It returns CR IDs, revisions, target branches, and a stable Revision Set ID. CR creation must use the iCode `git push_cr --repo-path ... --branch ...` boundary; never fall back to raw Git push.
 
 ## iPipe
 

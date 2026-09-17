@@ -43,6 +43,7 @@ class IpipeRuntime:
         log_limit: int = 4096,
         validated_profile: dict[str, Any] | None = None,
         profile_hash: str | None = None,
+        log_reader: Callable[[str], dict[str, Any]] | None = None,
     ):
         self.state = state_store
         self.approvals = approval_ledger
@@ -55,6 +56,11 @@ class IpipeRuntime:
         self.log_limit = log_limit
         self.validated_profile = validated_profile
         self.profile_hash = profile_hash
+        # A job's status is its script's exit code. A stage that runs product cases without
+        # checking their result reports success over a run where every case failed, and the
+        # only place those numbers exist is the log, so the log is read before a build is
+        # called passing.
+        self.log_reader = log_reader or _default_log_reader
         self._build_bindings: dict[str, dict[str, Any]] = {}
         self._stage_bindings: dict[str, dict[str, Any]] = {}
 
@@ -229,6 +235,19 @@ class IpipeRuntime:
                     "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
                 }
             if aggregate in _SUCCESS and all(_stage_passed(stage) for stage in normalized_stages):
+                silent = self._silent_case_failures(normalized_stages)
+                if silent:
+                    return {
+                        "ok": False,
+                        "reason_code": "JOB_SUCCEEDED_WITH_FAILED_CASES",
+                        "status": "FAILURE",
+                        "classification": "TEST_FAILURE",
+                        "build_id": build_id,
+                        "stages": normalized_stages,
+                        "case_failures": silent,
+                        "environment_fingerprint": binding["environment_fingerprint"],
+                        "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
+                    }
                 return {
                     "ok": True,
                     "reason_code": "OK",
@@ -254,7 +273,205 @@ class IpipeRuntime:
                 self.sleeper(self.poll_interval)
         return _failure("MONITOR_TIMEOUT", status="TIMEOUT", build_id=build_id)
 
-    def rerun(self, stage_build_id: str, approval: dict[str, Any]) -> dict[str, Any]:
+    def product_url(self, module: str, revision: str, pipeline_id: str) -> dict[str, Any]:
+        """The build product a downstream stage has to download, for one module.
+
+        A manual stage that asks a person to paste a download command is asking for a fact
+        the pipeline already published: the compile job carries `productHttpUrl`. Finding
+        it costs three reads -- the build for the revision, its stages, the compile
+        stage's jobs -- and removes a hand-copied parameter.
+        """
+        try:
+            builds = self.api.builds_by_revision(module, revision, pipeline_id)
+        except Exception as error:
+            return _failure(_transport_reason(error, "PIPELINE_TRANSIENT"))
+        for build in builds:
+            build_id = _build_id(build)
+            if not build_id:
+                continue
+            try:
+                stages = self.api.pipeline_stage_info(build_id)
+            except Exception as error:
+                return _failure(_transport_reason(error, "PIPELINE_TRANSIENT"))
+            for stage in stages:
+                stage_id = str(stage.get("id") or stage.get("stageBuildId") or "")
+                if not stage_id or _status(stage) not in _SUCCESS:
+                    continue
+                try:
+                    detail = self.api.stage_detail(stage_id)
+                except Exception as error:
+                    return _failure(_transport_reason(error, "PIPELINE_TRANSIENT"))
+                for group in (detail.get("entities") or {}).get("realJobBuilds") or []:
+                    for job in group if isinstance(group, list) else []:
+                        if not isinstance(job, dict) or _status(job) not in _SUCCESS:
+                            continue
+                        url = ((job.get("realJobBuild") or {}).get("productHttpUrl") or "")
+                        if isinstance(url, str) and url.startswith("http"):
+                            return {
+                                "ok": True, "reason_code": "OK", "module": module,
+                                "revision": revision, "build_id": build_id,
+                                "stage_build_id": stage_id,
+                                "job_build_id": str(job.get("id") or ""),
+                                "product_url": url,
+                            }
+        return _failure("PRODUCT_URL_NOT_PUBLISHED", module=module, revision=revision)
+
+    def _silent_case_failures(self, stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Jobs that reported success while their own log reports failed cases.
+
+        The log also names the agent host and the script that ran, which is what a person
+        needs to go and look at the environment with `tom-autodebug` when the numbers alone
+        do not explain the failure.
+        """
+        found: list[dict[str, Any]] = []
+        for stage in stages:
+            jobs = [job for job in stage.get("jobs") or [] if job.get("status") in _SUCCESS]
+            # The stage listing carries job statuses but no log links; only the stage detail
+            # does. Without this lookup a stage bound from the listing has no readable log,
+            # and a silent case failure under it stays invisible.
+            missing = [job for job in jobs if not job.get("log_url")]
+            resolved = (
+                self._stage_job_logs(stage.get("stage_build_id")) if missing else {}
+            )
+            for job in jobs:
+                log_url = job.get("log_url") or resolved.get(str(job.get("job_build_id") or ""), "")
+                if not log_url:
+                    continue
+                parsed = self.log_reader(log_url)
+                if not isinstance(parsed, dict) or not parsed.get("ok"):
+                    continue
+                ratios = [value for value in parsed.get("success_ratios") or [] if value < 100]
+                failures = parsed.get("failed_cases") or [
+                    case["case"] for case in parsed.get("case_results") or []
+                    if isinstance(case, dict) and case.get("passed") is False
+                ]
+                if not ratios and not failures:
+                    continue
+                found.append({
+                    "stage_build_id": stage.get("stage_build_id"),
+                    "stage_name": stage.get("name"),
+                    "job_build_id": job.get("job_build_id"),
+                    "job_name": job.get("name"),
+                    "log_url": log_url,
+                    "success_ratios": parsed.get("success_ratios") or [],
+                    "failed_cases": failures[:40],
+                    # Where to look next, straight from the log.
+                    "agent_host": parsed.get("agent_host"),
+                    "agent_ip": parsed.get("agent_ip"),
+                    "workspace": parsed.get("workspace"),
+                    "scripts": parsed.get("scripts") or [],
+                })
+        return found
+
+    def _stage_job_logs(self, stage_build_id: Any) -> dict[str, str]:
+        """job_build_id -> log link, from the stage detail response.
+
+        A missing or unreadable detail is not an error here: it only means this stage
+        cannot contribute case evidence, which is what an empty mapping says.
+        """
+        if not stage_build_id:
+            return {}
+        try:
+            detail = self.api.stage_detail(str(stage_build_id))
+        except Exception:
+            return {}
+        found: dict[str, str] = {}
+        pending: list[Any] = [detail]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                job_id = value.get("id") or value.get("jobBuildId")
+                url = _job_log_url(value)
+                if job_id and url:
+                    found[str(job_id)] = url
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+        return found
+
+    def _rerun_binding(
+        self, stage_build_id: str, parameters: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """What a re-run of this stage would decide, or why it cannot be decided.
+
+        Both the approval request and the write itself need this, and they have to agree
+        to the byte: an approval is only valid for the hash of exactly this binding.
+        """
+        from stage_parameters import redacted
+
+        stage_binding = self._load_stage_binding(stage_build_id)
+        if stage_binding is None:
+            return _failure("STAGE_OWNERSHIP_UNVERIFIED")
+        stage = stage_binding["stage"]
+        rerunnable = stage["status"] in _FAILURE | _MANUAL
+        # A stage whose jobs all exited zero while their logs report failed cases is a
+        # failure the platform calls a success. Refusing to re-run it left the only remedy
+        # outside the control plane, so the case evidence makes it rerunnable -- and the
+        # approval is bound to that evidence, not merely to the stage.
+        silent = [] if rerunnable else self._silent_case_failures([stage])
+        if not rerunnable and not silent:
+            return _failure("STAGE_NOT_RERUNNABLE")
+        context = stage_binding["context"]
+        build_id = stage_binding["build_id"]
+        failure_signature = stage.get("failure_signature") or _failure_signature(
+            build_id, [stage], []
+        )
+        return {
+            "ok": True,
+            "reason_code": "OK",
+            "context": context,
+            "build_id": build_id,
+            "stage": stage,
+            "case_failures": silent,
+            "binding": {
+                "operation": "ipipe.rerun",
+                "run_id": self.run_id,
+                "pipeline_id": context["pipeline_id"],
+                "module": context["module"],
+                "environment_fingerprint": context["environment_fingerprint"],
+                "build_id": build_id,
+                "stage_build_id": stage_build_id,
+                "revision_set_id": context["revision_set_id"],
+                "repositories": context["repositories"],
+                "failure_signature": failure_signature,
+                **({"case_failure_signature": _canonical_hash(silent)} if silent else {}),
+                **({"parameters": redacted(parameters)} if parameters else {}),
+            },
+        }
+
+    def rerun_input_hash(
+        self, stage_build_id: str, *, parameters: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """The G8 hash to request approval for, without touching the stage."""
+        bound = self._rerun_binding(stage_build_id, parameters)
+        if not bound.get("ok"):
+            return bound
+        return {
+            "ok": True,
+            "reason_code": "OK",
+            "run_id": self.run_id,
+            "stage_build_id": stage_build_id,
+            "input_hash": _canonical_hash(bound["binding"]),
+            "case_failures": bound["case_failures"],
+        }
+
+    def rerun(
+        self,
+        stage_build_id: str,
+        approval: dict[str, Any],
+        *,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Re-run or continue a stage, optionally carrying the inputs it asks for.
+
+        A manual stage can declare parameters a person normally types. They are derived
+        elsewhere (`stage_parameters`) and passed in here. What the G8 approval binds, and
+        what the intent records, is the *redacted* form: the decision is "run this stage
+        with this CR and this product", while the irepo token in the download command is a
+        credential and has no business in an approval ledger or an audit payload.
+        """
+        from stage_parameters import redacted
+
         key = f"ipipe.rerun:{self.run_id}:{stage_build_id}"
         completed = self.state.result_by_idempotency_key(key)
         if completed is not None:
@@ -275,27 +492,12 @@ class IpipeRuntime:
                 return reconciled
             return _failure("QUERY_REQUIRED", intent_id=existing["intent_id"], retry_allowed=False)
 
-        stage_binding = self._load_stage_binding(stage_build_id)
-        if stage_binding is None:
-            return _failure("STAGE_OWNERSHIP_UNVERIFIED")
-        stage = stage_binding["stage"]
-        if stage["status"] not in _FAILURE | _MANUAL:
-            return _failure("STAGE_NOT_RERUNNABLE")
-        context = stage_binding["context"]
-        build_id = stage_binding["build_id"]
-        failure_signature = stage.get("failure_signature") or _failure_signature(build_id, [stage], [])
-        binding = {
-            "operation": "ipipe.rerun",
-            "run_id": self.run_id,
-            "pipeline_id": context["pipeline_id"],
-            "module": context["module"],
-            "environment_fingerprint": context["environment_fingerprint"],
-            "build_id": build_id,
-            "stage_build_id": stage_build_id,
-            "revision_set_id": context["revision_set_id"],
-            "repositories": context["repositories"],
-            "failure_signature": failure_signature,
-        }
+        stage_bound = self._rerun_binding(stage_build_id, parameters)
+        if not stage_bound.get("ok"):
+            return stage_bound
+        binding = stage_bound["binding"]
+        context = stage_bound["context"]
+        build_id = stage_bound["build_id"]
         input_hash = _canonical_hash(binding)
         approval_failure = _approved_record(
             self.approvals, approval, run_id=self.run_id, action="G8", input_hash=input_hash
@@ -312,7 +514,7 @@ class IpipeRuntime:
             return _failure("RERUN_CONFLICT" if claim["status"] == "CONFLICT" else "QUERY_REQUIRED", retry_allowed=False)
         intent = claim["intent"]
         try:
-            response = self.api.manual_execute_stage(stage_build_id, {})
+            response = self.api.manual_execute_stage(stage_build_id, dict(parameters or {}))
         except Exception as error:
             if isinstance(error, IpipeTransportError) and not error.transient:
                 return _failure(
@@ -323,7 +525,7 @@ class IpipeRuntime:
                 return reconciled
             return _failure("RERUN_RESULT_UNKNOWN", intent_id=intent["intent_id"], retry_allowed=False)
         response_stage = str(response.get("stageBuildId") or response.get("id") or "") if isinstance(response, dict) else ""
-        if response_stage != stage_build_id:
+        if not response_stage:
             return _failure("RERUN_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
         try:
             current = self.api.build_by_id(build_id, **self._build_key(binding))
@@ -344,19 +546,34 @@ class IpipeRuntime:
                 _transport_reason(error, "RERUN_CONFIRMATION_REQUIRED"),
                 intent_id=intent["intent_id"], retry_allowed=False,
             )
-        current_stage = next(
-            (
-                _normalize_stage(item) for item in current_stages
-                if isinstance(item, dict)
-                and str(item.get("id") or item.get("stageBuildId") or "") == stage_build_id
-            ),
-            None,
+        normalized = [_normalize_stage(item) for item in current_stages if isinstance(item, dict)]
+        # Re-executing a stage that already finished makes iPipe allocate a *new* stage
+        # build for the same stage of the same build, so the response names an id the
+        # request never mentioned. Demanding the requested id back reported a started
+        # stage as an invalid response; the successor is accepted only when it is the same
+        # stage of the same build, and it is recorded so monitoring follows the new run.
+        started = next(
+            (item for item in normalized if item["stage_build_id"] == response_stage), None
         )
-        if current_stage is None or _status(current_stage) in _FAILURE | _MANUAL:
+        if started is None or _status(started) in _FAILURE | _MANUAL:
             return _failure("RERUN_CONFIRMATION_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-        return self._save_rerun_receipt(intent["intent_id"], payload)
+        if started["stage_build_id"] != stage_build_id and not _same_stage(
+            stage_bound["stage"], started
+        ):
+            return _failure("RERUN_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
+        if started["stage_build_id"] != stage_build_id:
+            self._bind_stage(build_id, context, started)
+        return self._save_rerun_receipt(
+            intent["intent_id"], payload, started_stage_build_id=started["stage_build_id"]
+        )
 
-    def _save_rerun_receipt(self, intent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _save_rerun_receipt(
+        self,
+        intent_id: str,
+        payload: dict[str, Any],
+        *,
+        started_stage_build_id: str | None = None,
+    ) -> dict[str, Any]:
         context = {
             "module": payload.get("module"),
             "revision_map": {
@@ -365,13 +582,18 @@ class IpipeRuntime:
                 if isinstance(item, dict) and item.get("module") and item.get("revision")
             },
         }
-        evidence_refs = _build_evidence(payload["build_id"], context, [{"stage_build_id": payload["stage_build_id"]}])
+        started = started_stage_build_id or payload["stage_build_id"]
+        stages = [{"stage_build_id": payload["stage_build_id"]}]
+        if started != payload["stage_build_id"]:
+            stages.append({"stage_build_id": started})
+        evidence_refs = _build_evidence(payload["build_id"], context, stages)
         receipt = {
             "ok": True,
             "reason_code": "OK",
             "run_id": self.run_id,
             "build_id": payload["build_id"],
             "stage_build_id": payload["stage_build_id"],
+            "started_stage_build_id": started,
             "revision_set_id": payload["revision_set_id"],
             "evidence_refs": evidence_refs,
         }
@@ -388,17 +610,23 @@ class IpipeRuntime:
                     error.reason_code, intent_id=intent["intent_id"], retry_allowed=False
                 )
             return None
-        expected_revisions = {
-            item["module"]: item["revision"]
-            for item in payload.get("repositories", [])
-            if isinstance(item, dict) and _nonempty(item.get("module")) and _nonempty(item.get("revision"))
+        # Identity is checked by the same rule the rest of this runtime uses: a build
+        # record states the revision it was triggered on and only sometimes a map over
+        # every repository, so an absent field is not evidence of a mismatch. Comparing a
+        # whole revision map here made reconciliation impossible against the real gateway,
+        # which returns no map at all.
+        context = self._load_build_binding(payload["build_id"]) or {
+            "pipeline_id": payload.get("pipeline_id"),
+            "module": payload.get("module"),
+            "revision_map": {
+                item["module"]: item["revision"]
+                for item in payload.get("repositories", [])
+                if isinstance(item, dict)
+                and _nonempty(item.get("module")) and _nonempty(item.get("revision"))
+            },
+            "parameters": (build or {}).get("params", (build or {}).get("parameters")),
         }
-        actual_revisions = build.get("revisions") if isinstance(build, dict) else None
-        if actual_revisions != expected_revisions:
-            return _failure("REVISION_MISMATCH", intent_id=intent["intent_id"], retry_allowed=False)
-        if payload.get("pipeline_id") and str(build.get("pipelineConfId") or build.get("pipeline_id") or "") != payload["pipeline_id"]:
-            return _failure("REVISION_MISMATCH", intent_id=intent["intent_id"], retry_allowed=False)
-        if payload.get("module") and str(build.get("module") or build.get("space") or "") != payload["module"]:
+        if not _matches_build(build, context):
             return _failure("REVISION_MISMATCH", intent_id=intent["intent_id"], retry_allowed=False)
         try:
             stages = _embedded_stages(build)
@@ -406,17 +634,43 @@ class IpipeRuntime:
                 stages = self._build_stages(payload["build_id"], build)
         except Exception:
             return None
+        normalized = [_normalize_stage(item) for item in stages if isinstance(item, dict)]
         current_stage = next(
             (
-                _normalize_stage(item) for item in stages
-                if isinstance(item, dict)
-                and str(item.get("id") or item.get("stageBuildId") or "") == payload["stage_build_id"]
+                item for item in normalized
+                if item["stage_build_id"] == payload["stage_build_id"]
             ),
             None,
         )
-        if current_stage is None or _status(current_stage) in _FAILURE | _MANUAL:
+        if current_stage is not None and _status(current_stage) not in _FAILURE | _MANUAL:
+            return self._save_rerun_receipt(intent["intent_id"], payload)
+        # The stage the intent names may have been superseded: re-executing a finished
+        # stage allocates a new stage build, so the evidence that the write landed is a
+        # sibling run of the same stage that is no longer waiting for a person.
+        requested = self._stage_bindings.get(payload["stage_build_id"], {}).get("stage") or (
+            self.state.idempotency_result(
+                f"ipipe.stage-binding:{self.run_id}:{payload['stage_build_id']}"
+            ) or {}
+        ).get("stage")
+        if not isinstance(requested, dict):
             return None
-        return self._save_rerun_receipt(intent["intent_id"], payload)
+        successor = next(
+            (
+                item for item in normalized
+                if item["stage_build_id"] != payload["stage_build_id"]
+                and _same_stage(requested, item)
+                and _status(item) not in _FAILURE | _MANUAL
+            ),
+            None,
+        )
+        if successor is None:
+            return None
+        binding = self._load_build_binding(payload["build_id"])
+        if binding is not None:
+            self._bind_stage(payload["build_id"], binding, successor)
+        return self._save_rerun_receipt(
+            intent["intent_id"], payload, started_stage_build_id=successor["stage_build_id"]
+        )
 
     def verify_release(self, build_id: str, revision_set: dict[str, Any]) -> dict[str, Any]:
         binding = self._load_build_binding(build_id)
@@ -583,10 +837,19 @@ class IpipeRuntime:
                 "environment_fingerprint", "parameters", "target_branch", "release_rule", "stage_classes",
             )
         }
-        self.state.save_idempotency_result(
-            f"ipipe.build-binding:{self.run_id}:{build_id}",
-            {"run_id": self.run_id, "build_id": build_id, "binding": binding},
-        )
+        try:
+            self.state.save_idempotency_result(
+                f"ipipe.build-binding:{self.run_id}:{build_id}",
+                {"run_id": self.run_id, "build_id": build_id, "binding": binding},
+            )
+        except ValueError:
+            # Ownership of a build is written once and never moves. Discovering the same
+            # build again -- a second adopt, a watcher tick after a diagnosis -- must
+            # therefore keep the stored binding rather than overwrite or fail.
+            stored = self.state.idempotency_result(f"ipipe.build-binding:{self.run_id}:{build_id}")
+            if isinstance(stored, dict) and isinstance(stored.get("binding"), dict):
+                self._build_bindings[build_id] = stored["binding"]
+                return
         self._build_bindings[build_id] = binding
 
     def _bind_stage(self, build_id: str, context: dict[str, Any], stage: dict[str, Any]) -> None:
@@ -844,7 +1107,33 @@ def _normalize_stage(value: dict[str, Any]) -> dict[str, Any]:
         "job_statuses": [
             _status(job) for job in value.get("jobBuildBeans") or [] if isinstance(job, dict)
         ],
+        "stage_conf_id": str(value.get("stageConfId") or ""),
+        "jobs": [
+            {
+                "job_build_id": str(job.get("id") or job.get("jobBuildId") or ""),
+                "name": str(job.get("jobName") or job.get("name") or ""),
+                "status": _status(job),
+                "log_url": _job_log_url(job),
+            }
+            for job in value.get("jobBuildBeans") or [] if isinstance(job, dict)
+        ],
     }
+
+
+def _job_log_url(job: dict[str, Any]) -> str:
+    for entry in job.get("logs") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("url"), str) and entry["url"].startswith("http"):
+            return entry["url"]
+    return ""
+
+
+def _default_log_reader(url: str) -> dict[str, Any]:
+    from ipipe_logs import fetch, parse
+
+    fetched = fetch(url)
+    if not fetched.get("ok"):
+        return fetched
+    return {**parse(fetched["text"]), "url": url}
 
 
 def _stage_passed(stage: dict[str, Any]) -> bool:
@@ -895,6 +1184,19 @@ def _classification(stages: list[dict[str, Any]], jobs: list[dict[str, Any]], st
     if any(word in text for word in ("compile", "build", "link", "code", "interface")):
         return "CODE_FAILURE"
     return "MIXED_FAILURE" if len(stages) > 1 else "PIPELINE_FAILURE"
+
+
+def _same_stage(requested: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Whether two stage builds are two runs of the same stage.
+
+    A re-executed stage keeps its stage configuration and its name; only the stage build
+    id is new. The configuration id decides when both sides carry one, and the name is the
+    fallback for a binding written before it was recorded.
+    """
+    left, right = str(requested.get("stage_conf_id") or ""), str(candidate.get("stage_conf_id") or "")
+    if left and right:
+        return left == right
+    return bool(requested.get("name")) and requested.get("name") == candidate.get("name")
 
 
 def _failure_signature(build_id: str, stages: list[dict[str, Any]], jobs: list[dict[str, Any]]) -> str:

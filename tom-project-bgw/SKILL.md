@@ -1,6 +1,6 @@
 ---
 name: tom-project-bgw
-description: Use when tom-autodev targets the BGW C/C++ project and needs repository topology, knowledge sources, test-repository, environment, Review, or iPipe rules.
+description: Use when tom-autodev targets the BGW C/C++ project and needs repository topology, knowledge sources, test-repository, environment, Review, iPipe rules, the 25G client/BGW/RS topology, associated logs, version or counter inspection, or P0新case回归 parameters get_bgw_test_case and get_bgwagent.
 ---
 
 # Tom Project BGW
@@ -26,8 +26,12 @@ The profile must explicitly name each business repository/module, independent pr
 
 BGW tests must assert the stable externally observable gateway/API/protocol boundary and include valid, boundary, malformed, compatibility, and regression cases. Environment readiness must include runner OS/architecture, image/toolchain digests, services/data/capacity, and reproducible cleanup. All build, unit, regression, integration, packaging, and release commands run only in the pinned iPipe runner; Mac performs source generation/Review and evidence parsing.
 
+## Runtime Topology and Manual Stages
+
+Read [`references/runtime-topology.md`](references/runtime-topology.md) before diagnosing or continuing a BGW iPipe product-case stage. It names the live client/BGW/RS topology, associated logs, version and counter inspection, and the `P0新case回归` parameter map (`get_bgw_test_case`, `get_bgwagent`). That stage updates client `bgw_auto` and `tool/bgwagent` only; the server BGW binary is replaced by earlier compile/regression stages.
+
 ## Verification Contract
 
 The BGW project profile must map each task to business revisions, product-test revision, test plan hash, environment fingerprint, iPipe build/stage evidence, and release version. Compile, unit, regression, integration, deployment, and release execution occur only in that profile's iPipe runner. The Mac may generate source/test patches and perform source Review, but never run BGW build or tests.
 
-**REQUIRED PARENT:** Return topology, knowledge, environment, and release evidence requirements to `tom-autodev`; do not call iCode/iPipe directly.
+**REQUIRED PARENT:** Return topology, knowledge, environment, iPipe parameter mapping, and release evidence requirements to `tom-autodev`; do not call iCode/iPipe directly.

@@ -1,6 +1,6 @@
 ---
 name: tom-autodev
-description: Use when a user wants to drive an iCafe requirement through Spec, end-to-end task implementation, source review, iCode, iPipe verification, repair, and release across a configured project and language.
+description: Use when a user wants to drive an iCafe requirement through Spec, end-to-end task implementation, source review, iCode, iPipe verification, repair, and release across a configured project and language. Also use when a failed or manual iPipe stage such as BGW P0新case回归 must be parameterized and rerun through G8.
 ---
 
 # Tom Autodev
@@ -15,7 +15,7 @@ This is a Comate-only entrypoint. There is no alternate host or entrypoint. The 
 
 1. Require an explicit project and human-confirmed iCafe card.
 2. Load project/language skills and profile.
-3. Read the iCafe snapshot through the iCafe boundary, then call `start(requirement_id, project, requirement_snapshot=...)`; use `status`, `approve`, `resume`, or `stop` for an existing run.
+3. Read the iCafe snapshot through the iCafe boundary, then call `start(requirement_id, project, requirement_snapshot=...)`; use `status`, `approve`, `resume`, or `stop` for an existing run. `resume` only returns a checkpoint and lists uncertain external intents to reconcile; it never executes or completes a phase.
 4. Return `PROJECT_NOT_READY` when the profile, independent test repo, Review provider, stable iPipe profile, environment profile, or approval channel is missing.
 
 Do not infer projects from directories or bind iCafe cards without confirmation.
@@ -32,17 +32,35 @@ Intake -> tom-grill -> tom-spec -> tom-tasks -> WorkspaceGate
        -> iCode -> iPipe -> approved release
 ```
 
-Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; Comate and Infoflow share one `approval_id`, and the first valid response wins.
+For each child phase, the current Agent executes the complete sequence:
+`next` -> load the named child skill -> read pinned inputs and validate predecessor
+hash, schema, revisions, and ownership -> generate the real `ArtifactEnvelope` ->
+EvidenceGate -> applicable human approval -> `complete-phase`. REVIEW is evidence-only
+and does not open a phase gate. Loading a skill, calling `next`,
+or calling `resume` is not phase completion. Do not invent or require a host-side
+LLM/Implement runner; the current Agent and its Read/apply_patch tools are the runner.
+For IMPLEMENT, generate the real change-set, commit owned worktrees with the
+repository identity and a Change-Id via `submit_descriptor._commit_if_dirty`,
+obtain G5 APPROVE, then call `complete-phase`, which must transition to REVIEW. Track progress by
+`run_id/source_event_id/action_id/input_hash` and the generated artifact hash. If the
+same action has not advanced, perform its missing work instead of repeating resume or
+approval; reuse an existing pending/approved gate only for its exact approval input
+hash. Re-read the saved candidate after approval; do not regenerate it or request G5
+again. Only call `next` for the next phase after a confirmed completion. If blocked,
+report the actual missing input, permission, ownership, or evidence, not a fictitious
+runner. Status must distinguish `待生成` from `已批准待提交`. G4/G5 的已批准待提交是 complete-phase；G7 的已批准待提交是 cli.py submit，不是 complete-phase。
+
+Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; Comate and Infoflow share one `approval_id`, and the first valid response wins. Every approval card must identify the affected repository/module, target branch, and pinned revision; a multi-repository change lists one row per repository and revision. G7 cards must also state whether the operation creates a new CR or appends an existing one.
 
 When a run needs a decision that is not a gate, ask it in 如流 as well as in the IDE (`scripts/ask_infoflow.py`, see `references/approval-policy.md`); a question that only exists in the CLI stays invisible until someone comes back to look.
 
-Telling the operator that a run is parked is a session-stop concern, not a phase concern: in Comate register `scripts/ide_turn_hook.py` as the harness `Stop` hook in `~/.comate/hooks.json` or `~/.comate/hooks.local.json`; Claude Code uses `~/.claude/settings.json`. The notice follows the stop rather than a `complete-phase` call, which is how gated stops, questions, errors, and API-driven runs used to go unannounced. `orchestrator.py notify-ide-turn` is the same path by hand; one notice per ledger event, suppressed while an approval card is out.
+Approval settlement creates one durable, hash-bound resume handoff containing `approval_id`, `run_id`, `input_hash`, the source event, and the next action. In a live Comate turn, register `scripts/ide_turn_hook.py` as the `Stop` hook in `~/.comate/hooks.json` or `~/.comate/hooks.local.json`: after a valid APPROVE it returns a blocking continuation with `additionalContext`, so Comate resumes without a manual `继续`. The hook only hands control back to Comate; it never executes a phase or external write. Replays are idempotent and stale, rejected, expired, mismatched, or completed handoffs are ignored. `SessionEnd` is fire-and-forget and cannot create a new Agent turn, so an ended session receives the existing 如流 fallback notice; `orchestrator.py notify-ide-turn` remains the manual notification path.
 
 Call `EvidenceGate` before every checkpoint or external side effect. Block on a changed input hash, missing artifact, unresolved finding, revision mismatch, stale environment fingerprint, or stale verification evidence.
 
 `tom-review` produces evidence only and never grants approval. A dual-axis PASS is a prerequisite for the parent-owned G7 iCode approval, bound to the exact reviewed Change Set hash; `INCOMPLETE`, `NEEDS_CLARIFICATION`, stale/hash-mismatched baselines, and blocking findings stop submission or route to diagnosis.
 
-For a failed or manual iPipe stage, use `orchestrator.py ipipe-rerun RUN STAGE_BUILD_ID APPROVAL_ID INPUT_HASH`; it is the explicit G8/manual-continuation path and reuses the durable stage ownership check.
+For a failed or manual iPipe stage, load the project skill's runtime/parameter map first, then use `orchestrator.py ipipe-rerun RUN STAGE_BUILD_ID APPROVAL_ID INPUT_HASH --parameter NAME ...`; it is the explicit G8/manual-continuation path and reuses the durable stage ownership check. The project skill names the topology, logs, version/counter checks, and parameter-to-product mapping; this controller resolves product URLs, redacts tokens, requests G8, reruns, and classifies the new evidence. Child project skills never call iPipe.
 
 The platform's own review (小码哥) is a second opinion taken after SUBMIT, while the CR exists and nothing is merged: `orchestrator.py ai-review start RUN --change-number N --revision R`, then `ai-review poll RUN --conversation-id C`. The conversation id comes back once and `get_ai_review` accepts nothing else, so the trigger claims an intent and writes the id into a receipt; a trigger left without one reports `AI_REVIEW_CONVERSATION_LOST` instead of spending a second review to replace a lost one. Verify each finding against the code before changing anything: a report that cannot see the sibling repositories will call a cross-repository contract broken when the other side already enforces it. A finding you do confirm routes `SUBMIT -> DIAGNOSE` and repairs through the ordinary path, landing as a new revision on the same CR; the repaired task owes iCode that new change set before IPIPE will start.
 
@@ -66,6 +84,8 @@ The platform's own review (小码哥) is a second opinion taken after SUBMIT, wh
 | Diagnose | `tom-diagnose` |
 | Language | `tom-lang-c-cpp` or `tom-lang-npl` |
 | Project | `tom-project-bgw` or `tom-project-xflow` |
+
+Project skills supply repository topology, environment, iPipe parameter names, log locations, and version/counter inspection. This controller sequences `next` / G8 / `ipipe-rerun` / evidence ingest. For BGW, read `tom-project-bgw/references/runtime-topology.md` before filling or rerunning `P0新case回归`.
 
 Every child phase follows [`references/phase-protocol.md`](references/phase-protocol.md): consume and emit a schema-validated, content-hashed `ArtifactEnvelope`, persist changed requirement/design/implementation/review/diagnosis documents to KU, and link the artifact in an iCafe comment. Child skills return artifacts and evidence to this controller; only this controller owns iCafe/KU/iCode/iPipe adapters and G0-G10 gates.
 

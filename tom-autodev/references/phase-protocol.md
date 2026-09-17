@@ -17,11 +17,31 @@ The child skill must validate the predecessor hash and the phase schema before p
 | SPEC | `spec` | grill artifact | G2 | behavior, test interface, environment, traceability |
 | TASKS | `task-dag` | approved spec | G3 | acyclic end-to-end frontier DAG |
 | PLAN | `task-plan` | task + WorkspaceGate | G4 | executable per-task plan |
-| IMPLEMENT | `change-set` | approved plan + owned worktrees | G5 | business/test candidate diff |
+| IMPLEMENT | `change-set` | approved, hash-pinned plan + owned worktrees | G5 | business/test candidate diff |
 | REVIEW | `review` | fixed change set | no phase approval; parent G7 after PASS | independent Standards and Spec verdict |
 | DIAGNOSE | `diagnosis` | frozen failure bundle | G6 | one falsifiable cause and repair route |
 
-Child skills return to the parent on missing input, hash mismatch, unavailable provider, or unresolved approval. They never call iCafe, KU, iCode, Infoflow, or iPipe directly. All compilation, tests, regression, integration, NCS, simulator, Docker, and release execution happens in the approved iPipe runner; a Mac invocation must return `LOCAL_EXECUTION_FORBIDDEN`.
+Child skills return to the parent on missing input, hash mismatch, unavailable provider, or unresolved approval. They never call iCafe, KU, iCode, Infoflow, or iPipe directly. The current Comate Agent executes the child phase after loading its skill; no separate host LLM/Implement runner is required. `resume` only lists uncertain intents and the checkpoint; it neither reconciles them itself nor executes or completes a phase. All compilation, tests, regression, integration, NCS, simulator, Docker, and release execution happens in the approved iPipe runner; a Mac invocation must return `LOCAL_EXECUTION_FORBIDDEN`.
+
+The order is strict: `next -> load child skill -> read pinned inputs -> validate
+predecessor/schema/revisions/ownership -> generate artifact -> EvidenceGate -> applicable
+human approval -> complete-phase` (REVIEW has no phase approval). A repeated action that has not advanced the checkpoint
+must not reissue resume or duplicate approval. IMPLEMENT must obtain G5 APPROVE before
+`complete-phase`, and completion transitions to REVIEW.
+
+Read `input_artifacts` by their immutable IDs through the integrity-checked artifact
+reader, then read the actual pinned contents, not just their paths or summaries.
+IMPLEMENT must use the pinned Plan and verify both business/test worktrees through
+`WorkspaceManager.query_ownership` with run/task/owner token and baseline revisions
+before any edit. Preserve user changes; a conflict stops execution. Use the current
+Agent's Read/apply_patch (or an available Agent delegation), not a new LLM service.
+Save the real candidate and its approval input hash before asking the parent for G5.
+On APPROVE, re-read that same candidate and verify the exact ledger binding; use
+`complete-phase` for archival and transition, never `advance` as a shortcut.
+Hash drift requires a new human decision, while an unchanged action reuses its gate.
+Missing remote authorization/receipts remain a block, not permission to fake evidence.
+
+A `PLAN -> IMPLEMENT` event pins the completed Plan's artifact ID and content hash. IMPLEMENT resolves this pin before any latest-by-task lookup; an invalid, cross-run, cross-task, or hash-mismatched pin fails closed as a missing predecessor. `orchestrator.py recover-rebuilt-change-set RUN TASK PLAN_ARTIFACT` is the local-only recovery entry for rebuilding a candidate: it verifies that immutable Plan, records an idempotent `IMPLEMENT` checkpoint with the pin, and performs no worktree, database, or remote adapter operation.
 
 ## Parent Controller Phases
 
@@ -37,7 +57,7 @@ The following phases are controller-owned. They use the same envelope shape but 
 
 ### G8 Controller Action
 
-G8 is a parent-owned controller action, not a child phase. Its inputs are the frozen failed-stage `ipipe-evidence`, the exact iCode submission/revisions, pinned pipeline/module/profile/environment identity, the requested failed stage, and an allowlisted rerun or manual-continuation parameter set. The parent publishes the same approval request to Comate and Infoflow; the approval `input_hash` is the canonical hash of the failed-stage evidence plus action and parameters, and cannot authorize a revision, profile, or unplanned stage change.
+G8 is a parent-owned controller action, not a child phase. Its inputs are the frozen failed-stage `ipipe-evidence`, the exact iCode submission/revisions, pinned pipeline/module/profile/environment identity, the requested failed stage, and an allowlisted rerun or manual-continuation parameter set. Before filling parameters, the parent loads the project skill's runtime map so each named input resolves to a compiled product of this run (for BGW, `get_bgw_test_case` → `baidu/nsiqa/x86bgw`, `get_bgwagent` → `baidu/sysip/bgwagent`). The parent publishes the same approval request to Comate and Infoflow; the approval `input_hash` is the canonical hash of the failed-stage evidence plus action and parameters, and cannot authorize a revision, profile, or unplanned stage change. After rerun, classify from the project skill's log order before routing to DIAGNOSE: job log, client `out`/`res.csv`, then server `/var/log/messages`.
 
 Before calling iPipe, persist a durable intent whose identity is `run_id + task_id + G8 action + input_hash`; after the remote action, persist a receipt containing the intent identity, rerun/manual-continuation identity, pipeline/build/stage/job IDs, exact revisions/profile/environment fingerprints, and result evidence. Completion requires a verified remote result for the same revisions/profile and a persisted `ipipe-evidence` update linked to both the intent and receipt. Replay of a completed intent is idempotent; an unknown result, missing receipt, approval timeout/rejection, hash/profile/revision drift, unauthorized parameter, or unbounded retry is a hard stop and requires recovery or a new human decision.
 

@@ -571,7 +571,13 @@ class PhaseProtocol:
         )
         receipt_error = self._receipt_error(run_id, envelope, receipt)
         if receipt_error is not None:
-            return _failure(receipt_error, run_id=run_id, phase_complete=False)
+            details = {"run_id": run_id, "phase_complete": False}
+            if isinstance(receipt, dict):
+                if receipt.get("retry_allowed") is not None:
+                    details["retry_allowed"] = receipt["retry_allowed"]
+                if isinstance(receipt.get("intent_id"), str) and receipt["intent_id"]:
+                    details["intent_id"] = receipt["intent_id"]
+            return _failure(receipt_error, **details)
         final_envelope = {
             **validated["draft"],
             "knowledge_doc_id": receipt["child_doc_id"],
@@ -590,7 +596,7 @@ class PhaseProtocol:
             return self._raced_completion(
                 run_id, result_key, draft_hash, _failure(recheck, run_id=run_id)
             )
-        if self.state.pending_intents(run_id):
+        if self._blocking_pending(run_id):
             return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
         target, next_task_id, completion_reason = self._completion_target(action, envelope)
         transition = self.transitions.validate(action["state"], target)
@@ -604,6 +610,10 @@ class PhaseProtocol:
                 "artifact_id": stored["artifact_id"],
                 "artifact_hash": envelope["content_hash"],
                 "task_id": action.get("task_id"),
+                **(
+                    {"plan_artifact_id": stored["artifact_id"], "plan_content_hash": envelope["content_hash"]}
+                    if action["phase"] == "PLAN" and target == "IMPLEMENT" else {}
+                ),
                 "source_revisions": validated["draft"].get("source_revisions", {}),
                 "knowledge_receipt": {
                     "child_doc_id": receipt["child_doc_id"],
@@ -731,15 +741,44 @@ class PhaseProtocol:
             evidence = payload.get("evidence")
             explicit = evidence.get("task_id") if isinstance(evidence, dict) else None
         if isinstance(explicit, str) and explicit:
-            if state in {"WORKSPACE", "PLAN"} and not self._task_dependencies_met(run_id, explicit):
-                # A DAG amendment can give the pinned task a new prerequisite. The
-                # pointer carried by the previous event predates that edge, so honour
-                # the amended frontier instead of planning a task that is now blocked.
+            if (
+                state == "PLAN"
+                and payload.get("reason_code") in {
+                    "STALE_REBUILT_PLAN_RECOVERED",
+                    "STALE_SUBMIT_RECOVERED",
+                    "REVIEW_REFRESH_REQUIRED",
+                }
+                and self._task_dependencies_met(run_id, explicit)
+            ):
+                return explicit
+            # CODE_ONLY repairs re-enter PLAN carrying the diagnosed task. That task
+            # already has a passing Review — that is why SUBMIT happened — so the
+            # "already reviewed" skip would plan the next DAG node instead of the
+            # repair. Honour the pointer whenever PLAN was entered from DIAGNOSE.
+            if (
+                state == "PLAN"
+                and payload.get("previous_state") == "DIAGNOSE"
+                and self._task_dependencies_met(run_id, explicit)
+            ):
+                return explicit
+            if state in {"WORKSPACE", "PLAN"} and (
+                not self._task_dependencies_met(run_id, explicit)
+                or self._task_reviewed(run_id, explicit)
+            ):
+                # A DAG amendment can give the pinned task a new prerequisite, and the
+                # pointer carried by the previous event can also name a task that already
+                # passed Review: after an amendment the run re-enters WORKSPACE carrying
+                # whatever task the SPEC and TASKS actions happened to be bound to. Either
+                # way the amended frontier is the answer, not a task that is blocked or
+                # already finished.
                 return self._ready_task(run_id)
             return explicit
         if state in {"WORKSPACE", "PLAN"}:
             return self._ready_task(run_id)
         if state == "IMPLEMENT":
+            pinned = self._pinned_plan(run_id, current)
+            if pinned is not None:
+                return pinned["envelope"].get("task_id")
             artifact = self.artifacts.latest_phase(run_id, "PLAN")
             return artifact.get("envelope", {}).get("task_id") if artifact.get("valid") else None
         if state == "REVIEW":
@@ -751,6 +790,66 @@ class PhaseProtocol:
                 if artifact.get("valid"):
                     return artifact["envelope"].get("task_id")
         return None
+
+    def _passing_reviews(self, run_id: str) -> dict[str, int]:
+        """task_id -> ledger position of its newest passing Review."""
+        found: dict[str, int] = {}
+        for artifact in self.artifacts.phase_artifacts(run_id, "REVIEW"):
+            if not artifact.get("valid") or not _passing_review(artifact["envelope"].get("content")):
+                continue
+            task_id = artifact["envelope"].get("task_id")
+            sequence = artifact.get("sequence")
+            if isinstance(task_id, str) and isinstance(sequence, int):
+                found[task_id] = max(found.get(task_id, 0), sequence)
+        return found
+
+    def _task_reviewed(self, run_id: str, task_id: str) -> bool:
+        """True when this task's passing Review still covers the current task DAG.
+
+        A Review is only evidence about the scope it was written against. An amendment
+        that gives an already-reviewed task new scope -- Spec 1.1.3 adding NAT64 coverage
+        to T3, say -- publishes a newer task DAG, and the old Review says nothing about
+        the added work. Treating it as "finished forever" emptied the frontier and parked
+        the run with no task to plan.
+        """
+        dag = self.artifacts.latest_phase(run_id, "TASKS", None)
+        dag_sequence = dag.get("sequence") if dag.get("valid") else None
+        reviewed = self._passing_reviews(run_id).get(task_id)
+        if reviewed is None:
+            return False
+        if dag_sequence is not None and reviewed <= dag_sequence:
+            return False
+        # Review is evidence about the IMPLEMENT candidate it consumed. Do not
+        # consult a later submit descriptor here: that descriptor is created
+        # after Review and would make the validity check circular (and would
+        # mistake an unreviewed worktree HEAD for reviewed evidence).
+        implement = self.artifacts.latest_phase(run_id, "IMPLEMENT", task_id)
+        reviews = [
+            artifact for artifact in self.artifacts.phase_artifacts(run_id, "REVIEW")
+            if artifact.get("valid")
+            and artifact.get("sequence") == reviewed
+            and artifact["envelope"].get("task_id") == task_id
+            and _passing_review(artifact["envelope"].get("content"))
+        ]
+        if not reviews:
+            return False
+        review = reviews[0]["envelope"]
+        # Older ledger fixtures may contain a Review without the separately
+        # archived IMPLEMENT envelope. Preserve their historical frontier
+        # semantics; when an IMPLEMENT predecessor exists, however, require
+        # the explicit hash binding below.
+        if not implement.get("valid"):
+            return True
+        candidate_hash = implement["envelope"].get("content", {}).get("candidate_hash")
+        if not candidate_hash or not review.get("content", {}).get("change_set_hash"):
+            return True
+        return (
+            isinstance(candidate_hash, str)
+            and candidate_hash
+            and review.get("content", {}).get("change_set_hash") == candidate_hash
+            and review.get("parent_artifact_hash")
+            == implement["envelope"].get("content_hash")
+        )
 
     def _task_dependencies_met(self, run_id: str, task_id: str) -> bool:
         """True when every DAG predecessor of task_id already has a passing Review."""
@@ -785,10 +884,16 @@ class PhaseProtocol:
         content = dag["envelope"].get("content", {})
         nodes = content.get("nodes", [])
         edges = content.get("edges", [])
-        passing = {
-            artifact["envelope"].get("task_id")
-            for artifact in self.artifacts.phase_artifacts(run_id, "REVIEW")
-            if artifact.get("valid") and _passing_review(artifact["envelope"].get("content"))
+        reviews = self._passing_reviews(run_id)
+        dag_sequence = dag.get("sequence")
+        # Two different questions, and answering both with one set is what parked the run
+        # after an amendment. "Is this task still open?" is asked against the current DAG,
+        # so a Review older than the DAG does not close it. "Are its prerequisites done?"
+        # is asked about work that happened, so any passing Review counts there.
+        passed_ever = set(reviews)
+        finished = {
+            task_id for task_id, sequence in reviews.items()
+            if dag_sequence is None or sequence > dag_sequence
         }
         dependencies: dict[str, set[str]] = {
             node.get("task_id"): set() for node in nodes if isinstance(node, dict)
@@ -798,9 +903,17 @@ class PhaseProtocol:
                 dependencies[edge["to"]].add(edge.get("from"))
         for node in nodes:
             task_id = node.get("task_id") if isinstance(node, dict) else None
-            if isinstance(task_id, str) and task_id not in passing and dependencies.get(task_id, set()).issubset(passing):
+            if isinstance(task_id, str) and task_id not in finished and dependencies.get(task_id, set()).issubset(passed_ever):
                 return task_id
         return None
+
+    def _current_passing(self, run_id: str) -> set[str]:
+        """Tasks whose passing Review still covers the current DAG."""
+        return {
+            task_id
+            for task_id in self._passing_reviews(run_id)
+            if self._task_reviewed(run_id, task_id)
+        }
 
     def _predecessor(
         self, run_id: str, phase: str | tuple[str, ...] | None, task_id: str | None
@@ -817,15 +930,49 @@ class PhaseProtocol:
                 ):
                     return artifact
             return None
+        if phase == "PLAN":
+            events = self.state.events(run_id)
+            current = events[-1] if events else {}
+            pinned = self._pinned_plan(run_id, current)
+            if pinned is not None:
+                if task_id is None or pinned["envelope"].get("task_id") == task_id:
+                    return pinned
+                return None
         exact_task = task_id if phase in {"PLAN", "IMPLEMENT", "REVIEW"} else None
         artifact = self.artifacts.latest_phase(run_id, phase, exact_task)
         return artifact if artifact.get("valid") else None
 
-    @staticmethod
-    def _source_revisions(current: dict[str, Any], predecessor: dict[str, Any] | None) -> dict[str, str]:
+    def _pinned_plan(self, run_id: str, current: dict[str, Any]) -> dict[str, Any] | None:
+        """Return IMPLEMENT's explicitly pinned Plan, refusing stale or forged pins."""
+        payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+        artifact_id = payload.get("plan_artifact_id")
+        content_hash = payload.get("plan_content_hash")
+        if not isinstance(artifact_id, str) or not isinstance(content_hash, str):
+            return None
+        artifact = self.artifacts.phase_artifact(artifact_id)
+        envelope = artifact.get("envelope") if artifact.get("valid") else None
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("run_id") != run_id
+            or envelope.get("phase") != "PLAN"
+            or envelope.get("content_hash") != content_hash
+        ):
+            return None
+        return artifact
+
+    def _source_revisions(
+        self, current: dict[str, Any], predecessor: dict[str, Any] | None
+    ) -> dict[str, str]:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
         for key in ("source_revisions", "repo_revisions"):
             value = payload.get(key)
+            if isinstance(value, dict):
+                return dict(value)
+        plan_artifact_id = payload.get("plan_artifact_id")
+        if isinstance(plan_artifact_id, str):
+            plan = self.artifacts.phase_artifact(plan_artifact_id)
+            envelope = plan.get("envelope") if plan.get("valid") else None
+            value = envelope.get("source_revisions") if isinstance(envelope, dict) else None
             if isinstance(value, dict):
                 return dict(value)
         if predecessor is not None:
@@ -869,6 +1016,13 @@ class PhaseProtocol:
         if not isinstance(receipt, dict) or not receipt.get("ok"):
             if isinstance(receipt, dict) and receipt.get("reason_code") in {"QUERY_REQUIRED", "RECOVERY_REQUIRED"}:
                 return "RECOVERY_REQUIRED"
+            # Keep the publisher's own reason when it named one. Collapsing every
+            # failed publish into KNOWLEDGE_PUBLISH_INCOMPLETE hid
+            # KU_CHILD_CONTENT_UNSETTLED / KU_IMMUTABLE_CONFLICT on the BGW-1956
+            # T3 PLAN and IMPLEMENT retries, so the operator had to call
+            # publish_phase by hand to see what actually happened.
+            if isinstance(receipt, dict) and isinstance(receipt.get("reason_code"), str) and receipt["reason_code"]:
+                return receipt["reason_code"]
             return "KNOWLEDGE_PUBLISH_INCOMPLETE"
         if receipt.get("run_id", run_id) != run_id or receipt.get("artifact_hash") != envelope["content_hash"]:
             return "KU_RECEIPT_MISMATCH"
@@ -910,8 +1064,10 @@ class PhaseProtocol:
                 return "STOPPED", None, "REVIEW_NEEDS_CLARIFICATION"
             if not _passing_review(review):
                 return "DIAGNOSE", action.get("task_id"), "OK"
-            next_task = self._ready_task_excluding(action["run_id"], action.get("task_id"))
-            return ("WORKSPACE", next_task, "OK") if next_task else ("SUBMIT", None, "OK")
+            # One frontier at a time: the reviewed Change Set still has to reach
+            # iCode. Jumping to the next DAG node from here left BGW-1956 T3
+            # unsubmitted while next() asked for T1's G4.
+            return "SUBMIT", action.get("task_id"), "OK"
         if action["phase"] == "DIAGNOSE":
             content = envelope["content"]
             route = content.get("route")
@@ -932,23 +1088,38 @@ class PhaseProtocol:
         return target, None, "OK"
 
     def _ready_task_excluding(self, run_id: str, completing_task: str | None) -> str | None:
+        """Next open DAG node, treating `completing_task` as finished.
+
+        "Finished" is a Review that still covers the current DAG. Counting any
+        historical pass emptied the frontier after an amendment — BGW-1956 T0's
+        Review then went to SUBMIT while T1/T2 Reviews predated the DAG and T3
+        was REJECT, and IPIPE started over that half-finished set.
+        """
         dag = self.artifacts.latest_phase(run_id, "TASKS", None)
         if not dag.get("valid"):
             return None
-        content = dag["envelope"]["content"]
-        passing = {
-            artifact["envelope"].get("task_id")
-            for artifact in self.artifacts.phase_artifacts(run_id, "REVIEW")
-            if artifact.get("valid") and _passing_review(artifact["envelope"].get("content"))
+        content = dag["envelope"].get("content", {})
+        nodes = content.get("nodes", [])
+        edges = content.get("edges", [])
+        reviews = self._passing_reviews(run_id)
+        dag_sequence = dag.get("sequence")
+        passed_ever = set(reviews)
+        finished = {
+            task_id for task_id, sequence in reviews.items()
+            if dag_sequence is None or sequence > dag_sequence
         }
         if completing_task:
-            passing.add(completing_task)
-        dependencies = {node["task_id"]: set() for node in content["nodes"]}
-        for edge in content["edges"]:
-            dependencies[edge["to"]].add(edge["from"])
-        for node in content["nodes"]:
-            task_id = node["task_id"]
-            if task_id not in passing and dependencies[task_id].issubset(passing):
+            passed_ever.add(completing_task)
+            finished.add(completing_task)
+        dependencies: dict[str, set[str]] = {
+            node.get("task_id"): set() for node in nodes if isinstance(node, dict)
+        }
+        for edge in edges:
+            if isinstance(edge, dict) and edge.get("to") in dependencies:
+                dependencies[edge["to"]].add(edge.get("from"))
+        for node in nodes:
+            task_id = node.get("task_id") if isinstance(node, dict) else None
+            if isinstance(task_id, str) and task_id not in finished and dependencies.get(task_id, set()).issubset(passed_ever):
                 return task_id
         return None
 

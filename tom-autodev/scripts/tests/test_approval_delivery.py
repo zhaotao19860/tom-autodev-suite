@@ -453,6 +453,64 @@ class ChangeSetSummaryTests(unittest.TestCase):
         self.assertIn("偏离计划 0 处", summary[1])
         self.assertEqual([line for line in summary if line.startswith("偏离：")], [])
 
+    def test_g7_submit_descriptor_names_module_branch_and_revision(self):
+        summary = content_summary({
+            "change_set_id": "CS-1",
+            "revision_set_id": "RS-1",
+            "module": "baidu/nsiqa/x86bgw",
+            "target_branch": "pipline_case",
+            "commit_revision": "b" * 40,
+            "revision_set": {
+                "business": {
+                    "module": "baidu/bgw",
+                    "branch": "master",
+                    "revision": "a" * 40,
+                },
+                "test": {
+                    "module": "baidu/nsiqa/x86bgw",
+                    "branch": "pipline_case",
+                    "revision": "b" * 40,
+                },
+            },
+        })
+
+        self.assertIn("主仓库 baidu/nsiqa/x86bgw，分支 pipline_case", summary)
+        self.assertIn("提交版本 bbbbbbbbbbbb…", summary)
+        self.assertTrue(any(
+            line.startswith("business 仓库 baidu/bgw，分支 master，版本")
+            for line in summary
+        ))
+        self.assertTrue(any(
+            line.startswith("test 仓库 baidu/nsiqa/x86bgw，分支 pipline_case")
+            for line in summary
+        ))
+        self.assertNotIn("任务 -", summary)
+
+    def test_g7_submit_descriptor_names_create_new_cr(self):
+        summary = content_summary({
+            "change_set_id": "CS-1",
+            "revision_set_id": "RS-1",
+            "module": "module",
+            "target_branch": "branch",
+            "commit_revision": "revision",
+            "submission_mode": "create_new_cr",
+            "revision_set": {},
+        })
+        self.assertEqual(summary[0], "提交方式 新建 CR")
+
+    def test_g7_submit_descriptor_can_identify_existing_cr_append(self):
+        summary = content_summary({
+            "change_set_id": "CS-1",
+            "revision_set_id": "RS-1",
+            "module": "module",
+            "target_branch": "branch",
+            "commit_revision": "revision",
+            "existing_cr": "122402145",
+            "revision_set": {},
+        })
+
+        self.assertEqual(summary[0], "提交方式 追加现有 CR")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ class Recovery:
         self.locks = LockManager(database_path, clock=clock)
 
     def resume(self, run_id: str) -> dict[str, Any]:
+        """Inspect a checkpoint; READY does not mean a child phase was executed."""
         events = self.state.events(run_id)
         checkpoint = events[-1] if events else None
         uncertain = self.state.pending_intents(run_id)
@@ -37,6 +38,15 @@ class Recovery:
             "run_id": run_id,
             "state": checkpoint["state"] if checkpoint is not None else "RUN_NOT_FOUND",
             "status": "QUERY_REQUIRED" if actions else "READY",
+            "phase_complete": False,
+            "execution_performed": False,
+            "next_step": (
+                "Resolve the listed uncertain intents before retrying their operations."
+                if actions else
+                "Call next, load its child skill, and execute it in the current Agent; "
+                "reuse the exact approved artifact and complete-phase after its gate. "
+                "Do not repeat resume for an unchanged action."
+            ),
             "checkpoint": checkpoint,
             "events": events,
             "retry_allowed": not actions,

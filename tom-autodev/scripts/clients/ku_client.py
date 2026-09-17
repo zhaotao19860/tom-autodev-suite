@@ -5,6 +5,8 @@ import json
 import os
 import re
 import subprocess
+import tempfile
+import time
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
@@ -62,6 +64,9 @@ class KuClient:
         username: str | None = None,
         repo_paths: Sequence[str] = (),
         binary: str = DEFAULT_KU_BINARY,
+        settle_attempts: int = 12,
+        settle_wait_seconds: float = 6.0,
+        sleeper: Any = time.sleep,
     ):
         self.username = username or resolve_username(repo_paths)
         self.transport = transport or CliTransport(
@@ -71,6 +76,19 @@ class KuClient:
         self.run_id = run_id
         self.repo_id = repo_id
         self.binary = binary
+        # KU serves a document before its content has propagated, so the read-back that
+        # immediately follows a create can come back without the marker. That is a read
+        # arriving early, not a failed write, and treating it as failure made every phase
+        # completion fail once and only land on a manual retry.
+        #
+        # The bound is a minute rather than the six seconds it started at: measured
+        # propagation on 2026-09-09 was tens of seconds for a phase document and longer
+        # for a change set carrying a 60 KB patch, so the short window turned every
+        # completion into two or three manual retries. A window that expires still fails
+        # closed -- the intent stays open and the same call is the whole recovery.
+        self.settle_attempts = max(1, settle_attempts)
+        self.settle_wait_seconds = max(0.0, settle_wait_seconds)
+        self.sleeper = sleeper
 
     @staticmethod
     def marked_markdown(parent_doc_id: str, title: str, markdown: str) -> str:
@@ -112,7 +130,6 @@ class KuClient:
         if not all(isinstance(value, str) and value for value in (parent_doc_id, title, markdown)):
             return _failure("INVALID_INPUT")
         initial = self.run_root_markdown(parent_doc_id, title, markdown)
-        marker = initial.rsplit("\n", 1)[-1]
         key = f"ku-run-root:{parent_doc_id}:{_identity(parent_doc_id, title)}"
         completed = self.state.result_by_idempotency_key(key)
         if completed is not None:
@@ -120,7 +137,14 @@ class KuClient:
             if not response.get("ok"):
                 return response
             remote = self._query_document(str(response.get("doc_id", "")))
-            if not remote.get("ok") or remote.get("text", "").count(marker) != 1:
+            # A completed receipt already named the document. A query that cannot
+            # be read is an identity/query miss, not a missing marker; collapsing
+            # it into KU_RUN_ROOT_VERIFICATION_FAILED hid 60103 / empty-username
+            # failures on the BGW-1956 T3 REVIEW retry. Marker identity still
+            # uses `_carries_marker`, because KU reformats the body.
+            if not remote.get("ok"):
+                return remote
+            if not _carries_marker(remote.get("text", ""), initial):
                 return _failure("KU_RUN_ROOT_VERIFICATION_FAILED")
             publish_key = f"ku-publish:{response['doc_id']}:{_content_hash(initial)}"
             published = self.state.result_by_idempotency_key(publish_key)
@@ -139,7 +163,7 @@ class KuClient:
             return self._root_result(response, published["receipt"]["response"])
 
         intent = self.state.intent_by_idempotency_key(key)
-        discovered = self._discover_run_root(parent_doc_id, title, marker)
+        discovered = self._discover_run_root(parent_doc_id, title, initial)
         if intent is not None:
             if not discovered["ok"]:
                 if discovered["reason_code"] == "KU_CHILD_NOT_FOUND":
@@ -177,22 +201,7 @@ class KuClient:
             key,
             self._create_payload(parent_doc_id, title, _content_hash(initial)),
         )
-        created_call = self._invoke(
-            [
-                self.binary,
-                "create-doc",
-                "--repo-id",
-                self.repo_id,
-                "--parent-doc-id",
-                parent_doc_id,
-                "--username",
-                self.username or "",
-                "--title",
-                title,
-                "--content",
-                initial,
-            ]
-        )
+        created_call = self._create_call(parent_doc_id, title, initial)
         if not created_call["ok"]:
             if not _unknown_result(created_call["reason_code"]):
                 return self._persist_failure(intent, created_call["reason_code"])
@@ -200,12 +209,8 @@ class KuClient:
         info = created_call["payload"].get("result")
         if not self._valid_remote_info(info, expected_title=title):
             return _failure("KU_RUN_ROOT_VERIFICATION_FAILED", intent_id=intent["intent_id"])
-        remote = self._query_document(info["docGuid"])
-        if (
-            not remote.get("ok")
-            or remote.get("url") != info["url"]
-            or remote.get("text") != initial
-        ):
+        remote = self._settled_child(info["docGuid"], initial, info["url"])
+        if remote is None:
             return _failure("KU_RUN_ROOT_VERIFICATION_FAILED", intent_id=intent["intent_id"])
         created = self._persist_create_receipt(intent, remote, _content_hash(initial))
         publish = self._publish(
@@ -224,7 +229,13 @@ class KuClient:
             return _failure("INVALID_INPUT")
         content_hash = _content_hash(markdown)
         marked = self.marked_markdown(parent_doc_id, title, markdown)
-        create_key = self._create_key(parent_doc_id, title, content_hash)
+        # An abandoned create is an account of an attempt, not an answer. Keyed only by
+        # the content hash, the replay would hand that abandonment back to every later
+        # attempt at the same artifact, so a fresh attempt claims a key chained off the
+        # one it supersedes.
+        create_key = self.state.live_idempotency_key(
+            self._create_key(parent_doc_id, title, content_hash)
+        )
         completed = self.state.result_by_idempotency_key(create_key)
         if completed is not None:
             response = completed["receipt"]["response"]
@@ -273,22 +284,7 @@ class KuClient:
             create_key,
             self._create_payload(parent_doc_id, title, content_hash),
         )
-        created_call = self._invoke(
-            [
-                self.binary,
-                "create-doc",
-                "--repo-id",
-                self.repo_id,
-                "--parent-doc-id",
-                parent_doc_id,
-                "--username",
-                self.username or "",
-                "--title",
-                title,
-                "--content",
-                marked,
-            ]
-        )
+        created_call = self._create_call(parent_doc_id, title, marked)
         if not created_call["ok"]:
             if not _unknown_result(created_call["reason_code"]):
                 return self._persist_failure(intent, created_call["reason_code"])
@@ -296,11 +292,71 @@ class KuClient:
         info = created_call["payload"].get("result")
         if not self._valid_remote_info(info, expected_title=title):
             return _failure("KU_CREATE_VERIFICATION_FAILED", intent_id=intent["intent_id"])
-        verified = self._query_document(info["docGuid"])
-        if not self._matching_child(verified, marked, info["url"]):
+        verified = self._settled_child(info["docGuid"], marked, info["url"])
+        if verified is None:
             return _failure("KU_CREATE_VERIFICATION_FAILED", intent_id=intent["intent_id"])
         created = self._persist_create_receipt(intent, verified, content_hash)
         return self._complete_artifact(created, verified, content_hash, marked)
+
+    def _create_call(self, parent_doc_id: str, title: str, marked: str) -> dict[str, Any]:
+        """Create the child document, handing KU the body as a file rather than an argument.
+
+        `--content` puts the whole document on the command line. A change-set document
+        carries a unified diff, whose lines start with `---`, `+++` and `@@`, and on
+        2026-09-09 that produced a created document holding nothing but its title line:
+        21 characters, no marker, `05-change-set/T3-r2`. The attempt before it landed a
+        484 KB body — the same call is not reliable at that size. `-md-file` is the CLI's
+        own way in for exactly this, and it takes the body out of argv where neither a
+        leading dash nor a length limit can reach it.
+        """
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".md", delete=False
+        )
+        try:
+            handle.write(marked)
+            handle.close()
+            return self._invoke(
+                [
+                    self.binary,
+                    "create-doc",
+                    "--repo-id",
+                    self.repo_id,
+                    "--parent-doc-id",
+                    parent_doc_id,
+                    "--username",
+                    self.username or "",
+                    "--title",
+                    title,
+                    "--md-file",
+                    handle.name,
+                ]
+            )
+        finally:
+            handle.close()
+            try:
+                os.unlink(handle.name)
+            except OSError:
+                pass
+
+    def _settled_child(
+        self, doc_id: str, marked: str, expected_url: Any
+    ) -> dict[str, Any] | None:
+        """Read a just-created document back, allowing the content a moment to settle.
+
+        The write is already done at this point, so a read that misses the marker is
+        only evidence about propagation. Re-reading a bounded number of times is the
+        difference between a phase that lands and a phase that needs a manual retry.
+        """
+        for attempt in range(1, self.settle_attempts + 1):
+            verified = self._query_document(doc_id)
+            if (
+                self._matching_child(verified, marked, expected_url)
+                and verified.get("version") is not None
+            ):
+                return verified
+            if attempt < self.settle_attempts and self.settle_wait_seconds:
+                self.sleeper(self.settle_wait_seconds)
+        return None
 
     def update_index(self, doc_id: str, entry: dict[str, Any]) -> dict[str, Any]:
         persistence = self._persistence()
@@ -586,7 +642,7 @@ class KuClient:
         return _failure("KU_IMMUTABLE_CONFLICT")
 
     def _discover_run_root(
-        self, parent_doc_id: str, title: str, marker: str
+        self, parent_doc_id: str, title: str, expected_text: str
     ) -> dict[str, Any]:
         listing = self._query_repo(parent_doc_id)
         if not listing["ok"]:
@@ -599,7 +655,7 @@ class KuClient:
             remote = self._query_document(candidate["doc_id"])
             if not remote["ok"]:
                 return remote
-            if remote["url"] == candidate["url"] and remote["text"].count(marker) == 1:
+            if remote["url"] == candidate["url"] and _carries_marker(remote["text"], expected_text):
                 matches.append(remote)
         if len(candidates) != 1 or len(matches) != 1:
             return _failure("KU_RUN_ROOT_CONFLICT")
@@ -701,7 +757,17 @@ class KuClient:
             return content
         version = self._query_version(doc_id)
         if not version["ok"]:
-            return version
+            # query-content can succeed while query-version still answers
+            # 20113 文档不存在: the body has propagated, the version index
+            # has not. That is the same KU lag as a missing marker, not a
+            # vanished document. Leave init_type unset so _publish_verifies
+            # and _matching_child wait for a later read.
+            return {
+                **content,
+                "version": None,
+                "init_type": None,
+                "version_reason": version.get("reason_code"),
+            }
         return {**content, "version": version["version"], "init_type": version["init_type"]}
 
     def _query_content(self, doc_id: str) -> dict[str, Any]:

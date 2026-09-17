@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from typing import Any
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -476,6 +477,197 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(forged["reason_code"], "RERUN_CONFLICT")
         self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
 
+    def test_a_log_link_missing_from_the_listing_is_taken_from_the_stage_detail(self):
+        # `pipeline_stage_info` carries job statuses but no log links, so a stage bound
+        # from the listing used to have nothing to read and its silent failure vanished.
+        stage = _normalize_stage({
+            "id": 637340540, "stageName": "P0新case回归", "status": "SUCC",
+            "jobBuildBeans": [{"id": 1018370712, "jobName": "P0新功能调试", "status": "SUCC"}],
+        })
+        self.assertEqual(stage["jobs"][0]["log_url"], "")
+        api = FakeApi()
+        api.details["637340540"] = {"entities": {"realJobBuilds": [[{
+            "id": 1018370712, "logs": [{"url": "https://logonline.example/detail"}],
+        }]]}}
+        read = []
+
+        def reader(url):
+            read.append(url)
+            return {"ok": True, "success_ratios": [0.0], "failed_cases": ["case-1"]}
+
+        runtime = pinned_runtime(self.state, self.ledger, api, log_reader=reader)
+        found = runtime._silent_case_failures([stage])
+
+        self.assertEqual(read, ["https://logonline.example/detail"])
+        self.assertEqual(found[0]["log_url"], "https://logonline.example/detail")
+        self.assertEqual(found[0]["failed_cases"], ["case-1"])
+
+    def test_reexecuting_a_finished_stage_accepts_the_new_stage_build_it_allocates(self):
+        # iPipe does not re-use the stage build id when a completed stage is executed
+        # again: it allocates a new one for the same stage of the same build. Demanding
+        # the requested id back reported a stage that had genuinely started as an invalid
+        # response, and left the intent without a receipt.
+        finished = {
+            "id": "stage-1", "stageConfId": 4875670, "stageName": "P0新case回归", "status": "SUCC",
+            "jobBuildBeans": [{
+                "id": "job-1", "jobName": "P0新功能调试", "status": "SUCC",
+                "logs": [{"url": "https://logonline.example/silent"}],
+            }],
+        }
+        successor = {
+            "id": "stage-2", "stageConfId": 4875670, "stageName": "P0新case回归", "status": "RUNNING",
+            "jobBuildBeans": [{"id": "job-2", "jobName": "P0新功能调试", "status": "RUNNING"}],
+        }
+        self.bind_build(status="SUCCESS", stages=[finished])
+        self.api.stages["build-1"] = [finished]
+        runtime = pinned_runtime(
+            self.state, self.ledger, self.api,
+            log_reader=lambda url: {"ok": True, "success_ratios": [0.0], "failed_cases": ["case-1"]},
+        )
+        runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        approval = approved(self.ledger, "G8", runtime.rerun_input_hash("stage-1")["input_hash"])
+        self.api.rerun_result = {"stageBuildId": "stage-2", "status": "RUNNING"}
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[finished, successor])
+        self.api.stages["build-1"] = [finished, successor]
+
+        executed = runtime.rerun("stage-1", approval)
+
+        self.assertEqual(executed["reason_code"], "OK")
+        self.assertEqual(executed["stage_build_id"], "stage-1")
+        self.assertEqual(executed["started_stage_build_id"], "stage-2")
+        self.assertIn("ipipe:stage/stage-2", executed["evidence_refs"])
+        # The new run is owned too, so monitoring and a later re-run can address it.
+        self.assertIsNotNone(
+            self.state.idempotency_result("ipipe.stage-binding:run-1:stage-2")
+        )
+
+    def test_a_response_naming_a_different_stage_is_still_refused(self):
+        failed = {"id": "stage-1", "stageConfId": 1, "stageName": "unit", "status": "FAIL"}
+        unrelated = {"id": "stage-9", "stageConfId": 2, "stageName": "release", "status": "RUNNING"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        monitored = self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+        approval = approved(
+            self.ledger, "G8", canonical_hash(rerun_binding(monitored["failure_signature"]))
+        )
+        self.api.rerun_result = {"stageBuildId": "stage-9", "status": "RUNNING"}
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[failed, unrelated])
+        self.api.stages["build-1"] = [failed, unrelated]
+
+        result = self.runtime.rerun("stage-1", approval)
+
+        self.assertEqual(result["reason_code"], "RERUN_RESPONSE_INVALID")
+
+    def test_reconciliation_works_against_a_build_record_that_states_no_revision_map(self):
+        # The real gateway returns no per-repository revision map, so comparing one made
+        # every unknown re-run result unreconcilable and parked the run for good.
+        failed = {"id": "stage-1", "stageConfId": 7, "stageName": "unit", "status": "FAIL"}
+        successor = {"id": "stage-2", "stageConfId": 7, "stageName": "unit", "status": "RUNNING"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        monitored = self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+        approval = approved(
+            self.ledger, "G8", canonical_hash(rerun_binding(monitored["failure_signature"]))
+        )
+        self.api.rerun_result = TimeoutError("unknown")
+        unknown = self.runtime.rerun("stage-1", approval)
+        without_map = build(status="RUNNING", stages=[failed, successor])
+        without_map.pop("revisions")
+        self.api.builds["build-1"] = without_map
+        self.api.stages["build-1"] = [failed, successor]
+
+        reconciled = pinned_runtime(self.state, self.ledger, self.api).rerun("stage-1", approval)
+
+        self.assertEqual(unknown["reason_code"], "RERUN_RESULT_UNKNOWN")
+        self.assertEqual(reconciled["reason_code"], "OK")
+        self.assertEqual(reconciled["started_stage_build_id"], "stage-2")
+        self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
+
+    def test_a_stage_that_reported_success_over_failed_cases_stays_rerunnable(self):
+        succeeded = {
+            "id": "stage-1", "stageName": "P0新case回归", "status": "SUCC",
+            "jobBuildBeans": [{
+                "id": "job-1", "jobName": "P0新功能调试", "status": "SUCC",
+                "logs": [{"url": "https://logonline.example/silent"}],
+            }],
+        }
+        self.bind_build(status="SUCCESS", stages=[succeeded])
+        self.api.stages["build-1"] = [succeeded]
+        silent = {"ok": True, "success_ratios": [0.0], "failed_cases": ["test_stun_route_NAT44_cc_tcp_017"]}
+        runtime = pinned_runtime(self.state, self.ledger, self.api, log_reader=lambda url: silent)
+        runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+
+        bound = runtime.rerun_input_hash("stage-1")
+        approval = approved(self.ledger, "G8", bound["input_hash"])
+        executed = runtime.rerun("stage-1", approval)
+
+        self.assertEqual(bound["reason_code"], "OK")
+        self.assertEqual(bound["case_failures"][0]["job_build_id"], "job-1")
+        self.assertEqual(executed["reason_code"], "OK")
+        self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
+
+    def test_a_stage_whose_cases_all_passed_is_still_refused(self):
+        succeeded = {
+            "id": "stage-1", "stageName": "unit", "status": "SUCC",
+            "jobBuildBeans": [{
+                "id": "job-1", "jobName": "unit", "status": "SUCC",
+                "logs": [{"url": "https://logonline.example/ok"}],
+            }],
+        }
+        self.bind_build(status="SUCCESS", stages=[succeeded])
+        self.api.stages["build-1"] = [succeeded]
+        runtime = pinned_runtime(
+            self.state, self.ledger, self.api,
+            log_reader=lambda url: {"ok": True, "success_ratios": [100.0], "failed_cases": []},
+        )
+        runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+
+        self.assertEqual(
+            runtime.rerun_input_hash("stage-1")["reason_code"], "STAGE_NOT_RERUNNABLE"
+        )
+        self.assertEqual(
+            runtime.rerun("stage-1", {"approval_id": "a", "input_hash": "b"})["reason_code"],
+            "STAGE_NOT_RERUNNABLE",
+        )
+        self.assertFalse(any(call[0] == "manual_execute_stage" for call in self.api.calls))
+
+    def test_the_printed_g8_hash_is_the_one_the_write_demands(self):
+        failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        monitored = self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+
+        printed = self.runtime.rerun_input_hash("stage-1")
+        with_parameters = self.runtime.rerun_input_hash(
+            "stage-1", parameters={"test_cr_id": "122402145"}
+        )
+        approval = approved(self.ledger, "G8", printed["input_hash"])
+        self.api.builds["build-1"] = build(
+            status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}]
+        )
+        executed = self.runtime.rerun("stage-1", approval)
+
+        self.assertEqual(printed["input_hash"], canonical_hash(rerun_binding(monitored["failure_signature"])))
+        self.assertNotEqual(with_parameters["input_hash"], printed["input_hash"])
+        self.assertEqual(executed["reason_code"], "OK")
+
+    def test_rediscovering_an_owned_build_keeps_the_stored_binding(self):
+        self.bind_build(status="RUNNING")
+        stored = self.state.idempotency_result("ipipe.build-binding:run-1:build-1")
+
+        again = self.runtime.discover(PROFILE, REVISIONS)
+        restarted = pinned_runtime(self.state, self.ledger, self.api).discover(PROFILE, REVISIONS)
+
+        self.assertEqual(again["reason_code"], "OK")
+        self.assertEqual(restarted["reason_code"], "OK")
+        self.assertEqual(self.state.idempotency_result("ipipe.build-binding:run-1:build-1"), stored)
+
     def test_rerun_after_monitor_restart_rebuilds_stage_ownership(self):
         failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
         self.bind_build(status="FAIL", stages=[failed])
@@ -835,6 +1027,83 @@ class ApiClientShapeTests(unittest.TestCase):
         self.assertFalse(_stage_passed(skipped_with_failure))
         self.assertTrue(_stage_passed(_normalize_stage({"stageName": "x", "status": "SUCC"})))
         self.assertFalse(_stage_passed(_normalize_stage({"stageName": "x", "status": "RUNNING"})))
+
+    def test_stage_parameters_reach_the_platform_while_the_approval_stays_token_free(self):
+        # A manual stage's inputs are derived, not typed. The approval and the intent record
+        # the decision -- which CR, which product -- while the irepo token in the download
+        # command goes only to the platform call.
+        token = "82f7b234-8b56-40c5-9011-5492673ed8d8"
+        parameters = {
+            "test_cr_id": "122402145",
+            "get_bgwagent": f'wget -O output.tar.gz --header "IREPO-TOKEN:{token}" "https://irepo/x"',
+        }
+        captured: dict[str, Any] = {}
+
+        from stage_parameters import redacted
+
+        binding = {"parameters": redacted(parameters)}
+
+        self.assertNotIn(token, json.dumps(binding, ensure_ascii=False))
+        self.assertIn("<IREPO-TOKEN>", binding["parameters"]["get_bgwagent"])
+        self.assertEqual(binding["parameters"]["test_cr_id"], "122402145")
+        captured["sent"] = dict(parameters)
+        self.assertIn(token, captured["sent"]["get_bgwagent"])
+
+    def _log_runtime(self, log_reader):
+        directory = tempfile.mkdtemp()
+        return IpipeRuntime(
+            state_store=StateStore(Path(directory) / "state.sqlite"),
+            approval_ledger=ApprovalLedger(Path(directory) / "approvals.sqlite"),
+            run_id="run-1",
+            api_transport=object(),
+            log_reader=log_reader,
+        )
+
+    def test_a_job_reporting_success_over_failed_cases_is_not_passing_evidence(self):
+        # BGW's new-case stage runs product cases and never checks their result, so it
+        # reported SUCC over a run where every case failed. The numbers only exist in the
+        # log, so the log decides -- and it also says where to go looking.
+        stage = _normalize_stage({
+            "id": 637340540,
+            "stageName": "P0新case回归",
+            "status": "SUCC",
+            "jobBuildBeans": [{
+                "id": 1018370712, "jobName": "P0新功能调试", "status": "SUCC",
+                "logs": [{"url": "https://logonline.example/abc"}],
+            }],
+        })
+        parsed = {
+            "ok": True,
+            "success_ratios": [0.0, 0.0],
+            "failed_cases": ["test_stun_route_NAT44_cc_tcp_017"],
+            "agent_host": "bjkjy-sys-ip-base-sep6.bjkjy.baidu.com",
+            "agent_ip": "10.130.21.26",
+            "workspace": "/root/workspace/abc",
+            "scripts": ["script/fetch_cr.sh"],
+        }
+        runtime = self._log_runtime(lambda url: parsed)
+
+        found = runtime._silent_case_failures([stage])
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["job_build_id"], "1018370712")
+        self.assertEqual(found[0]["failed_cases"], ["test_stun_route_NAT44_cc_tcp_017"])
+        self.assertEqual(found[0]["agent_ip"], "10.130.21.26")
+        self.assertEqual(found[0]["scripts"], ["script/fetch_cr.sh"])
+
+    def test_a_job_whose_log_reports_every_case_passing_stays_passing_evidence(self):
+        stage = _normalize_stage({
+            "id": 1, "stageName": "p0", "status": "SUCC",
+            "jobBuildBeans": [{
+                "id": 2, "jobName": "run cases", "status": "SUCC",
+                "logs": [{"url": "https://logonline.example/ok"}],
+            }],
+        })
+        runtime = self._log_runtime(
+            lambda url: {"ok": True, "success_ratios": [100.0], "failed_cases": []}
+        )
+
+        self.assertEqual(runtime._silent_case_failures([stage]), [])
 
     def test_stage_identity_falls_back_to_the_stage_build_named_by_its_jobs(self):
         listed = {

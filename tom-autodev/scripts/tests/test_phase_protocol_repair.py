@@ -843,6 +843,72 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
 
         self.assertEqual(second["task_id"], "T-2")
 
+    def test_a_pinned_task_that_already_passed_review_is_not_the_frontier(self):
+        # After a Spec/DAG amendment the run re-enters WORKSPACE carrying whatever task
+        # the SPEC and TASKS actions were bound to. If that task already passed Review,
+        # honouring the pointer would re-plan finished work instead of the new node.
+        run_id = "run-frontier-pinned"
+        self.seed(run_id, "TASKS", None, two_node_dag())
+        self.seed(
+            run_id, "REVIEW", "T-1", specialized_examples()["review"],
+            revisions={"business": "r2", "tests": "t2"},
+        )
+        self.state.transition(run_id, "WORKSPACE", {"profile_hash": "a" * 64, "task_id": "T-1"})
+
+        action = self.protocol.next(run_id)
+
+        self.assertEqual(action["task_id"], "T-2")
+
+    def test_an_amendment_reopens_a_task_whose_review_predates_the_new_dag(self):
+        # A Review is evidence about the scope it was written against. When an amendment
+        # publishes a newer DAG that gives a reviewed task more work -- Spec 1.1.3 adding
+        # NAT64 coverage to T3 -- the old Review no longer closes it, and treating it as
+        # finished left the frontier empty and the run with nothing to plan.
+        run_id = "run-frontier-reopened"
+        self.seed(run_id, "TASKS", None, two_node_dag())
+        for task_id in ("T-1", "T-2"):
+            self.seed(
+                run_id, "REVIEW", task_id, specialized_examples()["review"],
+                revisions={"business": "r2", "tests": "t2"},
+            )
+        self.state.transition(run_id, "WORKSPACE", {"profile_hash": "a" * 64})
+        exhausted = self.protocol.next(run_id)
+
+        amended = two_node_dag()
+        amended["nodes"][1]["capability_slice"] += " plus the amended scope"
+        self.seed(run_id, "TASKS", None, amended)
+        self.state.transition(run_id, "WORKSPACE", {"profile_hash": "a" * 64, "task_id": "T-2"})
+        reopened = self.protocol.next(run_id)
+
+        self.assertIsNone(exhausted.get("task_id"))
+        # The pointer the amendment carried is honoured now that its task is open again,
+        # and with no pointer the frontier is the first reopened node in DAG order.
+        self.assertEqual(reopened["task_id"], "T-2")
+        self.state.transition(run_id, "WORKSPACE", {"profile_hash": "a" * 64})
+        self.assertEqual(self.protocol.next(run_id)["task_id"], "T-1")
+
+    def test_completing_one_review_after_an_amendment_does_not_empty_the_frontier(self):
+        # `_ready_task_excluding` used to count any historical pass as finished. After a
+        # DAG amendment that reopened every node, completing T-1 then looked at T-2's
+        # pre-amendment Review, declared the DAG done, and routed to SUBMIT. BGW-1956
+        # T0 went that way while T1/T2 still predated the DAG and T3 was REJECT.
+        run_id = "run-review-amended-sibling"
+        self.seed(run_id, "TASKS", None, two_node_dag())
+        for task_id in ("T-1", "T-2"):
+            self.seed(
+                run_id, "REVIEW", task_id, specialized_examples()["review"],
+                revisions={"business": "r2", "tests": "t2"},
+            )
+        amended = two_node_dag()
+        amended["nodes"][1]["capability_slice"] += " plus the amended scope"
+        self.seed(run_id, "TASKS", None, amended)
+
+        after_t1 = self.protocol._ready_task_excluding(run_id, "T-1")
+        after_t2 = self.protocol._ready_task_excluding(run_id, "T-2")
+
+        self.assertEqual(after_t1, "T-2")
+        self.assertEqual(after_t2, "T-1")
+
     def review_run(self, run_id, task_id, review_content, *, prior_review=False):
         self.seed(run_id, "TASKS", None, two_node_dag())
         if prior_review:
@@ -865,7 +931,11 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
         draft = self.draft(action, review_content, approval_id=None)
         return self.protocol.complete(run_id, draft)
 
-    def test_passing_review_routes_to_next_task_then_submit_only_after_all_nodes(self):
+    def test_passing_review_submits_the_reviewed_task_even_when_another_node_is_ready(self):
+        # One frontier at a time. Routing a PASS to the next DAG node's WORKSPACE
+        # left BGW-1956 T3's reviewed Change Set unsubmitted while next() asked
+        # for T1's G4 -- T0/T1/T2 Reviews older than the amended DAG still look
+        # unfinished, so `_ready_task_excluding` always found a sibling.
         first = self.review_run("run-review-first", "T-1", specialized_examples()["review"])
         second_review = specialized_examples()["review"]
         second_review["task_id"] = "T-2"
@@ -873,9 +943,10 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
 
         self.assertTrue(first["ok"], first)
         self.assertTrue(second["ok"], second)
-        self.assertEqual((first["state"], first["task_id"]), ("WORKSPACE", "T-1"))
-        self.assertEqual(self.state.events("run-review-first")[-1]["payload"]["task_id"], "T-2")
-        self.assertEqual(second["state"], "SUBMIT")
+        self.assertEqual((first["state"], first["task_id"]), ("SUBMIT", "T-1"))
+        self.assertEqual(self.state.events("run-review-first")[-1]["payload"]["task_id"], "T-1")
+        self.assertEqual((second["state"], second["task_id"]), ("SUBMIT", "T-2"))
+        self.assertEqual(self.protocol.next("run-review-first")["controller"], "submit")
 
     def test_review_reject_blocking_and_incomplete_have_distinct_fail_closed_routes(self):
         rejected = specialized_examples()["review"]
@@ -1266,3 +1337,27 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
 
         self.assertTrue(allowed["allowed"], allowed)
         self.assertTrue(still_allowed["allowed"], still_allowed)
+
+    def test_code_only_plan_reentry_keeps_the_diagnosed_task_even_after_a_passing_review(self):
+        # SUBMIT -> DIAGNOSE -> PLAN is a repair of a task that already passed Review.
+        # The PLAN event carries that task_id; treating the old Review as "finished"
+        # would skip it and plan the next DAG node instead — BGW-1956 T0 empty submit
+        # after CR tip 8f27400 jumped to T1.
+        run_id = "run-code-only-replan"
+        dag = two_node_dag()
+        self.protocol.artifacts.put_envelope(final_envelope(run_id, "TASKS", None, dag))
+        review = specialized_examples()["review"]
+        self.protocol.artifacts.put_envelope(final_envelope(
+            run_id, "REVIEW", "T-1", review, revisions={"business": "r2", "tests": "t2"},
+        ))
+        self.protocol.state.transition(run_id, "PLAN", {
+            "profile_hash": "a" * 64,
+            "task_id": "T-1",
+            "previous_state": "DIAGNOSE",
+            "source_revisions": {"business": "r2", "tests": "t2"},
+        })
+
+        action = self.protocol.next(run_id)
+
+        self.assertEqual(action.get("task_id"), "T-1")
+        self.assertEqual(action.get("phase"), "PLAN")

@@ -8,6 +8,7 @@ of the artifact derived from the very content the hash covers.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # Subject and effect per gate. Keep these in step with `phase_protocol._PHASES`.
@@ -47,6 +48,8 @@ def content_summary(content: Any) -> list[str]:
         return _task_dag(content)
     if "plan_id" in content:
         return _task_plan(content)
+    if _is_submit_descriptor(content):
+        return _submit_descriptor(content)
     if "change_set_id" in content:
         return _change_set(content)
     return [f"字段 {name}：{_size(value)}" for name, value in sorted(content.items())][:8]
@@ -75,11 +78,49 @@ def _spec(content: dict[str, Any]) -> list[str]:
     ]
 
 
+_REPO_TOKEN = re.compile(r"([a-z0-9][a-z0-9._-]*/[a-z0-9._-]+/[a-z0-9._-]+)")
+
+
+def _dag_node_repos(node: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Repositories a task touches, split into business and test sides.
+
+    The task-dag has no dedicated repository field; each node names its repos in
+    the leading token of every business/test change line (e.g. baidu/sysip/bgwagent).
+    Branch and pinned revision are deliberately absent here — they are bound at
+    WorkspaceGate and shown on the G4/G7 cards — so this only surfaces module names.
+    """
+    def repos(changes: Any) -> list[str]:
+        seen: list[str] = []
+        for line in changes if isinstance(changes, list) else []:
+            if not isinstance(line, str):
+                continue
+            match = _REPO_TOKEN.match(line.strip())
+            if match and match.group(1) not in seen:
+                seen.append(match.group(1))
+        return seen
+
+    return repos(node.get("business_changes")), repos(node.get("test_changes"))
+
+
 def _task_dag(content: dict[str, Any]) -> list[str]:
-    return [
+    lines = [
         f"任务 {_count(content.get('nodes'))} 个，依赖 {_count(content.get('edges'))} 条",
         f"验收点覆盖 {_count(content.get('acceptance_coverage'))} 项",
     ]
+    nodes = content.get("nodes")
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        business, test = _dag_node_repos(node)
+        parts = []
+        if business:
+            parts.append(f"业务 {'、'.join(business)}")
+        if test:
+            parts.append(f"测试 {'、'.join(test)}")
+        repo_text = "；".join(parts) if parts else "仓库未标注"
+        lines.append(f"{_text(node.get('task_id'))} {repo_text}")
+    lines.append("分支与 pinned 版本在 WORKSPACE 绑定后于 G4/G7 卡展示")
+    return lines
 
 
 def _task_plan(content: dict[str, Any]) -> list[str]:
@@ -103,6 +144,42 @@ def _change_set(content: dict[str, Any]) -> list[str]:
         f"全量 diff 哈希 {_short(content.get('full_diff_hash'))}",
     ]
     return lines + _named(content.get("deviations"), (), "reason", "偏离")
+
+
+def _is_submit_descriptor(content: dict[str, Any]) -> bool:
+    """Distinguish the G7 submission descriptor from the G5 change-set artifact."""
+    return all(
+        isinstance(content.get(key), str) and content.get(key)
+        for key in ("module", "target_branch", "commit_revision")
+    ) and isinstance(content.get("revision_set"), dict)
+
+
+def _submit_descriptor(content: dict[str, Any]) -> list[str]:
+    """Show the identity an approver is authorizing iCode to submit."""
+    revision_set = content.get("revision_set") or {}
+    rows = []
+    for role in ("business", "test"):
+        repository = revision_set.get(role)
+        if not isinstance(repository, dict):
+            continue
+        rows.append(
+            f"{role} 仓库 {_text(repository.get('module'))}，"
+            f"分支 {_text(repository.get('branch'))}，"
+            f"版本 {_short(repository.get('revision'))}"
+        )
+    if content.get("change_number") or content.get("existing_cr"):
+        mode = "追加现有 CR"
+    elif content.get("submission_mode") == "create_new_cr":
+        mode = "新建 CR"
+    else:
+        mode = "提交前由 iCode 校验新建/追加"
+    return [
+        f"提交方式 {mode}",
+        f"主仓库 {_text(content.get('module'))}，分支 {_text(content.get('target_branch'))}",
+        f"提交版本 {_short(content.get('commit_revision'))}",
+        f"变更集 {_text(content.get('change_set_id'))}，版本集 {_short(content.get('revision_set_id'))}",
+        *rows,
+    ]
 
 
 def _named(

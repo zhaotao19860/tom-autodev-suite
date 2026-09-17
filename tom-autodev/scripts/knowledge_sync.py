@@ -7,6 +7,7 @@ from typing import Any
 from clients.icafe_client import CafeClient
 from clients.ku_client import KuClient
 from persistence_policy import validate_evidence_refs
+from phase_document import canonical_appendix
 from state_store import StateStore
 
 
@@ -143,7 +144,7 @@ class KnowledgeSync:
         intent = self.state.intent(
             bound_run_id,
             "knowledge.publish-phase",
-            f"knowledge-sync:{operation_hash}",
+            self.state.live_idempotency_key(f"knowledge-sync:{operation_hash}"),
             {
                 "parent_doc_id": root_doc_id,
                 "card_id": self.card_id,
@@ -308,13 +309,17 @@ class KnowledgeSync:
         # A phase document is read by people, so `markdown` may be a rendered view.
         # What is hashed stays the canonical JSON, and the rendered document has to
         # carry it verbatim, otherwise the published page and the artifact could drift.
+        # A change set's patches are payload sized, so the appendix carries them elided
+        # behind their own sha256 — `canonical_appendix` is a pure function of the
+        # canonical bytes, so requiring exactly its output keeps the same anti-drift
+        # guarantee without putting a 484 KB diff on the page.
         canonical = artifact.get("canonical")
         if canonical is not None:
             if not isinstance(canonical, str) or not canonical:
                 return _failure("INVALID_INPUT")
             if artifact["content_hash"] != hashlib.sha256(canonical.encode("utf-8")).hexdigest():
                 return _failure("ARTIFACT_HASH_MISMATCH")
-            if artifact["markdown"].count(canonical) != 1:
+            if artifact["markdown"].count(canonical_appendix(canonical)) != 1:
                 return _failure("ARTIFACT_HASH_MISMATCH")
             return None
         actual = hashlib.sha256(artifact["markdown"].encode("utf-8")).hexdigest()

@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from recovery import Recovery
+from phase_document import canonical_appendix
 from state_store import StateStore
 from clients.icafe_client import CafeClient
 from clients.ku_client import KuClient
@@ -328,6 +329,51 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason_code"], "QUERY_REQUIRED")
         self.assertEqual(result["intent_id"], lower["intent_id"])
+
+    def test_publishing_the_same_artifact_again_after_an_abandonment_proceeds(self):
+        """Abandoning a stuck publish must not close that artifact off for good.
+
+        The change set for T3 was published into a document that came back holding only
+        its title. Abandoning that write cleared the block, but the publish is keyed by
+        the artifact it publishes, so every later attempt replayed the abandonment and
+        the run could not leave IMPLEMENT even after the cause was fixed.
+        """
+        markdown = "# 05-change-set/T3-r2"
+        artifact = {
+            "title": "05-change-set/T3-r2",
+            "markdown": markdown,
+            "content_hash": hashlib.sha256(markdown.encode()).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            ku = FakeKuClient(child={"ok": False, "reason_code": "KU_CHILD_CONTENT_UNSETTLED"})
+            sync = KnowledgeSync(
+                state_store=state,
+                ku_client=ku,
+                cafe_client=FakeCafeClient(),
+                parent_doc_id="root-1",
+                card_id="BGW-1",
+                run_id="run-abandon",
+            )
+            stuck = sync.publish_phase("run-abandon", artifact)
+            pending = state.pending_intents("run-abandon")
+            for intent in pending:
+                state.abandon_intent(intent["intent_id"], "文档只落下标题行，改名让出标题", "owner")
+
+            sync.ku = FakeKuClient()
+            retried = sync.publish_phase("run-abandon", artifact)
+            results = state.external_results("run-abandon")
+
+        self.assertFalse(stuck["ok"])
+        self.assertEqual(len(pending), 1)
+        self.assertTrue(retried["ok"])
+        # The abandoned attempt keeps its own account beside the one that succeeded.
+        self.assertEqual(
+            sorted(
+                bool(result["receipt"]["response"].get("abandoned")) for result in results
+            ),
+            [False, True],
+        )
 
     def test_artifact_hash_mismatch_is_rejected_before_any_external_call(self):
         if KnowledgeSync is None:
@@ -758,6 +804,65 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertEqual(accepted["artifact_hash"], content_hash)
         self.assertEqual(missing["reason_code"], "ARTIFACT_HASH_MISMATCH")
         self.assertEqual(wrong_hash["reason_code"], "ARTIFACT_HASH_MISMATCH")
+
+    def test_a_payload_sized_field_is_carried_elided_but_still_pinned(self):
+        """The page may abridge the canonical JSON, but only the one abridgement.
+
+        Inlining a change set's diffs put a 484 KB body on one page and, on the next
+        attempt, produced a created document holding nothing but its title line. So the
+        appendix elides a payload-sized field behind its own sha256. `canonical_appendix`
+        is a pure function of the canonical bytes, so requiring exactly its output still
+        makes a page that disagrees with its artifact unpublishable.
+        """
+        patch = "diff --git a/a b/a\n" + "+x" * 2000
+        canonical = json.dumps(
+            {"business_patch": patch, "task_id": "T3"},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        content_hash = hashlib.sha256(canonical.encode()).hexdigest()
+        appendix = canonical_appendix(canonical)
+        rendered = f"# 05-change-set/T3\n\n## 附录\n\n```json\n{appendix}\n```"
+        tampered = rendered.replace('"task_id":"T3"', '"task_id":"T4"')
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            sync = KnowledgeSync(
+                state_store=state,
+                ku_client=FakeKuClient(),
+                cafe_client=FakeCafeClient(),
+                parent_doc_id="root-1",
+                card_id="BGW-1",
+                run_id="run-elide",
+            )
+            accepted = sync.publish_phase(
+                "run-elide",
+                {
+                    "title": "05-change-set/T3", "markdown": rendered,
+                    "content_hash": content_hash, "canonical": canonical,
+                },
+            )
+            unabridged = sync.publish_phase(
+                "run-elide",
+                {
+                    "title": "05-change-set/T3-r2",
+                    "markdown": f"```json\n{canonical}\n```",
+                    "content_hash": content_hash, "canonical": canonical,
+                },
+            )
+            drifted = sync.publish_phase(
+                "run-elide",
+                {
+                    "title": "05-change-set/T3-r3", "markdown": tampered,
+                    "content_hash": content_hash, "canonical": canonical,
+                },
+            )
+
+        self.assertTrue(accepted["ok"])
+        self.assertNotIn(patch, rendered)
+        self.assertIn(hashlib.sha256(patch.encode()).hexdigest(), appendix)
+        # The un-abridged canonical is no longer what the page must carry, and a page
+        # whose surviving fields disagree with the artifact is still refused.
+        self.assertEqual(unabridged["reason_code"], "ARTIFACT_HASH_MISMATCH")
+        self.assertEqual(drifted["reason_code"], "ARTIFACT_HASH_MISMATCH")
 
 
 if __name__ == "__main__":

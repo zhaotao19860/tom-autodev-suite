@@ -440,6 +440,38 @@ class AbandonIntentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "RECEIPT_CONFLICT"):
             self.store.receipt(self.intent["intent_id"], {"ok": True, "group_id": "g1"}, [])
 
+    def test_a_later_attempt_gets_a_key_of_its_own_past_each_abandonment(self):
+        """An abandonment must not become the permanent answer for that operation.
+
+        A knowledge publish is keyed by the artifact it publishes, so replaying it after
+        an abandonment returned the abandonment forever — the run stayed wedged after the
+        underlying problem was fixed. Chaining the next attempt off the intent it
+        supersedes keeps both accounts and lets the retry proceed.
+        """
+        base = "notify:1"
+        self.assertEqual(self.store.live_idempotency_key(base), base)
+
+        self.store.abandon_intent(self.intent["intent_id"], "机器人下线", "owner")
+        first_retry = self.store.live_idempotency_key(base)
+        self.assertEqual(first_retry, f"{base}:after:{self.intent['intent_id']}")
+        # Stable while the retry is unresolved, so replaying the caller is idempotent.
+        second = self.store.intent("run-1", "collaboration.notify", first_retry, {"card": "c"})
+        self.assertEqual(self.store.live_idempotency_key(base), first_retry)
+
+        self.store.abandon_intent(second["intent_id"], "又下线了", "owner")
+        self.assertEqual(
+            self.store.live_idempotency_key(base), f"{base}:after:{second['intent_id']}"
+        )
+
+        # A real failure is an answer, not an abandonment: it stays the answer.
+        third = self.store.intent(
+            "run-1", "collaboration.notify", f"{base}:after:{second['intent_id']}", {"card": "c"}
+        )
+        self.store.receipt(third["intent_id"], {"ok": False, "reason_code": "KU_REFUSED"}, [])
+        self.assertEqual(
+            self.store.live_idempotency_key(base), f"{base}:after:{second['intent_id']}"
+        )
+
 
 class GenericPutSchemaTests(unittest.TestCase):
     """Content checks on the plain `put` path, which had none.

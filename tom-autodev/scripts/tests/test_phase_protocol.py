@@ -367,6 +367,28 @@ class PhaseProtocolTests(unittest.TestCase):
                 self.assertEqual(result["reason_code"], reason)
                 self.assertEqual(self.state.events("run-1")[-1]["state"], "INTAKE")
 
+    def test_complete_keeps_the_publishers_reason_when_ku_write_fails(self):
+        """A failed publish used to come back as KNOWLEDGE_PUBLISH_INCOMPLETE.
+
+        PLAN and IMPLEMENT on BGW-1956 T3 both failed that way: KU had named
+        KU_CHILD_CONTENT_UNSETTLED, but complete-phase swallowed it, so the
+        operator could not tell a settle-wait from a title conflict.
+        """
+        action = self.protocol().next("run-1")
+        envelope = self.result_for(action)
+        result = self.protocol(
+            approvals=FakeApprovals(input_hash=action["input_hash"]),
+            sync=FakeKnowledgeSync({
+                "ok": False,
+                "reason_code": "KU_CHILD_CONTENT_UNSETTLED",
+                "retry_allowed": True,
+            }),
+        ).complete("run-1", envelope)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason_code"], "KU_CHILD_CONTENT_UNSETTLED")
+        self.assertTrue(result["retry_allowed"])
+        self.assertEqual(self.state.events("run-1")[-1]["state"], "INTAKE")
+
     def test_complete_returns_recovery_required_for_pending_intent(self):
         action = self.protocol().next("run-1")
         envelope = self.result_for(action)

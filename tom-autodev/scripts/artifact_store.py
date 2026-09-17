@@ -342,7 +342,10 @@ class ArtifactStore:
             _validate_final_envelope(envelope)
         except ValueError as error:
             return _invalid(row["artifact_id"], str(error))
-        return {**loaded, "envelope": envelope}
+        # The ledger position travels with the artifact: callers that have to decide
+        # "which of these two phases happened first" -- a Review against the task DAG it
+        # was written for, say -- otherwise have to re-query with their own ordering.
+        return {**loaded, "envelope": envelope, "sequence": row["sequence"]}
 
     def _load(self, row: sqlite3.Row) -> dict[str, Any]:
         artifact_id = row["artifact_id"]

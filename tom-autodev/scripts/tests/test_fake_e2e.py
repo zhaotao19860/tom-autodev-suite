@@ -165,10 +165,13 @@ class StatefulKuTransport:
         if operation == "create-doc":
             self.sequence += 1
             doc_id = f"fake-doc-{self.sequence}"
+            # The body arrives as a file rather than an argument: a change-set document
+            # carries a unified diff, and putting that on the command line cost a real
+            # document its entire body on 2026-09-09.
             self.docs[doc_id] = {
                 "parent": argument("--parent-doc-id"),
                 "title": argument("--title"),
-                "text": argument("--content"),
+                "text": Path(argument("--md-file")).read_text(encoding="utf-8"),
                 "version": 1,
                 "published": False,
             }
@@ -691,11 +694,14 @@ class FakeE2ETests(unittest.TestCase):
         })
         self.assertEqual(workspace["state"], "PLAN", workspace)
 
+        reviewed_revisions = None
         for phase in ("PLAN", "IMPLEMENT", "REVIEW"):
             action = self.orchestrator.next(run_id)
             self.assertTrue(action["ok"], action)
             self.assertEqual((action["phase"], action["child_skill"]), (phase, expected_children[phase]))
-            content = self._phase_content(action, requirement)
+            if phase == "IMPLEMENT":
+                reviewed_revisions = self._commit_reviewed_worktrees(receipts)
+            content = self._phase_content(action, requirement, reviewed_revisions)
             envelope = self._phase_envelope(action, content, run_id)
             result = self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)
             self.assertTrue(result["ok"], result)
@@ -708,7 +714,7 @@ class FakeE2ETests(unittest.TestCase):
         submit_hash = canonical_hash({"run_id": run_id, "revision_set": revision_set})
         g7 = self._approval(run_id, "G7", submit_hash)
         change_set = {
-            "run_id": run_id, "change_set_id": f"CS-{project}",
+            "run_id": run_id, "change_set_id": "CS-1",
             "revision_set_id": f"RS-{project}", "repo_path": str(self.root / f"{project}-business"),
             "module": "baidu/team/app", "target_branch": "main", "commit_revision": "r2",
             "card_id": card, "owner": "owner@example.test", "revision_set": revision_set,
@@ -719,6 +725,8 @@ class FakeE2ETests(unittest.TestCase):
             icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
         )
         self.assertTrue(submitted["ok"], submitted)
+        # A single-task DAG has no open nodes once its only change set reaches iCode,
+        # so the last submission advances the frontier straight to IPIPE.
         self.assertEqual(self.orchestrator.next(run_id)["controller"], "ipipe")
 
         revisions = {
@@ -859,7 +867,7 @@ class FakeE2ETests(unittest.TestCase):
             "roles": ["development"] if routed["collaboration_category"] == "code" else trace["role_routing"][-1]["roles"],
         })
         self.assertEqual(
-            {"intake", "grill", "spec", "tasks", "plan", "implement", "review", "submission", "ipipe", "run-summary"},
+            {"intake", "grill", "spec", "tasks", "plan", "implement", "review", "change-set", "submission", "ipipe", "run-summary"},
             {artifact["kind"] for artifact in trace["artifacts"]},
         )
         self.assertEqual(ku.calls[0][1], parent)
@@ -871,7 +879,7 @@ class FakeE2ETests(unittest.TestCase):
             "pending_after_recovery": self.orchestrator.state.pending_intents(run_id),
         }
 
-    def _phase_content(self, action, requirement):
+    def _phase_content(self, action, requirement, revisions=None):
         content = copy.deepcopy(action.get("content") or specialized_examples()[action["result_schema"]])
         if action["phase"] == "INTAKE":
             return copy.deepcopy(requirement)
@@ -883,7 +891,7 @@ class FakeE2ETests(unittest.TestCase):
                 repository["revision"] = action["source_revisions"][repository["role"]]
         elif action["phase"] == "IMPLEMENT":
             content["baseline_revisions"] = copy.deepcopy(action["source_revisions"])
-            content["revisions"] = {"business": "r2", "tests": "t2"}
+            content["revisions"] = copy.deepcopy(revisions) if revisions else {"business": "r2", "tests": "t2"}
             content["full_diff_hash"] = canonical_hash({
                 "business_patch": content["business_patch"], "test_patch": content["test_patch"],
             })
@@ -895,6 +903,23 @@ class FakeE2ETests(unittest.TestCase):
             content["change_set_hash"] = predecessor["envelope"]["content"]["candidate_hash"]
             content["baseline_revisions"] = predecessor["envelope"]["content"]["baseline_revisions"]
         return content
+
+    def _commit_reviewed_worktrees(self, receipts):
+        # The real IMPLEMENT step writes the change into each owned worktree and commits
+        # it; the reviewed change set then pins those commits. build_and_archive (run at
+        # REVIEW completion) re-commits the same clean worktree and asserts the revision
+        # matches content["revisions"], so the fixture has to use the real commit SHAs
+        # rather than synthetic placeholders.
+        from submit_descriptor import _commit_if_dirty
+
+        revisions = {}
+        for role in ("business", "tests"):
+            worktree = Path(receipts[role]["worktree_path"])
+            (worktree / f"{role}-reviewed-change.txt").write_text(
+                f"reviewed change for {role}\n", encoding="utf-8"
+            )
+            revisions[role] = _commit_if_dirty(str(worktree), f"reviewed {role} change set")
+        return revisions
 
     def _optimization_candidate(self, run_id, label):
         control_root = self.root / f"control-{label}"
@@ -1075,13 +1100,15 @@ class FakeE2ETests(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(business)], check=True)
         subprocess.run(["git", "init", "-q", str(tests)], check=True)
         for repo, label in ((business, "business"), (tests, "tests")):
+            # Persist the identity (rather than passing it per commit) so git worktrees
+            # created off these repos inherit it: build_and_archive commits reviewed
+            # change sets from the worktree and reads user.name/user.email there.
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "tom-autodev-fixture"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "fixture@example.test"], check=True)
             (repo / "README.md").write_text(f"{project} {label}\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
             subprocess.run([
-                "git", "-C", str(repo),
-                "-c", "user.name=tom-autodev-fixture",
-                "-c", "user.email=fixture@example.test",
-                "commit", "-q", "-m", "fixture baseline",
+                "git", "-C", str(repo), "commit", "-q", "-m", "fixture baseline",
             ], check=True)
         language = self.root / f"{project}-{language_name}"
         project_skill = self.root / f"{project}-{project_name}"

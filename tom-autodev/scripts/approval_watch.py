@@ -12,6 +12,7 @@ _ACK_KEY = "approval.ack"
 _NUDGE_KEY = "approval.nudge"
 _REISSUE_KEY = "approval.reissue"
 _RESUME_KEY = "resume-notice"
+_RESUME_HANDOFF_PREFIX = "approval-resume"
 _IDE_TURN_KEY = "ide-turn-notice"
 # Reminders get more urgent as the deadline approaches; the bucket index keeps each
 # reminder idempotent without adding state of its own.
@@ -136,6 +137,27 @@ class ApprovalWatcher:
             approval = self._approved_gate(run_id, brief.get("gate"), latest.get("created_at"))
             if approval is None:
                 continue
+            handoff_id = f"{_RESUME_HANDOFF_PREFIX}-{approval['approval_id']}"
+            try:
+                handoff = self.orchestrator.state.record_handoff(
+                    run_id,
+                    handoff_id,
+                    {
+                        "kind": "APPROVAL_RESUME",
+                        "run_id": run_id,
+                        "event_id": latest["event_id"],
+                        "approval_id": approval["approval_id"],
+                        "input_hash": approval["input_hash"],
+                        "action": approval.get("action"),
+                    },
+                )
+            except Exception as error:  # noqa: BLE001 - preserve the gate decision
+                notices.append({
+                    "reason_code": "RESUME_HANDOFF_FAILED",
+                    "run_id": run_id,
+                    "detail": str(error),
+                })
+                continue
             key = f"{_RESUME_KEY}:{run_id}:{latest['event_id']}:{approval['approval_id']}"
             if self.orchestrator.state.idempotency_result(key) is not None:
                 continue
@@ -147,7 +169,12 @@ class ApprovalWatcher:
                 run_id,
                 "approval.resume_notice",
                 key,
-                {"run_id": run_id, "event_id": latest["event_id"], "approval_id": approval["approval_id"]},
+                {
+                    "run_id": run_id,
+                    "event_id": latest["event_id"],
+                    "approval_id": approval["approval_id"],
+                    "handoff_id": handoff["handoff_id"],
+                },
             )
             if claim["status"] == "DONE":
                 continue
@@ -180,6 +207,7 @@ class ApprovalWatcher:
                     # not the settlement of a gate, and a reporter must be able to
                     # tell the two apart.
                     "gate_approval_id": approval["approval_id"],
+                    "handoff_id": handoff["handoff_id"],
                 }
             )
         return notices
@@ -591,13 +619,67 @@ def _resume_markdown(
         f"**当前阶段** {brief['state']}",
         f"**下一步** {brief['next']['text']}",
         "",
-        "**请在 Comate 里回复**",
-        "继续",
+        "**Comate 会自动续跑当前 run**",
         "",
-        "> 该闸门已落账，流程停在这里只是因为阶段推进需要 Comate 执行。",
+        "> 该闸门已落账；若当前会话仍活跃，Stop Hook 会自动交回 Comate。",
+        "> 若会话已结束，请重新打开 Comate 后执行 `resume`。",
         f"> run_id `{brief['run_id'][:12]}…`",
     ]
     return "\n".join(lines)
+
+
+def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Hand one approved resume back to a live Comate turn.
+
+    The hook only injects context and never executes a phase or external write.
+    Completing the durable handoff makes repeated Stop callbacks idempotent.
+    """
+    if not isinstance(payload, dict) or payload.get("hook_event_name") != "Stop":
+        return {"ok": True, "reason_code": "HOOK_EVENT_IGNORED"}
+    if payload.get("status") == "cancelled":
+        return {"ok": True, "reason_code": "SESSION_CANCELLED"}
+    candidates = []
+    for latest in orchestrator.state.latest_states():
+        run_id = latest.get("run_id")
+        if not isinstance(run_id, str):
+            continue
+        for handoff in orchestrator.state.incomplete_handoffs(run_id):
+            data = handoff.get("payload") or {}
+            if data.get("kind") == "APPROVAL_RESUME":
+                candidates.append((str(handoff["handoff_id"]), run_id, data))
+    if not candidates:
+        return {"ok": True, "reason_code": "NO_RESUME_HANDOFF"}
+    if len(candidates) > 1:
+        return {"ok": True, "reason_code": "MULTIPLE_RESUME_HANDOFFS"}
+    handoff_id, run_id, data = sorted(candidates, key=lambda item: item[0])[0]
+    events_reader = getattr(orchestrator.state, "events", None)
+    latest_events = events_reader(run_id) if callable(events_reader) else []
+    if latest_events and latest_events[-1].get("event_id") != data.get("event_id"):
+        return {"ok": True, "reason_code": "RESUME_HANDOFF_STALE", "run_id": run_id}
+    approval = orchestrator.approvals.get(data.get("approval_id"))
+    if (
+        not isinstance(approval, dict)
+        or approval.get("run_id") != run_id
+        or approval.get("effective_decision") != "APPROVE"
+        or approval.get("input_hash") != data.get("input_hash")
+    ):
+        return {"ok": True, "reason_code": "RESUME_HANDOFF_STALE", "run_id": run_id}
+    orchestrator.state.complete_handoff(handoff_id)
+    return {
+        "ok": True,
+        "reason_code": "AUTO_RESUME",
+        "run_id": run_id,
+        "approval_id": approval["approval_id"],
+        "input_hash": approval["input_hash"],
+        "decision": "block",
+        "continue": True,
+        "reason": "审批已通过，继续执行 tom-autodev 当前 run",
+        "additionalContext": (
+            f"审批 {approval['approval_id']} 已通过且与 input_hash 绑定。"
+            f"请继续 run_id {run_id}，先读取 next/status 并遵守当前阶段审批，"
+            "不要重复提交、重跑或绕过其他闸门。"
+        ),
+    }
 
 
 def _ack_markdown(approval: dict[str, Any], decision: str, responder: str | None) -> str:

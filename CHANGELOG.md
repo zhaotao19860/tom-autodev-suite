@@ -10,8 +10,7 @@ The x86bgw CDN-URL requirement (iCafe `BGW-1956`) was the suite's first end-to-e
 finished, but only because an operator worked around the control plane repeatedly, and this
 entry is mostly an account of what those workarounds were covering for. The working-tree
 state the run actually used is committed first as a single baseline, so everything below
-reads as a diff against what ran rather than against the pre-run skeleton. 613 tests pass
-and the suite no longer emits `ResourceWarning`s.
+reads as a diff against what ran rather than against the pre-run skeleton. 720 tests pass.
 
 ### Added
 

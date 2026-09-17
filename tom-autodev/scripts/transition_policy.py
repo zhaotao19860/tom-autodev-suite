@@ -26,7 +26,10 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     # DIAGNOSE -> PLAN/SPEC path and comes back as a new revision on the same CR, which
     # is why the edge is to DIAGNOSE and not back to IMPLEMENT: nothing may be repaired
     # before the finding is root-caused.
-    "SUBMIT": {"IPIPE", "DIAGNOSE"},
+    # WORKSPACE because a PASS now submits that task immediately. The CR can
+    # land while later DAG nodes are still open; IPIPE over that half-written
+    # requirement is not evidence, so the frontier rebinds instead.
+    "SUBMIT": {"IPIPE", "DIAGNOSE", "WORKSPACE"},
     "IPIPE": {"RELEASE", "DIAGNOSE", "ENVIRONMENT_BLOCKED"},
     "RELEASE": {"RELEASE_SUCCESS", "DIAGNOSE", "ENVIRONMENT_BLOCKED"},
     # PLAN is reachable from DIAGNOSE only for a code-only repair, i.e. one whose

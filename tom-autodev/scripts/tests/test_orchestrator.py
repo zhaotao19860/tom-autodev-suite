@@ -111,6 +111,56 @@ def _start(orchestrator, card_id="BGW-1"):
 
 
 class OrchestratorTests(unittest.TestCase):
+    def test_child_brief_distinguishes_generation_and_approved_submission(self):
+        from run_brief import _next_step
+
+        action = {"child_skill": "tom-implement", "required_human_gate": "G5"}
+        approved = {"action": "G5", "approval_id": "approval-g5"}
+        draft = _next_step(action, "IMPLEMENT", [], [], None)
+        self.assertIn("待生成", draft["text"])
+        ready = _next_step(action, "IMPLEMENT", [], [], None, approved)
+        self.assertIn("已批准待提交", ready["text"])
+        self.assertIn("approval_input_hash", ready["text"])
+        self.assertIn("complete-phase", ready["text"])
+        ready_without_child = _next_step({"required_human_gate": "G5"}, "IMPLEMENT", [], [], None, approved)
+        self.assertIn("已批准待提交", ready_without_child["text"])
+        self.assertIn("complete-phase", ready_without_child["text"])
+        g7 = {"action": "G7", "approval_id": "approval-g7"}
+        submit_ready = _next_step({"controller": "submit", "required_human_gate": "G7"}, "SUBMIT", [], [], None, g7)
+        self.assertIn("已批准待提交", submit_ready["text"])
+        self.assertIn("cli.py submit", submit_ready["text"])
+        self.assertIn("不是 complete-phase", submit_ready["text"])
+        self.assertNotRegex(submit_ready["text"], r"(?<!不是 )complete-phase")
+        blocked = _next_step(action, "IMPLEMENT", [], [], "PREDECESSOR_REQUIRED", approved)
+        self.assertNotIn("已批准待提交", blocked["text"])
+
+    def test_child_brief_does_not_reuse_approval_from_previous_phase_entry(self):
+        from run_brief import build
+        from unittest.mock import Mock
+
+        orchestrator = Mock()
+        orchestrator.state.events.return_value = [{
+            "state": "IMPLEMENT", "created_at": "2026-09-14T12:00:00",
+        }]
+        orchestrator.state.pending_intents.return_value = []
+        orchestrator.next.return_value = {
+            "ok": True, "child_skill": "tom-implement", "required_human_gate": "G5",
+        }
+        row = {
+            "action": "G5", "approval_id": "g5", "effective_decision": "APPROVE",
+            "created_at": "2026-09-14T11:00:00", "resolved_at": "2026-09-14T13:00:00",
+        }
+        orchestrator.approvals.for_run.return_value = [row]
+        self.assertIn("待生成", build(orchestrator, "run")["next"]["text"])
+        row["created_at"] = "2026-09-14T12:01:00"
+        self.assertIn("已批准待提交", build(orchestrator, "run")["next"]["text"])
+
+    def test_submission_recorded_is_a_successful_cli_exit(self):
+        from orchestrator import _cli_exit_code
+
+        self.assertEqual(_cli_exit_code({"ok": True, "reason_code": "SUBMISSION_RECORDED", "state": "WORKSPACE"}), 0)
+        self.assertEqual(_cli_exit_code({"ok": False, "reason_code": "SUBMIT_REJECTED"}), 1)
+
     def test_explicit_config_root_keeps_profiles_under_config_projects(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -122,6 +172,53 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(recorded["profile_path"], str(expected))
         self.assertEqual(result["state"], "INTAKE")
+
+    def test_status_does_not_ask_for_a_superseded_pending_gate(self):
+        """A later APPROVE of the same action retires an unanswered earlier card.
+
+        BGW-1956 Spec 1.1.4 already had G2 43cb8f46 APPROVE while e133d87e stayed
+        PENDING; status then kept asking people to answer the dead card.
+        """
+        from run_brief import build
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_profile(root, PROFILE)
+            orchestrator = Orchestrator(root)
+            run_id = _start(orchestrator)["run_id"]
+            policy = {"comate": ["manager@example.test"], "infoflow": ["manager@example.test"]}
+            stale = orchestrator.approvals.request(
+                "G2", "stale-hash", ["comate", "infoflow"],
+                run_id=run_id, member_policy=policy,
+            )
+            _approve_for_run(orchestrator, run_id, "G2", "current-hash")
+            live = orchestrator.approvals.request(
+                "G6", "live-hash", ["comate", "infoflow"],
+                run_id=run_id, member_policy=policy,
+            )
+            for channel in ("comate", "infoflow"):
+                orchestrator.approvals.record_delivery(
+                    live["approval_id"], channel,
+                    {"request_id": f"{channel}-{live['approval_id']}"},
+                    payload_hash="live-hash",
+                )
+            orchestrator.state.transition(run_id, "DIAGNOSE", {"task_id": "T3"})
+            original_next = orchestrator.next
+            orchestrator.next = lambda _run_id: {
+                "ok": True, "required_human_gate": "G6", "state": "DIAGNOSE",
+            }
+            try:
+                brief = build(orchestrator, run_id)
+            finally:
+                orchestrator.next = original_next
+
+        self.assertIsNone(stale.get("effective_decision"))
+        self.assertEqual(
+            [gate["approval_id"] for gate in brief["waiting_on"]],
+            [live["approval_id"]],
+        )
+        self.assertIn(live["approval_id"], brief["next"]["text"])
+        self.assertNotIn(stale["approval_id"], brief["next"]["text"])
 
     def test_start_missing_profile_is_not_ready(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -832,6 +929,7 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertTrue(policy.validate("SUBMIT", "DIAGNOSE")["allowed"])
         self.assertTrue(policy.validate("SUBMIT", "IPIPE")["allowed"])
+        self.assertTrue(policy.validate("SUBMIT", "WORKSPACE")["allowed"])
         self.assertEqual(
             policy.validate("SUBMIT", "IMPLEMENT")["reason_code"], "INVALID_TRANSITION"
         )
@@ -943,6 +1041,218 @@ class SubmitDescriptorWiringTests(unittest.TestCase):
         self.assertNotIn("submit_descriptor", rejected)
 
 
+class SkippedSubmitRecoveryTests(unittest.TestCase):
+    """A WORKSPACE that skipped SUBMIT is moved onto the reviewed task."""
+
+    def test_next_recovers_a_review_pass_that_jumped_to_workspace(self):
+        from test_phase_protocol_repair import final_envelope, two_node_dag
+        from test_schema_validation import specialized_examples
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_profile(root, PROFILE)
+            orchestrator = Orchestrator(root)
+            run_id = _start(orchestrator)["run_id"]
+            revisions = {"business": "r2", "tests": "t2"}
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "TASKS", None, two_node_dag(),
+            ))
+            review = specialized_examples()["review"]
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "REVIEW", "T-1", review, revisions=revisions,
+            ))
+            content = json.dumps({
+                "run_id": run_id, "change_set_id": "CS-1", "revision_set_id": "RS-T-1",
+                "repo_path": "/tmp/T-1", "module": "baidu/team/T-1", "target_branch": "main",
+                "commit_revision": "rev-T-1", "card_id": "BGW-1", "owner": "dev",
+                "revision_set": {
+                    "business": {"module": "baidu/team/T-1", "revision": "rev-T-1", "branch": "main"},
+                    "test": {"module": "baidu/team/T-1-tests", "revision": "test-rev", "branch": "main"},
+                },
+            }, sort_keys=True).encode()
+            orchestrator.artifacts.put(run_id, "change-set", content, {
+                "verdict": "PASS", "task_id": "T-1", "revision_set_id": "RS-T-1",
+            })
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "IMPLEMENT", "T-1", specialized_examples()["change-set"],
+                revisions=revisions,
+            ))
+            orchestrator.state.transition(run_id, "WORKSPACE", {
+                "previous_state": "REVIEW", "task_id": "T-2", "profile_hash": "a" * 64,
+            })
+
+            action = orchestrator.next(run_id)
+            status = orchestrator.status(run_id)
+
+        self.assertTrue(action.get("ok"), action)
+        self.assertEqual(status["state"], "SUBMIT")
+        self.assertEqual(action["controller"], "submit")
+        self.assertEqual(action.get("task_id"), "T-1")
+        self.assertEqual(status["events"][-1]["payload"]["reason_code"], "SKIPPED_SUBMIT_RECOVERED")
+
+    def test_next_does_not_recover_an_ordinary_workspace_binding(self):
+        from test_phase_protocol_repair import final_envelope, two_node_dag
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_profile(root, PROFILE)
+            orchestrator = Orchestrator(root)
+            run_id = _start(orchestrator)["run_id"]
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "TASKS", None, two_node_dag(),
+            ))
+            orchestrator.state.transition(run_id, "WORKSPACE", {
+                "previous_state": "TASKS", "profile_hash": "a" * 64,
+            })
+
+            action = orchestrator.next(run_id)
+            status = orchestrator.status(run_id)
+
+        self.assertTrue(action.get("ok"), action)
+        self.assertEqual(status["state"], "WORKSPACE")
+        self.assertEqual(action["controller"], "workspace")
+
+
+class RebuiltChangeSetRecoveryTests(unittest.TestCase):
+    """Recovery must be local, idempotent, and bind IMPLEMENT to one Plan."""
+
+    def test_recovery_pins_the_selected_plan_not_a_newer_plan(self):
+        from test_phase_protocol_repair import final_envelope
+        from test_schema_validation import specialized_examples
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_profile(root, PROFILE)
+            orchestrator = Orchestrator(root)
+            run_id = _start(orchestrator)["run_id"]
+            first = orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "PLAN", "T-1", specialized_examples()["task-plan"],
+                revisions={"business": "r1", "tests": "t1"},
+            ))
+            newer_plan = specialized_examples()["task-plan"]
+            newer_plan["g4_input_hash"] = "b" * 64
+            newer = orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "PLAN", "T-1", newer_plan,
+                revisions={"business": "r2", "tests": "t2"},
+            ))
+            checkpoint = orchestrator.state.transition(run_id, "PLAN", {
+                "previous_state": "DIAGNOSE", "task_id": "T-1",
+            })
+
+            recovered = orchestrator.recover_rebuilt_change_set(
+                run_id, "T-1", first["artifact_id"]
+            )
+            action = orchestrator.next(run_id)
+            replay = orchestrator.recover_rebuilt_change_set(
+                run_id, "T-1", first["artifact_id"]
+            )
+
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["state"], "IMPLEMENT")
+        self.assertEqual(replay["event_id"], recovered["event_id"])
+        self.assertEqual(action["task_id"], "T-1")
+        self.assertEqual(action["parent_artifact_hash"], first["envelope"]["content_hash"])
+        self.assertNotEqual(action["parent_artifact_hash"], newer["envelope"]["content_hash"])
+        self.assertEqual(checkpoint["state"], "PLAN")
+
+    def test_recovery_rejects_foreign_plan_without_transition(self):
+        from test_phase_protocol_repair import final_envelope
+        from test_schema_validation import specialized_examples
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_profile(root, PROFILE)
+            orchestrator = Orchestrator(root)
+            run_id = _start(orchestrator)["run_id"]
+            foreign = orchestrator.artifacts.put_envelope(final_envelope(
+                "other-run", "PLAN", "T-1", specialized_examples()["task-plan"],
+                revisions={"business": "r1", "tests": "t1"},
+            ))
+            orchestrator.state.transition(run_id, "PLAN", {"task_id": "T-1"})
+
+            result = orchestrator.recover_rebuilt_change_set(run_id, "T-1", foreign["artifact_id"])
+            state = orchestrator.status(run_id)["state"]
+
+        self.assertEqual(result["reason_code"], "PLAN_PREDECESSOR_INVALID")
+        self.assertEqual(state, "PLAN")
+
+
+class StaleRebuiltPlanRecoveryTests(unittest.TestCase):
+    """A rebuilt QA revision must restart at an unapproved, immutable PLAN."""
+
+    def _fixture(self, state="SUBMIT"):
+        from test_phase_protocol_repair import final_envelope
+        from test_schema_validation import specialized_examples
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _write_profile(root, PROFILE)
+        orchestrator = Orchestrator(root)
+        run_id = _start(orchestrator)["run_id"]
+        source = orchestrator.artifacts.put_envelope(final_envelope(
+            run_id, "PLAN", "T3", specialized_examples()["task-plan"],
+            revisions={"business": "old-business", "tests": "old-tests"},
+        ))
+        orchestrator.state.transition(run_id, "PLAN", {"task_id": "T3"})
+        orchestrator.state.transition(run_id, "IMPLEMENT", {
+            "task_id": "T3", "plan_artifact_id": source["artifact_id"],
+            "plan_content_hash": source["envelope"]["content_hash"],
+        })
+        if state == "SUBMIT":
+            orchestrator.state.transition(run_id, "SUBMIT", {"task_id": "T3"})
+        return orchestrator, run_id, source
+
+    def test_recovery_creates_a_new_unapproved_plan_and_preserves_source(self):
+        orchestrator, run_id, source = self._fixture()
+        revisions = {
+            "business": "008f38ba",
+            "tests": "8696dccb13487a1920c4efd468bbdff9ae8df495",
+        }
+
+        recovered = orchestrator.recover_stale_rebuilt_plan(
+            run_id, "T3", "SUBMIT", source["artifact_id"], revisions
+        )
+        replay = orchestrator.recover_stale_rebuilt_plan(
+            run_id, "T3", "SUBMIT", source["artifact_id"], revisions
+        )
+        replacement = orchestrator.artifacts.phase_artifact(recovered["plan_artifact_id"])["envelope"]
+        original = orchestrator.artifacts.phase_artifact(source["artifact_id"])["envelope"]
+
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["state"], "PLAN")
+        self.assertEqual(replay["event_id"], recovered["event_id"])
+        self.assertNotEqual(recovered["plan_artifact_id"], source["artifact_id"])
+        self.assertEqual(replacement["source_revisions"], revisions)
+        self.assertIsNone(replacement["approval_id"])
+        self.assertIsNone(replacement["approval_input_hash"])
+        self.assertEqual(
+            {entry["role"]: entry["revision"] for entry in replacement["content"]["repositories"]},
+            revisions,
+        )
+        self.assertEqual(original["source_revisions"], {"business": "old-business", "tests": "old-tests"})
+        self.assertEqual(orchestrator.status(run_id)["events"][-1]["payload"]["approval_required"], "G4")
+        # The command itself never auto-approves; the recovery event explicitly leaves G4 pending.
+        self.assertEqual(recovered["approval_required"], "G4")
+        self.assertIsNone(replacement["approval_id"])
+
+    def test_recovery_fails_closed_when_current_state_or_pinned_plan_does_not_match(self):
+        orchestrator, run_id, source = self._fixture("IMPLEMENT")
+        revisions = {"business": "b-new", "tests": "t-new"}
+
+        wrong_state = orchestrator.recover_stale_rebuilt_plan(
+            run_id, "T3", "SUBMIT", source["artifact_id"], revisions
+        )
+        wrong_plan = orchestrator.recover_stale_rebuilt_plan(
+            run_id, "T3", "IMPLEMENT", "not-the-pinned-plan", revisions
+        )
+
+        self.assertEqual(wrong_state["reason_code"], "RECOVERY_STATE_MISMATCH")
+        self.assertEqual(wrong_plan["reason_code"], "RECOVERY_PLAN_MISMATCH")
+        self.assertEqual(orchestrator.status(run_id)["state"], "IMPLEMENT")
+
+
+
 class MultiRepoSubmitFrontierTests(unittest.TestCase):
     """SUBMIT may only hand over to IPIPE once every reviewed change set is in."""
 
@@ -1048,6 +1358,89 @@ class MultiRepoSubmitFrontierTests(unittest.TestCase):
 
         self.assertEqual(outstanding, [])
 
+    def test_an_amended_dag_keeps_unreviewed_nodes_outstanding_after_a_sibling_submit(self):
+        """A Review older than the current DAG cannot answer IPIPE for that node.
+
+        BGW-1956 T0's empty submit otherwise saw T1/T2 PASS descriptors from before
+        the amended DAG, T3's latest Review as REJECT, and jumped to IPIPE.
+        """
+        from orchestrator import _outstanding_submissions
+        from test_phase_protocol_repair import final_envelope, two_node_dag
+        from test_schema_validation import specialized_examples
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+            revisions = {"business": "r2", "tests": "t2"}
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "TASKS", None, two_node_dag(),
+            ))
+            for task_id in ("T-1", "T-2"):
+                orchestrator.artifacts.put_envelope(final_envelope(
+                    run_id, "REVIEW", task_id, specialized_examples()["review"],
+                    revisions=revisions,
+                ))
+            amended = two_node_dag()
+            amended["nodes"][1]["capability_slice"] += " plus the amended scope"
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "TASKS", None, amended,
+            ))
+            current_t1 = copy.deepcopy(specialized_examples()["review"])
+            current_t1["provider"] = {
+                "kind": "source-only", "identity": "review-provider-after-amendment",
+            }
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "REVIEW", "T-1", current_t1, revisions=revisions,
+            ))
+            self._descriptor(orchestrator, run_id, "T-1", "CS-1")
+            self._descriptor(orchestrator, run_id, "T-2", "CS-2")
+            self._submission(orchestrator, run_id, "CS-1", "bgw")
+
+            outstanding = _outstanding_submissions(orchestrator, run_id)
+
+        self.assertEqual(outstanding, ["T-2"])
+
+    def test_submit_followup_stays_in_submit_until_reviewed_sets_are_in(self):
+        from orchestrator import _submit_followup_state
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+            self._descriptor(orchestrator, run_id, "T0", "CS-0")
+            self._descriptor(orchestrator, run_id, "T1", "CS-1")
+            before = _submit_followup_state(orchestrator, run_id)
+            self._submission(orchestrator, run_id, "CS-0", "bgw")
+            half = _submit_followup_state(orchestrator, run_id)
+            self._submission(orchestrator, run_id, "CS-1", "bgw-second")
+            done = _submit_followup_state(orchestrator, run_id)
+
+        self.assertEqual(before, "SUBMIT")
+        self.assertEqual(half, "SUBMIT")
+        self.assertEqual(done, "IPIPE")
+
+    def test_submit_followup_returns_to_workspace_when_open_nodes_remain(self):
+        from orchestrator import _submit_followup_state
+        from test_phase_protocol_repair import final_envelope, two_node_dag
+        from test_schema_validation import specialized_examples
+
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator = self._orchestrator(Path(directory))
+            run_id = _start(orchestrator)["run_id"]
+            revisions = {"business": "r2", "tests": "t2"}
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "TASKS", None, two_node_dag(),
+            ))
+            orchestrator.artifacts.put_envelope(final_envelope(
+                run_id, "REVIEW", "T-1", specialized_examples()["review"],
+                revisions=revisions,
+            ))
+            self._descriptor(orchestrator, run_id, "T-1", "CS-1")
+            self._submission(orchestrator, run_id, "CS-1", "bgw")
+
+            followup = _submit_followup_state(orchestrator, run_id)
+
+        self.assertEqual(followup, "WORKSPACE")
+
     def test_the_ipipe_payload_names_the_primary_repository_not_the_last_one(self):
         from orchestrator import _primary_submission, _recorded_submissions
 
@@ -1109,6 +1502,100 @@ class PerModulePipelineIdentityTests(unittest.TestCase):
             "baidu/sysip/bgwagent", "baidu/sysip/x86bgw",
         ])
         self.assertEqual(_required_modules({"pipeline_id": "p"}), [])
+
+
+class TestOnlySubmissionTests(unittest.TestCase):
+    """A task may legitimately touch only the test repository.
+
+    A Spec amendment that retires stale product cases has no business commit, so the
+    submission is about the test repository. Both the descriptor consumer and the
+    submission binding used to read `module`/`commit_revision` off the business entry
+    unconditionally, which refused exactly those submissions.
+    """
+
+    PROFILE = {
+        "business_repos": [
+            {"path": "/repo/business", "module": "baidu/sysip/x86bgw", "branch": "feature"}
+        ],
+        "test_repo": {"path": "/repo/tests", "module": "baidu/nsiqa/x86bgw", "branch": "pipline_case"},
+        "pipeline_profile": {
+            "pipeline_id": "348102",
+            "release_rule": "manual-approval",
+            "pipelines": [
+                {"module": "baidu/sysip/x86bgw", "pipeline_id": "348102", "release_rule": "manual-approval"},
+                {"module": "baidu/nsiqa/x86bgw", "pipeline_id": "504074", "release_rule": "p0-only"},
+            ],
+        },
+        "environment_profile": {"kind": "sandbox"},
+    }
+    REVISION_SET = {
+        "business": {"module": "baidu/sysip/x86bgw", "revision": "b" * 40, "branch": "feature"},
+        "test": {"module": "baidu/nsiqa/x86bgw", "revision": "t" * 40, "branch": "pipline_case"},
+    }
+
+    def _change_set(self, primary_role):
+        entry = self.REVISION_SET["business" if primary_role == "business" else "test"]
+        return {
+            "module": entry["module"],
+            "commit_revision": entry["revision"],
+            "revision_set": self.REVISION_SET,
+        }
+
+    def _receipt(self, change_set):
+        return {
+            "module": change_set["module"],
+            "commit_revision": change_set["commit_revision"],
+            "patchset": change_set["commit_revision"],
+            "revision_set": self.REVISION_SET,
+        }
+
+    def test_a_test_repository_submission_binds_to_its_own_pipeline(self):
+        from orchestrator import _submission_controller_binding
+
+        change_set = self._change_set("test")
+        error, binding = _submission_controller_binding(
+            self.PROFILE, self._receipt(change_set), change_set
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(binding["module"], "baidu/nsiqa/x86bgw")
+        self.assertEqual(binding["pipeline_id"], "504074")
+        self.assertEqual(binding["release_rule"], "p0-only")
+        self.assertEqual(
+            binding["source_revisions"],
+            {"business": "b" * 40, "tests": "t" * 40},
+        )
+
+    def test_a_business_submission_still_binds_to_the_business_pipeline(self):
+        from orchestrator import _submission_controller_binding
+
+        change_set = self._change_set("business")
+
+        error, binding = _submission_controller_binding(
+            self.PROFILE, self._receipt(change_set), change_set
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(binding["module"], "baidu/sysip/x86bgw")
+        self.assertEqual(binding["pipeline_id"], "348102")
+
+    def test_a_module_revision_pair_in_neither_entry_is_refused(self):
+        from orchestrator import _submission_controller_binding
+
+        # 描述符声明的模块与提交必须真的是 revision_set 里的某一条，
+        # 否则提交对象无从确定。
+        stray = {
+            "module": "baidu/nsiqa/x86bgw",
+            "commit_revision": "c" * 40,
+            "revision_set": self.REVISION_SET,
+        }
+
+        error, binding = _submission_controller_binding(
+            self.PROFILE, self._receipt(stray), stray
+        )
+
+        self.assertEqual(error, "SOURCE_REVISION_MISMATCH")
+        self.assertEqual(binding, {})
 
 
 def _write_profile(root: Path, profile: dict) -> None:

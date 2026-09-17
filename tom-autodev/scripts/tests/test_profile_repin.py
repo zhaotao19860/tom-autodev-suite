@@ -66,7 +66,9 @@ class ProfileRepinTests(unittest.TestCase):
 
         `phase_protocol` keeps its own copy of the check and embeds the pinned hash in
         the action's identity, so a re-pin that only `_runtime_profile` sees leaves
-        `next` reporting PROFILE_CONFLICT and then ACTION_CONFLICT.
+        `next` reporting PROFILE_CONFLICT and then ACTION_CONFLICT. `knowledge_sync` is
+        the third door: every phase completion goes through it, so a pin it does not
+        honour blocks the run even while `next` reports OK.
         """
         with tempfile.TemporaryDirectory() as directory:
             orchestrator, run_id, path, previous = self._prepared(directory)
@@ -75,23 +77,52 @@ class ProfileRepinTests(unittest.TestCase):
 
             broken = orchestrator._runtime_profile(run_id)
             broken_next = orchestrator.next(run_id)["reason_code"]
+            broken_sync = orchestrator.knowledge_sync(run_id)
             prepared = profile_repin.plan(orchestrator, run_id, previous)
             approval_id = self._approve(orchestrator, run_id, prepared["input_hash"])
             applied = profile_repin.apply(orchestrator, run_id, approval_id, previous)
             healed = orchestrator._runtime_profile(run_id)
             healed_next = orchestrator.next(run_id)
+            healed_sync = orchestrator.knowledge_sync(run_id)
             replay = profile_repin.apply(orchestrator, run_id, approval_id, previous)
 
         self.assertEqual(before, "OK")
         self.assertEqual(broken["reason_code"], "PROFILE_CONFLICT")
         self.assertEqual(broken_next, "PROFILE_CONFLICT")
+        self.assertEqual(broken_sync["reason_code"], "PROFILE_CONFLICT")
         self.assertEqual(prepared["changed_keys"], ["pipeline_profile"])
         self.assertEqual(applied["reason_code"], "OK")
         self.assertEqual(healed["reason_code"], "OK")
         self.assertEqual(healed_next["reason_code"], "OK")
+        self.assertNotIsInstance(healed_sync, dict)
         self.assertEqual(healed["profile_hash"], prepared["new_hash"])
         self.assertEqual(healed["profile"]["pipeline_profile"]["pipeline_id"], "348142")
         self.assertEqual(replay["reason_code"], "ALREADY_REPINNED")
+
+    def test_the_pin_can_move_more_than_once_in_one_run(self):
+        # A run registers a pipeline early and changes the submission policy later. With
+        # every move stored under one key the second one crashed on a duplicate key and
+        # left the run stuck at PROFILE_CONFLICT.
+        with tempfile.TemporaryDirectory() as directory:
+            orchestrator, run_id, path, previous = self._prepared(directory)
+            self._edit(path, lambda p: p["pipeline_profile"].update({"pipeline_id": "348142"}))
+            first = profile_repin.plan(orchestrator, run_id, previous)
+            first_approval = self._approve(orchestrator, run_id, first["input_hash"])
+            profile_repin.apply(orchestrator, run_id, first_approval, previous)
+            intermediate = Path(directory) / "intermediate.yaml"
+            intermediate.write_text(Path(path).read_text(encoding="utf-8"), encoding="utf-8")
+
+            self._edit(path, lambda p: p.update({"submission_policy": "one_cr_per_repo"}))
+            second = profile_repin.plan(orchestrator, run_id, intermediate)
+            second_approval = self._approve(orchestrator, run_id, second["input_hash"])
+            applied = profile_repin.apply(orchestrator, run_id, second_approval, intermediate)
+            healed = orchestrator._runtime_profile(run_id)
+
+        self.assertEqual(second["changed_keys"], ["submission_policy"])
+        self.assertEqual(applied["reason_code"], "OK")
+        self.assertEqual(healed["reason_code"], "OK")
+        self.assertEqual(healed["profile"]["submission_policy"], "one_cr_per_repo")
+        self.assertEqual(healed["profile_hash"], second["new_hash"])
 
     def test_a_field_an_existing_binding_hashed_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:

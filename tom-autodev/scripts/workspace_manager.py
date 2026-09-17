@@ -389,8 +389,10 @@ class WorkspaceManager:
                     "ACTIVE",
                     "STOP",
                 )
+            # ACTIVE worktrees may already carry task commits on top of the recorded
+            # baseline; match query_ownership and allow HEAD as a descendant.
             mismatch = _registered_worktree_mismatch(
-                repo, worktree, expected_revision
+                repo, worktree, expected_revision, committed=True
             )
             if mismatch is not None:
                 return _reconcile_result(
@@ -468,8 +470,12 @@ class WorkspaceManager:
             )
 
         if status == "ACTIVE":
+            # Same descendant rule as query_ownership: an ACTIVE worktree's HEAD may
+            # have advanced past the recorded baseline with task commits.
             mismatch = (
-                _registered_worktree_mismatch(repo, worktree, expected_revision)
+                _registered_worktree_mismatch(
+                    repo, worktree, expected_revision, committed=True
+                )
                 if registered and path_exists
                 else "WORKTREE_ACTIVE_MISMATCH"
             )
@@ -619,8 +625,10 @@ class WorkspaceManager:
         if status == "REMOVING":
             had_worktree = registered or path_exists
             if registered:
+                # remove() transitions ACTIVE→REMOVING then reconciles; the worktree
+                # may still carry task commits ahead of the recorded baseline.
                 mismatch = _registered_worktree_mismatch(
-                    repo, worktree, expected_revision
+                    repo, worktree, expected_revision, committed=True
                 )
                 if mismatch is not None:
                     return _reconcile_result(
@@ -788,33 +796,43 @@ class WorkspaceManager:
                         "reason_code": "WORKTREE_OWNER_MISMATCH",
                         "existing": True,
                     }
+                # A REMOVED tombstone is intentionally re-enterable: the same owner may
+                # recreate onto a newer Plan baseline. ACTIVE/RESERVED/REMOVING still
+                # reject a baseline change so a live workspace cannot silently drift.
+                baseline_mismatch = (
+                    existing["baseline_revision"] is not None
+                    and existing["baseline_revision"] != baseline_revision
+                )
                 if (
                     existing["repo_path"] != str(repo)
                     or existing["run_id"] != run_id
                     or existing["task_id"] != task_id
-                    or (
-                        existing["baseline_revision"] is not None
-                        and existing["baseline_revision"] != baseline_revision
-                    )
+                    or (baseline_mismatch and existing["status"] != "REMOVED")
                 ):
                     return {
                         "owner_token": None,
                         "reason_code": "WORKTREE_RECEIPT_MISMATCH",
                         "existing": True,
                     }
-                if existing["baseline_revision"] is None:
+                if existing["baseline_revision"] is None or (
+                    existing["status"] == "REMOVED" and baseline_mismatch
+                ):
                     connection.execute(
                         """
                         UPDATE worktree_ownership
                         SET baseline_revision = ?, updated_at = ?
                         WHERE worktree_path = ? AND owner_token = ?
-                          AND baseline_revision IS NULL
+                          AND (
+                            baseline_revision IS NULL
+                            OR (status = 'REMOVED' AND baseline_revision != ?)
+                          )
                         """,
                         (
                             baseline_revision,
                             _now(),
                             str(worktree),
                             requested_owner_token,
+                            baseline_revision,
                         ),
                     )
                 return {
