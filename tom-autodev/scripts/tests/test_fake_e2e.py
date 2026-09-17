@@ -496,6 +496,30 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(parked["parked"], worker_driver.PRODUCER_WAIT)
         self.assertEqual(parked["auto_completed"], [])
 
+    def test_submit_draft_completes_a_gated_model_phase(self):
+        # express run auto-advances to the SPEC producer frontier.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-917", "I15ClP2KW4ZGAK", "express")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+        draft = copy.deepcopy(specialized_examples()["spec"])
+
+        # Without the G2 approval, submit-draft records the draft but refuses to complete,
+        # returning the exact hash to approve — a model phase is never completed ungated.
+        pending = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertEqual(pending["reason_code"], "APPROVAL_REQUIRED")
+        self.assertEqual(pending["gate"], "G2")
+        self.assertEqual(self.orchestrator.state.producer_job(job_id)["status"], "FULFILLED")
+
+        # After the operator approves that hash, submit-draft completes into TASKS.
+        self._approval(run_id, "G2", pending["approval_input_hash"])
+        done = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertTrue(done["ok"], done)
+        self.assertEqual(self.orchestrator.next(run_id)["phase"], "TASKS")
+
+        # A stale job id (not the current frontier) is refused.
+        stale = worker_driver.submit_draft(self.orchestrator, run_id, "producer:deadbeef", draft, knowledge_sync=knowledge)
+        self.assertIn(stale["reason_code"], ("STALE_PRODUCER_JOB", "NOT_PRODUCER"))
+
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

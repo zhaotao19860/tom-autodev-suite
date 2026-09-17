@@ -77,17 +77,21 @@ def classify_next(orchestrator: Any, run_id: str) -> dict[str, Any]:
     return {"kind": CONTROLLER_STEP, "controller": action.get("controller"), "action": action}
 
 
-def build_envelope(action: dict[str, Any]) -> dict[str, Any]:
-    """Build the ArtifactEnvelope for an auto/controller-authored action server-side.
+def build_envelope(
+    action: dict[str, Any], content: dict[str, Any] | None = None, approval_id: str | None = None
+) -> dict[str, Any]:
+    """Build the ArtifactEnvelope for an action server-side from its content.
 
-    This is the "server builds the envelope from pinned content" seam: for an auto phase
-    the content is already in the action, so the worker constructs the full envelope the
-    same way the agent would for a no-gate phase (approval_id None), and `complete_phase`
-    validates it unchanged. Only defined for auto actions (content present, no gate).
+    The "server builds the envelope" seam, shared by execute_auto (auto phase, content
+    pinned in the action, no approval) and submit_draft (model phase, content is the
+    producer's DraftContent, approval bound). `complete_phase` validates it unchanged.
     """
-    content = action["content"]
+    content = action["content"] if content is None else content
     content_hash = _canonical_hash(content)
-    source_revisions = action.get("source_revisions")
+    source_revisions = (
+        content.get("revisions") if action.get("phase") == "IMPLEMENT"
+        else action.get("source_revisions")
+    )
     approval_input_hash = _canonical_hash({
         "action_id": action["action_id"],
         "task_id": action.get("task_id"),
@@ -112,10 +116,22 @@ def build_envelope(action: dict[str, Any]) -> dict[str, Any]:
         "knowledge_version": None,
         "icafe_comment_id": None,
         "evidence_refs": copy.deepcopy(action.get("source_evidence_refs") or []),
-        "approval_id": None,
+        "approval_id": approval_id,
         "approval_input_hash": approval_input_hash,
         "content": content,
     }
+
+
+def _settled_approval_id(orchestrator: Any, run_id: str, gate: str, input_hash: str) -> str | None:
+    for record in orchestrator.approvals.for_run(run_id):
+        if (
+            isinstance(record, dict)
+            and record.get("action") == gate
+            and record.get("effective_decision") == "APPROVE"
+            and record.get("input_hash") == input_hash
+        ):
+            return record.get("approval_id")
+    return None
 
 
 def execute_auto(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None) -> dict[str, Any]:
@@ -130,6 +146,38 @@ def execute_auto(orchestrator: Any, run_id: str, knowledge_sync: Any | None = No
     if decision["kind"] != AUTO_COMPLETE:
         return {"ok": False, "reason_code": "NOT_AUTO", "decision_kind": decision["kind"]}
     envelope = build_envelope(decision["action"])
+    return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
+
+
+def submit_draft(
+    orchestrator: Any, run_id: str, job_id: str, draft: dict[str, Any],
+    knowledge_sync: Any | None = None,
+) -> dict[str, Any]:
+    """Fulfil a ProducerJob with model-authored DraftContent and complete the phase.
+
+    This is the producer-return seam: the agent (or a headless producer) supplies the
+    DraftContent for the parked model phase; the server builds the envelope and completes.
+    The job must match the current frontier (stale jobs are refused). For a gated phase
+    the completion binds the settled approval for the draft's content hash; if no such
+    approval exists yet the draft is recorded and APPROVAL_REQUIRED is returned with the
+    exact hash to approve — so a model phase is never completed without its human gate.
+    """
+    decision = classify_next(orchestrator, run_id)
+    if decision["kind"] != PRODUCER_WAIT:
+        return {"ok": False, "reason_code": "NOT_PRODUCER", "decision_kind": decision["kind"]}
+    action = decision["action"]
+    expected_job = f"producer:{action['action_id']}"
+    if job_id != expected_job:
+        return {"ok": False, "reason_code": "STALE_PRODUCER_JOB", "expected_job_id": expected_job}
+    orchestrator.state.fulfill_producer_job(job_id, draft)
+    envelope = build_envelope(action, draft)
+    gate = action.get("required_human_gate")
+    if gate is not None:
+        approval_id = _settled_approval_id(orchestrator, run_id, gate, envelope["approval_input_hash"])
+        if approval_id is None:
+            return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": gate,
+                    "approval_input_hash": envelope["approval_input_hash"], "job_id": job_id}
+        envelope["approval_id"] = approval_id
     return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
 
 
