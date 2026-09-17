@@ -482,6 +482,12 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(result["decision"]["skill"], "tom-spec")
         self.assertEqual([step["phase"] for step in result["auto_completed"]], ["GRILL"])
         self.assertEqual(self.orchestrator.next(run_id)["phase"], "SPEC")
+        # Parking enqueued a durable, idempotent ProducerJob for the SPEC frontier.
+        job = result["producer_job"]
+        self.assertEqual((job["status"], job["payload"]["phase"]), ("PENDING", "SPEC"))
+        self.assertEqual([j["job_id"] for j in self.orchestrator.state.pending_producer_jobs(run_id)], [job["job_id"]])
+        again = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertEqual(again["producer_job"]["job_id"], job["job_id"])
 
         # standard: nothing is auto — advance() parks immediately at GRILL with no
         # auto-completed steps.

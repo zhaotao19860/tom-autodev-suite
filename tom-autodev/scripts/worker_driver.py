@@ -152,6 +152,14 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     steps: list[dict[str, Any]] = []
     for _ in range(max_steps):
         decision = classify_next(orchestrator, run_id)
+        if decision["kind"] == PRODUCER_WAIT:
+            # Durably record what the model must produce, so parking is actionable and
+            # idempotent: the agent (or a headless producer) fulfils this job later via
+            # submit-draft. Enqueuing is a local, idempotent write — no external effect.
+            job = _enqueue_producer_job(orchestrator, run_id, decision)
+            return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                    "parked": PRODUCER_WAIT, "producer_job": job, "decision": decision,
+                    "auto_completed": steps}
         if decision["kind"] != AUTO_COMPLETE:
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
                     "parked": decision["kind"], "decision": decision, "auto_completed": steps}
@@ -162,3 +170,20 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         steps.append({"phase": decision["action"].get("phase"), "result": result})
     return {"ok": False, "reason_code": "MAX_STEPS_EXCEEDED", "run_id": run_id,
             "auto_completed": steps}
+
+
+def _enqueue_producer_job(orchestrator: Any, run_id: str, decision: dict[str, Any]) -> dict[str, Any]:
+    """Record a ProducerJob for a PRODUCER_WAIT frontier (idempotent on the action id)."""
+    action = decision["action"]
+    job_id = f"producer:{action['action_id']}"
+    payload = {
+        "phase": action.get("phase"),
+        "skill": decision.get("skill"),
+        "result_schema": action.get("result_schema"),
+        "input_hash": action.get("input_hash"),
+        "action_id": action.get("action_id"),
+        "source_event_id": action.get("source_event_id"),
+        "task_id": action.get("task_id"),
+        "required_human_gate": action.get("required_human_gate"),
+    }
+    return orchestrator.state.record_producer_job(run_id, job_id, payload)
