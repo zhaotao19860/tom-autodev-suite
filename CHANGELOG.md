@@ -4,6 +4,28 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-17 — WorkflowSpec 与 durable-worker 安全半 (Phase 1a–1c)
+
+把工作流从“Agent 即执行器”推向“确定性 worker 驱动 + 有界模型 producer”。行为对
+standard 类保持不变;新增能力靠全量测试证等价。
+
+- **1a WorkflowSpec 单一事实源**:新增 `workflow_spec.py`,把此前散落 ≥8 处、手工同步
+  的工作流语义(状态/转移/G0–G10 闸门/skill/schema/标题/side-effects/证据要求/闸门文案/
+  失败路由)集中为一份带版本、可 canonical-hash 的数据。`transition_policy` /
+  `phase_protocol` / `evidence_policy` / `approval_summary` 全部改为从它派生;一致性测试
+  机械化替代所有“keep in step”注释,消除 437/641 那类漂移。区分 `entry_gate` 与
+  `output_gate` 两义(澄清 IMPLEMENT 的 G4/G5)。
+- **1b 变更类自适应路由**:iCafe 卡片类型确定性映射出建议类别、由 owner 在 G0 确认/覆盖
+  (不新增审批点)。`express` 小改:GRILL 在验收项已存在时自动派生(无模型、免 G1),
+  TASKS 免 G3(ungated,模型仍产 DAG);SPEC 与全部代码/副作用闸门(G4/G5/G7/G9)保持。
+- **1c WorkerDriver 安全半**:`classify_next`(只读决策)、`execute_auto`(自主完成 auto
+  阶段、拒绝非 auto)、`advance`(自动推进确定性阶段 + park + 入队幂等 ProducerJob)、
+  `submit-draft`(模型交 DraftContent → 服务端建 envelope → gated 阶段绑定审批后完成,
+  无审批则只记草案并返回待批 hash)。确定性步骤零 Agent 唤醒。
+- **尚未接线**:自主 CONTROLLER_STEP 执行(worker 直接 submit iCode / 触发 iPipe /
+  release)刻意保留,待明确确认后单独实现;handoff 消费方由 Stop-hook 迁至 worker、以及
+  express `merged`(spec+dag 一步两产物)一并留待该阶段。
+
 ## 2026-09-17 — 控制面加固基线收绿 (Phase 0)
 
 把 2026-09-07 的加固工作(iCode/iPipe/KU 运行时客户端、提交描述符、iPipe watcher、
