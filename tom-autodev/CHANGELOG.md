@@ -2,6 +2,14 @@
 
 本 skill 属于 tom-autodev 套件，整套共 13 个，必须一起安装才能完成端到端流程。套件构成与各自职责见 SKILL.md 的依赖说明。
 
+## 2026-09-18
+
+- WorkerDriver 现在自驱 IPIPE 控制器：在 G7 下 compute-then-approve 推导触发绑定 hash（G7 授权「提交 iCode 并触发 iPipe」，G8 仅用于失败重跑），触发流水线并 monitor 到终态；成功落 RELEASE、失败转 DIAGNOSE，人工阶段/超时/瞬时故障则 park 交人处理
+- WorkerDriver 现在自驱 RELEASE 控制器：在 G9 下只读校验平台已发布锁定的 build（`verify_release`），未发布则 park `RELEASE_WAITING`，成功则记录发布证据并落终态 RELEASE_SUCCESS
+- 新增 `release-evidence` schema 与 `ingest_release_evidence` 摄入：发布证据绑定到成功的 IPIPE 前驱（同 pipeline/module/revisions/release rule/environment/build），确保只能对流水线证明过的 build 发布
+- `execute_controller` / `advance` 在注入 iPipe API transport 时同时驱动 IPIPE 与 RELEASE，打通 INTAKE→…→RELEASE_SUCCESS 的 worker 驱动闭环
+- 控制面回归测试 `765` 项全部通过
+
 ## 2026-09-15
 
 - IPIPE 失败或人工阶段先读取项目 Skill 的拓扑、日志和参数映射，再由控制面解析产物 URL、脱敏 token 并执行 `ipipe-rerun`
