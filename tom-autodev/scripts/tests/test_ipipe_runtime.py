@@ -14,8 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from approval_ledger import ApprovalLedger
 from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport, IpipeTransportError
-from clients.ipipe_runtime import IpipeRuntime, _normalize_stage, _stage_passed
+from clients.ipipe_runtime import IpipeRuntime, _normalize_stage, _stage_passed, evidence_outcome
 from project_registry import validate_profile
+from schema_validator import validate_named_schema
 from state_store import StateStore
 
 
@@ -1177,6 +1178,44 @@ class ApiClientShapeTests(unittest.TestCase):
                 ),
             ],
         )
+
+
+class EvidenceOutcomeTests(unittest.TestCase):
+    _BINDING = {
+        "pipeline_id": "pipe-1", "module": "baidu/team/app",
+        "revisions": {"business": "r2", "tests": "t2"},
+        "environment_fingerprint": "env-1", "release_rule": "manual-approval",
+    }
+
+    def test_success_result_maps_to_schema_valid_outcome(self):
+        outcome = evidence_outcome({
+            "status": "SUCCESS", "classification": "SUCCESS", "build_id": "build-1",
+            "stages": [{"stage_build_id": "stage-1", "status": "SUCCESS", "jobs": []}],
+            "evidence_refs": ["ipipe:build/build-1"],
+        })
+        self.assertEqual(outcome["status"], "SUCCESS")
+        self.assertIsNone(outcome["failure_signature"])
+        # A stage the API did not break into jobs contributes one implicit job.
+        self.assertEqual(outcome["stages"], [{"stage_id": "stage-1", "status": "SUCCESS", "job_ids": ["stage-1-job"]}])
+        self.assertEqual(outcome["jobs"], [
+            {"job_id": "stage-1-job", "status": "SUCCESS", "evidence_refs": ["ipipe:job/stage-1-job"]}
+        ])
+        self.assertEqual(validate_named_schema({**outcome, **self._BINDING}, "ipipe-evidence"), [])
+
+    def test_failure_result_maps_status_classification_and_jobs(self):
+        outcome = evidence_outcome({
+            "status": "FAILURE", "classification": "CODE_FAILURE", "failure_signature": "sig-1",
+            "build_id": "build-1",
+            "stages": [{"stage_build_id": "stage-1", "status": "FAIL",
+                        "jobs": [{"job_build_id": "job-1", "status": "FAIL"}]}],
+            "evidence_refs": ["ipipe:build/build-1", "ipipe:job/job-1"],
+        })
+        self.assertEqual((outcome["status"], outcome["classification"], outcome["failure_signature"]),
+                         ("FAILURE", "CODE_FAILURE", "sig-1"))
+        self.assertEqual(outcome["stages"][0], {"stage_id": "stage-1", "status": "FAILURE", "job_ids": ["job-1"]})
+        self.assertEqual(outcome["jobs"][0],
+                         {"job_id": "job-1", "status": "FAILURE", "evidence_refs": ["ipipe:job/job-1"]})
+        self.assertEqual(validate_named_schema({**outcome, **self._BINDING}, "ipipe-evidence"), [])
 
 
 if __name__ == "__main__":

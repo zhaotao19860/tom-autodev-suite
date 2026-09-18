@@ -1120,6 +1120,72 @@ def _normalize_stage(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_EVIDENCE_STATUS: dict[str, str] = {
+    **{token: "SUCCESS" for token in _SUCCESS},
+    **{token: "FAILURE" for token in _FAILURE},
+    **{token: "BLOCKED" for token in _MANUAL},
+    **{token: "SUCCESS" for token in _SKIPPED},
+}
+
+
+def _evidence_status(raw: Any) -> str:
+    """Map an iPipe stage/job status token to the 3-value schema enum (default FAILURE)."""
+    return _EVIDENCE_STATUS.get(str(raw or "").upper(), "FAILURE")
+
+
+def _terminal_evidence_status(status: Any) -> str:
+    if status == "SUCCESS":
+        return "SUCCESS"
+    if status in ("MANUAL_WAIT", "RELEASE_WAITING"):
+        return "BLOCKED"
+    return "FAILURE"
+
+
+def evidence_outcome(monitor_result: dict[str, Any]) -> dict[str, Any]:
+    """The ipipe-evidence OUTCOME fields, mapped from a terminal monitor result.
+
+    Owns only the iPipe-vocabulary -> schema mapping. The binding half (pipeline_id /
+    module / revisions / release_rule / environment_fingerprint) is joined by the caller
+    from the pinned submission, so it cannot drift from what G7 approved. Per the agreed
+    design: statuses collapse to {SUCCESS, FAILURE, BLOCKED}; jobs[] is aggregated from
+    stages[].jobs[] with a synthesized per-job evidence ref; a stage the API did not break
+    into jobs contributes one implicit job so the schema's job_ids/jobs minItems hold.
+    """
+    stages_out: list[dict[str, Any]] = []
+    jobs_out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for stage in monitor_result.get("stages") or []:
+        stage_id = str(stage.get("stage_build_id") or "")
+        stage_jobs = stage.get("jobs") or [{"job_build_id": f"{stage_id}-job", "status": stage.get("status")}]
+        job_ids: list[str] = []
+        for job in stage_jobs:
+            job_id = str(job.get("job_build_id") or f"{stage_id}-job")
+            job_ids.append(job_id)
+            if job_id not in seen:
+                seen.add(job_id)
+                jobs_out.append({
+                    "job_id": job_id,
+                    "status": _evidence_status(job.get("status")),
+                    "evidence_refs": [f"ipipe:job/{job_id}"],
+                })
+        stages_out.append({
+            "stage_id": stage_id,
+            "status": _evidence_status(stage.get("status")),
+            "job_ids": job_ids,
+        })
+    evidence_refs = list(monitor_result.get("evidence_refs") or [])
+    return {
+        "status": _terminal_evidence_status(monitor_result.get("status")),
+        "classification": monitor_result.get("classification") or "SUCCESS",
+        "failure_signature": monitor_result.get("failure_signature"),
+        "stages": stages_out,
+        "jobs": jobs_out,
+        "remote_evidence_refs": evidence_refs,
+        "release_evidence": evidence_refs,
+        "build_id": monitor_result.get("build_id"),
+    }
+
+
 def _job_log_url(job: dict[str, Any]) -> str:
     for entry in job.get("logs") or []:
         if isinstance(entry, dict) and isinstance(entry.get("url"), str) and entry["url"].startswith("http"):
