@@ -168,6 +168,17 @@ class StateStore:
                     draft_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS failure_cases (
+                    signature TEXT PRIMARY KEY,
+                    classification TEXT,
+                    run_ids_json TEXT NOT NULL,
+                    occurrences INTEGER NOT NULL,
+                    resolved INTEGER NOT NULL,
+                    first_seen_run TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_run TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
                 """
             )
             _optimization_migrate(connection)
@@ -914,6 +925,78 @@ class StateStore:
             ).fetchone()
         return _draft_cache_row(row) if row is not None else None
 
+    def draft_cache_entries(self, input_hash: str) -> list[dict[str, Any]]:
+        """Every cached draft for one input_hash, across prompt_versions and models — the
+        rows a cross-model diff gate compares."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM draft_cache WHERE input_hash = ? ORDER BY prompt_version, model",
+                (input_hash,),
+            ).fetchall()
+        return [_draft_cache_row(row) for row in rows]
+
+    def record_failure_case(
+        self, signature: str, classification: str | None, run_id: str, resolved: bool = False
+    ) -> dict[str, Any]:
+        """Record one occurrence of a failure signature in the cross-run FailureCase library.
+
+        Keyed by signature (NOT run_id), so the same failure recurring across runs
+        accumulates: occurrences and the distinct run set grow, and `resolved` tracks
+        whether its latest occurrence was resolved. This is what turns repair_policy's
+        single-run "same signature, no progress" check into a cross-run one — a signature
+        that keeps coming back across runs is escalated instead of blindly re-repaired.
+        """
+        if not isinstance(signature, str) or not signature:
+            raise ValueError("FAILURE_SIGNATURE_INVALID")
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM failure_cases WHERE signature = ?", (signature,)
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO failure_cases(
+                        signature, classification, run_ids_json, occurrences, resolved,
+                        first_seen_run, first_seen_at, last_seen_run, last_seen_at
+                    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                    """,
+                    (signature, classification, json.dumps([run_id]), int(resolved),
+                     run_id, now, run_id, now),
+                )
+            else:
+                run_ids = json.loads(existing["run_ids_json"])
+                if run_id not in run_ids:
+                    run_ids.append(run_id)
+                connection.execute(
+                    """
+                    UPDATE failure_cases SET classification = ?, run_ids_json = ?,
+                        occurrences = ?, resolved = ?, last_seen_run = ?, last_seen_at = ?
+                    WHERE signature = ?
+                    """,
+                    (classification or existing["classification"], json.dumps(run_ids),
+                     existing["occurrences"] + 1, int(resolved), run_id, now, signature),
+                )
+            row = connection.execute(
+                "SELECT * FROM failure_cases WHERE signature = ?", (signature,)
+            ).fetchone()
+        return _failure_case_row(row)
+
+    def failure_case(self, signature: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM failure_cases WHERE signature = ?", (signature,)
+            ).fetchone()
+        return _failure_case_row(row) if row is not None else None
+
+    def failure_cases(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM failure_cases ORDER BY last_seen_at, signature"
+            ).fetchall()
+        return [_failure_case_row(row) for row in rows]
+
     def save_optimization_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
         """Persist one immutable G10 candidate and its mutable result status."""
         required = ("proposal_id", "run_id", "candidate_hash", "envelope_hash")
@@ -1202,6 +1285,22 @@ def _draft_cache_row(row: sqlite3.Row) -> dict[str, Any]:
         "output_hash": row["output_hash"],
         "draft": json.loads(row["draft_json"]),
         "created_at": row["created_at"],
+    }
+
+
+def _failure_case_row(row: sqlite3.Row) -> dict[str, Any]:
+    run_ids = json.loads(row["run_ids_json"])
+    return {
+        "signature": row["signature"],
+        "classification": row["classification"],
+        "run_ids": run_ids,
+        "distinct_runs": len(set(run_ids)),
+        "occurrences": row["occurrences"],
+        "resolved": bool(row["resolved"]),
+        "first_seen_run": row["first_seen_run"],
+        "first_seen_at": row["first_seen_at"],
+        "last_seen_run": row["last_seen_run"],
+        "last_seen_at": row["last_seen_at"],
     }
 
 

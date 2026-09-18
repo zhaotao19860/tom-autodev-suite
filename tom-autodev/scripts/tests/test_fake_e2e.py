@@ -900,6 +900,58 @@ class FakeE2ETests(unittest.TestCase):
             summary["producers"],
         )
 
+    def test_golden_replay_and_cross_model_diff_gate(self):
+        # Phase 3c: golden replay confirms every recorded producer fill has a cached draft
+        # that still hashes to its recorded output (determinism/integrity); the cross-model
+        # diff gate flags when two models produce different drafts for the same input.
+        import replay_gate
+
+        summary = self._worker_drive_to_terminal("BGW-803")
+        report = replay_gate.golden_replay(self.orchestrator.state, summary["run_id"])
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["receipts"], summary["producers"])
+        self.assertGreaterEqual(report["checked"], summary["producers"])
+        self.assertEqual(report["missing_cache"], [])
+
+        input_hash = "input-xyz"
+        self.orchestrator.state.cache_draft(input_hash, "workflow-spec-v1", "model-a", {"x": 1})
+        self.orchestrator.state.cache_draft(input_hash, "workflow-spec-v1", "model-b", {"x": 1})
+        agree = replay_gate.cross_model_diff(self.orchestrator.state.draft_cache_entries(input_hash))
+        self.assertEqual(agree["status"], "CONSISTENT")
+
+        self.orchestrator.state.cache_draft(input_hash, "workflow-spec-v1", "model-c", {"x": 2})
+        diverge = replay_gate.cross_model_diff(self.orchestrator.state.draft_cache_entries(input_hash))
+        self.assertEqual((diverge["status"], diverge["distinct_outputs"]), ("DIVERGENT", 2))
+
+    def test_cross_run_failure_case_library_escalates_recurring_signatures(self):
+        # Phase 3b: the same failure signature routed across two runs accumulates into one
+        # cross-run FailureCase; signature-first matching then escalates a recurring,
+        # unresolved failure to architecture review instead of repairing it yet again.
+        import repair_policy
+
+        signature = "SIG-recurring-xyz"
+        for card in ("BGW-820", "BGW-821"):
+            started = self.orchestrator.start(card, "bgw", requirement_snapshot=snapshot(card))
+            rid = started["run_id"]
+            self.orchestrator.state.transition(rid, "REVIEW", {"fake_remote_evidence": True})
+            self.orchestrator.route_failure(
+                rid, "CODE_FAILURE", {"classification": "CODE", "failure_signature": signature})
+        case = self.orchestrator.state.failure_case(signature)
+        self.assertEqual((case["distinct_runs"], case["occurrences"], case["resolved"]), (2, 2, False))
+
+        confirmed = [{"diagnosis_confirmed": True, "failure_signature": signature}]
+        self.assertEqual(
+            repair_policy.next_action(confirmed),
+            {"action": "REPAIR", "reason_code": "DIAGNOSIS_CONFIRMED"},
+        )
+        self.assertEqual(
+            repair_policy.next_action(confirmed, known_case=case),
+            {"action": "ARCHITECTURE_REVIEW", "reason_code": "KNOWN_CROSS_RUN_FAILURE"},
+        )
+        # A first-time-cross-run or already-resolved signature does not escalate.
+        self.assertIsNone(repair_policy.known_failure_verdict({"distinct_runs": 1, "resolved": False}))
+        self.assertIsNone(repair_policy.known_failure_verdict({"distinct_runs": 3, "resolved": True}))
+
     def test_worker_caches_producer_drafts_for_reuse(self):
         # Phase 2: every producer fill also caches its DraftContent under
         # (input_hash, prompt_version, model), so a worker re-driving the same frontier can

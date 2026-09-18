@@ -1071,10 +1071,24 @@ class Orchestrator:
             idempotency_key, result,
         )
         if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            self._record_failure_case(run_id, routed_evidence)
             return committed["result"]
         if committed.get("status") == "RESULT_CONFLICT":
             return {"run_id": run_id, "state": current["state"], "reason_code": "FAILURE_CONFLICT"}
         return {"run_id": run_id, "state": current["state"], "reason_code": "STALE_ACTION"}
+
+    def _record_failure_case(self, run_id: str, evidence: dict[str, Any]) -> None:
+        """Record this failure's signature in the cross-run FailureCase library (best-effort
+        — a library write must never fail the failure routing itself)."""
+        signature = evidence.get("failure_signature") or evidence.get("signature")
+        if not isinstance(signature, str) or not signature:
+            return
+        try:
+            self.state.record_failure_case(
+                signature, evidence.get("classification"), run_id, resolved=False
+            )
+        except Exception:
+            pass
 
     def stop(self, run_id: str) -> dict[str, Any]:
         current = self.status(run_id)

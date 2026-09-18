@@ -10,8 +10,30 @@ NON_REPAIRABLE_FAILURES = {
     "REVISION_MISMATCH",
 }
 
+# A signature unresolved across at least this many distinct runs is escalated rather than
+# repaired again: the same fix has already failed to hold across runs, so another repair
+# round is unlikely to help.
+CROSS_RUN_RECURRENCE_THRESHOLD = 2
 
-def next_action(history: list[dict[str, Any]]) -> dict[str, str]:
+
+def known_failure_verdict(case: dict[str, Any] | None) -> dict[str, str] | None:
+    """A cross-run FailureCase verdict, or None to defer to the per-run next_action.
+
+    Signature-first matching (Phase 3b): a failure the library has seen unresolved across
+    >= CROSS_RUN_RECURRENCE_THRESHOLD distinct runs is sent to ARCHITECTURE_REVIEW instead
+    of another blind repair. A resolved or first-time-cross-run signature returns None so
+    the normal single-run repair policy still governs.
+    """
+    if not isinstance(case, dict) or case.get("resolved"):
+        return None
+    if case.get("distinct_runs", 0) >= CROSS_RUN_RECURRENCE_THRESHOLD:
+        return {"action": "ARCHITECTURE_REVIEW", "reason_code": "KNOWN_CROSS_RUN_FAILURE"}
+    return None
+
+
+def next_action(
+    history: list[dict[str, Any]], known_case: dict[str, Any] | None = None
+) -> dict[str, str]:
     if not history:
         return {"action": "STOP", "reason_code": "DIAGNOSIS_INCOMPLETE"}
 
@@ -34,6 +56,10 @@ def next_action(history: list[dict[str, Any]]) -> dict[str, str]:
             "action": "ARCHITECTURE_REVIEW",
             "reason_code": "THREE_FAILED_FIXES",
         }
+
+    cross_run = known_failure_verdict(known_case)
+    if cross_run is not None:
+        return cross_run
 
     return {"action": "REPAIR", "reason_code": "DIAGNOSIS_CONFIRMED"}
 
