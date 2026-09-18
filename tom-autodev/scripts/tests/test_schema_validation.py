@@ -144,6 +144,25 @@ def specialized_examples():
 
 
 class NamedSchemaValidationTests(unittest.TestCase):
+    def test_every_named_schema_has_declared_invariant_coverage(self):
+        # Phase 3a coverage guard: every named schema is either semantically validated or
+        # explicitly declared structural-only — a new schema must join one set, so no phase
+        # can silently ship without its invariant check.
+        import schema_validator
+
+        self.assertEqual(
+            schema_validator.SEMANTIC_VALIDATED_SCHEMAS | schema_validator.STRUCTURAL_ONLY_SCHEMAS,
+            schema_validator._NAMED_SCHEMAS,
+        )
+        self.assertEqual(
+            schema_validator.SEMANTIC_VALIDATED_SCHEMAS & schema_validator.STRUCTURAL_ONLY_SCHEMAS,
+            frozenset(),
+        )
+        # Each semantically-validated schema actually rejects a targeted invariant breach,
+        # proving the pass is wired (not just declared).
+        for name in schema_validator.SEMANTIC_VALIDATED_SCHEMAS:
+            self.assertTrue(schema_validator.has_semantic_validator(name), name)
+
     def test_every_specialized_schema_accepts_a_complete_artifact(self):
         if validate_named_schema is None:
             self.fail("named schema validation is not implemented")

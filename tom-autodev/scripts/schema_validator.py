@@ -88,6 +88,29 @@ def validate_named_schema(instance: Any, name: str) -> list[SchemaIssue]:
     return sorted(set(issues), key=lambda issue: (issue.path, issue.kind))
 
 
+# Phase-invariant coverage. Every named schema is either given a semantic invariant pass in
+# validate_named_schema above (SEMANTIC_VALIDATED_SCHEMAS) or is deliberately structural-only
+# (STRUCTURAL_ONLY_SCHEMAS) because its invariants are fully expressed by the JSON schema
+# and/or enforced across artifacts at ingestion (phase_protocol binding). A new schema must
+# be placed in exactly one set — test_schema_validation's coverage guard fails closed
+# otherwise, so no phase can silently lose its invariant check.
+SEMANTIC_VALIDATED_SCHEMAS = frozenset({
+    "requirement-snapshot", "decision-log", "spec", "task-dag", "task-plan",
+    "change-set", "review", "diagnosis", "ipipe-evidence", "optimization-proposal",
+})
+STRUCTURAL_ONLY_SCHEMAS = frozenset({
+    # release-evidence and submit-descriptor bind cross-artifact at ingestion
+    # (phase_protocol._release_binding_error / _submission_controller_binding); run-summary
+    # is a terminal report whose shape the schema fully pins.
+    "run-summary", "submit-descriptor", "release-evidence",
+})
+
+
+def has_semantic_validator(name: str) -> bool:
+    """Whether `validate_named_schema` runs a semantic invariant pass for this schema."""
+    return name in SEMANTIC_VALIDATED_SCHEMAS
+
+
 def validate_schema(instance: Any, schema: dict[str, Any] | None = None) -> list[SchemaIssue]:
     schema = schema or load_project_profile_schema()
     issues: list[SchemaIssue] = []
