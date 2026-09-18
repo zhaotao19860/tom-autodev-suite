@@ -242,12 +242,13 @@ def execute_controller(
     WORKSPACE (local, reversible worktree binding + gated WORKSPACE->PLAN) and SUBMIT
     (derive the reviewed descriptor and submit it to iCode under G7) are executed here.
     IPIPE (trigger the pipeline under G7, monitor to a terminal state, ingest the evidence)
-    is executed too once its `ipipe_api` transport is injected — the same G7 approval that
-    authorized the submit authorizes the trigger, computed-then-approved here so the
-    executed trigger hash cannot drift from what was approved. RELEASE still returns
-    CONTROLLER_NEEDS_RUNTIME. Every path goes through the orchestrator's own gate
-    enforcement, so nothing performs an un-approved action; SUBMIT in particular only
-    opens/updates a CR once G7 is APPROVE for that exact descriptor.
+    and RELEASE (verify the release under G9, record the evidence, land RELEASE_SUCCESS) are
+    executed too once their `ipipe_api` transport is injected — the same runtime backs both.
+    The G7 approval that authorized the submit authorizes the trigger, computed-then-approved
+    here so the executed trigger hash cannot drift from what was approved; RELEASE runs only
+    once G9 is APPROVE for that exact release action. Every path goes through the
+    orchestrator's own gate enforcement, so nothing performs an un-approved action; SUBMIT
+    in particular only opens/updates a CR once G7 is APPROVE for that exact descriptor.
     """
     decision = classify_next(orchestrator, run_id)
     if decision["kind"] not in (CONTROLLER_STEP, APPROVAL_WAIT):
@@ -277,6 +278,8 @@ def execute_controller(
         return _submit(orchestrator, run_id, task_id, approval_id, icode_skill, icode_runtime=icode_runtime)
     if controller == "ipipe" and ipipe_api is not None:
         return _execute_ipipe(orchestrator, run_id, action, ipipe_api, knowledge_sync=knowledge_sync)
+    if controller == "release" and ipipe_api is not None:
+        return _execute_release(orchestrator, run_id, action, ipipe_api, knowledge_sync=knowledge_sync)
     return {"ok": False, "reason_code": "CONTROLLER_NEEDS_RUNTIME", "controller": controller}
 
 
@@ -443,6 +446,82 @@ def _build_ipipe_evidence(binding: dict[str, Any], monitored: dict[str, Any]) ->
     }
 
 
+def _execute_release(
+    orchestrator: Any, run_id: str, action: dict[str, Any], ipipe_api: Any,
+    knowledge_sync: Any | None = None,
+) -> dict[str, Any]:
+    """Verify the release under G9 and record it, landing the run at RELEASE_SUCCESS.
+
+    G9 is the release gate: the worker records a release only once G9 is APPROVE for this
+    exact release action. verify_release is read-only — it confirms the platform actually
+    published the pinned build — so a release the platform has not published yet is not the
+    worker's to force: it parks (RELEASE_WAITING). The recorded evidence's binding half
+    (pipeline / module / revisions / release rule / environment) is read from the IPIPE
+    predecessor, so a release can only ever be recorded for the build the pipeline proved.
+    """
+    approval_id = _settled_approval_id(orchestrator, run_id, "G9", action.get("input_hash"))
+    if approval_id is None:
+        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G9",
+                "approval_input_hash": action.get("input_hash"), "controller": "release"}
+    protocol = orchestrator.phase_protocol(knowledge_sync)
+    ipipe_artifact = protocol.artifacts.latest_phase(run_id, "IPIPE", None)
+    ipipe_content = ipipe_artifact.get("envelope", {}).get("content") if ipipe_artifact.get("valid") else None
+    if not isinstance(ipipe_content, dict) or not isinstance(ipipe_content.get("build_id"), str):
+        return {"ok": False, "reason_code": "PREDECESSOR_REQUIRED", "run_id": run_id}
+    build_id = ipipe_content["build_id"]
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    from orchestrator import _ipipe_revision_set
+
+    derived = _ipipe_revision_set(orchestrator, run_id, pinned["profile"])
+    if not derived.get("ok"):
+        return derived
+    runtime = orchestrator.ipipe_runtime(run_id, ipipe_api)
+    if isinstance(runtime, dict):  # the factory returns an error dict, never a falsy runtime
+        return runtime
+    verified = runtime.verify_release(build_id, derived["revisions"])
+    if not verified.get("ok"):
+        if verified.get("status") == "RELEASE_WAITING":
+            # The platform has not published the release yet: wait for it, do not force it.
+            return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "RELEASE_WAITING",
+                    "controller": "release", "build_id": build_id, "detail": verified}
+        return {"ok": False, "reason_code": "RELEASE_VERIFY_FAILED", "detail": verified,
+                "run_id": run_id, "build_id": build_id}
+    content = _build_release_evidence(ipipe_content, verified)
+    ingested = protocol.ingest_release_evidence(
+        run_id, content, {"approval_id": approval_id, "input_hash": action.get("input_hash")}
+    )
+    if not ingested.get("ok"):
+        return {"ok": False, "reason_code": "RELEASE_EVIDENCE_INGEST_FAILED", "detail": ingested,
+                "run_id": run_id, "build_id": build_id}
+    landed = orchestrator.status(run_id).get("state")
+    return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
+            "build_id": build_id, "release_id": verified.get("release_id"), "result": ingested}
+
+
+def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, Any]) -> dict[str, Any]:
+    """Join the IPIPE evidence's binding half with the verified release's outcome half.
+
+    Pipeline / module / revisions come from the successful IPIPE evidence (so they cannot
+    drift from what the pipeline proved); build / release id / rule / environment / refs
+    come from verify_release. Together they form the `release-evidence` document the
+    protocol validates and binds on ingestion.
+    """
+    return {
+        "pipeline_id": ipipe_content.get("pipeline_id"),
+        "build_id": verified["build_id"],
+        "release_id": verified["release_id"],
+        "module": ipipe_content.get("module"),
+        "revisions": ipipe_content.get("revisions"),
+        "environment_fingerprint": verified["environment_fingerprint"],
+        "release_rule": verified["release_rule"],
+        "status": "SUCCESS",
+        "release_evidence": verified["evidence_refs"],
+        "remote_evidence_refs": verified["evidence_refs"],
+    }
+
+
 # States a deterministic auto-advance may complete on its own. Controller side effects
 # (submit / iPipe / release) are deliberately NOT auto-run here: they touch external
 # systems and each keeps its own gate, so the loop parks on them for an explicit step.
@@ -452,16 +531,16 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     """Drive a run forward through every step the worker can take on its own, then park.
 
     Loops: completes AUTO_COMPLETE frontiers, and executes the WORKSPACE, SUBMIT and (when
-    an `ipipe_api` transport is injected) IPIPE controllers when their gate is already
-    settled (the compute-then-approve executors park with the exact hash when it is not).
-    It parks — returning the decision the caller must arrange next — on a model phase
+    an `ipipe_api` transport is injected) IPIPE and RELEASE controllers when their gate is
+    already settled (the compute-then-approve executors park with the exact hash when it is
+    not). It parks — returning the decision the caller must arrange next — on a model phase
     (PRODUCER_WAIT, enqueuing a ProducerJob), an unsettled controller gate, a controller
-    with no injected runtime (IPIPE without `ipipe_api`, RELEASE), a non-terminal pipeline
-    monitor result, a terminal state, or a block. `max_steps` bounds the loop.
+    with no injected runtime (IPIPE/RELEASE without `ipipe_api`), a non-terminal pipeline
+    monitor or an unpublished release, a terminal state, or a block. `max_steps` bounds it.
 
-    WORKSPACE (local), SUBMIT (G7-gated CR) and IPIPE (G7-gated trigger + monitor + ingest)
-    are the controllers the worker runs; RELEASE is surfaced, not run. Every controller
-    execution goes through the orchestrator's own gate enforcement.
+    WORKSPACE (local), SUBMIT (G7-gated CR), IPIPE (G7-gated trigger + monitor + ingest)
+    and RELEASE (G9-gated verify + ingest) are the controllers the worker runs. Every
+    controller execution goes through the orchestrator's own gate enforcement.
     """
     steps: list[dict[str, Any]] = []
     for _ in range(max_steps):
@@ -482,7 +561,7 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         if kind in (CONTROLLER_STEP, APPROVAL_WAIT):
             controller = (decision.get("action") or {}).get("controller")
             worker_owned = controller in ("workspace", "submit") or (
-                controller == "ipipe" and ipipe_api is not None
+                controller in ("ipipe", "release") and ipipe_api is not None
             )
             if worker_owned:
                 result = execute_controller(
@@ -504,7 +583,7 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                             "auto_completed": steps}
                 return {"ok": False, "reason_code": "CONTROLLER_STEP_FAILED", "run_id": run_id,
                         "controller": controller, "detail": result, "auto_completed": steps}
-            # intake / ipipe-without-runtime / release: not executed by the worker loop.
+            # intake / ipipe / release without an injected runtime: not run by the loop.
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
                     "parked": kind, "controller": controller, "decision": decision,
                     "auto_completed": steps}

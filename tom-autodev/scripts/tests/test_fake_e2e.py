@@ -644,7 +644,7 @@ class FakeE2ETests(unittest.TestCase):
         exact module/revision/pipeline the run pinned at SUBMIT.
         """
         from orchestrator import _ipipe_revision_set
-        from phase_protocol import _registered_pipeline
+        from phase_protocol import _registered_pipeline, _registered_release_rule
 
         profile = self.orchestrator._runtime_profile(run_id)["profile"]
         derived = _ipipe_revision_set(self.orchestrator, run_id, profile)
@@ -652,6 +652,7 @@ class FakeE2ETests(unittest.TestCase):
         repositories = derived["revisions"]["repositories"]
         primary = repositories[0]
         pipeline_id = _registered_pipeline(profile["pipeline_profile"], primary["module"])
+        release_rule = _registered_release_rule(profile["pipeline_profile"], primary["module"])
         revision_map = {item["module"]: item["revision"] for item in repositories}
         api = FakeApi()
         api.pipeline = {"id": pipeline_id, "module": primary["module"]}
@@ -662,6 +663,14 @@ class FakeE2ETests(unittest.TestCase):
             "revisions": revision_map, "params": {}, "status": build_status,
             "stageBuilds": [{"id": "stage-1", "stageName": "compile", "status": stage_status}],
         }
+        if build_status == "SUCCESS" and stage_status == "SUCCESS":
+            # The published release the run's RELEASE step verifies (read-only). Seeding it
+            # on the same api keeps the whole trigger -> monitor -> verify chain honest.
+            api.releases = [{
+                "id": "release-1", "module": primary["module"], "branch": primary["branch"],
+                "pipelineBuildId": "build-1", "revisions": revision_map,
+                "releaseRule": release_rule, "status": "SUCCESS",
+            }]
         return api
 
     def test_worker_triggers_ipipe_under_g7_and_lands_release(self):
@@ -730,6 +739,62 @@ class FakeE2ETests(unittest.TestCase):
         self.assertIn("ipipe", [step.get("controller") for step in result["auto_completed"]])
         self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE")
 
+
+    def _drive_to_release(self, card):
+        """A run whose pipeline passed under G7, parked at the RELEASE controller."""
+        run_id, knowledge = self._drive_to_ipipe(card)
+        api = self._ipipe_api(run_id)
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self._approval(run_id, "G7", need["approval_input_hash"])
+        done = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual(done["state"], "RELEASE", done)
+        return run_id, knowledge, api
+
+    def test_worker_verifies_release_under_g9_and_reaches_terminal(self):
+        # A run parked at RELEASE: G9 is the release gate. Until G9 is APPROVE for the
+        # release action, the worker returns its hash to approve; once approved it verifies
+        # the platform published the pinned build and records the evidence, reaching the
+        # terminal RELEASE_SUCCESS.
+        run_id, knowledge, api = self._drive_to_release("BGW-535")
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual((need["reason_code"], need["gate"]), ("APPROVAL_REQUIRED", "G9"))
+
+        self._approval(run_id, "G9", need["approval_input_hash"])
+        done = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertTrue(done["ok"], done)
+        self.assertEqual(done["state"], "RELEASE_SUCCESS")
+        self.assertEqual(done["release_id"], "release-1")
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE_SUCCESS")
+
+    def test_worker_release_waiting_parks_until_platform_publishes(self):
+        # G9 approved, but the platform has not published the release yet: verify_release is
+        # read-only, so the worker parks (RELEASE_WAITING) rather than forcing a release.
+        run_id, knowledge, api = self._drive_to_release("BGW-536")
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self._approval(run_id, "G9", need["approval_input_hash"])
+        api.releases = []  # nothing published yet
+        parked = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual((parked["ok"], parked["reason_code"]), (True, "PARKED"))
+        self.assertEqual(parked["parked"], "RELEASE_WAITING")
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE")
+
+    def test_worker_advance_chains_through_a_settled_release_to_terminal(self):
+        # With G9 settled and an ipipe_api injected, advance() runs the RELEASE controller
+        # itself and drives the run to the terminal RELEASE_SUCCESS.
+        run_id, knowledge, api = self._drive_to_release("BGW-537")
+        action = self.orchestrator.next(run_id)
+        self._approval(run_id, "G9", action["input_hash"])
+        result = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual((result["ok"], result["reason_code"]), (True, "PARKED"))
+        self.assertIn("release", [step.get("controller") for step in result["auto_completed"]])
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE_SUCCESS")
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "pipeline_id",
+    "build_id",
+    "release_id",
+    "module",
+    "revisions",
+    "environment_fingerprint",
+    "release_rule",
+    "status",
+    "release_evidence",
+    "remote_evidence_refs"
+  ],
+  "properties": {
+    "pipeline_id": {"type": "string", "minLength": 1},
+    "build_id": {"type": "string", "minLength": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "module": {"type": "string", "minLength": 1},
+    "revisions": {"$ref": "#/$defs/revisions"},
+    "environment_fingerprint": {"type": "string", "minLength": 1},
+    "release_rule": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "enum": ["SUCCESS"]},
+    "release_evidence": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "remote_evidence_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "revisions": {
+      "type": "object",
+      "required": ["business", "tests"],
+      "properties": {
+        "business": {"type": "string", "minLength": 1},
+        "tests": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

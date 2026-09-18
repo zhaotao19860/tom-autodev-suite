@@ -1295,6 +1295,177 @@ class PhaseProtocol:
         raced = self.state.idempotency_result(result_key)
         return self._validated_cached_ipipe_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
 
+    def ingest_release_evidence(
+        self, run_id: str, content: dict[str, Any], approval: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            return self._ingest_release_evidence(run_id, content, approval)
+        except Exception as error:
+            return _failure(_exception_reason(error, "RELEASE_EVIDENCE_INGEST_FAILED"), run_id=run_id)
+
+    def _release_binding_error(self, run_id: str, content: Any) -> str | None:
+        """The release evidence has to describe the exact build the pipeline proved.
+
+        Binding it to the IPIPE predecessor's successful evidence — same pipeline, module,
+        revisions, release rule, environment and build — means a release can only be
+        recorded for the change the pipeline actually passed, never a different or later
+        build, and never before a passing pipeline exists.
+        """
+        predecessor = self._predecessor(run_id, "IPIPE", None)
+        if predecessor is None:
+            return "PREDECESSOR_REQUIRED"
+        ipipe = predecessor.get("envelope", {}).get("content")
+        if not isinstance(ipipe, dict) or ipipe.get("status") != "SUCCESS":
+            return "PREDECESSOR_REQUIRED"
+        if not isinstance(content, dict):
+            return "SCHEMA_INVALID"
+        if content.get("build_id") != ipipe.get("build_id"):
+            return "BUILD_IDENTITY_MISMATCH"
+        if content.get("pipeline_id") != ipipe.get("pipeline_id") or content.get("module") != ipipe.get("module"):
+            return "PIPELINE_IDENTITY_MISMATCH"
+        if content.get("revisions") != ipipe.get("revisions"):
+            return "SOURCE_REVISION_MISMATCH"
+        if content.get("release_rule") != ipipe.get("release_rule"):
+            return "RELEASE_RULE_MISMATCH"
+        if content.get("environment_fingerprint") != ipipe.get("environment_fingerprint"):
+            return "ENV_FINGERPRINT_MISMATCH"
+        return None
+
+    def _validated_cached_release_ingestion(
+        self, run_id: str, existing: Any
+    ) -> dict[str, Any]:
+        if not isinstance(existing, dict):
+            return _failure("STALE_ACTION", run_id=run_id)
+        artifact_id = existing.get("artifact_id")
+        artifact = self.artifacts.phase_artifact(artifact_id) if isinstance(artifact_id, str) else {}
+        if not artifact.get("valid"):
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        envelope = artifact["envelope"]
+        if envelope.get("run_id") != run_id or envelope.get("phase") != "RELEASE" or envelope.get("task_id") is not None:
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        receipt_error = self._receipt_error(run_id, envelope, existing.get("knowledge_receipt"))
+        if receipt_error is not None:
+            return _failure(receipt_error, run_id=run_id)
+        binding_error = self._release_binding_error(run_id, envelope.get("content"))
+        if binding_error is not None:
+            return _failure(binding_error, run_id=run_id)
+        approval_error = self._controller_approval_error(run_id, {
+            "approval_id": envelope.get("approval_id"),
+            "approval_input_hash": envelope.get("approval_input_hash"),
+        }, "G9")
+        if approval_error is not None:
+            return _failure(approval_error, run_id=run_id)
+        return existing
+
+    def _ingest_release_evidence(
+        self, run_id: str, content: dict[str, Any], approval: dict[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(content, dict) or not isinstance(content.get("build_id"), str):
+            return _failure("INVALID_INPUT", run_id=run_id)
+        if not isinstance(approval, dict) or not isinstance(approval.get("approval_id"), str):
+            return _failure("APPROVAL_REQUIRED", run_id=run_id)
+        content_hash = _canonical_hash(content)
+        result_key = f"release-ingest:{run_id}:{content['build_id']}"
+        existing = self.state.idempotency_result(result_key)
+        if existing is not None:
+            if existing.get("ingest_hash") != content_hash:
+                return _failure("COMPLETION_CONFLICT", run_id=run_id)
+            return self._validated_cached_release_ingestion(run_id, existing)
+        events = self.state.events(run_id)
+        if events and events[-1].get("state") != "RELEASE":
+            prior = self.artifacts.latest_phase(run_id, "RELEASE", None)
+            if prior.get("valid"):
+                return _failure("COMPLETION_CONFLICT", run_id=run_id)
+        action = self.next(run_id)
+        if not action.get("ok"):
+            return action
+        if action.get("state") != "RELEASE" or action.get("controller") != "release":
+            return _failure("INVALID_STATE", run_id=run_id)
+        issues = validate_named_schema(content, "release-evidence")
+        if issues:
+            return {**_failure("SCHEMA_INVALID", run_id=run_id), "schema_errors": [
+                {"path": issue.path, "kind": issue.kind} for issue in issues
+            ]}
+        # G9 authorizes this exact release action; the operator approves it while the run
+        # is already at RELEASE, so — unlike IPIPE's G7 carried in the payload — the hash is
+        # the release action's own input_hash, checked against the ledger here.
+        if approval.get("input_hash") != action.get("input_hash"):
+            return _failure("APPROVAL_INPUT_MISMATCH", run_id=run_id)
+        approval_check = {
+            "approval_id": approval.get("approval_id"),
+            "approval_input_hash": approval.get("input_hash"),
+        }
+        approval_error = self._controller_approval_error(run_id, approval_check, "G9")
+        if approval_error is not None:
+            return _failure(approval_error, run_id=run_id)
+        binding_error = self._release_binding_error(run_id, content)
+        if binding_error is not None:
+            return _failure(binding_error, run_id=run_id)
+        predecessor = self._predecessor(run_id, "IPIPE", None)
+        parent_hash = predecessor["envelope"]["content_hash"]
+        revisions = predecessor["envelope"]["content"]["revisions"]
+        draft = {
+            "action_id": action["action_id"], "source_event_id": action["source_event_id"],
+            "host": "comate", "run_id": run_id, "phase": "RELEASE", "task_id": None,
+            "schema_version": "1", "input_hash": action["input_hash"], "content_hash": content_hash,
+            "source_revisions": revisions, "parent_artifact_hash": parent_hash,
+            "knowledge_doc_id": None, "knowledge_url": None, "knowledge_version": None,
+            "icafe_comment_id": None, "evidence_refs": content.get("remote_evidence_refs", []),
+            "approval_id": approval.get("approval_id"),
+            "approval_input_hash": approval.get("input_hash"), "content": content,
+        }
+        # __RELEASE_INGEST_TAIL__
+        title = f"09-release-evidence/{content['build_id']}"
+        canonical = _canonical_json(content)
+        receipt = self.knowledge.publish_phase(run_id, {
+            "title": title,
+            "markdown": render_phase_markdown(title, content, content_hash, canonical),
+            "content_hash": content_hash, "canonical": canonical,
+        })
+        receipt_error = self._receipt_error(run_id, draft, receipt)
+        if receipt_error:
+            return _failure(receipt_error, run_id=run_id)
+        final = {
+            **draft, "knowledge_doc_id": receipt["child_doc_id"], "knowledge_url": receipt["child_url"],
+            "knowledge_version": receipt["child_version"], "icafe_comment_id": str(receipt["comment_id"]),
+            "evidence_refs": _merge_evidence_refs(draft["evidence_refs"], receipt["evidence_refs"]),
+        }
+        stored = self.artifacts.put_envelope(final)
+        events = self.state.events(run_id)
+        if not events or events[-1].get("event_id") != action["source_event_id"]:
+            raced = self.state.idempotency_result(result_key)
+            return self._validated_cached_release_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
+        binding_error = self._release_binding_error(run_id, content)
+        if binding_error is not None:
+            return _failure(binding_error, run_id=run_id)
+        approval_error = self._controller_approval_error(run_id, approval_check, "G9")
+        if approval_error is not None:
+            return _failure(approval_error, run_id=run_id)
+        if not self.artifacts.get(stored["artifact_id"]).get("valid"):
+            return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
+        transition = self.transitions.validate("RELEASE", "RELEASE_SUCCESS")
+        if not transition.get("allowed"):
+            return _failure(transition.get("reason_code", "INVALID_TRANSITION"), run_id=run_id)
+        result = {
+            "ok": True, "reason_code": "OK", "phase_complete": True, "action_id": action["action_id"],
+            "artifact_id": stored["artifact_id"], "content_hash": content_hash, "phase": "RELEASE",
+            "task_id": None, "draft_hash": _canonical_hash(draft), "ingest_hash": content_hash,
+            "knowledge_receipt": receipt,
+        }
+        committed = self.state.commit_transition_result(
+            run_id, action["source_event_id"], "RELEASE_SUCCESS",
+            {"previous_state": "RELEASE", "artifact_id": stored["artifact_id"],
+             "action_id": action["action_id"], "source_event_id": action["source_event_id"],
+             "policy_decision": transition},
+            result_key, result,
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return _failure("COMPLETION_CONFLICT", run_id=run_id)
+        raced = self.state.idempotency_result(result_key)
+        return self._validated_cached_release_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
+
     def _controller_approval_error(
         self, run_id: str, payload: dict[str, Any], gate: str
     ) -> str | None:

@@ -30,6 +30,7 @@ _PHASE_SCHEMAS = {
     "INTAKE": "requirement-snapshot", "GRILL": "decision-log", "SPEC": "spec",
     "TASKS": "task-dag", "PLAN": "task-plan", "IMPLEMENT": "change-set",
     "REVIEW": "review", "DIAGNOSE": "diagnosis", "IPIPE": "ipipe-evidence",
+    "RELEASE": "release-evidence",
 }
 # Content checks for the kinds written through the generic `put`. `put_envelope` picks
 # its schema from the phase, so phase artifacts were always validated; everything else

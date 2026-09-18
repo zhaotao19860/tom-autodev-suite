@@ -35,6 +35,7 @@ _NAMED_SCHEMAS = frozenset(
         "review",
         "diagnosis",
         "ipipe-evidence",
+        "release-evidence",
         "run-summary",
         "optimization-proposal",
         # The submit descriptor. Deliberately not called "change-set": that name is
