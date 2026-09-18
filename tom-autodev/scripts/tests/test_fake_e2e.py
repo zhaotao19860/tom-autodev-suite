@@ -900,6 +900,43 @@ class FakeE2ETests(unittest.TestCase):
             summary["producers"],
         )
 
+    def test_worker_lease_makes_a_run_single_writer(self):
+        # Phase 2: with a LockManager, the worker takes a per-run lease. A run already held
+        # by a live worker is refused (WORKER_LEASE_HELD), never raced; once free the worker
+        # drives and releases the lease on return.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-810", "I15ClP2KW4ZGAK", "express")
+        locks = self.orchestrator.recovery.locks
+        key = f"worker-run:{run_id}"
+        held = locks.acquire(key, "foreign-worker", 300)
+        self.assertTrue(held["acquired"], held)
+        refused = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge, locks=locks, owner_token="worker-b")
+        self.assertEqual(refused["reason_code"], "WORKER_LEASE_HELD")
+
+        locks.release(key, "foreign-worker")
+        drove = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge, locks=locks, owner_token="worker-b")
+        self.assertEqual((drove["ok"], drove["reason_code"]), (True, "PARKED"))
+        self.assertEqual(locks.records()["active"], [])  # lease released after the drive
+
+    def test_worker_lease_is_taken_over_from_a_crashed_holder(self):
+        # A crashed worker's lease goes stale (TTL elapsed + dead pid); the next worker takes
+        # it over and resumes — the event log + idempotency keys make the takeover safe.
+        from datetime import datetime, timedelta, timezone
+        from lock_manager import LockManager
+
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-811", "I15ClP2KW4ZGAK", "express")
+        key = f"worker-run:{run_id}"
+        stale_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        crashed = LockManager(self.orchestrator.state.database_path, pid=2147483000,
+                              clock=lambda: stale_at)
+        self.assertTrue(crashed.acquire(key, "crashed-worker", 1)["acquired"])
+
+        live = LockManager(self.orchestrator.state.database_path)
+        drove = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge, locks=live, owner_token="worker-c")
+        self.assertEqual((drove["ok"], drove["reason_code"]), (True, "PARKED"))
+
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")
         approval = self._approval(run_id, "G4", "approved-hash")

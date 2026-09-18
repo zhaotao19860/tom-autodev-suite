@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import subprocess
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,14 @@ from phase_protocol import _canonical_hash
 # parks for a human. The runtime's own max_polls/poll_interval bound the poll count; this
 # bounds elapsed time so a stuck build surfaces as a park rather than blocking the loop.
 _IPIPE_MONITOR_WINDOW = timedelta(hours=2)
+
+# One worker drives a given run at a time. The lease key is per-run; a crashed holder's
+# lease goes stale (TTL elapsed + dead pid) and the next worker takes it over, resuming
+# from the last committed event — every side effect is already idempotency-keyed, so the
+# takeover cannot double-apply. The TTL only bounds how long a *crashed* holder blocks a
+# takeover; a live worker releases the lease as soon as its drive returns.
+_WORKER_LEASE_PREFIX = "worker-run:"
+_WORKER_LEASE_TTL_SECONDS = 300
 
 TERMINAL = "TERMINAL"
 BLOCKED = "BLOCKED"
@@ -557,7 +566,36 @@ def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, A
 # systems and each keeps its own gate, so the loop parks on them for an explicit step.
 def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
-            icode_runtime: Any | None = None, ipipe_api: Any | None = None) -> dict[str, Any]:
+            icode_runtime: Any | None = None, ipipe_api: Any | None = None,
+            locks: Any | None = None, owner_token: str | None = None) -> dict[str, Any]:
+    """Drive a run forward, optionally under a single-writer run lease.
+
+    When `locks` (a LockManager) is supplied the worker takes a per-run lease first, so two
+    workers can never drive the same run concurrently; a run already driven by another live
+    worker returns WORKER_LEASE_HELD instead of racing it. The lease is released as soon as
+    the drive returns (a crashed holder's stale lease is taken over by the next worker). No
+    `locks` means no lease — the established single-process behavior — so existing callers
+    are unaffected.
+    """
+    if locks is None:
+        return _drive(orchestrator, run_id, knowledge_sync, max_steps, icode_skill,
+                      icode_runtime, ipipe_api)
+    token = owner_token or uuid.uuid4().hex
+    key = f"{_WORKER_LEASE_PREFIX}{run_id}"
+    lease = locks.acquire(key, token, _WORKER_LEASE_TTL_SECONDS)
+    if not lease.get("acquired"):
+        return {"ok": False, "reason_code": "WORKER_LEASE_HELD", "run_id": run_id,
+                "owner_pid": lease.get("owner_pid")}
+    try:
+        return _drive(orchestrator, run_id, knowledge_sync, max_steps, icode_skill,
+                      icode_runtime, ipipe_api)
+    finally:
+        locks.release(key, token)
+
+
+def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
+           max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+           icode_runtime: Any | None = None, ipipe_api: Any | None = None) -> dict[str, Any]:
     """Drive a run forward through every step the worker can take on its own, then park.
 
     Loops: completes AUTO_COMPLETE frontiers, and executes the WORKSPACE, SUBMIT and (when
@@ -626,7 +664,8 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
 
 def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
            icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
-           icode_runtime: Any | None = None, ipipe_api: Any | None = None) -> dict[str, Any]:
+           icode_runtime: Any | None = None, ipipe_api: Any | None = None,
+           locks: Any | None = None, owner_token: str | None = None) -> dict[str, Any]:
     """Consume a run's settled approval-resume handoff and drive it forward.
 
     Run-scoped by construction (it only looks at this run's handoffs), which is the fix
@@ -655,7 +694,8 @@ def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         return {"ok": False, "reason_code": "RESUME_HANDOFF_STALE", "run_id": run_id}
     orchestrator.state.complete_handoff(handoff["handoff_id"])
     return advance(orchestrator, run_id, knowledge_sync=knowledge_sync,
-                   icode_skill=icode_skill, icode_runtime=icode_runtime, ipipe_api=ipipe_api)
+                   icode_skill=icode_skill, icode_runtime=icode_runtime, ipipe_api=ipipe_api,
+                   locks=locks, owner_token=owner_token)
 
 
 def _enqueue_producer_job(orchestrator: Any, run_id: str, decision: dict[str, Any]) -> dict[str, Any]:

@@ -136,6 +136,28 @@ class LockManager:
             )
         return {"key": key, "status": "HEARTBEAT_RECORDED", "heartbeat_at": now_text}
 
+    def release(self, key: str, owner_token: str) -> dict[str, Any]:
+        """Drop a lock this owner holds so the next writer need not wait out the TTL.
+
+        Idempotent and safe: a missing lock is RELEASED (already gone); a lock held by a
+        different owner_token/pid is left untouched and reported, never stolen — takeover
+        of a dead owner's lock stays the staleness path in `acquire`.
+        """
+        now_text = self.clock().astimezone(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM locks WHERE lock_key = ?", (key,)
+            ).fetchone()
+            if existing is None:
+                return {"key": key, "status": "RELEASED", "released": True}
+            if existing["owner_token"] != owner_token or existing["owner_pid"] != self.pid:
+                return {"key": key, "status": "LOCK_OWNER_MISMATCH", "released": False,
+                        "owner_pid": existing["owner_pid"]}
+            connection.execute("DELETE FROM locks WHERE lock_key = ?", (key,))
+            self._record_heartbeat(connection, key, owner_token, self.pid, now_text, "RELEASE")
+        return {"key": key, "status": "RELEASED", "released": True}
+
     def records(self) -> dict[str, list[dict[str, Any]]]:
         now = self.clock().astimezone(timezone.utc)
         with self._connect() as connection:
