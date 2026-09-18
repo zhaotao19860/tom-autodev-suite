@@ -65,7 +65,9 @@ class CliOperationTests(unittest.TestCase):
             self.assertEqual(result["status"], "READY")
             self.assertFalse(result["phase_complete"])
             self.assertFalse(result["execution_performed"])
-            self.assertIn("current Agent", result["next_step"])
+            # resume is inspection only; it now directs the WorkerDriver (not the Agent)
+            # to own sequencing from the settled checkpoint.
+            self.assertIn("WorkerDriver", result["next_step"])
         self.assertEqual(self.orchestrator.state.events(self.run_id), before)
 
     def test_resume_pending_intent_still_requires_recovery(self):

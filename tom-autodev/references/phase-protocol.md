@@ -33,11 +33,13 @@ Read `input_artifacts` by their immutable IDs through the integrity-checked arti
 reader, then read the actual pinned contents, not just their paths or summaries.
 IMPLEMENT must use the pinned Plan and verify both business/test worktrees through
 `WorkspaceManager.query_ownership` with run/task/owner token and baseline revisions
-before any edit. Preserve user changes; a conflict stops execution. Use the current
-Agent's Read/apply_patch (or an available Agent delegation), not a new LLM service.
+before any edit. Preserve user changes; a conflict stops execution. The bounded producer
+turn uses its Read/apply_patch (or an available Agent delegation), not a new LLM service,
+to generate the candidate `DraftContent` and submit it with `submit-draft`.
 Save the real candidate and its approval input hash before asking the parent for G5.
-On APPROVE, re-read that same candidate and verify the exact ledger binding; use
-`complete-phase` for archival and transition, never `advance` as a shortcut.
+On APPROVE the worker re-reads that same candidate, verifies the exact ledger binding, and
+owns `complete-phase` for archival and transition — the producer turn never calls
+`complete-phase` or `advance` itself.
 Hash drift requires a new human decision, while an unchanged action reuses its gate.
 Missing remote authorization/receipts remain a block, not permission to fake evidence.
 

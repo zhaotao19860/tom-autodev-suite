@@ -8,7 +8,9 @@
 - WorkerDriver 现在自驱 RELEASE 控制器：在 G9 下只读校验平台已发布锁定的 build（`verify_release`），未发布则 park `RELEASE_WAITING`，成功则记录发布证据并落终态 RELEASE_SUCCESS
 - 新增 `release-evidence` schema 与 `ingest_release_evidence` 摄入：发布证据绑定到成功的 IPIPE 前驱（同 pipeline/module/revisions/release rule/environment/build），确保只能对流水线证明过的 build 发布
 - `execute_controller` / `advance` 在注入 iPipe API transport 时同时驱动 IPIPE 与 RELEASE，打通 INTAKE→…→RELEASE_SUCCESS 的 worker 驱动闭环
-- 控制面回归测试 `765` 项全部通过
+- 新增计划验收用例：单个 standard 需求由 WorkerDriver 全程驱动到 RELEASE_SUCCESS，断言 ProducerJob 次数=模型 phase 数(6)、四个副作用控制器(workspace/submit/ipipe/release)全在 worker 循环内自动执行(确定性步骤零 Agent 回合)、每道闸门一次人工 APPROVE、事件数远低于此前唯一真实 run 的 102
+- 改写 durable-worker 契约(recovery.py 的 `next_step`、SKILL.md、references/phase-protocol.md)：WorkerDriver 拥有时序并执行全部确定性步骤与控制器副作用，只在 ApprovalJob/ProducerJob 处 park；有界 Agent 回合仅填充 ProducerJob 的 DraftContent，不再"由 current Agent 执行整条序列"
+- 控制面回归测试 `766` 项全部通过
 
 ## 2026-09-15
 

@@ -796,6 +796,81 @@ class FakeE2ETests(unittest.TestCase):
         self.assertIn("release", [step.get("controller") for step in result["auto_completed"]])
         self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE_SUCCESS")
 
+    def _worker_drive_to_terminal(self, card):
+        """Drive one standard run GRILL->RELEASE_SUCCESS with the WorkerDriver as the only
+        sequencer: it auto-runs every deterministic transition and parks exactly at each
+        gate and ProducerJob. Returns the counts the plan's acceptance asserts."""
+        run_id, knowledge, requirement = self._run_to_grill_action(card, "I15ClP2KW4ZGAK", "standard")
+        icode = FakeIcodeRuntime(self.orchestrator.state, run_id)
+        producers = 0
+        gate_approvals = 1  # G0 was granted in _run_to_grill_action before the loop
+        controllers_run: list[str] = []
+        receipts = None
+        reviewed_revisions = None
+        api = None
+        for _ in range(80):
+            state = self.orchestrator.status(run_id)["state"]
+            if state == "RELEASE_SUCCESS":
+                break
+            if api is None and state == "IPIPE":
+                api = self._ipipe_api(run_id)
+            result = worker_driver.advance(
+                self.orchestrator, run_id, knowledge_sync=knowledge, icode_runtime=icode, ipipe_api=api)
+            controllers_run += [step["controller"] for step in result.get("auto_completed", []) if step.get("controller")]
+            if self.orchestrator.status(run_id)["state"] == "RELEASE_SUCCESS":
+                break  # the RELEASE controller ran within this advance and landed terminal
+            self.assertEqual(result["reason_code"], "PARKED", result)
+            parked = result.get("parked")
+            if parked == worker_driver.PRODUCER_WAIT:
+                action = self.orchestrator.next(run_id)
+                if action["phase"] == "IMPLEMENT" and reviewed_revisions is None:
+                    reviewed_revisions = self._commit_reviewed_worktrees(receipts)
+                draft = self._phase_content(action, requirement, reviewed_revisions)
+                job_id = result["producer_job"]["job_id"]
+                done = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+                if done.get("reason_code") == "APPROVAL_REQUIRED":
+                    self._approval(run_id, done["gate"], done["approval_input_hash"])
+                    gate_approvals += 1
+                    done = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+                self.assertTrue(done["ok"], done)
+                producers += 1
+            elif parked == worker_driver.APPROVAL_WAIT:
+                gate = result["gate"]
+                input_hash = result["approval_input_hash"]
+                if result.get("controller") == "workspace" and receipts is None:
+                    # Capture the worktrees the worker cut, so IMPLEMENT can commit into them.
+                    need = worker_driver.execute_controller(
+                        self.orchestrator, run_id, knowledge_sync=knowledge, icode_runtime=icode)
+                    receipts = need["workspace_receipts"]
+                    gate, input_hash = need["gate"], need["approval_input_hash"]
+                self._approval(run_id, gate, input_hash)
+                gate_approvals += 1
+            elif parked == worker_driver.CONTROLLER_STEP and result.get("controller") in ("ipipe", "release"):
+                # SUBMIT/IPIPE landed the next controller in the same advance, before the
+                # transport was built; the next iteration builds it and runs the controller.
+                self.assertIsNone(api)
+            else:
+                self.fail(f"unexpected park {parked!r}: {result}")
+        else:
+            self.fail("run did not reach RELEASE_SUCCESS within the step bound")
+        events = len(self.orchestrator.trace(run_id)["events"])
+        return {"run_id": run_id, "producers": producers, "gate_approvals": gate_approvals,
+                "controllers_run": controllers_run, "events": events}
+
+    def test_worker_drives_a_standard_run_to_release_success_without_agent_turns(self):
+        # The plan's acceptance: one standard requirement driven end to end by the worker.
+        summary = self._worker_drive_to_terminal("BGW-800")
+        self.assertEqual(self.orchestrator.status(summary["run_id"])["state"], "RELEASE_SUCCESS")
+        # ProducerJob fills == the six model phases (deterministic steps take no agent turn).
+        self.assertEqual(summary["producers"], 6)
+        # Every side-effect controller ran inside the worker loop, never as a ProducerJob.
+        self.assertEqual(set(summary["controllers_run"]), {"workspace", "submit", "ipipe", "release"})
+        # One human APPROVE per gate the run actually crosses: G0 at intake, the gated
+        # model phases, WORKSPACE G4, SUBMIT G7, the IPIPE trigger G7 and RELEASE G9.
+        self.assertEqual(summary["gate_approvals"], 10)
+        # Far below the 102-event thrash of the one real un-worker-driven run.
+        self.assertLess(summary["events"], 40)
+
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")
         approval = self._approval(run_id, "G4", "approved-hash")

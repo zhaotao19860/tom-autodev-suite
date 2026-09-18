@@ -32,23 +32,29 @@ Intake -> tom-grill -> tom-spec -> tom-tasks -> WorkspaceGate
        -> iCode -> iPipe -> approved release
 ```
 
-For each child phase, the current Agent executes the complete sequence:
-`next` -> load the named child skill -> read pinned inputs and validate predecessor
-hash, schema, revisions, and ownership -> generate the real `ArtifactEnvelope` ->
-EvidenceGate -> applicable human approval -> `complete-phase`. REVIEW is evidence-only
-and does not open a phase gate. Loading a skill, calling `next`,
-or calling `resume` is not phase completion. Do not invent or require a host-side
-LLM/Implement runner; the current Agent and its Read/apply_patch tools are the runner.
-For IMPLEMENT, generate the real change-set, commit owned worktrees with the
-repository identity and a Change-Id via `submit_descriptor._commit_if_dirty`,
-obtain G5 APPROVE, then call `complete-phase`, which must transition to REVIEW. Track progress by
+The `WorkerDriver` owns sequencing. After a gate settles, it runs every deterministic
+step itself — `next` action computation, EvidenceGate/transition validation, and the
+controller side effects (WORKSPACE bind, iCode submit, iPipe trigger/monitor, release
+verify, KU/iCafe persistence, evidence ingestion) — and parks only on an **ApprovalJob**
+(a human APPROVE bound to the exact `input_hash`) or a **ProducerJob** (model-authored
+`DraftContent` for a skill phase: GRILL/SPEC/TASKS/PLAN/IMPLEMENT/REVIEW). A bounded
+Agent turn fills a parked ProducerJob and submits it with `submit-draft`; the worker
+builds the `ArtifactEnvelope`, runs EvidenceGate and `complete-phase`, and advances. The
+Agent turn produces `DraftContent` only — it never runs a controller, `complete-phase`,
+or a transition by hand, and never re-drives a step the worker already owns. REVIEW is
+evidence-only and does not open a phase gate. Do not invent or require a host-side
+LLM/Implement runner; the bounded Agent turn and its Read/apply_patch tools are the
+producer backend (a seam designed to later swap to a headless-LLM backend without
+changing the worker). For IMPLEMENT, the producer turn generates the real change-set and
+commits owned worktrees with the repository identity and a Change-Id via
+`submit_descriptor._commit_if_dirty` before submitting the draft; the worker takes G5,
+`complete-phase` and the transition to REVIEW from there. Track progress by
 `run_id/source_event_id/action_id/input_hash` and the generated artifact hash. If the
 same action has not advanced, perform its missing work instead of repeating resume or
 approval; reuse an existing pending/approved gate only for its exact approval input
 hash. Re-read the saved candidate after approval; do not regenerate it or request G5
-again. Only call `next` for the next phase after a confirmed completion. If blocked,
-report the actual missing input, permission, ownership, or evidence, not a fictitious
-runner. Status must distinguish `待生成` from `已批准待提交`. G4/G5 的已批准待提交是 complete-phase；G7 的已批准待提交是 cli.py submit，不是 complete-phase。
+again. If blocked, report the actual missing input, permission, ownership, or evidence,
+not a fictitious runner. Status must distinguish `待生成` from `已批准待提交`. G4/G5 的已批准待提交是 complete-phase；G7 的已批准待提交是 cli.py submit，不是 complete-phase。
 
 Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; Comate and Infoflow share one `approval_id`, and the first valid response wins. Every approval card must identify the affected repository/module, target branch, and pinned revision; a multi-repository change lists one row per repository and revision. G7 cards must also state whether the operation creates a new CR or appends an existing one.
 

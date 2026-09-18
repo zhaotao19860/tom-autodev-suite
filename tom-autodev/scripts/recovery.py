@@ -43,9 +43,13 @@ class Recovery:
             "next_step": (
                 "Resolve the listed uncertain intents before retrying their operations."
                 if actions else
-                "Call next, load its child skill, and execute it in the current Agent; "
-                "reuse the exact approved artifact and complete-phase after its gate. "
-                "Do not repeat resume for an unchanged action."
+                "Drive this run with WorkerDriver.advance (or resume, for a settled "
+                "approval-resume handoff): the worker owns sequencing — it runs every "
+                "deterministic step and controller side effect itself and parks on an "
+                "ApprovalJob (needs a human APPROVE bound to the exact input_hash) or a "
+                "ProducerJob (needs model DraftContent, filled via submit-draft). Do not "
+                "execute controllers or complete-phase by hand from the Agent; only fill a "
+                "parked ProducerJob. Do not repeat resume for an unchanged action."
             ),
             "checkpoint": checkpoint,
             "events": events,
