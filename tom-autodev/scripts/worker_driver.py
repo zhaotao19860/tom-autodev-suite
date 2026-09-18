@@ -157,6 +157,34 @@ def execute_auto(orchestrator: Any, run_id: str, knowledge_sync: Any | None = No
     return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
 
 
+def _record_model_receipt(
+    orchestrator: Any, run_id: str, action: dict[str, Any], draft: dict[str, Any],
+    validators: list[Any],
+) -> None:
+    """Record how a ProducerJob's DraftContent was produced, for replay and cross-model
+    diffing. The agent-turn backend knows no provider/model/temperature/seed, so those are
+    null; the load-bearing fields are the pinned input_hash, the draft's output_hash, the
+    prompt/spec versions, and which schema validators the draft is about to be checked
+    against. Best-effort: a receipt failure must never block completing the phase."""
+    try:
+        orchestrator.state.record_model_execution_receipt(run_id, {
+            "job_id": f"producer:{action['action_id']}",
+            "action_id": action.get("action_id"),
+            "phase": action.get("phase"),
+            "backend": "agent-turn",
+            "provider": None, "model": None, "model_version": None,
+            "temperature": None, "seed": None,
+            "prompt_version": workflow_spec.WORKFLOW_VERSION,
+            "workflow_spec_hash": workflow_spec.canonical_hash(),
+            "skill_version": action.get("child_skill"),
+            "input_hash": action.get("input_hash"),
+            "output_hash": _canonical_hash(draft),
+            "validators_passed": [name for name in validators if name],
+        })
+    except Exception:
+        pass
+
+
 def submit_draft(
     orchestrator: Any, run_id: str, job_id: str, draft: dict[str, Any],
     knowledge_sync: Any | None = None,
@@ -183,6 +211,7 @@ def submit_draft(
         return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync)
 
     orchestrator.state.fulfill_producer_job(job_id, draft)
+    _record_model_receipt(orchestrator, run_id, action, draft, [action.get("result_schema")])
     envelope = build_envelope(action, draft)
     gate = action.get("required_human_gate")
     if gate is not None:
@@ -207,6 +236,7 @@ def _submit_merged(
     if not (isinstance(draft, dict) and isinstance(draft.get("spec"), dict) and isinstance(draft.get("dag"), dict)):
         return {"ok": False, "reason_code": "MERGED_DRAFT_INVALID", "job_id": job_id}
     orchestrator.state.fulfill_producer_job(job_id, draft)
+    _record_model_receipt(orchestrator, run_id, action, draft, ["spec", "task-dag"])
 
     spec_envelope = build_envelope(action, draft["spec"])
     gate = action.get("required_human_gate")

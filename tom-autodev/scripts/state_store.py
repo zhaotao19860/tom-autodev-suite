@@ -147,6 +147,18 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS producer_jobs_run_id
                     ON producer_jobs(run_id, job_id);
+                CREATE TABLE IF NOT EXISTS model_execution_receipts (
+                    receipt_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    phase TEXT,
+                    input_hash TEXT,
+                    output_hash TEXT NOT NULL,
+                    receipt_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS model_execution_receipts_run_id
+                    ON model_execution_receipts(run_id, created_at);
                 """
             )
             _optimization_migrate(connection)
@@ -791,6 +803,57 @@ class StateStore:
             ).fetchall()
         return [_producer_job_row(row) for row in rows]
 
+    def record_model_execution_receipt(
+        self, run_id: str, receipt: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record how one ProducerJob's DraftContent was produced (provider/model/version/
+        prompt_version/skill_version/temperature/seed/input_hash/output_hash/validators).
+
+        Idempotent on (job_id, output_hash): the same fill recorded twice returns the
+        existing row; a different receipt for that identity raises. This is the ledger a
+        later golden replay and cross-model diff gate read from.
+        """
+        job_id = receipt.get("job_id")
+        output_hash = receipt.get("output_hash")
+        if not isinstance(job_id, str) or not job_id or not isinstance(output_hash, str) or not output_hash:
+            raise ValueError("MODEL_RECEIPT_INVALID")
+        receipt_id = hashlib.sha256(f"{job_id}\0{output_hash}".encode("utf-8")).hexdigest()
+        encoded = _encode(receipt)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM model_execution_receipts WHERE receipt_id = ?", (receipt_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing["run_id"] != run_id or existing["receipt_json"] != encoded:
+                    raise ValueError("MODEL_RECEIPT_CONFLICT")
+                return _model_execution_receipt_row(existing)
+            connection.execute(
+                """
+                INSERT INTO model_execution_receipts(
+                    receipt_id, run_id, job_id, phase, input_hash, output_hash,
+                    receipt_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (receipt_id, run_id, job_id, receipt.get("phase"), receipt.get("input_hash"),
+                 output_hash, encoded, _now()),
+            )
+            row = connection.execute(
+                "SELECT * FROM model_execution_receipts WHERE receipt_id = ?", (receipt_id,)
+            ).fetchone()
+        return _model_execution_receipt_row(row)
+
+    def model_execution_receipts(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM model_execution_receipts
+                WHERE run_id = ? ORDER BY created_at, receipt_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_model_execution_receipt_row(row) for row in rows]
+
     def save_optimization_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
         """Persist one immutable G10 candidate and its mutable result status."""
         required = ("proposal_id", "run_id", "candidate_hash", "envelope_hash")
@@ -1057,6 +1120,16 @@ def _producer_job_row(row: sqlite3.Row) -> dict[str, Any]:
         "draft": json.loads(row["draft_json"]) if row["draft_json"] is not None else None,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+
+
+def _model_execution_receipt_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "receipt_id": row["receipt_id"],
+        "run_id": row["run_id"],
+        "job_id": row["job_id"],
+        "created_at": row["created_at"],
+        **json.loads(row["receipt_json"]),
     }
 
 

@@ -871,6 +871,35 @@ class FakeE2ETests(unittest.TestCase):
         # Far below the 102-event thrash of the one real un-worker-driven run.
         self.assertLess(summary["events"], 40)
 
+    def test_worker_records_a_model_execution_receipt_per_producer_fill(self):
+        # Phase 2: every ProducerJob fill leaves a ModelExecutionReceipt (provider/model
+        # null for the agent-turn backend, but input_hash/output_hash/prompt_version pinned)
+        # — the ledger a later golden replay and cross-model diff gate read from.
+        summary = self._worker_drive_to_terminal("BGW-801")
+        receipts = self.orchestrator.state.model_execution_receipts(summary["run_id"])
+        self.assertEqual(len(receipts), summary["producers"])
+        self.assertEqual(
+            {receipt["phase"] for receipt in receipts},
+            {"GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "REVIEW"},
+        )
+        for receipt in receipts:
+            self.assertEqual(receipt["backend"], "agent-turn")
+            self.assertIsNone(receipt["model"])
+            self.assertEqual(receipt["prompt_version"], "workflow-spec-v1")
+            self.assertTrue(receipt["input_hash"] and receipt["output_hash"])
+            self.assertTrue(receipt["validators_passed"])
+        # Idempotent: re-recording the same fill returns the same row, never a duplicate.
+        first = receipts[0]
+        again = self.orchestrator.state.record_model_execution_receipt(summary["run_id"], {
+            key: value for key, value in first.items()
+            if key not in ("receipt_id", "run_id", "created_at")
+        })
+        self.assertEqual(again["receipt_id"], first["receipt_id"])
+        self.assertEqual(
+            len(self.orchestrator.state.model_execution_receipts(summary["run_id"])),
+            summary["producers"],
+        )
+
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")
         approval = self._approval(run_id, "G4", "approved-hash")
