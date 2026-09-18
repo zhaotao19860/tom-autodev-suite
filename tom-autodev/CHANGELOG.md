@@ -10,7 +10,9 @@
 - `execute_controller` / `advance` 在注入 iPipe API transport 时同时驱动 IPIPE 与 RELEASE，打通 INTAKE→…→RELEASE_SUCCESS 的 worker 驱动闭环
 - 新增计划验收用例：单个 standard 需求由 WorkerDriver 全程驱动到 RELEASE_SUCCESS，断言 ProducerJob 次数=模型 phase 数(6)、四个副作用控制器(workspace/submit/ipipe/release)全在 worker 循环内自动执行(确定性步骤零 Agent 回合)、每道闸门一次人工 APPROVE、事件数远低于此前唯一真实 run 的 102
 - 改写 durable-worker 契约(recovery.py 的 `next_step`、SKILL.md、references/phase-protocol.md)：WorkerDriver 拥有时序并执行全部确定性步骤与控制器副作用，只在 ApprovalJob/ProducerJob 处 park；有界 Agent 回合仅填充 ProducerJob 的 DraftContent，不再"由 current Agent 执行整条序列"
-- 控制面回归测试 `766` 项全部通过
+- Phase 2 持久化与回执：每次 ProducerJob 填充记 `ModelExecutionReceipt`（input/output hash、prompt/spec 版本、validators）；WorkerDriver 可选每 run 单写者租约（`LockManager.release` + 崩溃持有者 TTL+死 pid 被接管）；草案缓存键 `(input_hash, prompt_version, model)` 供再驱动复用
+- Phase 3 语义校验 + 失败复用 + 回放门禁：每 phase 不变量覆盖守卫（语义/结构-only 两集合须划分全部命名 schema）；跨 run `FailureCase` 库（按签名累积、`route_failure` 记录），`repair_policy` 签名先匹配——跨 ≥2 run 未解决的失败升级 ARCHITECTURE_REVIEW 而非再修；`replay_gate` golden replay（草案确定性/完整性）+ 跨模型差分门禁（同输入不同模型输出分歧则 DIVERGENT，只读、CI 用非运行时拦截）
+- 控制面回归测试 `773` 项全部通过
 
 ## 2026-09-15
 
