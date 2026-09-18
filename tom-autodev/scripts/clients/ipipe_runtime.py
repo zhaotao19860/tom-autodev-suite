@@ -104,6 +104,36 @@ class IpipeRuntime:
             "evidence_refs": _build_evidence(build_id, context),
         }
 
+    def _trigger_binding(self, context: dict[str, Any]) -> dict[str, Any]:
+        """The canonical binding a trigger approval is bound to (shared by trigger and
+        trigger_input_hash so the approved hash and the executed hash cannot drift)."""
+        return {
+            "operation": "ipipe.trigger",
+            "run_id": self.run_id,
+            "pipeline_id": context["pipeline_id"],
+            "module": context["module"],
+            "revision_set_id": context["revision_set_id"],
+            "repositories": context["repositories"],
+            "environment_fingerprint": context["environment_fingerprint"],
+            "parameters": context["parameters"],
+        }
+
+    def trigger_input_hash(
+        self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None
+    ) -> dict[str, Any]:
+        """The trigger approval hash to request, without touching the pipeline.
+
+        Lets the worker do compute-then-approve for the initial pipeline trigger the same
+        way rerun_input_hash does for a rerun.
+        """
+        context = self._context(profile, revision_set, module)
+        if context.get("reason_code") != "OK":
+            return context
+        return {
+            "ok": True, "reason_code": "OK", "run_id": self.run_id,
+            "input_hash": _canonical_hash(self._trigger_binding(context)),
+        }
+
     def trigger(
         self,
         profile: dict[str, Any],
@@ -117,16 +147,7 @@ class IpipeRuntime:
         forbidden = set(context["parameters"]) - set(context["allowed_parameters"])
         if forbidden or _contains_secret_material(context["parameters"]):
             return _failure("PIPELINE_PARAMETER_FORBIDDEN", forbidden_parameters=sorted(forbidden))
-        binding = {
-            "operation": "ipipe.trigger",
-            "run_id": self.run_id,
-            "pipeline_id": context["pipeline_id"],
-            "module": context["module"],
-            "revision_set_id": context["revision_set_id"],
-            "repositories": context["repositories"],
-            "environment_fingerprint": context["environment_fingerprint"],
-            "parameters": context["parameters"],
-        }
+        binding = self._trigger_binding(context)
         input_hash = _canonical_hash(binding)
         approval_failure = _approved_record(
             self.approvals, approval, run_id=self.run_id, action="G7", input_hash=input_hash

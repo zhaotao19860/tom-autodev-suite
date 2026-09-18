@@ -25,11 +25,17 @@ from __future__ import annotations
 
 import copy
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import workflow_spec
 from phase_protocol import _canonical_hash
+
+# Wall-clock bound on how long the worker will monitor a triggered pipeline before it
+# parks for a human. The runtime's own max_polls/poll_interval bound the poll count; this
+# bounds elapsed time so a stuck build surfaces as a park rather than blocking the loop.
+_IPIPE_MONITOR_WINDOW = timedelta(hours=2)
 
 TERMINAL = "TERMINAL"
 BLOCKED = "BLOCKED"
@@ -229,15 +235,19 @@ def execute_controller(
     orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
     icode_runtime: Any | None = None,
+    ipipe_api: Any | None = None,
 ) -> dict[str, Any]:
     """Execute the current controller transition, if it is one the worker owns.
 
     WORKSPACE (local, reversible worktree binding + gated WORKSPACE->PLAN) and SUBMIT
     (derive the reviewed descriptor and submit it to iCode under G7) are executed here.
-    IPIPE (triggers a pipeline) and RELEASE still return CONTROLLER_NEEDS_RUNTIME and are
-    driven by their dedicated runtime-injected paths. Every path goes through the
-    orchestrator's own gate enforcement, so nothing performs an un-approved action; SUBMIT
-    in particular only opens/updates a CR once G7 is APPROVE for that exact descriptor.
+    IPIPE (trigger the pipeline under G7, monitor to a terminal state, ingest the evidence)
+    is executed too once its `ipipe_api` transport is injected — the same G7 approval that
+    authorized the submit authorizes the trigger, computed-then-approved here so the
+    executed trigger hash cannot drift from what was approved. RELEASE still returns
+    CONTROLLER_NEEDS_RUNTIME. Every path goes through the orchestrator's own gate
+    enforcement, so nothing performs an un-approved action; SUBMIT in particular only
+    opens/updates a CR once G7 is APPROVE for that exact descriptor.
     """
     decision = classify_next(orchestrator, run_id)
     if decision["kind"] not in (CONTROLLER_STEP, APPROVAL_WAIT):
@@ -265,6 +275,8 @@ def execute_controller(
             return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G7",
                     "approval_input_hash": input_hash, "task_id": task_id}
         return _submit(orchestrator, run_id, task_id, approval_id, icode_skill, icode_runtime=icode_runtime)
+    if controller == "ipipe" and ipipe_api is not None:
+        return _execute_ipipe(orchestrator, run_id, action, ipipe_api, knowledge_sync=knowledge_sync)
     return {"ok": False, "reason_code": "CONTROLLER_NEEDS_RUNTIME", "controller": controller}
 
 
@@ -337,24 +349,119 @@ def _execute_workspace(orchestrator: Any, run_id: str, action: dict[str, Any]) -
     return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": "PLAN", "result": result}
 
 
+def _execute_ipipe(
+    orchestrator: Any, run_id: str, action: dict[str, Any], ipipe_api: Any,
+    knowledge_sync: Any | None = None,
+) -> dict[str, Any]:
+    """Trigger the pipeline under G7, monitor it, and ingest the terminal evidence.
+
+    Compute-then-approve mirrors SUBMIT: the trigger's own binding hash is derived and a
+    settled G7 approval bound to *that* hash is required before the pipeline is touched, so
+    the executed trigger cannot drift from what the operator approved (G7 authorizes both
+    the submit and the trigger; G8 is only ever the failed-stage re-run). A terminal
+    SUCCESS/FAILURE is joined with the pinned submission's binding half and ingested, which
+    lands the run at RELEASE (success) or routes it to DIAGNOSE (failure). A non-terminal
+    monitor result — a manual gate, a timeout, a transient transport fault — parks for a
+    human rather than fabricating evidence.
+    """
+    binding = action.get("controller_binding") or {}
+    module = binding.get("module")
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    profile = pinned["profile"]
+    from orchestrator import _ipipe_revision_set
+
+    derived = _ipipe_revision_set(orchestrator, run_id, profile)
+    if not derived.get("ok"):
+        return derived
+    revision_set = derived["revisions"]
+    runtime = orchestrator.ipipe_runtime(run_id, ipipe_api)
+    if isinstance(runtime, dict):  # the factory returns an error dict, never a falsy runtime
+        return runtime
+    # The trigger's G7 hash, derived without touching the pipeline, so the approval can be
+    # requested for the exact binding that will be executed.
+    hashed = runtime.trigger_input_hash(profile, revision_set, module)
+    if not hashed.get("ok"):
+        return hashed
+    trigger_hash = hashed["input_hash"]
+    approval_id = _settled_approval_id(orchestrator, run_id, "G7", trigger_hash)
+    if approval_id is None:
+        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G7",
+                "approval_input_hash": trigger_hash, "controller": "ipipe"}
+    triggered = runtime.trigger(
+        profile, revision_set, {"approval_id": approval_id, "input_hash": trigger_hash}, module
+    )
+    if not triggered.get("ok"):
+        return {"ok": False, "reason_code": "IPIPE_TRIGGER_FAILED", "detail": triggered,
+                "run_id": run_id}
+    build_id = triggered["build_id"]
+    deadline = (datetime.now(timezone.utc) + _IPIPE_MONITOR_WINDOW).isoformat()
+    monitored = runtime.monitor(build_id, deadline)
+    status = monitored.get("status")
+    if status not in ("SUCCESS", "FAILURE"):
+        # MANUAL_WAIT / TIMEOUT / TRANSIENT / INVALID: not the worker's call to make.
+        return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "IPIPE_MONITOR",
+                "controller": "ipipe", "build_id": build_id, "monitor_status": status,
+                "monitor": monitored}
+    content = _build_ipipe_evidence(binding, monitored)
+    ingested = orchestrator.phase_protocol(knowledge_sync).ingest_ipipe_evidence(run_id, content)
+    if not ingested.get("ok"):
+        return {"ok": False, "reason_code": "IPIPE_EVIDENCE_INGEST_FAILED", "detail": ingested,
+                "run_id": run_id, "build_id": build_id}
+    landed = orchestrator.status(run_id).get("state")
+    return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
+            "build_id": build_id, "monitor_status": status, "result": ingested}
+
+
+def _build_ipipe_evidence(binding: dict[str, Any], monitored: dict[str, Any]) -> dict[str, Any]:
+    """Join the pinned submission's binding half with the monitored outcome half.
+
+    The binding half (pipeline_id / module / release_rule / revisions / environment
+    fingerprint) comes from the IPIPE action's controller_binding, so it is exactly what
+    G7 approved and cannot be re-supplied by the pipeline; the outcome half comes from
+    `evidence_outcome`, which owns only the iPipe-vocabulary -> schema mapping. Together
+    they form the `ipipe-evidence` document the protocol validates and binds on ingestion.
+    """
+    from clients.ipipe_runtime import evidence_outcome
+
+    outcome = evidence_outcome(monitored)
+    return {
+        "pipeline_id": binding.get("pipeline_id"),
+        "build_id": outcome["build_id"],
+        "module": binding.get("module"),
+        "revisions": binding.get("source_revisions"),
+        "environment_fingerprint": binding.get("environment_fingerprint"),
+        "release_rule": binding.get("release_rule"),
+        "status": outcome["status"],
+        "classification": outcome["classification"],
+        "failure_signature": outcome["failure_signature"],
+        "stages": outcome["stages"],
+        "jobs": outcome["jobs"],
+        "release_evidence": outcome["release_evidence"],
+        "remote_evidence_refs": outcome["remote_evidence_refs"],
+    }
+
+
 # States a deterministic auto-advance may complete on its own. Controller side effects
 # (submit / iPipe / release) are deliberately NOT auto-run here: they touch external
 # systems and each keeps its own gate, so the loop parks on them for an explicit step.
 def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
-            icode_runtime: Any | None = None) -> dict[str, Any]:
+            icode_runtime: Any | None = None, ipipe_api: Any | None = None) -> dict[str, Any]:
     """Drive a run forward through every step the worker can take on its own, then park.
 
-    Loops: completes AUTO_COMPLETE frontiers, and executes the WORKSPACE and SUBMIT
-    controllers when their gate is already settled (the compute-then-approve executors
-    park with the exact hash when it is not). It parks — returning the decision the caller
-    must arrange next — on a model phase (PRODUCER_WAIT, enqueuing a ProducerJob), an
-    unsettled controller gate, an IPIPE/RELEASE controller (needs its runtime), a terminal
-    state, or a block. `max_steps` bounds the loop.
+    Loops: completes AUTO_COMPLETE frontiers, and executes the WORKSPACE, SUBMIT and (when
+    an `ipipe_api` transport is injected) IPIPE controllers when their gate is already
+    settled (the compute-then-approve executors park with the exact hash when it is not).
+    It parks — returning the decision the caller must arrange next — on a model phase
+    (PRODUCER_WAIT, enqueuing a ProducerJob), an unsettled controller gate, a controller
+    with no injected runtime (IPIPE without `ipipe_api`, RELEASE), a non-terminal pipeline
+    monitor result, a terminal state, or a block. `max_steps` bounds the loop.
 
-    Only WORKSPACE (local) and SUBMIT (G7-gated CR) are ever executed here; IPIPE and
-    RELEASE are surfaced, not run. Every controller execution goes through the
-    orchestrator's own gate enforcement.
+    WORKSPACE (local), SUBMIT (G7-gated CR) and IPIPE (G7-gated trigger + monitor + ingest)
+    are the controllers the worker runs; RELEASE is surfaced, not run. Every controller
+    execution goes through the orchestrator's own gate enforcement.
     """
     steps: list[dict[str, Any]] = []
     for _ in range(max_steps):
@@ -374,14 +481,21 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                     "auto_completed": steps}
         if kind in (CONTROLLER_STEP, APPROVAL_WAIT):
             controller = (decision.get("action") or {}).get("controller")
-            if controller in ("workspace", "submit"):
+            worker_owned = controller in ("workspace", "submit") or (
+                controller == "ipipe" and ipipe_api is not None
+            )
+            if worker_owned:
                 result = execute_controller(
                     orchestrator, run_id, knowledge_sync=knowledge_sync,
-                    icode_skill=icode_skill, icode_runtime=icode_runtime,
+                    icode_skill=icode_skill, icode_runtime=icode_runtime, ipipe_api=ipipe_api,
                 )
-                if result.get("ok"):
+                if result.get("ok") and result.get("reason_code") != "PARKED":
                     steps.append({"controller": controller, "result": result})
                     continue
+                if result.get("reason_code") == "PARKED":
+                    return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                            "parked": result.get("parked"), "controller": controller,
+                            "detail": result, "auto_completed": steps}
                 if result.get("reason_code") == "APPROVAL_REQUIRED":
                     return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
                             "parked": APPROVAL_WAIT, "controller": controller,
@@ -390,7 +504,7 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                             "auto_completed": steps}
                 return {"ok": False, "reason_code": "CONTROLLER_STEP_FAILED", "run_id": run_id,
                         "controller": controller, "detail": result, "auto_completed": steps}
-            # intake / ipipe / release: not executed by the worker loop.
+            # intake / ipipe-without-runtime / release: not executed by the worker loop.
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
                     "parked": kind, "controller": controller, "decision": decision,
                     "auto_completed": steps}
@@ -403,7 +517,7 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
 
 def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
            icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
-           icode_runtime: Any | None = None) -> dict[str, Any]:
+           icode_runtime: Any | None = None, ipipe_api: Any | None = None) -> dict[str, Any]:
     """Consume a run's settled approval-resume handoff and drive it forward.
 
     Run-scoped by construction (it only looks at this run's handoffs), which is the fix
@@ -432,7 +546,7 @@ def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         return {"ok": False, "reason_code": "RESUME_HANDOFF_STALE", "run_id": run_id}
     orchestrator.state.complete_handoff(handoff["handoff_id"])
     return advance(orchestrator, run_id, knowledge_sync=knowledge_sync,
-                   icode_skill=icode_skill, icode_runtime=icode_runtime)
+                   icode_skill=icode_skill, icode_runtime=icode_runtime, ipipe_api=ipipe_api)
 
 
 def _enqueue_producer_job(orchestrator: Any, run_id: str, decision: dict[str, Any]) -> dict[str, Any]:

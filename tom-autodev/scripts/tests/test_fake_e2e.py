@@ -623,6 +623,114 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(self.orchestrator.next(run_id)["controller"], "ipipe")
 
 
+    def _drive_to_ipipe(self, card):
+        """A run submitted to iCode under G7 and parked at the IPIPE controller."""
+        run_id, knowledge = self._drive_to_submit(card)
+        icode = FakeIcodeRuntime(self.orchestrator.state, run_id)
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, icode_runtime=icode)
+        self._approval(run_id, "G7", need["approval_input_hash"])
+        submitted = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, icode_runtime=icode)
+        self.assertTrue(submitted["ok"], submitted)
+        self.assertEqual(self.orchestrator.next(run_id)["controller"], "ipipe")
+        return run_id, knowledge
+
+    def _ipipe_api(self, run_id, *, build_status="SUCCESS", stage_status="SUCCESS"):
+        """A FakeApi whose one build matches the revision set the run actually submitted.
+
+        Deriving the build from `_ipipe_revision_set` (rather than hard-coding revisions)
+        keeps the fake honest: the worker's trigger only matches when the build carries the
+        exact module/revision/pipeline the run pinned at SUBMIT.
+        """
+        from orchestrator import _ipipe_revision_set
+        from phase_protocol import _registered_pipeline
+
+        profile = self.orchestrator._runtime_profile(run_id)["profile"]
+        derived = _ipipe_revision_set(self.orchestrator, run_id, profile)
+        self.assertTrue(derived["ok"], derived)
+        repositories = derived["revisions"]["repositories"]
+        primary = repositories[0]
+        pipeline_id = _registered_pipeline(profile["pipeline_profile"], primary["module"])
+        revision_map = {item["module"]: item["revision"] for item in repositories}
+        api = FakeApi()
+        api.pipeline = {"id": pipeline_id, "module": primary["module"]}
+        api.trigger_result = {"id": "build-1"}
+        api.builds["build-1"] = {
+            "id": "build-1", "pipelineConfId": pipeline_id,
+            "module": primary["module"], "revision": primary["revision"],
+            "revisions": revision_map, "params": {}, "status": build_status,
+            "stageBuilds": [{"id": "stage-1", "stageName": "compile", "status": stage_status}],
+        }
+        return api
+
+    def test_worker_triggers_ipipe_under_g7_and_lands_release(self):
+        # A run parked at IPIPE: the worker derives the trigger's OWN binding hash and,
+        # since G7 is not yet APPROVE for that hash, returns it to approve — it never
+        # triggers a pipeline without the gate. G7 authorizes submit AND trigger; G8 is
+        # only the failed-stage re-run, so the trigger gate here is G7.
+        run_id, knowledge = self._drive_to_ipipe("BGW-531")
+        api = self._ipipe_api(run_id)
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual((need["reason_code"], need["gate"]), ("APPROVAL_REQUIRED", "G7"))
+        self.assertEqual(sum(call[0] == "trigger_by_revision" for call in api.calls), 0)
+
+        # After approving that exact trigger hash, the worker triggers the pipeline itself,
+        # monitors it to SUCCESS, ingests the evidence, and the run lands at RELEASE.
+        self._approval(run_id, "G7", need["approval_input_hash"])
+        done = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertTrue(done["ok"], done)
+        self.assertEqual((done["state"], done["monitor_status"]), ("RELEASE", "SUCCESS"))
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE")
+        self.assertEqual(sum(call[0] == "trigger_by_revision" for call in api.calls), 1)
+
+    def test_worker_ipipe_failure_routes_to_diagnose(self):
+        # A failed pipeline: the terminal evidence is ingested just the same, but a FAILURE
+        # routes the run to DIAGNOSE rather than RELEASE.
+        run_id, knowledge = self._drive_to_ipipe("BGW-532")
+        api = self._ipipe_api(run_id, build_status="FAILING", stage_status="FAILED")
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self._approval(run_id, "G7", need["approval_input_hash"])
+        done = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertTrue(done["ok"], done)
+        self.assertEqual((done["state"], done["monitor_status"]), ("DIAGNOSE", "FAILURE"))
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "DIAGNOSE")
+
+    def test_worker_ipipe_manual_wait_parks_for_a_human(self):
+        # A manual pipeline gate is not the worker's call: the trigger runs, but a
+        # non-terminal monitor result parks the run at IPIPE without fabricating evidence.
+        run_id, knowledge = self._drive_to_ipipe("BGW-533")
+        api = self._ipipe_api(run_id, build_status="RUNNING", stage_status="MANUAL")
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self._approval(run_id, "G7", need["approval_input_hash"])
+        parked = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual((parked["ok"], parked["reason_code"]), (True, "PARKED"))
+        self.assertEqual((parked["parked"], parked["monitor_status"]), ("IPIPE_MONITOR", "MANUAL_WAIT"))
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "IPIPE")
+
+    def test_worker_advance_chains_through_a_settled_ipipe(self):
+        # With G7 settled for the trigger and an ipipe_api injected, advance() runs the
+        # IPIPE controller itself (trigger + monitor + ingest) and keeps going, parking at
+        # the RELEASE controller, which still needs its own runtime.
+        run_id, knowledge = self._drive_to_ipipe("BGW-534")
+        api = self._ipipe_api(run_id)
+        need = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self._approval(run_id, "G7", need["approval_input_hash"])
+        result = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual((result["ok"], result["reason_code"]), (True, "PARKED"))
+        self.assertEqual(result["controller"], "release")
+        self.assertIn("ipipe", [step.get("controller") for step in result["auto_completed"]])
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE")
+
+
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")
         approval = self._approval(run_id, "G4", "approved-hash")
