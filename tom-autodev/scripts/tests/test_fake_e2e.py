@@ -900,6 +900,27 @@ class FakeE2ETests(unittest.TestCase):
             summary["producers"],
         )
 
+    def test_worker_caches_producer_drafts_for_reuse(self):
+        # Phase 2: every producer fill also caches its DraftContent under
+        # (input_hash, prompt_version, model), so a worker re-driving the same frontier can
+        # reuse it instead of re-invoking the producer.
+        summary = self._worker_drive_to_terminal("BGW-802")
+        receipts = self.orchestrator.state.model_execution_receipts(summary["run_id"])
+        for receipt in receipts:
+            cached = self.orchestrator.state.cached_draft(
+                receipt["input_hash"], "workflow-spec-v1", None)
+            self.assertIsNotNone(cached, receipt["phase"])
+            self.assertEqual(cached["prompt_version"], "workflow-spec-v1")
+            self.assertIsNone(cached["model"])
+        # The cache is authoritative and immutable per key: a conflicting re-cache is a hit
+        # that returns the original draft, never an overwrite.
+        first = receipts[0]
+        original = self.orchestrator.state.cached_draft(first["input_hash"], "workflow-spec-v1", None)
+        recache = self.orchestrator.state.cache_draft(
+            first["input_hash"], "workflow-spec-v1", None, {"tampered": True})
+        self.assertTrue(recache["cached"])
+        self.assertEqual(recache["output_hash"], original["output_hash"])
+
     def test_worker_lease_makes_a_run_single_writer(self):
         # Phase 2: with a LockManager, the worker takes a per-run lease. A run already held
         # by a live worker is refused (WORKER_LEASE_HELD), never raced; once free the worker

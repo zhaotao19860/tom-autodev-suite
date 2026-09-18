@@ -192,6 +192,26 @@ def _record_model_receipt(
         })
     except Exception:
         pass
+    # Cache the draft under (input_hash, prompt_version, model) so a worker re-driving the
+    # same frontier reuses it instead of re-invoking the producer. Best-effort.
+    try:
+        orchestrator.state.cache_draft(
+            action.get("input_hash"), workflow_spec.WORKFLOW_VERSION, None, draft
+        )
+    except Exception:
+        pass
+
+
+def cached_draft_for(orchestrator: Any, action: dict[str, Any]) -> dict[str, Any] | None:
+    """The cached DraftContent for this frontier's (input_hash, prompt_version, model), if a
+    producer already filled an identical frontier — the reuse seam for a re-driven worker."""
+    try:
+        cached = orchestrator.state.cached_draft(
+            action.get("input_hash"), workflow_spec.WORKFLOW_VERSION, None
+        )
+    except Exception:
+        return None
+    return cached["draft"] if isinstance(cached, dict) else None
 
 
 def submit_draft(

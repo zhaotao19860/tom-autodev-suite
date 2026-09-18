@@ -159,6 +159,15 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS model_execution_receipts_run_id
                     ON model_execution_receipts(run_id, created_at);
+                CREATE TABLE IF NOT EXISTS draft_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    input_hash TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    output_hash TEXT NOT NULL,
+                    draft_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             _optimization_migrate(connection)
@@ -854,6 +863,57 @@ class StateStore:
             ).fetchall()
         return [_model_execution_receipt_row(row) for row in rows]
 
+    def cache_draft(
+        self, input_hash: str, prompt_version: str, model: str | None, draft: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Cache a producer's DraftContent under (input_hash, prompt_version, model).
+
+        Insert-if-absent: the cache is authoritative and immutable per key, so a hit
+        returns the stored draft (`cached: True`) and the incoming one is ignored — a
+        worker re-driving the same frontier with the same prompt/model reuses the draft
+        instead of re-invoking the producer. `model` is None for the agent-turn backend;
+        a real model id later keys distinct entries, which is what a cross-model diff reads.
+        """
+        model_key = model or ""
+        cache_key = hashlib.sha256(
+            f"{input_hash}\0{prompt_version}\0{model_key}".encode("utf-8")
+        ).hexdigest()
+        output_hash = hashlib.sha256(_encode(draft).encode("utf-8")).hexdigest()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM draft_cache WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+            if existing is not None:
+                return {**_draft_cache_row(existing), "cached": True}
+            connection.execute(
+                """
+                INSERT INTO draft_cache(
+                    cache_key, input_hash, prompt_version, model, output_hash,
+                    draft_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (cache_key, input_hash, prompt_version, model_key, output_hash,
+                 _encode(draft), _now()),
+            )
+            row = connection.execute(
+                "SELECT * FROM draft_cache WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        return {**_draft_cache_row(row), "cached": False}
+
+    def cached_draft(
+        self, input_hash: str, prompt_version: str, model: str | None
+    ) -> dict[str, Any] | None:
+        model_key = model or ""
+        cache_key = hashlib.sha256(
+            f"{input_hash}\0{prompt_version}\0{model_key}".encode("utf-8")
+        ).hexdigest()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM draft_cache WHERE cache_key = ?", (cache_key,)
+            ).fetchone()
+        return _draft_cache_row(row) if row is not None else None
+
     def save_optimization_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
         """Persist one immutable G10 candidate and its mutable result status."""
         required = ("proposal_id", "run_id", "candidate_hash", "envelope_hash")
@@ -1130,6 +1190,18 @@ def _model_execution_receipt_row(row: sqlite3.Row) -> dict[str, Any]:
         "job_id": row["job_id"],
         "created_at": row["created_at"],
         **json.loads(row["receipt_json"]),
+    }
+
+
+def _draft_cache_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "cache_key": row["cache_key"],
+        "input_hash": row["input_hash"],
+        "prompt_version": row["prompt_version"],
+        "model": row["model"] or None,
+        "output_hash": row["output_hash"],
+        "draft": json.loads(row["draft_json"]),
+        "created_at": row["created_at"],
     }
 
 
