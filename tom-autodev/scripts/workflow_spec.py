@@ -228,19 +228,31 @@ class ChangeClass:
 
 
 CHANGE_CLASSES: dict[str, ChangeClass] = {
-    # The full path exactly as today: every phase is skill-produced with its own gate.
-    "standard": ChangeClass("standard", phase_modes={}),
-    # A small change: GRILL auto-derived (acceptance already present); SPEC produced
-    # together with the task DAG in one gated ({spec, dag}) step; TASKS ungated, filled
-    # from that same draft. One model turn and one gate (G2) for the whole design front.
+    # The default: the SPEC and task DAG are produced together in one gated ({spec, dag})
+    # step (G2), and TASKS is ungated (filled from that same draft). One model turn and one
+    # gate for the whole design front. PLAN/IMPLEMENT/REVIEW and every code/side-effect gate
+    # stay full.
+    "standard": ChangeClass("standard", phase_modes={"SPEC": "merged", "TASKS": "ungated"}),
+    # The escape hatch for a complex or cross-repository requirement: SPEC and TASKS are
+    # separate skill phases with their own gates (G2 then G3) — the pre-merge full path.
+    "full": ChangeClass("full", phase_modes={}),
+    # A small change: standard's merged design front plus GRILL auto-derived (acceptance
+    # already present, no model, no G1).
     "express": ChangeClass("express", phase_modes={"GRILL": "auto", "SPEC": "merged", "TASKS": "ungated"}),
+    # A hotfix: express plus PLAN folded (the plan artifact is still produced, but its own
+    # G4 is waived — the WORKSPACE binding G4 is enforced separately and is untouched).
+    "hotfix": ChangeClass(
+        "hotfix", phase_modes={"GRILL": "auto", "SPEC": "merged", "TASKS": "ungated", "PLAN": "ungated"}
+    ),
 }
 DEFAULT_CHANGE_CLASS = "standard"
 
-# iCafe card types that deterministically SUGGEST the express class (owner confirms /
-# overrides at G0). Everything else — including an unknown/missing type — defaults to
-# standard, so the safe full path is the fallback.
-_EXPRESS_CARD_TYPES = frozenset({"bug", "缺陷", "缺陷修复", "fix", "hotfix", "defect"})
+# iCafe card types that deterministically SUGGEST a class (owner confirms / overrides at
+# G0). An unknown/missing type falls to standard (merged design front); a large/epic type
+# is suggested `full` so its SPEC and DAG stay separate skill phases.
+_HOTFIX_CARD_TYPES = frozenset({"hotfix", "热修复", "紧急修复"})
+_EXPRESS_CARD_TYPES = frozenset({"bug", "缺陷", "缺陷修复", "fix", "defect"})
+_FULL_CARD_TYPES = frozenset({"epic", "史诗"})
 
 
 def phase_mode(change_class: str, state: str) -> str:
@@ -269,16 +281,21 @@ def waived_gates(change_class: str) -> frozenset[str]:
 def classify_change(snapshot: Any, override: str | None = None) -> str:
     """Suggested change class from the requirement snapshot; an explicit override wins.
 
-    Deterministic: a known express-ish card type suggests express, everything else is
-    standard. The G0 approver confirms or overrides — nothing here decides on its own.
+    Deterministic: a hotfix-ish type suggests `hotfix`, a bug/fix type `express`, an
+    epic/large type `full`, everything else the default `standard` (merged design front).
+    The G0 approver confirms or overrides — nothing here decides on its own.
     """
     if isinstance(override, str) and override in CHANGE_CLASSES:
         return override
     card_type = ""
     if isinstance(snapshot, dict):
         card_type = str(snapshot.get("type") or "").strip().lower()
+    if card_type and any(keyword in card_type for keyword in _HOTFIX_CARD_TYPES):
+        return "hotfix"
     if card_type and any(keyword in card_type for keyword in _EXPRESS_CARD_TYPES):
         return "express"
+    if card_type and any(keyword in card_type for keyword in _FULL_CARD_TYPES):
+        return "full"
     return DEFAULT_CHANGE_CLASS
 
 

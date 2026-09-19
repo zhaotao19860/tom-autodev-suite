@@ -178,7 +178,9 @@ class PhaseProtocolTests(unittest.TestCase):
         cases = [
             ("GRILL", "INTAKE", "requirement-snapshot", "tom-grill", "decision-log", "G1"),
             ("SPEC", "GRILL", "decision-log", "tom-spec", "spec", "G2"),
-            ("TASKS", "SPEC", "spec", "tom-tasks", "task-dag", "G3"),
+            # Under the default (standard) class TASKS is ungated — the merged design front
+            # carries the DAG, so TASKS's own G3 is waived. (The `full` class keeps G3.)
+            ("TASKS", "SPEC", "spec", "tom-tasks", "task-dag", None),
             ("PLAN", "TASKS", "task-dag", "tom-plan", "task-plan", "G4"),
             ("IMPLEMENT", "PLAN", "task-plan", "tom-implement", "change-set", "G5"),
             ("REVIEW", "IMPLEMENT", "change-set", "tom-review", "review", None),

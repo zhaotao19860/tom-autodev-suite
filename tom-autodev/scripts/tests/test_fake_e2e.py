@@ -825,7 +825,14 @@ class FakeE2ETests(unittest.TestCase):
                 action = self.orchestrator.next(run_id)
                 if action["phase"] == "IMPLEMENT" and reviewed_revisions is None:
                     reviewed_revisions = self._commit_reviewed_worktrees(receipts)
-                draft = self._phase_content(action, requirement, reviewed_revisions)
+                if result["producer_job"]["payload"].get("mode") == "merged":
+                    # standard's merged design front: one producer fill yields {spec, dag}.
+                    draft = {
+                        "spec": self._phase_content(action, requirement, reviewed_revisions),
+                        "dag": copy.deepcopy(specialized_examples()["task-dag"]),
+                    }
+                else:
+                    draft = self._phase_content(action, requirement, reviewed_revisions)
                 job_id = result["producer_job"]["job_id"]
                 done = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
                 if done.get("reason_code") == "APPROVAL_REQUIRED":
@@ -861,13 +868,16 @@ class FakeE2ETests(unittest.TestCase):
         # The plan's acceptance: one standard requirement driven end to end by the worker.
         summary = self._worker_drive_to_terminal("BGW-800")
         self.assertEqual(self.orchestrator.status(summary["run_id"])["state"], "RELEASE_SUCCESS")
-        # ProducerJob fills == the six model phases (deterministic steps take no agent turn).
-        self.assertEqual(summary["producers"], 6)
+        # ProducerJob fills == the five model producer steps: GRILL, the merged SPEC+dag
+        # step, PLAN, IMPLEMENT, REVIEW (TASKS is auto-filled from the merged draft, not a
+        # separate producer). Deterministic steps take no agent turn.
+        self.assertEqual(summary["producers"], 5)
         # Every side-effect controller ran inside the worker loop, never as a ProducerJob.
         self.assertEqual(set(summary["controllers_run"]), {"workspace", "submit", "ipipe", "release"})
-        # One human APPROVE per gate the run actually crosses: G0 at intake, the gated
-        # model phases, WORKSPACE G4, SUBMIT G7, the IPIPE trigger G7 and RELEASE G9.
-        self.assertEqual(summary["gate_approvals"], 10)
+        # One human APPROVE per gate the run actually crosses: G0 at intake, G1 (grill),
+        # the merged design front G2 (TASKS's G3 is waived), WORKSPACE G4, PLAN G4, REVIEW
+        # G5, SUBMIT G7, the IPIPE trigger G7 and RELEASE G9.
+        self.assertEqual(summary["gate_approvals"], 9)
         # Far below the 102-event thrash of the one real un-worker-driven run.
         self.assertLess(summary["events"], 40)
 
@@ -880,7 +890,7 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(len(receipts), summary["producers"])
         self.assertEqual(
             {receipt["phase"] for receipt in receipts},
-            {"GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "REVIEW"},
+            {"GRILL", "SPEC", "PLAN", "IMPLEMENT", "REVIEW"},
         )
         for receipt in receipts:
             self.assertEqual(receipt["backend"], "agent-turn")
