@@ -2,6 +2,13 @@
 
 本 skill 属于 tom-autodev 套件，整套共 13 个，必须一起安装才能完成端到端流程。套件构成与各自职责见 SKILL.md 的依赖说明。
 
+## 2026-09-19
+
+- 瘦身 Stage A（变更类精简）：`standard` 默认合并 SPEC+TASKS——一步产 {spec,dag}、一道 G2、TASKS 免 G3，常规路径少一个模型步与一道闸门
+- 新增 `full` 变更类（旧 standard：SPEC/TASKS 分开 + G2+G3），G0 可选，作为复杂/跨仓 DAG 的逃生舱
+- 新增 `hotfix` 变更类（express + PLAN 折叠：计划产物仍产、免其 G4；WORKSPACE 绑定 G4 独立强制、不受影响）；`classify_change` 按卡型路由 hotfix/bug/epic → hotfix/express/full，其余 standard
+- 控制面回归测试 `773` 项全部通过
+
 ## 2026-09-18
 
 - WorkerDriver 现在自驱 IPIPE 控制器：在 G7 下 compute-then-approve 推导触发绑定 hash（G7 授权「提交 iCode 并触发 iPipe」，G8 仅用于失败重跑），触发流水线并 monitor 到终态；成功落 RELEASE、失败转 DIAGNOSE，人工阶段/超时/瞬时故障则 park 交人处理
