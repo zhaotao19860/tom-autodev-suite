@@ -2018,5 +2018,53 @@ class FakeE2ETests(unittest.TestCase):
         target.write_text(yaml.safe_dump(profile), encoding="utf-8")
 
 
+class BusinessRepoSelectionTests(unittest.TestCase):
+    """MEDIUM-005: a task's WORKSPACE binds the repo the task targets, not business_repos[0]."""
+
+    class _Orch:
+        def __init__(self, module):
+            self._module = module
+
+        def task_business_module(self, run_id, task_id):
+            return self._module
+
+    _REPOS = [
+        {"module": "bgw", "path": "/repo/bgw"},
+        {"module": "bgwagent", "path": "/repo/bgwagent"},
+    ]
+
+    def test_multi_repo_selects_by_declared_module(self):
+        first = worker_driver._select_business_repo(self._Orch("bgw"), "run", "T-1", self._REPOS)
+        second = worker_driver._select_business_repo(self._Orch("bgwagent"), "run", "T-2", self._REPOS)
+        self.assertEqual(first["module"], "bgw")
+        self.assertEqual(second["module"], "bgwagent")
+        # Swapping profile order does not change the target: selection is by module, not index.
+        swapped = worker_driver._select_business_repo(
+            self._Orch("bgwagent"), "run", "T-2", list(reversed(self._REPOS))
+        )
+        self.assertEqual(swapped["module"], "bgwagent")
+
+    def test_multi_repo_refuses_when_the_task_names_no_registered_module(self):
+        self.assertIsNone(
+            worker_driver._select_business_repo(self._Orch("unknown"), "run", "T-1", self._REPOS)
+        )
+        # A legacy DAG node with no business_module is also ambiguous across many repos.
+        self.assertIsNone(
+            worker_driver._select_business_repo(self._Orch(None), "run", "T-1", self._REPOS)
+        )
+
+    def test_single_repo_is_unambiguous_and_tolerates_the_module(self):
+        sole = [{"module": "bgw", "path": "/repo/bgw"}]
+        self.assertEqual(
+            worker_driver._select_business_repo(self._Orch("resolver"), "run", "T-1", sole)["module"],
+            "bgw",
+        )
+        self.assertEqual(
+            worker_driver._select_business_repo(self._Orch(None), "run", "T-1", sole)["module"],
+            "bgw",
+        )
+        self.assertIsNone(worker_driver._select_business_repo(self._Orch("bgw"), "run", "T-1", []))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,7 @@ def specialized_examples():
         },
         "task-dag": {
             "nodes": [{"task_id": "T-1", "title": "Resolver slice", "capability_slice": "Resolve query",
+                "business_module": "resolver",
                 "business_changes": ["src/resolver.cc"], "test_changes": ["test/test_resolver.py"],
                 "test_ids": ["resolver.answer"], "fixtures": ["query-a"], "ipipe_stages": ["unit"],
                 "completion_predicate": "review accepted", "acceptance_point_ids": ["AC-1"]}],

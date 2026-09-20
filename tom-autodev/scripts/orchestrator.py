@@ -759,6 +759,26 @@ class Orchestrator:
             return {"ok": False, "reason_code": "KNOWLEDGE_SYNC_MISMATCH", "run_id": run_id}
         return sync
 
+    def task_business_module(self, run_id: str, task_id: Any) -> str | None:
+        """The business repo module a DAG task targets, read from the pinned TASKS artifact.
+
+        The task-dag node names its business repository explicitly (MEDIUM-005), so a
+        cross-repo run binds each task's WORKSPACE to the repo that task actually changes
+        rather than to business_repos[0]. Returns None for a legacy DAG whose nodes carry no
+        business_module, or when the task/DAG is not resolvable — callers fall back to the
+        single-repo case only when it is unambiguous."""
+        if not isinstance(task_id, str) or not task_id:
+            return None
+        dag = self.artifacts.latest_phase(run_id, "TASKS", None)
+        if not dag.get("valid"):
+            return None
+        content = (dag.get("envelope") or {}).get("content") or {}
+        for node in content.get("nodes") or []:
+            if isinstance(node, dict) and node.get("task_id") == task_id:
+                module = node.get("business_module")
+                return module if isinstance(module, str) and module else None
+        return None
+
     def workspace_binding(
         self, run_id: str, workspace_receipts: dict[str, Any]
     ) -> dict[str, Any]:
@@ -821,6 +841,21 @@ class Orchestrator:
                     "ok": False, "reason_code": "WORKSPACE_PROFILE_MISMATCH",
                     "run_id": run_id, "role": role,
                 }
+            if role == "business":
+                # The receipt must be for the repo THIS task targets, not merely a registered
+                # business repo (MEDIUM-005). A single-repo profile is unambiguous, so an
+                # advisory/mismatched module is tolerated; a multi-repo profile is not.
+                declared = self.task_business_module(run_id, task_id)
+                if (
+                    declared
+                    and len(business_repositories) > 1
+                    and receipt["module"] != declared
+                ):
+                    return {
+                        "ok": False, "reason_code": "WORKSPACE_TASK_REPO_MISMATCH",
+                        "run_id": run_id, "role": role,
+                        "task_module": declared, "receipt_module": receipt["module"],
+                    }
             try:
                 ownership = self.workspaces.query_ownership(
                     receipt["repo_path"], run_id, task_id, receipt["owner_token"]

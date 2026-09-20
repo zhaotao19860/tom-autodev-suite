@@ -397,6 +397,28 @@ def execute_controller(
     return {"ok": False, "reason_code": "CONTROLLER_NEEDS_RUNTIME", "controller": controller}
 
 
+def _select_business_repo(
+    orchestrator: Any, run_id: str, task_id: Any, business_repos: list[Any]
+) -> dict[str, Any] | None:
+    """The business repository a DAG task targets (MEDIUM-005).
+
+    A multi-repo run must select by the task's declared business_module so a second repo's
+    task is not cut against the first repo's worktree; a single-repo run is unambiguous and
+    tolerates an advisory/absent module. Returns None when a multi-repo run's task names no
+    registered module (or a legacy DAG carries none), so the caller refuses instead of
+    silently defaulting to business_repos[0]."""
+    repos = [repo for repo in business_repos if isinstance(repo, dict) and repo.get("path")]
+    if not repos:
+        return None
+    module = orchestrator.task_business_module(run_id, task_id)
+    if module:
+        matched = [repo for repo in repos if repo.get("module") == module]
+        if matched:
+            return matched[0]
+        return repos[0] if len(repos) == 1 else None
+    return repos[0] if len(repos) == 1 else None
+
+
 def _execute_workspace(orchestrator: Any, run_id: str, action: dict[str, Any]) -> dict[str, Any]:
     """Create the task's owned worktrees, then advance WORKSPACE->PLAN once G4 is settled.
 
@@ -410,7 +432,15 @@ def _execute_workspace(orchestrator: Any, run_id: str, action: dict[str, Any]) -
     if not pinned.get("ok"):
         return pinned
     profile = pinned["profile"]
-    selected = {"business": (profile.get("business_repos") or [None])[0], "tests": profile.get("test_repo")}
+    business_repo = _select_business_repo(
+        orchestrator, run_id, task_id, profile.get("business_repos") or []
+    )
+    if business_repo is None:
+        # A cross-repo run whose DAG task does not name a registered business module has no
+        # unambiguous worktree to cut (MEDIUM-005) -- refuse rather than default to repo 0.
+        return {"ok": False, "reason_code": "WORKSPACE_TASK_REPO_UNRESOLVED",
+                "run_id": run_id, "task_id": task_id}
+    selected = {"business": business_repo, "tests": profile.get("test_repo")}
     if not all(isinstance(repository, dict) and repository.get("path") for repository in selected.values()):
         return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
     receipts: dict[str, Any] = {}
