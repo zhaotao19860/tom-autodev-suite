@@ -1047,6 +1047,44 @@ class FakeE2ETests(unittest.TestCase):
             self.orchestrator, run_id, knowledge_sync=knowledge, locks=live, owner_token="worker-c")
         self.assertEqual((drove["ok"], drove["reason_code"]), (True, "PARKED"))
 
+    def test_merged_tasks_recovers_from_persisted_dag_after_crash_between_spec_and_tasks(self):
+        # MEDIUM-002: crash after the merged SPEC commits but before TASKS. The DAG was
+        # checkpointed under the TASKS ProducerJob, so a bare advance() recovers TASKS from
+        # it — SPEC is not left orphaned and the producer is not re-invoked for the bundle.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-809", "I15ClP2KW4ZGAK", "express")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+        draft = {
+            "spec": copy.deepcopy(specialized_examples()["spec"]),
+            "dag": copy.deepcopy(specialized_examples()["task-dag"]),
+        }
+        need = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertEqual(need["reason_code"], "APPROVAL_REQUIRED")
+        self._approval(run_id, need["gate"], need["approval_input_hash"])
+
+        real_complete = self.orchestrator.complete_phase
+        state = {"crashed": False}
+
+        def flaky(rid, envelope, **kwargs):
+            if envelope.get("phase") == "TASKS" and not state["crashed"]:
+                state["crashed"] = True
+                raise RuntimeError("simulated crash before TASKS commit")
+            return real_complete(rid, envelope, **kwargs)
+
+        self.orchestrator.complete_phase = flaky
+        try:
+            with self.assertRaises(RuntimeError):
+                worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        finally:
+            self.orchestrator.complete_phase = real_complete
+
+        self.assertTrue(self.orchestrator.artifacts.latest_phase(run_id, "SPEC", None)["valid"])
+        self.assertFalse(self.orchestrator.artifacts.latest_phase(run_id, "TASKS", None).get("valid"))
+        result = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertTrue(self.orchestrator.artifacts.latest_phase(run_id, "TASKS", None)["valid"])
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
+        self.assertIn("TASKS", [s.get("phase") for s in result.get("auto_completed", [])])
+
     def test_worker_auto_consumes_the_persisted_draft_after_approval(self):
         # HIGH-001: once a draft is recorded, approving its gate lets the worker finish the
         # phase on the next advance() — no second submit_draft, no new producer turn.

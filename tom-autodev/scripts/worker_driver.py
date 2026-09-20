@@ -327,6 +327,13 @@ def _submit_merged(
     tasks_action = orchestrator.next(run_id)
     if not tasks_action.get("ok") or tasks_action.get("phase") != "TASKS":
         return {"ok": False, "reason_code": "MERGED_TASKS_UNAVAILABLE", "detail": tasks_action}
+    # Checkpoint the DAG under the TASKS ProducerJob before completing it (MEDIUM-002): if
+    # the process dies after SPEC commits but before TASKS, resume() finds this FULFILLED
+    # TASKS job and auto-completes it from the persisted DAG (HIGH-001), instead of leaving
+    # SPEC done + TASKS orphaned and re-invoking the producer for the bundle.
+    _enqueue_producer_job(
+        orchestrator, run_id, {"action": tasks_action, "skill": tasks_action.get("child_skill")})
+    orchestrator.state.fulfill_producer_job(f"producer:{tasks_action['action_id']}", draft["dag"])
     tasks_envelope = build_envelope(tasks_action, draft["dag"])
     tasks_result = orchestrator.complete_phase(run_id, tasks_envelope, knowledge_sync=knowledge_sync)
     if not tasks_result.get("ok"):
