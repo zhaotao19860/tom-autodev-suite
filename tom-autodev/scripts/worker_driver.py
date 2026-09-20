@@ -33,6 +33,7 @@ from typing import Any
 
 import workflow_spec
 from phase_protocol import _canonical_hash
+from schema_validator import validate_named_schema
 
 _log = logging.getLogger(__name__)
 
@@ -251,9 +252,19 @@ def submit_draft(
     if workflow_spec.phase_mode(change_class, action["phase"]) == "merged":
         return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync)
 
-    orchestrator.state.fulfill_producer_job(job_id, draft)
-    _record_model_receipt(orchestrator, run_id, action, draft, [action.get("result_schema")])
     envelope = build_envelope(action, draft)
+    # Validate the draft BEFORE locking the ProducerJob to it (HIGH-002): a schema-invalid
+    # draft leaves the job PENDING so a corrected draft can retry the same frontier, instead
+    # of locking it to a bad draft that every later submit conflicts with. The receipt's
+    # validators_passed then reflects a check that actually ran.
+    schema_name = action.get("result_schema")
+    issues = validate_named_schema(draft, schema_name) if schema_name else []
+    if issues:
+        return {"ok": False, "reason_code": "DRAFT_SCHEMA_INVALID", "retry_allowed": True,
+                "job_id": job_id, "schema": schema_name,
+                "schema_errors": [{"path": i.path, "kind": i.kind} for i in issues]}
+    orchestrator.state.fulfill_producer_job(job_id, draft)
+    _record_model_receipt(orchestrator, run_id, action, draft, [schema_name])
     gate = action.get("required_human_gate")
     if gate is not None:
         approval_id = _settled_approval_id(orchestrator, run_id, gate, envelope["approval_input_hash"])
@@ -276,6 +287,13 @@ def _submit_merged(
     """
     if not (isinstance(draft, dict) and isinstance(draft.get("spec"), dict) and isinstance(draft.get("dag"), dict)):
         return {"ok": False, "reason_code": "MERGED_DRAFT_INVALID", "job_id": job_id}
+    # Validate both halves BEFORE locking the job (HIGH-002): a schema-invalid spec or dag
+    # leaves the merged job PENDING for a corrected retry rather than locking a bad bundle.
+    issues = validate_named_schema(draft["spec"], "spec") + validate_named_schema(draft["dag"], "task-dag")
+    if issues:
+        return {"ok": False, "reason_code": "DRAFT_SCHEMA_INVALID", "retry_allowed": True,
+                "job_id": job_id,
+                "schema_errors": [{"path": i.path, "kind": i.kind} for i in issues]}
     orchestrator.state.fulfill_producer_job(job_id, draft)
     _record_model_receipt(orchestrator, run_id, action, draft, ["spec", "task-dag"])
 

@@ -1047,6 +1047,25 @@ class FakeE2ETests(unittest.TestCase):
             self.orchestrator, run_id, knowledge_sync=knowledge, locks=live, owner_token="worker-c")
         self.assertEqual((drove["ok"], drove["reason_code"]), (True, "PARKED"))
 
+    def test_producer_draft_validated_before_the_job_is_locked(self):
+        # HIGH-002: a schema-invalid draft is rejected as retryable WITHOUT locking the
+        # ProducerJob, so a corrected draft can retry the same frontier (no unrecoverable
+        # PRODUCER_JOB_CONFLICT). `full` keeps GRILL a normal gated model phase.
+        run_id, knowledge, req = self._run_to_grill_action("BGW-807", "I15ClP2KW4ZGAK", "full")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+        bad = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id, {"garbage": True}, knowledge_sync=knowledge)
+        self.assertEqual(bad["reason_code"], "DRAFT_SCHEMA_INVALID")
+        self.assertTrue(bad["retry_allowed"])
+        self.assertEqual(self.orchestrator.state.producer_job(job_id)["status"], "PENDING")
+        # A corrected draft on the same job/frontier proceeds to its gate, not a conflict.
+        action = self.orchestrator.next(run_id)
+        good = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id, self._phase_content(action, req),
+            knowledge_sync=knowledge)
+        self.assertEqual(good["reason_code"], "APPROVAL_REQUIRED")
+
     def test_producer_job_concurrent_fulfill_is_idempotent_or_conflicts(self):
         # Two workers filling the same ProducerJob: an identical draft merges to one row;
         # a different draft for an already-fulfilled job conflicts rather than overwriting.
