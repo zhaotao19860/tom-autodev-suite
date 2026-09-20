@@ -934,7 +934,7 @@ class OrchestratorTests(unittest.TestCase):
             policy.validate("SUBMIT", "IMPLEMENT")["reason_code"], "INVALID_TRANSITION"
         )
         self.assertEqual(
-            policy.failure_target("SUBMIT", "REVIEW_FAILED"), "DIAGNOSE"
+            policy.failure_target("REVIEW_FAILED"), "DIAGNOSE"
         )
 
     def test_route_failure_rejects_an_illegal_transition(self):

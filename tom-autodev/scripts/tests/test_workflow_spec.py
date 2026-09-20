@@ -71,7 +71,7 @@ class LegacyStructureConsistencyTests(unittest.TestCase):
             "TEST_FAILURE", "REVIEW_FAILED", "RELEASE_FAILED", "SOMETHING_ELSE",
         ]
         for reason in reasons:
-            self.assertEqual(ws.failure_target(reason), policy.failure_target("IPIPE", reason), reason)
+            self.assertEqual(ws.failure_target(reason), policy.failure_target(reason), reason)
 
     def test_phase_registry_matches__PHASES(self):
         spec_phases = {s for s, spec in ws.STATES.items() if spec.registry == "phase"}

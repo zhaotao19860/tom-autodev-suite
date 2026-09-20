@@ -371,7 +371,9 @@ class FakeE2ETests(unittest.TestCase):
         # standard: GRILL is a full skill phase gated by G1.
         run_id, _knowledge, _req = self._run_to_grill_action("BGW-902", "I15ClP2KW4ZGAK", "standard")
         grill = self.orchestrator.next(run_id)
-        self.assertEqual((grill["phase"], grill["child_skill"], grill["required_human_gate"]), ("GRILL", "tom-grill", "G1"))
+        self.assertEqual(
+            (grill["phase"], grill["child_skill"], grill["required_human_gate"]),
+            ("GRILL", "tom-grill", "G1"))
         self.assertNotIn("content", grill)
 
         # express (acceptance already present): GRILL is auto — no model, no G1, and the
@@ -816,7 +818,9 @@ class FakeE2ETests(unittest.TestCase):
                 api = self._ipipe_api(run_id)
             result = worker_driver.advance(
                 self.orchestrator, run_id, knowledge_sync=knowledge, icode_runtime=icode, ipipe_api=api)
-            controllers_run += [step["controller"] for step in result.get("auto_completed", []) if step.get("controller")]
+            controllers_run += [
+                step["controller"] for step in result.get("auto_completed", [])
+                if step.get("controller")]
             if self.orchestrator.status(run_id)["state"] == "RELEASE_SUCCESS":
                 break  # the RELEASE controller ran within this advance and landed terminal
             self.assertEqual(result["reason_code"], "PARKED", result)
@@ -838,7 +842,8 @@ class FakeE2ETests(unittest.TestCase):
                 if done.get("reason_code") == "APPROVAL_REQUIRED":
                     self._approval(run_id, done["gate"], done["approval_input_hash"])
                     gate_approvals += 1
-                    done = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+                    done = worker_driver.submit_draft(
+                        self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
                 self.assertTrue(done["ok"], (action.get("phase"), done))
                 producers += 1
             elif parked == worker_driver.APPROVAL_WAIT:
@@ -1041,6 +1046,34 @@ class FakeE2ETests(unittest.TestCase):
         drove = worker_driver.advance(
             self.orchestrator, run_id, knowledge_sync=knowledge, locks=live, owner_token="worker-c")
         self.assertEqual((drove["ok"], drove["reason_code"]), (True, "PARKED"))
+
+    def test_producer_job_concurrent_fulfill_is_idempotent_or_conflicts(self):
+        # Two workers filling the same ProducerJob: an identical draft merges to one row;
+        # a different draft for an already-fulfilled job conflicts rather than overwriting.
+        run_id = self.orchestrator.start(
+            "BGW-805", "bgw", requirement_snapshot=snapshot("BGW-805"))["run_id"]
+        st = self.orchestrator.state
+        st.record_producer_job(run_id, "producer:x", {"phase": "SPEC"})
+        first = st.fulfill_producer_job("producer:x", {"spec": 1})
+        self.assertEqual(first["status"], "FULFILLED")
+        again = st.fulfill_producer_job("producer:x", {"spec": 1})
+        self.assertEqual(again["draft"], {"spec": 1})
+        with self.assertRaises(ValueError):
+            st.fulfill_producer_job("producer:x", {"spec": 2})
+
+    def test_golden_replay_flags_a_receipt_with_no_cached_draft(self):
+        # A recorded producer fill whose cached draft is missing must fail the replay gate
+        # (never a false green), naming the offending input.
+        import replay_gate
+
+        run_id = self.orchestrator.start(
+            "BGW-806", "bgw", requirement_snapshot=snapshot("BGW-806"))["run_id"]
+        self.orchestrator.state.record_model_execution_receipt(run_id, {
+            "job_id": "producer:y", "phase": "SPEC", "input_hash": "ih-y", "output_hash": "oh-y",
+        })
+        report = replay_gate.golden_replay(self.orchestrator.state, run_id)
+        self.assertFalse(report["ok"])
+        self.assertIn("ih-y", report["missing_cache"])
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

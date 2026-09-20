@@ -1049,7 +1049,7 @@ class Orchestrator:
         next_state = (
             "DIAGNOSE"
             if _is_runtime_failure(reason_code)
-            else self.transition_policy.failure_target(current["state"], reason_code)
+            else self.transition_policy.failure_target(reason_code)
         )
         transition = self.transition_policy.validate(current["state"], next_state)
         if not transition["allowed"]:

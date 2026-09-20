@@ -530,7 +530,9 @@ def _validate_final_envelope(envelope: Any) -> None:
         if not all(isinstance(value, str) and value for value in (doc_id, url, version)):
             raise ValueError("KNOWLEDGE_RECEIPT_INVALID")
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.netloc != "ku.baidu-int.com" or not parsed.path.rstrip("/").endswith(f"/{doc_id}") or parsed.query or parsed.fragment:
+        path_ok = parsed.path.rstrip("/").endswith(f"/{doc_id}")
+        if (parsed.scheme != "https" or parsed.netloc != "ku.baidu-int.com"
+                or not path_ok or parsed.query or parsed.fragment):
             raise ValueError("KNOWLEDGE_RECEIPT_INVALID")
     if wants_icafe and not (isinstance(comment_id, str) and comment_id):
         raise ValueError("KNOWLEDGE_RECEIPT_INVALID")

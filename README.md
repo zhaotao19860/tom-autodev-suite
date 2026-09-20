@@ -422,7 +422,7 @@ tom-autodev/
 cd scripts/tests && python3 -m unittest discover -s . -p "test_*.py"
 ```
 
-当前 **773** 项全绿（含一条“单 standard 需求由 WorkerDriver 全程驱到 RELEASE_SUCCESS”的验收用例：断言 ProducerJob 次数=模型相位数、四个副作用控制器全在 worker 循环内自动执行、每道闸门一次人工 APPROVE、事件数远低于历史真实 run 的 102）。用纯标准库 `unittest`（不用 pytest）；平台交互全部对 Fake adapter 验证，生产真实 transport 经 `orchestrator._cli_ipipe_runtime` 注入。
+当前 **774** 项全绿（含一条“单 standard 需求由 WorkerDriver 全程驱到 RELEASE_SUCCESS”的验收用例：断言 ProducerJob 次数=模型相位数、四个副作用控制器全在 worker 循环内自动执行、每道闸门一次人工 APPROVE、事件数远低于历史真实 run 的 102）。用纯标准库 `unittest`（不用 pytest）；平台交互全部对 Fake adapter 验证，生产真实 transport 经 `orchestrator._cli_ipipe_runtime` 注入。
 
 ## 参考文档
 

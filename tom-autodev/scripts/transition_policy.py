@@ -50,13 +50,7 @@ class TransitionPolicy:
             "policy_id": POLICY_ID,
         }
 
-    def failure_target(self, current: str, reason_code: str) -> str:
-        if reason_code == "REQUIREMENT_CHANGED":
-            target = "GRILL"
-        elif reason_code in {"ENV_UNSATISFIED", "ENV_TRANSIENT"}:
-            target = "ENVIRONMENT_BLOCKED"
-        elif reason_code in {"CODE_FAILURE", "TEST_FAILURE", "REVIEW_FAILED", "RELEASE_FAILED"}:
-            target = "DIAGNOSE"
-        else:
-            target = "STOPPED"
-        return target
+    def failure_target(self, reason_code: str) -> str:
+        # Single source of truth: the reason_code -> target mapping lives in
+        # workflow_spec.FAILURE_TARGETS; this delegates rather than re-listing it.
+        return workflow_spec.failure_target(reason_code)

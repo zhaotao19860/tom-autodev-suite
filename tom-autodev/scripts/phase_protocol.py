@@ -1350,7 +1350,8 @@ class PhaseProtocol:
         if not artifact.get("valid"):
             return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
         envelope = artifact["envelope"]
-        if envelope.get("run_id") != run_id or envelope.get("phase") != "RELEASE" or envelope.get("task_id") is not None:
+        if (envelope.get("run_id") != run_id or envelope.get("phase") != "RELEASE"
+                or envelope.get("task_id") is not None):
             return _failure("ARTIFACT_INTEGRITY_FAILED", run_id=run_id)
         receipt_error = self._receipt_error(run_id, envelope, existing.get("knowledge_receipt"))
         if receipt_error is not None:
@@ -1443,7 +1444,9 @@ class PhaseProtocol:
         events = self.state.events(run_id)
         if not events or events[-1].get("event_id") != action["source_event_id"]:
             raced = self.state.idempotency_result(result_key)
-            return self._validated_cached_release_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
+            if raced:
+                return self._validated_cached_release_ingestion(run_id, raced)
+            return _failure("STALE_ACTION", run_id=run_id)
         binding_error = self._release_binding_error(run_id, content)
         if binding_error is not None:
             return _failure(binding_error, run_id=run_id)
@@ -1473,7 +1476,9 @@ class PhaseProtocol:
         if committed.get("status") == "RESULT_CONFLICT":
             return _failure("COMPLETION_CONFLICT", run_id=run_id)
         raced = self.state.idempotency_result(result_key)
-        return self._validated_cached_release_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
+        if raced:
+            return self._validated_cached_release_ingestion(run_id, raced)
+        return _failure("STALE_ACTION", run_id=run_id)
 
     def _controller_approval_error(
         self, run_id: str, payload: dict[str, Any], gate: str

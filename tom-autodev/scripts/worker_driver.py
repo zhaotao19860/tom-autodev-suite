@@ -24,6 +24,7 @@ Decision kinds:
 from __future__ import annotations
 
 import copy
+import logging
 import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,8 @@ from typing import Any
 
 import workflow_spec
 from phase_protocol import _canonical_hash
+
+_log = logging.getLogger(__name__)
 
 # Wall-clock bound on how long the worker will monitor a triggered pipeline before it
 # parks for a human. The runtime's own max_polls/poll_interval bound the poll count; this
@@ -55,13 +58,19 @@ CONTROLLER_STEP = "CONTROLLER_STEP"
 
 
 def _gate_settled(orchestrator: Any, run_id: str, gate: str, input_hash: str | None) -> bool:
-    """True when an APPROVE for `gate` bound to `input_hash` exists for the run."""
+    """True when an APPROVE for `gate` bound to exactly `input_hash` exists for the run.
+
+    A missing/None `input_hash` never matches: a gate can only be settled against a concrete
+    hash, so it fails closed rather than matching any approval for that gate.
+    """
+    if not isinstance(input_hash, str) or not input_hash:
+        return False
     for record in orchestrator.approvals.for_run(run_id):
         if (
             isinstance(record, dict)
             and record.get("action") == gate
             and record.get("effective_decision") == "APPROVE"
-            and (input_hash is None or record.get("input_hash") == input_hash)
+            and record.get("input_hash") == input_hash
         ):
             return True
     return False
@@ -191,7 +200,8 @@ def _record_model_receipt(
             "validators_passed": [name for name in validators if name],
         })
     except Exception:
-        pass
+        _log.warning("model-execution-receipt write failed for %s (best-effort)",
+                     action.get("action_id"), exc_info=True)
     # Cache the draft under (input_hash, prompt_version, model) so a worker re-driving the
     # same frontier reuses it instead of re-invoking the producer. Best-effort.
     try:
@@ -199,7 +209,8 @@ def _record_model_receipt(
             action.get("input_hash"), workflow_spec.WORKFLOW_VERSION, None, draft
         )
     except Exception:
-        pass
+        _log.warning("draft-cache write failed for %s (best-effort)",
+                     action.get("input_hash"), exc_info=True)
 
 
 def cached_draft_for(orchestrator: Any, action: dict[str, Any]) -> dict[str, Any] | None:
@@ -210,6 +221,7 @@ def cached_draft_for(orchestrator: Any, action: dict[str, Any]) -> dict[str, Any
             action.get("input_hash"), workflow_spec.WORKFLOW_VERSION, None
         )
     except Exception:
+        _log.debug("draft-cache lookup failed for %s", action.get("input_hash"), exc_info=True)
         return None
     return cached["draft"] if isinstance(cached, dict) else None
 
@@ -610,7 +622,10 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         return _drive(orchestrator, run_id, knowledge_sync, max_steps, icode_skill,
                       icode_runtime, ipipe_api)
     finally:
-        locks.release(key, token)
+        released = locks.release(key, token)
+        if isinstance(released, dict) and not released.get("released"):
+            _log.warning("worker lease %s not released by %s: %s", key, token,
+                         released.get("status"))
 
 
 def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
