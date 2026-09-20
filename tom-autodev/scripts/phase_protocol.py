@@ -1208,8 +1208,15 @@ class PhaseProtocol:
         approval_error = self._controller_approval_error(run_id, payload, "G7")
         if approval_error is not None:
             return _failure(approval_error, run_id=run_id)
+        # Each required module's evidence is its own artifact. phase_artifacts.action_id is
+        # UNIQUE, so a multi-module run must not reuse the single IPIPE action_id for every
+        # module (that collided as ARTIFACT_CONFLICT on the 2nd module — HIGH-003); the
+        # stored identity is scoped by module while the transition still rides the IPIPE
+        # source event. Replaying the same module is stable (same hash), so it stays idempotent.
+        artifact_action_id = _canonical_hash({
+            "ipipe_action_id": action["action_id"], "module": content.get("module")})
         draft = {
-            "action_id": action["action_id"], "source_event_id": action["source_event_id"],
+            "action_id": artifact_action_id, "source_event_id": action["source_event_id"],
             "host": "comate", "run_id": run_id, "phase": "IPIPE", "task_id": None,
             "schema_version": "1", "input_hash": action["input_hash"], "content_hash": content_hash,
             "source_revisions": revisions, "parent_artifact_hash": target_submission["sha256"],
@@ -1285,7 +1292,7 @@ class PhaseProtocol:
         if not transition.get("allowed"):
             return _failure(transition.get("reason_code", "INVALID_TRANSITION"), run_id=run_id)
         result = {
-            "ok": True, "reason_code": "OK", "phase_complete": True, "action_id": action["action_id"],
+            "ok": True, "reason_code": "OK", "phase_complete": True, "action_id": artifact_action_id,
             "artifact_id": stored["artifact_id"], "content_hash": content_hash, "phase": "IPIPE",
             "task_id": None, "draft_hash": _canonical_hash(draft), "ingest_hash": content_hash,
             "knowledge_receipt": receipt,

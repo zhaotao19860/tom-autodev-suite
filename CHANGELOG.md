@@ -12,6 +12,7 @@ Codex 评审全量修复（分步进行；每步全绿后推进）：
 - HIGH-002：ProducerJob 草案先校验 schema 再 fulfill——schema 非法草案返回 `DRAFT_SCHEMA_INVALID`（retry_allowed）且不锁定 job，可用修正版重试同一 frontier，不再变成不可恢复的 `PRODUCER_JOB_CONFLICT`；receipt 的 validators_passed 只记真跑过的校验；merged SPEC+TASKS 同样先校验两半再落地
 - HIGH-001：审批后 worker 自动消费持久化草案——一次草案 `submit_draft` 记录后，批准其闸门，下一次 `advance()`/`resume()` 直接从持久化草案完成该相位，**不再需要二次 `submit_draft`、不重新唤醒 producer**（提取 `_produce` 共享路径；auto-consume 走同一校验+审批绑定，action_id 键防旧草案越过新审批）
 - MEDIUM-002：merged SPEC+TASKS 崩溃可恢复——SPEC 提交后把 DAG 以 checkpoint 落到 TASKS 的 ProducerJob，若在 TASKS 提交前崩溃，`advance()` 从持久化 DAG 恢复 TASKS（复用 HIGH-001），SPEC 不再孤儿、不重跑 producer
+- HIGH-003（part 1/2，多模块 iPipe 证据身份）：`ingest_ipipe_evidence` 现在把每模块证据的 artifact action_id 按 module 作用域（`hash(ipipe_action_id, module)`），避免第二个模块的证据撞 `phase_artifacts.action_id` UNIQUE（原 `ARTIFACT_CONFLICT`）；转移仍走 IPIPE source event，同模块重放幂等。（part 2：worker 逐模块 trigger/monitor/ingest 驱动 + 多模块夹具，下一步）
 - 控制面回归测试 `779` 项全部通过
 
 ## 2026-09-19
