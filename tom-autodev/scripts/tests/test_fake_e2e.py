@@ -1141,6 +1141,42 @@ class FakeE2ETests(unittest.TestCase):
         with self.assertRaises(ValueError):
             st.fulfill_producer_job("producer:x", {"spec": 2})
 
+    def test_golden_replay_requires_the_receipt_output_to_be_backed_by_cache(self):
+        # MEDIUM-003: a receipt whose output_hash matches no cached draft for its input must
+        # fail replay — a receipt cannot claim an output no cached draft actually produced.
+        import replay_gate
+
+        run_id = self.orchestrator.start(
+            "BGW-810", "bgw", requirement_snapshot=snapshot("BGW-810"))["run_id"]
+        st = self.orchestrator.state
+        st.cache_draft("ih-z", "workflow-spec-v1", None, {"real": 1})
+        st.record_model_execution_receipt(run_id, {
+            "job_id": "producer:z", "phase": "SPEC", "input_hash": "ih-z",
+            "output_hash": "claimed-output-not-in-cache"})
+        report = replay_gate.golden_replay(st, run_id)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(m.get("reason") == "receipt_not_backed_by_cache"
+                            for m in report["mismatches"]), report)
+
+    def test_cross_model_diff_is_insufficient_evidence_without_two_known_models(self):
+        # MEDIUM-003: without >= 2 known model identities (agent-turn records model=None),
+        # a cross-model comparison cannot conclude — INSUFFICIENT_EVIDENCE, not a false CONSISTENT.
+        import replay_gate
+
+        st = self.orchestrator.state
+        st.cache_draft("ih-solo", "workflow-spec-v1", None, {"x": 1})
+        self.assertEqual(
+            replay_gate.cross_model_diff(st.draft_cache_entries("ih-solo"))["status"],
+            "INSUFFICIENT_EVIDENCE")
+        st.cache_draft("ih-solo", "workflow-spec-v1", "model-a", {"x": 1})
+        self.assertEqual(
+            replay_gate.cross_model_diff(st.draft_cache_entries("ih-solo"))["status"],
+            "INSUFFICIENT_EVIDENCE")
+        st.cache_draft("ih-solo", "workflow-spec-v1", "model-b", {"x": 1})
+        self.assertEqual(
+            replay_gate.cross_model_diff(st.draft_cache_entries("ih-solo"))["status"],
+            "CONSISTENT")
+
     def test_golden_replay_flags_a_receipt_with_no_cached_draft(self):
         # A recorded producer fill whose cached draft is missing must fail the replay gate
         # (never a false green), naming the offending input.

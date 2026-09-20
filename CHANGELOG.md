@@ -13,7 +13,8 @@ Codex 评审全量修复（分步进行；每步全绿后推进）：
 - HIGH-001：审批后 worker 自动消费持久化草案——一次草案 `submit_draft` 记录后，批准其闸门，下一次 `advance()`/`resume()` 直接从持久化草案完成该相位，**不再需要二次 `submit_draft`、不重新唤醒 producer**（提取 `_produce` 共享路径；auto-consume 走同一校验+审批绑定，action_id 键防旧草案越过新审批）
 - MEDIUM-002：merged SPEC+TASKS 崩溃可恢复——SPEC 提交后把 DAG 以 checkpoint 落到 TASKS 的 ProducerJob，若在 TASKS 提交前崩溃，`advance()` 从持久化 DAG 恢复 TASKS（复用 HIGH-001），SPEC 不再孤儿、不重跑 producer
 - HIGH-003（part 1/2，多模块 iPipe 证据身份）：`ingest_ipipe_evidence` 现在把每模块证据的 artifact action_id 按 module 作用域（`hash(ipipe_action_id, module)`），避免第二个模块的证据撞 `phase_artifacts.action_id` UNIQUE（原 `ARTIFACT_CONFLICT`）；转移仍走 IPIPE source event，同模块重放幂等。（part 2：worker 逐模块 trigger/monitor/ingest 驱动 + 多模块夹具，下一步）
-- 控制面回归测试 `779` 项全部通过
+- MEDIUM-003：`golden_replay` 现在强制 receipt.output_hash 必须被某条缓存草案 backing（不仅校验缓存自身哈希），receipt 不能声称一个无缓存草案产生过的输出（receipt 与 cache 的哈希口径本就一致，已验证）；`cross_model_diff` 在已知模型身份 < 2 时返回 `INSUFFICIENT_EVIDENCE`，不再对未知/单模型误报 CONSISTENT
+- 控制面回归测试 `781` 项全部通过
 
 ## 2026-09-19
 
