@@ -1047,6 +1047,29 @@ class FakeE2ETests(unittest.TestCase):
             self.orchestrator, run_id, knowledge_sync=knowledge, locks=live, owner_token="worker-c")
         self.assertEqual((drove["ok"], drove["reason_code"]), (True, "PARKED"))
 
+    def test_worker_auto_consumes_the_persisted_draft_after_approval(self):
+        # HIGH-001: once a draft is recorded, approving its gate lets the worker finish the
+        # phase on the next advance() — no second submit_draft, no new producer turn.
+        run_id, knowledge, req = self._run_to_grill_action("BGW-808", "I15ClP2KW4ZGAK", "full")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+        action = self.orchestrator.next(run_id)
+        need = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id, self._phase_content(action, req),
+            knowledge_sync=knowledge)
+        self.assertEqual(need["reason_code"], "APPROVAL_REQUIRED")
+        self.assertEqual(self.orchestrator.state.producer_job(job_id)["status"], "FULFILLED")
+
+        self._approval(run_id, need["gate"], need["approval_input_hash"])
+        result = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        # GRILL completed from the persisted draft; the run advanced to the SPEC frontier.
+        self.assertIn("GRILL", [s.get("phase") for s in result.get("auto_completed", [])])
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "SPEC")
+        # Exactly one producer receipt for GRILL — the auto-consume did not re-invoke it.
+        grill_receipts = [r for r in self.orchestrator.state.model_execution_receipts(run_id)
+                          if r["phase"] == "GRILL"]
+        self.assertEqual(len(grill_receipts), 1)
+
     def test_producer_draft_validated_before_the_job_is_locked(self):
         # HIGH-002: a schema-invalid draft is rejected as retryable WITHOUT locking the
         # ProducerJob, so a corrected draft can retry the same frontier (no unrecoverable

@@ -239,6 +239,9 @@ def submit_draft(
     the completion binds the settled approval for the draft's content hash; if no such
     approval exists yet the draft is recorded and APPROVAL_REQUIRED is returned with the
     exact hash to approve — so a model phase is never completed without its human gate.
+    Once a draft is recorded, the worker can finish the phase from it on the next advance()
+    without re-invoking the producer (see `_drive`), so a post-approval `resume()` alone
+    completes the phase.
     """
     decision = classify_next(orchestrator, run_id)
     if decision["kind"] != PRODUCER_WAIT:
@@ -247,7 +250,19 @@ def submit_draft(
     expected_job = f"producer:{action['action_id']}"
     if job_id != expected_job:
         return {"ok": False, "reason_code": "STALE_PRODUCER_JOB", "expected_job_id": expected_job}
+    return _produce(orchestrator, run_id, job_id, action, draft, knowledge_sync)
 
+
+def _produce(
+    orchestrator: Any, run_id: str, job_id: str, action: dict[str, Any],
+    draft: dict[str, Any], knowledge_sync: Any | None,
+) -> dict[str, Any]:
+    """Validate a DraftContent, persist it, and complete the phase (or park on its gate).
+
+    Shared by submit_draft (caller supplies the draft) and the worker's auto-consume path
+    (draft read back from the persisted ProducerJob). fulfill/receipt are idempotent, so
+    completing from a persisted draft after approval re-runs this safely.
+    """
     change_class = workflow_spec.change_class_of(orchestrator.state.events(run_id))
     if workflow_spec.phase_mode(change_class, action["phase"]) == "merged":
         return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync)
@@ -675,6 +690,26 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             steps.append({"phase": decision["action"].get("phase"), "result": result})
             continue
         if kind == PRODUCER_WAIT:
+            action = decision["action"]
+            job_id = f"producer:{action['action_id']}"
+            existing = orchestrator.state.producer_job(job_id)
+            if (isinstance(existing, dict) and existing.get("status") == "FULFILLED"
+                    and isinstance(existing.get("draft"), dict)):
+                # Auto-consume the persisted draft (HIGH-001): after approval, the worker
+                # completes the phase from the stored draft — no new producer turn. A stale
+                # draft cannot slip through: job_id is keyed on action_id, and _produce
+                # re-validates and re-binds the approval to the current envelope.
+                result = _produce(orchestrator, run_id, job_id, action, existing["draft"], knowledge_sync)
+                if result.get("ok"):
+                    steps.append({"phase": action.get("phase"), "result": result, "source": "cached-draft"})
+                    continue
+                if result.get("reason_code") == "APPROVAL_REQUIRED":
+                    return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                            "parked": APPROVAL_WAIT, "gate": result.get("gate"),
+                            "approval_input_hash": result.get("approval_input_hash"),
+                            "auto_completed": steps}
+                return {"ok": False, "reason_code": "PRODUCER_COMPLETE_FAILED", "run_id": run_id,
+                        "detail": result, "auto_completed": steps}
             job = _enqueue_producer_job(orchestrator, run_id, decision)
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
                     "parked": PRODUCER_WAIT, "producer_job": job, "decision": decision,

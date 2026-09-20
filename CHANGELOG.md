@@ -10,7 +10,8 @@ Codex 评审全量修复（分步进行；每步全绿后推进）：
 
 - 上一轮评审补丁：拆超长变更行；`transition_policy.failure_target` 改为委托 `workflow_spec.failure_target`（单一事实源）并移除未用的 `current` 参数；worker best-effort 异常改为记日志；`_gate_settled` 要求具体 input_hash（None 不再匹配任意审批）
 - HIGH-002：ProducerJob 草案先校验 schema 再 fulfill——schema 非法草案返回 `DRAFT_SCHEMA_INVALID`（retry_allowed）且不锁定 job，可用修正版重试同一 frontier，不再变成不可恢复的 `PRODUCER_JOB_CONFLICT`；receipt 的 validators_passed 只记真跑过的校验；merged SPEC+TASKS 同样先校验两半再落地
-- 控制面回归测试 `777` 项全部通过
+- HIGH-001：审批后 worker 自动消费持久化草案——一次草案 `submit_draft` 记录后，批准其闸门，下一次 `advance()`/`resume()` 直接从持久化草案完成该相位，**不再需要二次 `submit_draft`、不重新唤醒 producer**（提取 `_produce` 共享路径；auto-consume 走同一校验+审批绑定，action_id 键防旧草案越过新审批）
+- 控制面回归测试 `778` 项全部通过
 
 ## 2026-09-19
 
