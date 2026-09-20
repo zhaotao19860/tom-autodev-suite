@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -15,12 +16,14 @@ from collaboration import (
 from persistence_policy import ensure_persistable, validate_evidence_refs
 from phase_document import render_phase_markdown
 from project_registry import load_profile
+import repair_policy
 from requirement_snapshot import AcceptanceValueError, normalized_acceptance_ids
 from schema_validator import validate_named_schema
 
 import workflow_spec
 
 
+_log = logging.getLogger(__name__)
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _STABLE_DEPENDENCY_REASONS = frozenset({
     "INTENT_CONFLICT", "RECEIPT_CONFLICT", "ARTIFACT_CONFLICT",
@@ -1100,6 +1103,14 @@ class PhaseProtocol:
                 return "STOPPED", None, "DIAGNOSIS_INCOMPLETE"
             if route != "REPAIR":
                 return route, None, "OK"
+            # Deterministic cross-run guard (MEDIUM-004): even when the diagnosis proposes
+            # yet another REPAIR, a root cause the FailureCase library has already seen
+            # unresolved across >= CROSS_RUN_RECURRENCE_THRESHOLD runs is escalated to
+            # architecture review instead of blindly repaired again. The signature is read
+            # from the diagnosis the producer just filed, never reconstructed from events.
+            escalation = self._cross_run_escalation(content.get("failure_signature"))
+            if escalation is not None:
+                return escalation
             # A code-only repair leaves the Spec and the DAG standing, so it re-enters
             # at PLAN and wins a fresh G4 there. Anything that amends the Spec or moves
             # task scope re-enters at SPEC, which is also the default when the diagnosis
@@ -1111,6 +1122,44 @@ class PhaseProtocol:
         if not isinstance(target, str):
             raise ValueError("COMPLETION_TARGET_REQUIRED")
         return target, None, "OK"
+
+    def _cross_run_escalation(
+        self, signature: Any
+    ) -> tuple[str, None, str] | None:
+        """Escalate to ARCHITECTURE_REVIEW when the FailureCase library says this root cause
+        keeps recurring unresolved across runs; None to let the per-run repair policy stand."""
+        if not isinstance(signature, str) or not signature:
+            return None
+        try:
+            case = self.state.failure_case(signature)
+        except Exception:
+            _log.warning(
+                "failure-case read failed for signature %s (best-effort)",
+                signature, exc_info=True,
+            )
+            return None
+        verdict = repair_policy.known_failure_verdict(case)
+        if verdict is None:
+            return None
+        return "ARCHITECTURE_REVIEW", None, verdict["reason_code"]
+
+    def _record_cross_run_failure(self, run_id: str, content: dict[str, Any]) -> None:
+        """Record one occurrence of a runtime failure's signature in the cross-run
+        FailureCase library, so recurrence is detected on the real IPIPE->DIAGNOSE path and
+        not only when a caller invokes orchestrator.route_failure (MEDIUM-004). Best-effort:
+        the library must never fail the transition it observes."""
+        signature = content.get("failure_signature")
+        if not isinstance(signature, str) or not signature:
+            return
+        try:
+            self.state.record_failure_case(
+                signature, content.get("classification"), run_id, resolved=False
+            )
+        except Exception:
+            _log.warning(
+                "failure-case write failed for run %s signature %s (best-effort)",
+                run_id, signature, exc_info=True,
+            )
 
     def _ready_task_excluding(self, run_id: str, completing_task: str | None) -> str | None:
         """Next open DAG node, treating `completing_task` as finished.
@@ -1305,6 +1354,8 @@ class PhaseProtocol:
             result_key, result,
         )
         if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            if committed.get("status") == "COMMITTED" and target == "DIAGNOSE":
+                self._record_cross_run_failure(run_id, content)
             return committed["result"]
         if committed.get("status") == "RESULT_CONFLICT":
             return _failure("COMPLETION_CONFLICT", run_id=run_id)

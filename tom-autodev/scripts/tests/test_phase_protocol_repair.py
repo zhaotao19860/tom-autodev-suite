@@ -1331,6 +1331,32 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
         self.assertEqual(amended, ("SPEC", None, "OK"))
         self.assertEqual(silent, ("SPEC", None, "OK"))
 
+    def test_recurring_cross_run_failure_escalates_to_architecture_review(self):
+        # MEDIUM-004: the same root cause seen unresolved across >= 2 runs is escalated
+        # deterministically, even though the diagnosis still proposes REPAIR.
+        diagnosis = self._diagnosis()
+        signature = diagnosis["failure_signature"]
+        self.protocol.state.record_failure_case(signature, "CODE", "run-a", resolved=False)
+        self.protocol.state.record_failure_case(signature, "CODE", "run-b", resolved=False)
+        action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-c"}
+
+        target = self.protocol._completion_target(action, {"content": diagnosis})
+
+        self.assertEqual(target, ("ARCHITECTURE_REVIEW", None, "KNOWN_CROSS_RUN_FAILURE"))
+
+    def test_first_time_cross_run_signature_still_repairs(self):
+        # Seen in only one run so far: the per-run repair policy still governs, so REPAIR
+        # re-enters at SPEC (the conservative default) rather than escalating.
+        diagnosis = self._diagnosis()
+        self.protocol.state.record_failure_case(
+            diagnosis["failure_signature"], "CODE", "run-a", resolved=False
+        )
+        action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-a"}
+
+        target = self.protocol._completion_target(action, {"content": diagnosis})
+
+        self.assertEqual(target, ("SPEC", None, "OK"))
+
     def test_policy_allows_the_plan_reentry_edge(self):
         allowed = self.protocol.transitions.validate("DIAGNOSE", "PLAN")
         still_allowed = self.protocol.transitions.validate("DIAGNOSE", "SPEC")

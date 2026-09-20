@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from copy import deepcopy
 import re
@@ -36,6 +37,8 @@ import workflow_spec
 
 
 _PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+
+_log = logging.getLogger(__name__)
 
 # Exceptions that prove the call never reached the network: a method that is not
 # there, a signature that does not match, a module that will not import. They are
@@ -1095,7 +1098,13 @@ class Orchestrator:
                 signature, evidence.get("classification"), run_id, resolved=False
             )
         except Exception:
-            pass
+            # Best-effort: the FailureCase library must never fail the failure routing. But a
+            # silently dropped write means the cross-run recurrence count is wrong, so it is
+            # logged rather than swallowed (MEDIUM-004).
+            _log.warning(
+                "failure-case write failed for run %s signature %s (best-effort)",
+                run_id, signature, exc_info=True,
+            )
 
     def stop(self, run_id: str) -> dict[str, Any]:
         current = self.status(run_id)

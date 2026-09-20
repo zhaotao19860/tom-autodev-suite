@@ -435,7 +435,7 @@ class IpipeRuntime:
         context = stage_binding["context"]
         build_id = stage_binding["build_id"]
         failure_signature = stage.get("failure_signature") or _failure_signature(
-            build_id, [stage], []
+            context.get("pipeline_id"), context.get("module"), [stage], []
         )
         return {
             "ok": True,
@@ -953,7 +953,9 @@ class IpipeRuntime:
             except Exception as error:
                 return _failure(_transport_reason(error, "STAGE_DETAIL_QUERY_FAILED"))
         excerpt = _log_text([jobs, details], self.log_limit)
-        signature = _failure_signature(build_id, failed_stages, jobs)
+        signature = _failure_signature(
+            binding.get("pipeline_id"), binding.get("module"), failed_stages, jobs
+        )
         for stage in failed_stages:
             stage["failure_signature"] = signature
             self._stage_bindings[stage["stage_build_id"]]["stage"] = stage
@@ -1286,11 +1288,42 @@ def _same_stage(requested: dict[str, Any], candidate: dict[str, Any]) -> bool:
     return bool(requested.get("name")) and requested.get("name") == candidate.get("name")
 
 
-def _failure_signature(build_id: str, stages: list[dict[str, Any]], jobs: list[dict[str, Any]]) -> str:
+def _failure_signature(
+    pipeline_id: Any, module: Any, stages: list[dict[str, Any]], jobs: list[dict[str, Any]]
+) -> str:
+    """A STABLE root-cause signature, independent of this occurrence's build identity.
+
+    The same structural failure recurring in a later run is the same root cause, so the
+    signature is hashed over what identifies the failure across runs — the pipeline and
+    module, and each failed stage/job by its configuration identity and status — never over
+    build_id / stage_build_id / job_build_id, which are fresh every build and would split
+    one root cause into a new FailureCase every run. A job is included only when it carries
+    a real name (its normalized name falls back to the occurrence job id when absent, which
+    would reintroduce per-run noise), and stages/jobs are sorted so ordering never shifts
+    the hash. (MEDIUM-004: separate the stable root cause from occurrence/build identity.)
+    """
     value = {
-        "build_id": build_id,
-        "stages": [{"id": item.get("stage_build_id"), "status": item.get("status")} for item in stages],
-        "jobs": [{"id": item.get("job_build_id"), "status": item.get("status")} for item in jobs if isinstance(item, dict)],
+        "pipeline_id": str(pipeline_id or ""),
+        "module": str(module or ""),
+        "stages": sorted(
+            {
+                (
+                    str(item.get("stage_conf_id") or ""),
+                    str(item.get("name") or ""),
+                    str(item.get("status") or ""),
+                )
+                for item in stages if isinstance(item, dict)
+            }
+        ),
+        "jobs": sorted(
+            {
+                (str(item.get("name") or ""), str(item.get("status") or ""))
+                for item in jobs
+                if isinstance(item, dict)
+                and item.get("name")
+                and item.get("name") != item.get("job_build_id")
+            }
+        ),
     }
     return _canonical_hash(value)
 

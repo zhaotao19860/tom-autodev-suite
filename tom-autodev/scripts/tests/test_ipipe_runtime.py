@@ -1218,5 +1218,48 @@ class EvidenceOutcomeTests(unittest.TestCase):
         self.assertEqual(validate_named_schema({**outcome, **self._BINDING}, "ipipe-evidence"), [])
 
 
+class FailureSignatureTests(unittest.TestCase):
+    """MEDIUM-004: the failure signature identifies a root cause across runs, not a build."""
+
+    def test_signature_is_stable_across_builds(self):
+        from clients.ipipe_runtime import _failure_signature
+
+        stages_a = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL", "stage_build_id": "sb-A"}]
+        stages_b = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL", "stage_build_id": "sb-B"}]
+        jobs_a = [{"name": "compile", "status": "FAIL", "job_build_id": "jb-A"}]
+        jobs_b = [{"name": "compile", "status": "FAIL", "job_build_id": "jb-B"}]
+        # Same pipeline/module/stage/job structure in a fresh build is the same root cause.
+        self.assertEqual(
+            _failure_signature("pipe-1", "bgw", stages_a, jobs_a),
+            _failure_signature("pipe-1", "bgw", stages_b, jobs_b),
+        )
+
+    def test_a_different_failed_stage_is_a_different_root_cause(self):
+        from clients.ipipe_runtime import _failure_signature
+
+        base = _failure_signature(
+            "pipe-1", "bgw", [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL"}], []
+        )
+        other = _failure_signature(
+            "pipe-1", "bgw", [{"stage_conf_id": "conf-2", "name": "lint", "status": "FAIL"}], []
+        )
+        self.assertNotEqual(base, other)
+
+    def test_a_nameless_job_contributes_no_occurrence_noise(self):
+        from clients.ipipe_runtime import _failure_signature
+
+        stages = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL"}]
+        # A normalized job with no name falls back to its build id — it must not enter the
+        # signature, or the same failure would look new every build.
+        nameless_a = _failure_signature(
+            "pipe-1", "bgw", stages, [{"name": "jb-A", "job_build_id": "jb-A", "status": "FAIL"}]
+        )
+        nameless_b = _failure_signature(
+            "pipe-1", "bgw", stages, [{"name": "jb-B", "job_build_id": "jb-B", "status": "FAIL"}]
+        )
+        self.assertEqual(nameless_a, nameless_b)
+        self.assertEqual(nameless_a, _failure_signature("pipe-1", "bgw", stages, []))
+
+
 if __name__ == "__main__":
     unittest.main()
