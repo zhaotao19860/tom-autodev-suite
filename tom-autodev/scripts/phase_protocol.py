@@ -1161,6 +1161,18 @@ class PhaseProtocol:
                 run_id, signature, exc_info=True,
             )
 
+    def _resolve_run_failures(self, run_id: str) -> None:
+        """On a verified success (RELEASE_SUCCESS), clear the cross-run escalation streak of
+        every FailureCase this run hit — the pipeline proved those root causes repaired, so a
+        later, unrelated recurrence starts fresh instead of escalating immediately (MEDIUM-004
+        part 2). Best-effort: resolving the library must never fail the release itself."""
+        try:
+            self.state.resolve_failure_cases_for_run(run_id)
+        except Exception:
+            _log.warning(
+                "failure-case resolve failed for run %s (best-effort)", run_id, exc_info=True
+            )
+
     def _ready_task_excluding(self, run_id: str, completing_task: str | None) -> str | None:
         """Next open DAG node, treating `completing_task` as finished.
 
@@ -1530,6 +1542,8 @@ class PhaseProtocol:
             result_key, result,
         )
         if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            if committed.get("status") == "COMMITTED":
+                self._resolve_run_failures(run_id)
             return committed["result"]
         if committed.get("status") == "RESULT_CONFLICT":
             return _failure("COMPLETION_CONFLICT", run_id=run_id)

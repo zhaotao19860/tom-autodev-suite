@@ -1357,6 +1357,21 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
 
         self.assertEqual(target, ("SPEC", None, "OK"))
 
+    def test_resolved_cross_run_failure_no_longer_escalates(self):
+        # MEDIUM-004 part 2: once the root cause was repaired and proven (resolved), a later
+        # recurrence restarts the streak, so it is repaired again rather than escalated.
+        diagnosis = self._diagnosis()
+        signature = diagnosis["failure_signature"]
+        self.protocol.state.record_failure_case(signature, "CODE", "run-a", resolved=False)
+        self.protocol.state.record_failure_case(signature, "CODE", "run-b", resolved=False)
+        self.protocol.state.resolve_failure_cases_for_run("run-b")
+        self.protocol.state.record_failure_case(signature, "CODE", "run-c", resolved=False)
+        action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-c"}
+
+        target = self.protocol._completion_target(action, {"content": diagnosis})
+
+        self.assertEqual(target, ("SPEC", None, "OK"))
+
     def test_policy_allows_the_plan_reentry_edge(self):
         allowed = self.protocol.transitions.validate("DIAGNOSE", "PLAN")
         still_allowed = self.protocol.transitions.validate("DIAGNOSE", "SPEC")

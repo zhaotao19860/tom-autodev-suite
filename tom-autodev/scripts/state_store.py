@@ -945,6 +945,11 @@ class StateStore:
         whether its latest occurrence was resolved. This is what turns repair_policy's
         single-run "same signature, no progress" check into a cross-run one — a signature
         that keeps coming back across runs is escalated instead of blindly re-repaired.
+
+        The distinct-run set is the CURRENT unresolved streak, not lifetime history: the
+        first fresh failure occurrence after the case was marked resolved starts the streak
+        over, so a root cause that was genuinely fixed does not keep escalating on its next,
+        unrelated recurrence (MEDIUM-004 part 2). `occurrences` stays a lifetime count.
         """
         if not isinstance(signature, str) or not signature:
             raise ValueError("FAILURE_SIGNATURE_INVALID")
@@ -966,9 +971,14 @@ class StateStore:
                      run_id, now, run_id, now),
                 )
             else:
-                run_ids = json.loads(existing["run_ids_json"])
-                if run_id not in run_ids:
-                    run_ids.append(run_id)
+                if not resolved and bool(existing["resolved"]):
+                    # First failure after a resolution: a new unresolved streak, not more
+                    # evidence that the old (fixed) cause is still recurring.
+                    run_ids = [run_id]
+                else:
+                    run_ids = json.loads(existing["run_ids_json"])
+                    if run_id not in run_ids:
+                        run_ids.append(run_id)
                 connection.execute(
                     """
                     UPDATE failure_cases SET classification = ?, run_ids_json = ?,
@@ -982,6 +992,30 @@ class StateStore:
                 "SELECT * FROM failure_cases WHERE signature = ?", (signature,)
             ).fetchone()
         return _failure_case_row(row)
+
+    def resolve_failure_cases_for_run(self, run_id: str) -> list[str]:
+        """Mark every unresolved FailureCase this run participated in as resolved.
+
+        Called when a run reaches a verified success (RELEASE_SUCCESS): whatever root causes
+        it hit were repaired and proven by the pipeline, so their cross-run escalation streak
+        is cleared. Returns the signatures resolved. Idempotent — an already-resolved case is
+        skipped."""
+        if not isinstance(run_id, str) or not run_id:
+            return []
+        resolved: list[str] = []
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT signature, run_ids_json FROM failure_cases WHERE resolved = 0"
+            ).fetchall()
+            for row in rows:
+                if run_id in json.loads(row["run_ids_json"]):
+                    connection.execute(
+                        "UPDATE failure_cases SET resolved = 1 WHERE signature = ?",
+                        (row["signature"],),
+                    )
+                    resolved.append(row["signature"])
+        return resolved
 
     def failure_case(self, signature: str) -> dict[str, Any] | None:
         with self._connect() as connection:

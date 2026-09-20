@@ -569,5 +569,42 @@ class GenericPutSchemaTests(unittest.TestCase):
                     self.assertEqual(store.get(artifact["artifact_id"])["content"], content)
 
 
+class FailureCaseLibraryTests(unittest.TestCase):
+    """MEDIUM-004 part 2: resolution clears a root cause's cross-run escalation streak."""
+
+    def _store(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return StateStore(Path(directory.name) / "state.sqlite")
+
+    def test_distinct_runs_accumulate_across_unresolved_runs(self):
+        store = self._store()
+        store.record_failure_case("SIG", "CODE", "run-a", resolved=False)
+        case = store.record_failure_case("SIG", "CODE", "run-b", resolved=False)
+        self.assertEqual((case["distinct_runs"], case["occurrences"], case["resolved"]), (2, 2, False))
+
+    def test_resolution_then_new_failure_starts_a_fresh_streak(self):
+        store = self._store()
+        store.record_failure_case("SIG", "CODE", "run-a", resolved=False)
+        store.record_failure_case("SIG", "CODE", "run-b", resolved=False)
+        # A verified success on run-b resolves the case it participated in.
+        self.assertEqual(store.resolve_failure_cases_for_run("run-b"), ["SIG"])
+        self.assertTrue(store.failure_case("SIG")["resolved"])
+        # The next fresh failure restarts the streak at one distinct run, not three.
+        reopened = store.record_failure_case("SIG", "CODE", "run-c", resolved=False)
+        self.assertEqual((reopened["distinct_runs"], reopened["resolved"]), (1, False))
+        self.assertEqual(reopened["occurrences"], 3)
+
+    def test_resolve_is_scoped_to_participating_runs_and_idempotent(self):
+        store = self._store()
+        store.record_failure_case("SIG", "CODE", "run-a", resolved=False)
+        # A run that never hit the case resolves nothing.
+        self.assertEqual(store.resolve_failure_cases_for_run("run-z"), [])
+        self.assertFalse(store.failure_case("SIG")["resolved"])
+        self.assertEqual(store.resolve_failure_cases_for_run("run-a"), ["SIG"])
+        # Already resolved: a second pass is a no-op.
+        self.assertEqual(store.resolve_failure_cases_for_run("run-a"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
