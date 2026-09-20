@@ -130,7 +130,7 @@ worker 只在两类 job 上 park：**ApprovalJob**（等人工 APPROVE）与 **P
 有副作用的控制器不凭“动作描述符”盲批，而是**先算出将要执行的精确绑定 hash，请人批这个 hash，批到了才动手**——执行的东西与批的东西不会漂移。
 
 - SUBMIT：先派生已评审的提交描述符、算出其 `input_hash`，请 G7 批**这个**，批到才提交 iCode。
-- IPIPE：先用 `trigger_input_hash` 算出触发绑定 hash，请 G7 批，批到才触发→monitor。
+- IPIPE：先用 `trigger_input_hash` 算出触发绑定 hash，请 G7 批，批到才触发→monitor。profile 声明多个 `required_for_release` 模块时，worker **逐模块**驱动（每模块用自己的 submission 绑定、各自 G7 触发、依次 trigger→monitor→ingest），全部必需模块通过后才转 RELEASE；任一模块失败即转 DIAGNOSE，重启从未完成模块继续。
 - WORKSPACE：先切好（可逆的）worktree、算出绑定 hash，请 G4 批，批到才 WORKSPACE→PLAN。worktree 切在该任务的**目标业务仓**上——DAG 节点必填 `business_module`，多仓需求按它选仓（不再恒取第一个业务仓），绑定校验强制 receipt 仓与之一致。
 - RELEASE：G9 在进入 RELEASE 之后批该发布动作的 `input_hash`，批到后 worker 只读校验平台已发布锁定 build（`verify_release`）、记录发布证据、落终态；未发布则 park `RELEASE_WAITING`，不强推。
 
@@ -422,7 +422,7 @@ tom-autodev/
 cd scripts/tests && python3 -m unittest discover -s . -p "test_*.py"
 ```
 
-当前 **803** 项全绿（含一条“单 standard 需求由 WorkerDriver 全程驱到 RELEASE_SUCCESS”的验收用例：断言 ProducerJob 次数=模型相位数、四个副作用控制器全在 worker 循环内自动执行、每道闸门一次人工 APPROVE、事件数远低于历史真实 run 的 102）。用纯标准库 `unittest`（不用 pytest）；平台交互全部对 Fake adapter 验证，生产真实 transport 经 `orchestrator._cli_ipipe_runtime` 注入。
+当前 **806** 项全绿（含一条“单 standard 需求由 WorkerDriver 全程驱到 RELEASE_SUCCESS”的验收用例：断言 ProducerJob 次数=模型相位数、四个副作用控制器全在 worker 循环内自动执行、每道闸门一次人工 APPROVE、事件数远低于历史真实 run 的 102）。用纯标准库 `unittest`（不用 pytest）；平台交互全部对 Fake adapter 验证，生产真实 transport 经 `orchestrator._cli_ipipe_runtime` 注入。
 
 ## 参考文档
 

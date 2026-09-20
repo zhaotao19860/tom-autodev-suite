@@ -2066,5 +2066,79 @@ class BusinessRepoSelectionTests(unittest.TestCase):
         self.assertIsNone(worker_driver._select_business_repo(self._Orch("bgw"), "run", "T-1", []))
 
 
+class IpipeModuleDriveTests(unittest.TestCase):
+    """HIGH-003 part 2: the worker drives required modules one pipeline at a time."""
+
+    class _Artifacts:
+        def __init__(self, passed_modules):
+            self._passed = passed_modules
+
+        def phase_artifacts(self, run_id, phase):
+            return [
+                {"valid": True, "envelope": {"content": {"status": "SUCCESS", "module": module}}}
+                for module in self._passed
+            ]
+
+    class _State:
+        def __init__(self, events):
+            self._events = events
+
+        def events(self, run_id):
+            return self._events
+
+    class _Orch:
+        def __init__(self, passed_modules=(), events=()):
+            self.artifacts = IpipeModuleDriveTests._Artifacts(list(passed_modules))
+            self.state = IpipeModuleDriveTests._State(list(events))
+
+    _MULTI = {"pipeline_profile": {"pipelines": [
+        {"module": "x86bgw", "required_for_release": True},
+        {"module": "bgwagent", "required_for_release": True},
+    ]}}
+
+    def test_single_module_profile_uses_the_pinned_binding_module(self):
+        action = {"controller_binding": {"module": "bgw"}}
+        module = worker_driver._next_ipipe_module(
+            self._Orch(), "run", action, {"pipeline_profile": {}}
+        )
+        self.assertEqual(module, "bgw")
+
+    def test_required_modules_are_driven_in_order_and_skip_passed_ones(self):
+        action = {"controller_binding": {"module": "x86bgw"}}
+        self.assertEqual(
+            worker_driver._next_ipipe_module(self._Orch(), "run", action, self._MULTI), "bgwagent"
+        )
+        self.assertEqual(
+            worker_driver._next_ipipe_module(
+                self._Orch(passed_modules=["bgwagent"]), "run", action, self._MULTI
+            ),
+            "x86bgw",
+        )
+        self.assertIsNone(
+            worker_driver._next_ipipe_module(
+                self._Orch(passed_modules=["x86bgw", "bgwagent"]), "run", action, self._MULTI
+            )
+        )
+
+    def test_module_binding_prefers_primary_then_the_recorded_submission(self):
+        primary = {"module": "x86bgw", "pipeline_id": "pipe-x86"}
+        events = [{"payload": {"submissions": [
+            {"controller_binding": {"module": "bgwagent", "pipeline_id": "pipe-agent"}},
+        ]}}]
+        action = {"controller_binding": primary}
+        self.assertEqual(
+            worker_driver._ipipe_module_binding(self._Orch(events=events), "run", action, "x86bgw"),
+            primary,
+        )
+        agent = worker_driver._ipipe_module_binding(
+            self._Orch(events=events), "run", action, "bgwagent"
+        )
+        self.assertEqual(agent["pipeline_id"], "pipe-agent")
+        # A required module with no submission recorded has no binding to trigger from.
+        self.assertIsNone(
+            worker_driver._ipipe_module_binding(self._Orch(events=events), "run", action, "third")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

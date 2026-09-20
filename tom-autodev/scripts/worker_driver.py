@@ -511,12 +511,25 @@ def _execute_ipipe(
     monitor result — a manual gate, a timeout, a transient transport fault — parks for a
     human rather than fabricating evidence.
     """
-    binding = action.get("controller_binding") or {}
-    module = binding.get("module")
     pinned = orchestrator._runtime_profile(run_id)
     if not pinned.get("ok"):
         return pinned
     profile = pinned["profile"]
+    # A run may require several modules' pipelines to pass before RELEASE (HIGH-003 part 2).
+    # Drive them ONE module per step: pick the next required module without passing evidence,
+    # bind it to its own submission, and trigger/monitor/ingest it. A partial success keeps
+    # the run in IPIPE and the driver loop re-enters here for the next module; the last
+    # module's ingestion performs the transition. Recomputed from archived evidence each
+    # call, so a restart resumes from the first module still outstanding.
+    module = _next_ipipe_module(orchestrator, run_id, action, profile)
+    if module is None:
+        return {"ok": False, "reason_code": "IPIPE_NO_OUTSTANDING_MODULE", "run_id": run_id}
+    binding = _ipipe_module_binding(orchestrator, run_id, action, module)
+    if not binding:
+        # A required module the run never submitted has no binding to build from — refuse
+        # rather than trigger an unapproved or wrong-revision pipeline.
+        return {"ok": False, "reason_code": "IPIPE_MODULE_SUBMISSION_MISSING",
+                "run_id": run_id, "module": module}
     from orchestrator import _ipipe_revision_set
 
     derived = _ipipe_revision_set(orchestrator, run_id, profile)
@@ -527,7 +540,7 @@ def _execute_ipipe(
     if isinstance(runtime, dict):  # the factory returns an error dict, never a falsy runtime
         return runtime
     # The trigger's G7 hash, derived without touching the pipeline, so the approval can be
-    # requested for the exact binding that will be executed.
+    # requested for the exact binding that will be executed. Each module has its own hash.
     hashed = runtime.trigger_input_hash(profile, revision_set, module)
     if not hashed.get("ok"):
         return hashed
@@ -535,7 +548,7 @@ def _execute_ipipe(
     approval_id = _settled_approval_id(orchestrator, run_id, "G7", trigger_hash)
     if approval_id is None:
         return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G7",
-                "approval_input_hash": trigger_hash, "controller": "ipipe"}
+                "approval_input_hash": trigger_hash, "controller": "ipipe", "module": module}
     triggered = runtime.trigger(
         profile, revision_set, {"approval_id": approval_id, "input_hash": trigger_hash}, module
     )
@@ -550,15 +563,80 @@ def _execute_ipipe(
         # MANUAL_WAIT / TIMEOUT / TRANSIENT / INVALID: not the worker's call to make.
         return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "IPIPE_MONITOR",
                 "controller": "ipipe", "build_id": build_id, "monitor_status": status,
-                "monitor": monitored}
+                "module": module, "monitor": monitored}
     content = _build_ipipe_evidence(binding, monitored)
     ingested = orchestrator.phase_protocol(knowledge_sync).ingest_ipipe_evidence(run_id, content)
     if not ingested.get("ok"):
+        if ingested.get("reason_code") == "PIPELINE_EVIDENCE_INCOMPLETE":
+            # This module's evidence is archived and valid; other required modules remain, so
+            # the run stays in IPIPE. Report success for this module so the driver loop
+            # advances to the next one (its own G7 is requested when it is reached).
+            return {"ok": True, "reason_code": "MODULE_INGESTED", "run_id": run_id,
+                    "module": module, "build_id": build_id, "state": "IPIPE",
+                    "outstanding_modules": ingested.get("outstanding_modules"), "result": ingested}
         return {"ok": False, "reason_code": "IPIPE_EVIDENCE_INGEST_FAILED", "detail": ingested,
                 "run_id": run_id, "build_id": build_id}
     landed = orchestrator.status(run_id).get("state")
     return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
-            "build_id": build_id, "monitor_status": status, "result": ingested}
+            "build_id": build_id, "monitor_status": status, "module": module, "result": ingested}
+
+
+def _next_ipipe_module(
+    orchestrator: Any, run_id: str, action: dict[str, Any], profile: dict[str, Any]
+) -> str | None:
+    """The next module whose pipeline the worker should drive (HIGH-003 part 2).
+
+    A profile that registers no `required_for_release` pipelines is the single-module case:
+    use the module the IPIPE binding was pinned to. Otherwise return the first required
+    module with no archived passing evidence yet — the outstanding set shrinks as each
+    module's evidence lands, so this walks every required module and returns None once all
+    have passed (the last ingestion already performed the transition)."""
+    from phase_protocol import _required_modules
+
+    required = _required_modules(profile.get("pipeline_profile"))
+    if not required:
+        return (action.get("controller_binding") or {}).get("module")
+    passed = _ipipe_passed_modules(orchestrator, run_id)
+    for module in required:
+        if module not in passed:
+            return module
+    return None
+
+
+def _ipipe_passed_modules(orchestrator: Any, run_id: str) -> set[str]:
+    """Modules that already have archived, valid SUCCESS pipeline evidence for this run."""
+    passed: set[str] = set()
+    for artifact in orchestrator.artifacts.phase_artifacts(run_id, "IPIPE"):
+        if not artifact.get("valid"):
+            continue
+        content = (artifact.get("envelope") or {}).get("content") or {}
+        if content.get("status") == "SUCCESS" and isinstance(content.get("module"), str):
+            passed.add(content["module"])
+    return passed
+
+
+def _ipipe_module_binding(
+    orchestrator: Any, run_id: str, action: dict[str, Any], module: str
+) -> dict[str, Any] | None:
+    """The controller binding to build one module's pipeline evidence from.
+
+    The primary module's binding is on the IPIPE action; every other required module is
+    bound to the submission recorded for it, whose `controller_binding` carries the
+    pipeline_id / release_rule / revisions / environment fingerprint that iPipe evidence and
+    the G7 trigger hash are derived from (HIGH-003 part 2)."""
+    primary = action.get("controller_binding") or {}
+    if primary.get("module") == module:
+        return primary
+    for event in reversed(orchestrator.state.events(run_id)):
+        submissions = (event.get("payload") or {}).get("submissions")
+        if not submissions:
+            continue
+        for submission in submissions:
+            binding = (submission.get("controller_binding") or {}) if isinstance(submission, dict) else {}
+            if binding.get("module") == module:
+                return binding
+        break
+    return None
 
 
 def _build_ipipe_evidence(binding: dict[str, Any], monitored: dict[str, Any]) -> dict[str, Any]:
