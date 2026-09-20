@@ -122,12 +122,19 @@ class Orchestrator:
             "requirement_snapshot": requirement_snapshot,
             "collaboration_binding": prepared["binding"],
         }
+        # The change class is confirmed at G0, so it and the workflow_spec version the run
+        # runs under are bound INTO the G0 input hash (intake_hash_version v2): changing the
+        # class, or re-editing class routing / knowledge scope (both fold into
+        # workflow_spec_hash), changes the hash and voids any earlier APPROVE. classify_change
+        # suggests from the card; an explicit override (owner's call, confirmed at G0) wins.
+        # workflow_modes pins this class's phase-mode map so a later edit to CHANGE_CLASSES
+        # cannot re-route this run — next/complete read it back via workflow_spec.
+        change_class = workflow_spec.classify_change(requirement_snapshot, change_class)
+        payload["change_class"] = change_class
+        payload["workflow_spec_hash"] = workflow_spec.canonical_hash()
+        payload["workflow_modes"] = workflow_spec.run_workflow_modes(change_class)
+        payload["intake_hash_version"] = "v2"
         payload["g0_input_hash"] = intake_input_hash(payload)
-        # The change class is metadata, added AFTER the G0 hash so standard runs hash
-        # exactly as before. classify_change suggests from the card; an explicit override
-        # (owner's call, confirmed at G0) wins. next/complete read it back via
-        # workflow_spec.change_class_of.
-        payload["change_class"] = workflow_spec.classify_change(requirement_snapshot, change_class)
         event = self.state.transition(
             run_id,
             "INTAKE",

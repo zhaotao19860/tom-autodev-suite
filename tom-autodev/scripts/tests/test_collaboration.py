@@ -210,5 +210,52 @@ class CollaborationSessionTests(unittest.TestCase):
         self.assertEqual(len(client.send_calls), 1)
 
 
+class IntakeInputHashTests(unittest.TestCase):
+    """MEDIUM-001: the G0 input hash binds the change class and workflow_spec version."""
+
+    @staticmethod
+    def _v2_payload(**overrides):
+        payload = {
+            "requirement_id": "BGW-1",
+            "project": "bgw",
+            "profile_hash": "p",
+            "requirement_snapshot": {"content_hash": "c"},
+            "collaboration_binding": {"run_id": "run-1"},
+            "change_class": "standard",
+            "workflow_spec_hash": "spec-hash-1",
+            "intake_hash_version": "v2",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_change_class_is_part_of_the_v2_hash(self):
+        from collaboration import intake_input_hash
+
+        base = intake_input_hash(self._v2_payload())
+        other = intake_input_hash(self._v2_payload(change_class="full"))
+        self.assertNotEqual(base, other)
+
+    def test_workflow_spec_hash_is_part_of_the_v2_hash(self):
+        from collaboration import intake_input_hash
+
+        base = intake_input_hash(self._v2_payload())
+        edited = intake_input_hash(self._v2_payload(workflow_spec_hash="spec-hash-2"))
+        self.assertNotEqual(base, edited)
+
+    def test_legacy_payload_ignores_change_class_in_the_hash(self):
+        # A legacy (v1) INTAKE payload carries no intake_hash_version, so its hash is over
+        # the original five keys — adding/altering change_class does not change it, which is
+        # what keeps already-approved legacy runs valid.
+        from collaboration import intake_input_hash
+
+        legacy = {
+            "requirement_id": "BGW-1", "project": "bgw", "profile_hash": "p",
+            "requirement_snapshot": {"content_hash": "c"},
+            "collaboration_binding": {"run_id": "run-1"},
+        }
+        base = intake_input_hash(legacy)
+        self.assertEqual(intake_input_hash({**legacy, "change_class": "full"}), base)
+
+
 if __name__ == "__main__":
     unittest.main()

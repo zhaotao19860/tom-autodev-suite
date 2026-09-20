@@ -250,6 +250,35 @@ class FakeE2ETests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_intake_pins_change_class_and_workflow_spec_version(self):
+        # MEDIUM-001: start() freezes the run's control policy into the INTAKE event and
+        # binds it into the G0 input hash.
+        import workflow_spec
+        from collaboration import intake_input_hash
+
+        started = self.orchestrator.start(
+            "BGW-777", "bgw", requirement_snapshot=snapshot("BGW-777")
+        )
+        payload = self.orchestrator.state.events(started["run_id"])[0]["payload"]
+        change_class = payload["change_class"]
+        self.assertEqual(payload["intake_hash_version"], "v2")
+        self.assertIn(change_class, workflow_spec.CHANGE_CLASSES)
+        self.assertEqual(payload["workflow_spec_hash"], workflow_spec.canonical_hash())
+        self.assertEqual(
+            payload["workflow_modes"], workflow_spec.run_workflow_modes(change_class)
+        )
+        # The stored G0 hash is exactly the hash over the pinned payload — an approver who
+        # signs it signs the class and policy version too.
+        self.assertEqual(payload["g0_input_hash"], intake_input_hash(payload))
+
+        # A run started under a different class gets a different pin and G0 hash.
+        express = self.orchestrator.start(
+            "BGW-778", "bgw", requirement_snapshot=snapshot("BGW-778"), change_class="express"
+        )
+        express_payload = self.orchestrator.state.events(express["run_id"])[0]["payload"]
+        self.assertEqual(express_payload["change_class"], "express")
+        self.assertNotEqual(express_payload["workflow_modes"], payload["workflow_modes"])
+
     def test_bgw_and_xflow_enter_one_comate_controller_with_exact_project_binding(self):
         for project, card, parent, skill in (
             ("bgw", "BGW-101", "I15ClP2KW4ZGAK", None),

@@ -19,6 +19,7 @@ from clients.infoflow_group_client import InfoflowGroupClient
 from gateway import PendingApprovalGateway
 from orchestrator import Orchestrator
 from state_store import StateStore
+import workflow_spec
 
 
 class GroupFake:
@@ -164,11 +165,20 @@ class CollaborationSafetyTests(unittest.TestCase):
             f"infoflow.group.create:{started['run_id']}",
         )
         self.assertNotIn("group_id", binding)
+        # MEDIUM-001: the run's control policy is pinned into INTAKE and the G0 hash now
+        # binds it (intake_hash_version v2 = the five prerequisites + class + spec version).
+        self.assertEqual(payload["intake_hash_version"], "v2")
+        self.assertEqual(payload["change_class"], "standard")
+        self.assertEqual(payload["workflow_spec_hash"], workflow_spec.canonical_hash())
+        self.assertEqual(
+            payload["workflow_modes"], workflow_spec.run_workflow_modes("standard")
+        )
         prerequisites = {
             key: payload[key]
             for key in (
                 "requirement_id", "project", "profile_hash", "requirement_snapshot",
-                "collaboration_binding",
+                "collaboration_binding", "change_class", "workflow_spec_hash",
+                "intake_hash_version",
             )
         }
         self.assertEqual(payload["g0_input_hash"], hashlib.sha256(

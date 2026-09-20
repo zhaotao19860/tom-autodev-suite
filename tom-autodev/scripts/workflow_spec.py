@@ -309,6 +309,45 @@ def change_class_of(events: list[dict[str, Any]] | None) -> str:
     return change_class if change_class in CHANGE_CLASSES else DEFAULT_CHANGE_CLASS
 
 
+def run_workflow_modes(change_class: str) -> dict[str, str]:
+    """The phase-mode map to PIN into a run at start, resolved once from the live policy.
+
+    A run reads its modes back from this snapshot (`phase_mode_for_run`), so editing
+    CHANGE_CLASSES afterwards cannot silently re-route a run that was already authorized
+    under the old policy. Only the started class's modes are pinned — that is all the
+    run's gate/mode routing ever consults."""
+    spec = CHANGE_CLASSES.get(change_class) or CHANGE_CLASSES[DEFAULT_CHANGE_CLASS]
+    return dict(spec.phase_modes)
+
+
+def _pinned_modes(events: list[dict[str, Any]] | None) -> dict[str, str] | None:
+    if not events:
+        return None
+    modes = (events[0].get("payload") or {}).get("workflow_modes")
+    return modes if isinstance(modes, dict) else None
+
+
+def phase_mode_for_run(events: list[dict[str, Any]] | None, state: str) -> str:
+    """Production mode of a state for a specific run.
+
+    Prefers the run's pinned `workflow_modes` snapshot (frozen at G0) so a mid-run edit
+    to CHANGE_CLASSES does not change an in-flight run's routing. A legacy run with no
+    pin falls back to resolving from the live policy by its recorded class."""
+    pinned = _pinned_modes(events)
+    if pinned is not None:
+        return pinned.get(state, "full")
+    return phase_mode(change_class_of(events), state)
+
+
+def pinned_spec_hash(events: list[dict[str, Any]] | None) -> str | None:
+    """The workflow_spec version hash a run was authorized under, or None for a legacy
+    run that predates version pinning."""
+    if not events:
+        return None
+    value = (events[0].get("payload") or {}).get("workflow_spec_hash")
+    return value if isinstance(value, str) and value else None
+
+
 # Per-phase knowledge / collaboration write policy (slimming Stage B). Each archived phase
 # artifact declares whether it publishes a human-readable KU doc and/or comments the iCafe
 # card. The artifact itself is ALWAYS stored in the artifact_store — correctness and
@@ -434,6 +473,15 @@ def canonical_hash() -> str:
         },
         "gate_labels": {gate: list(label) for gate, label in sorted(GATE_LABELS.items())},
         "failure_targets": dict(sorted(FAILURE_TARGETS.items())),
+        # Change-class routing and per-phase knowledge scope are part of the control policy:
+        # editing a class's phase_modes, the default class, or a phase's KU/iCafe scope must
+        # change this hash so a run pinned to the old hash is provably not the new policy.
+        "change_classes": {
+            name: {"name": spec.name, "phase_modes": dict(sorted(spec.phase_modes.items()))}
+            for name, spec in sorted(CHANGE_CLASSES.items())
+        },
+        "default_change_class": DEFAULT_CHANGE_CLASS,
+        "knowledge_scope": dict(sorted(_KNOWLEDGE_SCOPE.items())),
     }
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

@@ -199,5 +199,77 @@ class ChangeClassTests(unittest.TestCase):
                 self.assertEqual(ws.STATES[state].registry, "phase", (change_class, state))
 
 
+class RunPolicyPinTests(unittest.TestCase):
+    """MEDIUM-001: the control policy a run runs under is frozen at G0.
+
+    change_class and the workflow_spec version hash are bound into the G0 input hash, and
+    the class's phase-mode map is pinned so a later edit to CHANGE_CLASSES cannot re-route
+    an in-flight run.
+    """
+
+    @staticmethod
+    def _intake_events(**payload):
+        return [{"payload": payload}]
+
+    def test_canonical_hash_covers_change_class_policy(self):
+        baseline = ws.canonical_hash()
+        original = ws.CHANGE_CLASSES["standard"]
+        patched = ws.ChangeClass("standard", phase_modes={"SPEC": "full", "TASKS": "full"})
+        ws.CHANGE_CLASSES["standard"] = patched
+        try:
+            self.assertNotEqual(ws.canonical_hash(), baseline)
+        finally:
+            ws.CHANGE_CLASSES["standard"] = original
+        self.assertEqual(ws.canonical_hash(), baseline)
+
+    def test_canonical_hash_covers_knowledge_scope(self):
+        baseline = ws.canonical_hash()
+        original = ws._KNOWLEDGE_SCOPE["REVIEW"]
+        ws._KNOWLEDGE_SCOPE["REVIEW"] = "both"
+        try:
+            self.assertNotEqual(ws.canonical_hash(), baseline)
+        finally:
+            ws._KNOWLEDGE_SCOPE["REVIEW"] = original
+        self.assertEqual(ws.canonical_hash(), baseline)
+
+    def test_run_workflow_modes_snapshots_the_started_class(self):
+        self.assertEqual(
+            ws.run_workflow_modes("standard"), {"SPEC": "merged", "TASKS": "ungated"}
+        )
+        # A snapshot, not a live view: mutating it never touches the class definition.
+        snapshot = ws.run_workflow_modes("express")
+        snapshot["SPEC"] = "full"
+        self.assertEqual(ws.CHANGE_CLASSES["express"].phase_modes["SPEC"], "merged")
+
+    def test_phase_mode_for_run_reads_the_pin_not_the_live_policy(self):
+        events = self._intake_events(
+            change_class="standard", workflow_modes=ws.run_workflow_modes("standard")
+        )
+        self.assertEqual(ws.phase_mode_for_run(events, "SPEC"), "merged")
+        self.assertEqual(ws.phase_mode_for_run(events, "TASKS"), "ungated")
+        self.assertEqual(ws.phase_mode_for_run(events, "PLAN"), "full")
+        # Re-editing the live class does NOT change this pinned run's routing.
+        original = ws.CHANGE_CLASSES["standard"]
+        ws.CHANGE_CLASSES["standard"] = ws.ChangeClass("standard", phase_modes={})
+        try:
+            self.assertEqual(ws.phase_mode_for_run(events, "SPEC"), "merged")
+        finally:
+            ws.CHANGE_CLASSES["standard"] = original
+
+    def test_phase_mode_for_run_falls_back_for_legacy_runs(self):
+        # A legacy INTAKE payload carries a class but no pinned modes map.
+        legacy = self._intake_events(change_class="express")
+        self.assertEqual(ws.phase_mode_for_run(legacy, "GRILL"), "auto")
+        self.assertEqual(ws.phase_mode_for_run(legacy, "SPEC"), "merged")
+        # No events at all resolves to the default class.
+        self.assertEqual(ws.phase_mode_for_run(None, "SPEC"), "merged")
+
+    def test_pinned_spec_hash_reads_the_run_pin(self):
+        events = self._intake_events(workflow_spec_hash="deadbeef")
+        self.assertEqual(ws.pinned_spec_hash(events), "deadbeef")
+        self.assertIsNone(ws.pinned_spec_hash(self._intake_events()))
+        self.assertIsNone(ws.pinned_spec_hash(None))
+
+
 if __name__ == "__main__":
     unittest.main()

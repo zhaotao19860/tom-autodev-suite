@@ -229,7 +229,7 @@ class PhaseProtocol:
         # no model, no G1) when the card already carries acceptance — otherwise it falls
         # back to the full skill path. An "ungated" phase (express TASKS) still runs the
         # model but waives its human gate; the owner's G0 express declaration covers it.
-        mode = workflow_spec.phase_mode(workflow_spec.change_class_of(events), state)
+        mode = workflow_spec.phase_mode_for_run(events, state)
         child_skill = selected.get("skill")
         human_gate = selected.get("gate")
         auto_content: dict[str, Any] | None = None

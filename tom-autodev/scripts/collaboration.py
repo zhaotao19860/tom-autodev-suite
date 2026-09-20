@@ -26,6 +26,14 @@ _INTAKE_PREREQUISITE_KEYS = (
     "requirement_id", "project", "profile_hash", "requirement_snapshot",
     "collaboration_binding",
 )
+# v2 also binds the control policy the owner is authorizing at G0: the change class chosen
+# for the run and the workflow_spec version hash (which covers class routing + knowledge
+# scope). Changing either changes the G0 input hash, so an old APPROVE cannot be reused for
+# a run that now runs a different class or under a re-edited policy. Legacy INTAKE payloads
+# carry no `intake_hash_version`; they hash over the v1 keys exactly as before.
+_INTAKE_PREREQUISITE_KEYS_V2 = _INTAKE_PREREQUISITE_KEYS + (
+    "change_class", "workflow_spec_hash", "intake_hash_version",
+)
 _GROUP_TOPIC_MAX = 12
 # Failures the group client raises before it dispatches anything: the request was
 # rejected locally or the gateway was unreachable, so no group can exist yet.
@@ -128,7 +136,12 @@ def group_id_for_run(state_store: Any, run_id: Any) -> str | None:
 
 def intake_prerequisites(payload: Any) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
-    return {key: source.get(key) for key in _INTAKE_PREREQUISITE_KEYS}
+    keys = (
+        _INTAKE_PREREQUISITE_KEYS_V2
+        if source.get("intake_hash_version") == "v2"
+        else _INTAKE_PREREQUISITE_KEYS
+    )
+    return {key: source.get(key) for key in keys}
 
 
 def intake_input_hash(payload: Any) -> str:

@@ -14,7 +14,8 @@ Codex 评审全量修复（分步进行；每步全绿后推进）：
 - MEDIUM-002：merged SPEC+TASKS 崩溃可恢复——SPEC 提交后把 DAG 以 checkpoint 落到 TASKS 的 ProducerJob，若在 TASKS 提交前崩溃，`advance()` 从持久化 DAG 恢复 TASKS（复用 HIGH-001），SPEC 不再孤儿、不重跑 producer
 - HIGH-003（part 1/2，多模块 iPipe 证据身份）：`ingest_ipipe_evidence` 现在把每模块证据的 artifact action_id 按 module 作用域（`hash(ipipe_action_id, module)`），避免第二个模块的证据撞 `phase_artifacts.action_id` UNIQUE（原 `ARTIFACT_CONFLICT`）；转移仍走 IPIPE source event，同模块重放幂等。（part 2：worker 逐模块 trigger/monitor/ingest 驱动 + 多模块夹具，下一步）
 - MEDIUM-003：`golden_replay` 现在强制 receipt.output_hash 必须被某条缓存草案 backing（不仅校验缓存自身哈希），receipt 不能声称一个无缓存草案产生过的输出（receipt 与 cache 的哈希口径本就一致，已验证）；`cross_model_diff` 在已知模型身份 < 2 时返回 `INSUFFICIENT_EVIDENCE`，不再对未知/单模型误报 CONSISTENT
-- 控制面回归测试 `781` 项全部通过
+- MEDIUM-001：change_class 与运行策略纳入 G0 绑定并按 run 冻结——`start()` 在 INTAKE 事件里固定 `change_class`、`workflow_spec_hash`(= `canonical_hash()`)、该类的 `workflow_modes` 快照，并以 `intake_hash_version=v2` 把 `change_class`+`workflow_spec_hash` 一并纳入 `g0_input_hash`：只改类别或改类路由/知识 scope（都并入 `canonical_hash`）都会改变 G0 哈希，旧 APPROVE 不可复用；`phase_mode` 运行期改走 `phase_mode_for_run(events, state)`——优先读 run 冻结的 `workflow_modes`，运行中再编辑 `CHANGE_CLASSES` 不会改已启动 run 的闸门/模式路由；model receipt 记录 run 冻结的 spec hash（缺则回落 live）。旧 INTAKE 载荷无 `intake_hash_version` → 仍按 v1 五键哈希，历史 run 不受影响
+- 控制面回归测试 `791` 项全部通过
 
 ## 2026-09-19
 

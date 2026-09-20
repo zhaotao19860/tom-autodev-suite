@@ -194,7 +194,10 @@ def _record_model_receipt(
             "provider": None, "model": None, "model_version": None,
             "temperature": None, "seed": None,
             "prompt_version": workflow_spec.WORKFLOW_VERSION,
-            "workflow_spec_hash": workflow_spec.canonical_hash(),
+            "workflow_spec_hash": (
+                workflow_spec.pinned_spec_hash(orchestrator.state.events(run_id))
+                or workflow_spec.canonical_hash()
+            ),
             "skill_version": action.get("child_skill"),
             "input_hash": action.get("input_hash"),
             "output_hash": _canonical_hash(draft),
@@ -263,8 +266,8 @@ def _produce(
     (draft read back from the persisted ProducerJob). fulfill/receipt are idempotent, so
     completing from a persisted draft after approval re-runs this safely.
     """
-    change_class = workflow_spec.change_class_of(orchestrator.state.events(run_id))
-    if workflow_spec.phase_mode(change_class, action["phase"]) == "merged":
+    events = orchestrator.state.events(run_id)
+    if workflow_spec.phase_mode_for_run(events, action["phase"]) == "merged":
         return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync)
 
     envelope = build_envelope(action, draft)
@@ -800,8 +803,8 @@ def _enqueue_producer_job(orchestrator: Any, run_id: str, decision: dict[str, An
     payload = {
         "phase": action.get("phase"),
         "skill": decision.get("skill"),
-        "mode": workflow_spec.phase_mode(
-            workflow_spec.change_class_of(orchestrator.state.events(run_id)), action.get("phase")
+        "mode": workflow_spec.phase_mode_for_run(
+            orchestrator.state.events(run_id), action.get("phase")
         ),
         "result_schema": action.get("result_schema"),
         "input_hash": action.get("input_hash"),
