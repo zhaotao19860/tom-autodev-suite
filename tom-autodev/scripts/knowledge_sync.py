@@ -114,7 +114,18 @@ class KnowledgeSync:
             run_id=run_id,
         )
 
-    def publish_phase(self, run_id: str, artifact: dict[str, Any]) -> dict[str, Any]:
+    def publish_phase(self, run_id: str, artifact: dict[str, Any], scope: str = "both") -> dict[str, Any]:
+        # scope (slimming Stage B): "both" = KU doc + iCafe comment; "ku_only" = KU doc, no
+        # comment; "icafe_only" = milestone comment, no KU doc; "skip" = neither. The phase
+        # artifact is stored by the caller regardless; this only governs the human-facing
+        # KU/iCafe writes.
+        if scope == "skip":
+            return {
+                "ok": True, "reason_code": "OK", "schema_version": "1", "run_id": self.run_id,
+                "artifact_hash": artifact.get("content_hash"), "child_doc_id": None,
+                "child_url": None, "child_version": None, "index_doc_id": None,
+                "index_version": None, "comment_id": None, "evidence_refs": [], "scope": scope,
+            }
         if run_id != self.run_id:
             return _failure("RUN_ID_MISMATCH")
         bound_run_id = self.run_id
@@ -153,37 +164,46 @@ class KnowledgeSync:
             },
         )
 
-        child = self.ku.create_artifact(root_doc_id, title, markdown)
-        # The document is verified against what was written to it; the index entry
-        # carries the artifact hash, which is what the control plane records.
-        child_error = self._verify_child(
-            child, hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-        )
-        if child_error is not None:
-            return self._settled(intent, child_error)
-        entry = {
-            "title": title,
-            "doc_id": child["doc_id"],
-            "url": child["url"],
-            "content_hash": content_hash,
-        }
-        index = self.ku.update_index(root_doc_id, entry)
-        index_error = self._verify_index(index, root_doc_id)
-        if index_error is not None:
-            return index_error
+        do_ku = scope in ("both", "ku_only")
+        do_icafe = scope in ("both", "icafe_only")
+        child: dict[str, Any] | None = None
+        index: dict[str, Any] | None = None
+        comment: dict[str, Any] | None = None
+        if do_ku:
+            child = self.ku.create_artifact(root_doc_id, title, markdown)
+            # The document is verified against what was written to it; the index entry
+            # carries the artifact hash, which is what the control plane records.
+            child_error = self._verify_child(
+                child, hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+            )
+            if child_error is not None:
+                return self._settled(intent, child_error)
+            entry = {
+                "title": title,
+                "doc_id": child["doc_id"],
+                "url": child["url"],
+                "content_hash": content_hash,
+            }
+            index = self.ku.update_index(root_doc_id, entry)
+            index_error = self._verify_index(index, root_doc_id)
+            if index_error is not None:
+                return index_error
 
-        comment = self.cafe.comment(
-            self.card_id,
-            (
-                f"Published phase artifact: {title}\n"
-                f"Knowledge: {child['url']}\n"
+        if do_icafe:
+            body = (
+                f"Published phase artifact: {title}\nKnowledge: {child['url']}\n"
                 f"Content hash: {content_hash}"
-            ),
-            f"knowledge:{bound_run_id}:{operation_hash}",
-        )
-        comment_error = self._verify_comment(comment)
-        if comment_error is not None:
-            return comment_error
+            ) if child is not None else (
+                # icafe_only milestone: no child doc, so point at the run's KU root.
+                f"Phase milestone: {title}\nRun knowledge doc: {root_doc_id}\n"
+                f"Content hash: {content_hash}"
+            )
+            comment = self.cafe.comment(
+                self.card_id, body, f"knowledge:{bound_run_id}:{operation_hash}",
+            )
+            comment_error = self._verify_comment(comment)
+            if comment_error is not None:
+                return comment_error
         lower_pending = self._pending_lower_intent(bound_run_id, intent["intent_id"])
         if lower_pending is not None:
             return {
@@ -193,41 +213,29 @@ class KnowledgeSync:
             }
 
         evidence_refs = [
-            child["evidence_refs"][0],
-            index["evidence_refs"][0],
-            comment["evidence_refs"][0],
+            source["evidence_refs"][0]
+            for source in (child, index, comment) if source is not None
         ]
         try:
             evidence_refs = validate_evidence_refs(evidence_refs)
         except ValueError:
             return _failure("KNOWLEDGE_EVIDENCE_INVALID")
-        response = {
-            "ok": True,
-            "reason_code": "OK",
-            "schema_version": "1",
-            "run_id": bound_run_id,
+        knowledge_fields = {
             "artifact_hash": content_hash,
-            "child_doc_id": child["doc_id"],
-            "child_url": child["url"],
-            "child_version": child["version"],
-            "index_doc_id": index["doc_id"],
-            "index_version": index["version"],
-            "comment_id": str(comment["comment_id"]),
-            "evidence_refs": evidence_refs,
+            "child_doc_id": child["doc_id"] if child else None,
+            "child_url": child["url"] if child else None,
+            "child_version": child["version"] if child else None,
+            "index_doc_id": index["doc_id"] if index else None,
+            "index_version": index["version"] if index else None,
+            "comment_id": str(comment["comment_id"]) if comment else None,
+        }
+        response = {
+            "ok": True, "reason_code": "OK", "schema_version": "1", "run_id": bound_run_id,
+            "scope": scope, **knowledge_fields, "evidence_refs": evidence_refs,
         }
         self.state.receipt(
             intent["intent_id"],
-            {
-                "ok": True,
-                "schema_version": "1",
-                "artifact_hash": content_hash,
-                "child_doc_id": child["doc_id"],
-                "child_url": child["url"],
-                "child_version": child["version"],
-                "index_doc_id": index["doc_id"],
-                "index_version": index["version"],
-                "comment_id": str(comment["comment_id"]),
-            },
+            {"ok": True, "schema_version": "1", **knowledge_fields},
             evidence_refs,
         )
         self.state.save_idempotency_result(result_key, response)

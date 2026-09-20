@@ -27,7 +27,7 @@ class KnowledgeFake:
     def __init__(self):
         self.published = []
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         self.published.append((run_id, artifact))
         return {
             "schema_version": "1",
@@ -41,12 +41,12 @@ class KnowledgeFake:
 
 
 class FailingKnowledgeFake(KnowledgeFake):
-    def publish_phase(self, _run_id, _artifact):
+    def publish_phase(self, _run_id, _artifact, scope="both"):
         return {"ok": False, "reason_code": "KU_WRITE_FAILED"}
 
 
 class BareKnowledgeFake(KnowledgeFake):
-    def publish_phase(self, _run_id, _artifact):
+    def publish_phase(self, _run_id, _artifact, scope="both"):
         return {"ok": True}
 
 
@@ -55,7 +55,7 @@ class ResultFailingKnowledgeFake(KnowledgeFake):
         super().__init__()
         self.fail_results = True
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         if self.fail_results and artifact["title"] == "G10 Optimization Result":
             return {"ok": False, "reason_code": "KU_WRITE_FAILED"}
         return super().publish_phase(run_id, artifact)
@@ -507,7 +507,7 @@ class RunSummaryTests(unittest.TestCase):
                 self._record_candidate(self._candidate(target))
 
                 class WrongReceipt(KnowledgeFake):
-                    def publish_phase(self, run_id, artifact):
+                    def publish_phase(self, run_id, artifact, scope="both"):
                         receipt = super().publish_phase(run_id, artifact)
                         receipt[field] = value
                         return receipt

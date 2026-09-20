@@ -584,6 +584,7 @@ class PhaseProtocol:
                 "content_hash": envelope["content_hash"],
                 "canonical": canonical,
             },
+            scope=workflow_spec.knowledge_scope(envelope.get("phase")),
         )
         receipt_error = self._receipt_error(run_id, envelope, receipt)
         if receipt_error is not None:
@@ -599,7 +600,8 @@ class PhaseProtocol:
             "knowledge_doc_id": receipt["child_doc_id"],
             "knowledge_url": receipt["child_url"],
             "knowledge_version": receipt["child_version"],
-            "icafe_comment_id": str(receipt["comment_id"]),
+            # None when this phase's scope skips the iCafe comment — never the string "None".
+            "icafe_comment_id": str(receipt["comment_id"]) if receipt.get("comment_id") is not None else None,
             "evidence_refs": _merge_evidence_refs(
                 validated["draft"]["evidence_refs"], receipt["evidence_refs"]
             ),
@@ -1042,23 +1044,30 @@ class PhaseProtocol:
             return "KNOWLEDGE_PUBLISH_INCOMPLETE"
         if receipt.get("run_id", run_id) != run_id or receipt.get("artifact_hash") != envelope["content_hash"]:
             return "KU_RECEIPT_MISMATCH"
-        if not receipt.get("child_doc_id") or not receipt.get("child_version"):
-            return "KU_RECEIPT_MISMATCH"
-        if not _canonical_ku_url(receipt.get("child_url"), receipt.get("child_doc_id")):
-            return "KU_RECEIPT_MISMATCH"
-        comment_id = receipt.get("comment_id")
-        if comment_id is None or str(comment_id) == "":
-            return "ICAFE_RECEIPT_MISMATCH"
+        # Slimming Stage B: only require the writes this phase's scope actually performs.
+        scope = workflow_spec.knowledge_scope(envelope.get("phase"))
+        wants_ku = scope in ("both", "ku_only")
+        wants_icafe = scope in ("both", "icafe_only")
         try:
             refs = validate_evidence_refs(receipt.get("evidence_refs"))
         except ValueError:
             return "KNOWLEDGE_RECEIPT_INVALID"
-        card_id = _requirement_id(self.state.events(run_id))
-        if f"ku:{receipt['child_doc_id']}/{receipt['child_version']}" not in refs:
-            return "KU_RECEIPT_MISMATCH"
-        if f"icafe:{card_id}/{comment_id}" not in refs:
-            return "ICAFE_RECEIPT_MISMATCH"
+        if wants_ku:
+            if not receipt.get("child_doc_id") or not receipt.get("child_version"):
+                return "KU_RECEIPT_MISMATCH"
+            if not _canonical_ku_url(receipt.get("child_url"), receipt.get("child_doc_id")):
+                return "KU_RECEIPT_MISMATCH"
+            if f"ku:{receipt['child_doc_id']}/{receipt['child_version']}" not in refs:
+                return "KU_RECEIPT_MISMATCH"
+        if wants_icafe:
+            comment_id = receipt.get("comment_id")
+            if comment_id is None or str(comment_id) == "":
+                return "ICAFE_RECEIPT_MISMATCH"
+            card_id = _requirement_id(self.state.events(run_id))
+            if f"icafe:{card_id}/{comment_id}" not in refs:
+                return "ICAFE_RECEIPT_MISMATCH"
         return None
+
 
     def _completion_target(
         self, action: dict[str, Any], envelope: dict[str, Any]
@@ -1218,7 +1227,7 @@ class PhaseProtocol:
             ),
             "content_hash": content_hash,
             "canonical": ipipe_canonical,
-        })
+        }, scope=workflow_spec.knowledge_scope("IPIPE"))
         receipt_error = self._receipt_error(run_id, draft, receipt)
         if receipt_error:
             return _failure(receipt_error, run_id=run_id)
@@ -1421,7 +1430,7 @@ class PhaseProtocol:
             "title": title,
             "markdown": render_phase_markdown(title, content, content_hash, canonical),
             "content_hash": content_hash, "canonical": canonical,
-        })
+        }, scope=workflow_spec.knowledge_scope("RELEASE"))
         receipt_error = self._receipt_error(run_id, draft, receipt)
         if receipt_error:
             return _failure(receipt_error, run_id=run_id)

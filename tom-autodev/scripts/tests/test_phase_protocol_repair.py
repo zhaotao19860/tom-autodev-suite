@@ -125,7 +125,7 @@ class ProductionShapeKnowledgeSync:
     def __init__(self):
         self.calls = []
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         self.calls.append((run_id, copy.deepcopy(artifact)))
         return {
             "ok": True,
@@ -168,7 +168,7 @@ class CallbackKnowledgeSync(ProductionShapeKnowledgeSync):
         super().__init__()
         self.callback = callback
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         result = super().publish_phase(run_id, artifact)
         self.callback()
         return result
@@ -181,7 +181,7 @@ class RecoveringKnowledgeSync(ProductionShapeKnowledgeSync):
         self.cache = {}
         self.lock = threading.Lock()
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         key = (run_id, artifact["content_hash"])
         with self.lock:
             self.calls.append((run_id, copy.deepcopy(artifact)))

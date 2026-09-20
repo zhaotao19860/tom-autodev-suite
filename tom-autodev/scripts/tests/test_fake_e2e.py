@@ -839,7 +839,7 @@ class FakeE2ETests(unittest.TestCase):
                     self._approval(run_id, done["gate"], done["approval_input_hash"])
                     gate_approvals += 1
                     done = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
-                self.assertTrue(done["ok"], done)
+                self.assertTrue(done["ok"], (action.get("phase"), done))
                 producers += 1
             elif parked == worker_driver.APPROVAL_WAIT:
                 gate = result["gate"]
@@ -880,6 +880,28 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(summary["gate_approvals"], 9)
         # Far below the 102-event thrash of the one real un-worker-driven run.
         self.assertLess(summary["events"], 40)
+
+    def test_slimmed_knowledge_writes_follow_the_phase_scope(self):
+        # Slimming Stage B: a phase's stored artifact carries a KU doc / iCafe comment only
+        # when its scope says so — GRILL/TASKS/PLAN/IMPLEMENT write neither, REVIEW writes
+        # KU but no comment, IPIPE comments but writes no KU doc, SPEC/RELEASE do both. The
+        # artifact itself is stored regardless (correctness never reads KU).
+        import workflow_spec as ws
+
+        summary = self._worker_drive_to_terminal("BGW-804")
+        scoped = {"INTAKE", "GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "REVIEW", "IPIPE", "RELEASE"}
+        seen = set()
+        for artifact in self.orchestrator.artifacts.phase_artifacts(summary["run_id"]):
+            envelope = artifact["envelope"]
+            phase = envelope["phase"]
+            if phase not in scoped:
+                continue
+            seen.add(phase)
+            scope = ws.knowledge_scope(phase)
+            self.assertEqual(bool(envelope.get("knowledge_doc_id")), scope in ("both", "ku_only"), (phase, "ku"))
+            self.assertEqual(bool(envelope.get("icafe_comment_id")), scope in ("both", "icafe_only"), (phase, "icafe"))
+        # The run actually exercised the trimmed (skip) and both split-scope phases.
+        self.assertTrue({"GRILL", "PLAN", "IMPLEMENT", "REVIEW", "SPEC", "IPIPE", "RELEASE"} <= seen, seen)
 
     def test_worker_records_a_model_execution_receipt_per_producer_fill(self):
         # Phase 2: every ProducerJob fill leaves a ModelExecutionReceipt (provider/model

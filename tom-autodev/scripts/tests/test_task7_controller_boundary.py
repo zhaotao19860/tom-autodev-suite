@@ -138,7 +138,7 @@ class KnowledgeFake:
     def __init__(self):
         self.calls = []
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         self.calls.append((run_id, copy.deepcopy(artifact)))
         return {
             "ok": True,

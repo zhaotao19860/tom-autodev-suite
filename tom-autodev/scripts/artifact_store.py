@@ -513,16 +513,26 @@ def _validate_final_envelope(envelope: Any) -> None:
         references = validate_evidence_refs(envelope.get("evidence_refs"))
     except ValueError as error:
         raise ValueError(str(error)) from None
-    if not references:
+    # Slimming Stage B: a phase only carries the KU/iCafe receipt fields its scope writes.
+    # The artifact itself is stored regardless; correctness/recovery never read KU.
+    from workflow_spec import knowledge_scope
+
+    scope = knowledge_scope(phase)
+    wants_ku = scope in ("both", "ku_only")
+    wants_icafe = scope in ("both", "icafe_only")
+    if (wants_ku or wants_icafe) and not references:
         raise ValueError("EVIDENCE_REQUIRED")
     doc_id = envelope.get("knowledge_doc_id")
     url = envelope.get("knowledge_url")
     version = envelope.get("knowledge_version")
     comment_id = envelope.get("icafe_comment_id")
-    if not all(isinstance(value, str) and value for value in (doc_id, url, version, comment_id)):
-        raise ValueError("KNOWLEDGE_RECEIPT_INVALID")
-    parsed = urlsplit(url)
-    if parsed.scheme != "https" or parsed.netloc != "ku.baidu-int.com" or not parsed.path.rstrip("/").endswith(f"/{doc_id}") or parsed.query or parsed.fragment:
+    if wants_ku:
+        if not all(isinstance(value, str) and value for value in (doc_id, url, version)):
+            raise ValueError("KNOWLEDGE_RECEIPT_INVALID")
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.netloc != "ku.baidu-int.com" or not parsed.path.rstrip("/").endswith(f"/{doc_id}") or parsed.query or parsed.fragment:
+            raise ValueError("KNOWLEDGE_RECEIPT_INVALID")
+    if wants_icafe and not (isinstance(comment_id, str) and comment_id):
         raise ValueError("KNOWLEDGE_RECEIPT_INVALID")
 
 

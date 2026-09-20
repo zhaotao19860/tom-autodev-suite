@@ -309,6 +309,45 @@ def change_class_of(events: list[dict[str, Any]] | None) -> str:
     return change_class if change_class in CHANGE_CLASSES else DEFAULT_CHANGE_CLASS
 
 
+# Per-phase knowledge / collaboration write policy (slimming Stage B). Each archived phase
+# artifact declares whether it publishes a human-readable KU doc and/or comments the iCafe
+# card. The artifact itself is ALWAYS stored in the artifact_store — correctness and
+# recovery read from there, never from KU — so this only trims the human-facing writes:
+#   both       — KU doc + iCafe comment            (SPEC, RELEASE)
+#   ku_only    — KU doc, no iCafe comment          (REVIEW, DIAGNOSE)
+#   icafe_only — iCafe milestone comment, no KU doc (INTAKE/G0, IPIPE)
+#   skip       — neither                           (GRILL, TASKS, PLAN, IMPLEMENT)
+# An unlisted phase defaults to "both" so nothing loses its writes by omission.
+_KNOWLEDGE_SCOPE: dict[str, str] = {
+    # INTAKE stays "both": its requirement-snapshot anchors the run's KU root (the doc every
+    # later phase indexes under) and is the G0 milestone, so it is not trimmed.
+    "INTAKE": "both",
+    "GRILL": "skip",
+    "SPEC": "both",
+    "TASKS": "skip",
+    "PLAN": "skip",
+    "IMPLEMENT": "skip",
+    "REVIEW": "ku_only",
+    "DIAGNOSE": "ku_only",
+    "IPIPE": "icafe_only",
+    "RELEASE": "both",
+}
+_KNOWLEDGE_SCOPES = frozenset({"both", "ku_only", "icafe_only", "skip"})
+
+
+def knowledge_scope(state: str) -> str:
+    """The KU/iCafe write scope for a phase artifact; "both" unless slimmed."""
+    return _KNOWLEDGE_SCOPE.get(state, "both")
+
+
+def publishes_ku(state: str) -> bool:
+    return knowledge_scope(state) in ("both", "ku_only")
+
+
+def comments_icafe(state: str) -> bool:
+    return knowledge_scope(state) in ("both", "icafe_only")
+
+
 # helpers
 def allowed_transitions() -> dict[str, set[str]]:
     """Reconstruct transition_policy.ALLOWED_TRANSITIONS."""

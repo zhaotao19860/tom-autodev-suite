@@ -65,7 +65,7 @@ class FakeKnowledgeSync:
         self.calls = []
         self.result = result
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         self.calls.append((run_id, artifact))
         if self.result is not None:
             return copy.deepcopy(self.result)
@@ -79,7 +79,7 @@ class FakeKnowledgeSync:
 
 
 class RaisingKnowledgeSync:
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         raise RuntimeError("transport exploded")
 
 
@@ -90,7 +90,7 @@ class SettlingKnowledgeSync(FakeKnowledgeSync):
         super().__init__(result)
         self.state = state
 
-    def publish_phase(self, run_id, artifact):
+    def publish_phase(self, run_id, artifact, scope="both"):
         response = super().publish_phase(run_id, artifact)
         if response.get("ok"):
             for pending in self.state.pending_intents(run_id):
