@@ -4,6 +4,24 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-19
+
+- 瘦身 Stage A（变更类精简）：`standard` 默认合并 SPEC+TASKS——一步产 {spec,dag}、一道 G2、TASKS 免 G3，常规路径少一个模型步与一道闸门
+- 新增 `full` 变更类（旧 standard：SPEC/TASKS 分开 + G2+G3），G0 可选，作为复杂/跨仓 DAG 的逃生舱
+- 新增 `hotfix` 变更类（express + PLAN 折叠：计划产物仍产、免其 G4；WORKSPACE 绑定 G4 独立强制、不受影响）；`classify_change` 按卡型路由 hotfix/bug/epic → hotfix/express/full，其余 standard
+- 瘦身 Stage B（知识/协作写入精简）：新增每相位 KU/iCafe 写入 scope（`workflow_spec.knowledge_scope`）——SPEC/RELEASE(+INTAKE) 落 KU+评论、REVIEW/DIAGNOSE 只落 KU、IPIPE 只发里程碑评论、GRILL/TASKS/PLAN/IMPLEMENT 都不写；`publish_phase(scope=)` 与两处 fail-closed 校验（`_receipt_error` + `artifact_store._validate_final_envelope`）随 scope 条件化；产物始终存 artifact_store（恢复不读 KU）
+- README 迁到仓库根并大改（中文详版）：补 `setup-tom-autodev` 注册流程、最新变更类/KU-iCafe scope，及一个从 iCafe 到 RELEASE_SUCCESS 的完整实例（启 worker、切 Comate Agent 填草案、切回、审批、查状态、继续/修改工作流、多工作流并发=单写者租约）
+- 控制面回归测试 `774` 项全部通过
+
+## 2026-09-18
+
+- WorkerDriver 自驱 IPIPE 控制器：G7 下 compute-then-approve 推导触发绑定 hash（G7 授权「提交 iCode 并触发 iPipe」，G8 仅失败重跑），触发流水线并 monitor 到终态；成功落 RELEASE、失败转 DIAGNOSE，人工阶段/超时/瞬时故障 park
+- WorkerDriver 自驱 RELEASE 控制器：G9 下只读校验平台已发布锁定 build（`verify_release`），未发布 park `RELEASE_WAITING`，成功记发布证据、落 RELEASE_SUCCESS；新增 `release-evidence` schema 与 `ingest_release_evidence`（绑定成功的 IPIPE 前驱）
+- Phase 2 持久化与回执：`ModelExecutionReceipt`、每 run 单写者租约（`LockManager.release` + 崩溃 TTL/死 pid 接管）、草案缓存键 `(input_hash, prompt_version, model)`
+- Phase 3 语义校验 + 失败复用 + 回放门禁：每 phase 不变量覆盖守卫；跨 run `FailureCase` 库（签名先匹配，跨 ≥2 run 未解决升级架构评审）；`replay_gate` golden replay + 跨模型差分门禁（只读、CI 用）
+- 改写 durable-worker 契约（`recovery.py`/SKILL.md/`references/phase-protocol.md`）：WorkerDriver 拥有时序、只在 ApprovalJob/ProducerJob park；有界 Agent 回合仅填 DraftContent
+- 计划验收用例：单 standard 需求由 WorkerDriver 全程驱到 RELEASE_SUCCESS（确定性步骤零 Agent 回合、每门一次 APPROVE、事件数远低于历史真实 run 的 102）
+
 ## 2026-09-17 — WorkflowSpec 与 durable-worker 安全半 (Phase 1a–1c)
 
 把工作流从“Agent 即执行器”推向“确定性 worker 驱动 + 有界模型 producer”。行为对
