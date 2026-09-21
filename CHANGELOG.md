@@ -28,6 +28,7 @@ Codex round-3 复核修复（`tom-autodev-suite_review_report_77a933b.md`，分�
 - R-M1：merged SPEC+TASKS 在 SPEC 提交后、TASKS job 入队前崩溃的更早窗口现可恢复——`worker_driver._recover_merged_tasks` 从合并 producer job（键于 SPEC action，仍持 `{spec, dag}`）确定性补建 TASKS ProducerJob，`_drive` 的 PRODUCER_WAIT 分支在无 fulfilled TASKS job 时先试恢复，再走 HIGH-001 auto-consume 完成 TASKS，不重唤模型；补该窗口的崩溃注入用例。回归 `809` 项全绿
 - R-M6：FailureCase 记账不再是 commit 后 best-effort——`record_failure_case`/`resolve_failure_cases_for_run` 抽出连接内 `_tx` 版，`commit_transition_result` 新增可选 `failure_accounting`，把入库（IPIPE→DIAGNOSE）/解决（RELEASE_SUCCESS）折进与状态提交**同一事务**：无 commit↔记账崩溃窗口、best-effort DB 失败不再丢记，且仅首次 COMMIT 执行（REPLAY 返回已存结果）故计数不翻倍；移除两处 commit 后调用，补 state_store 原子记账 + 重放幂等用例。回归 `811` 项全绿
 - R-H3（多模块发布聚合）：`_execute_release` 只 `verify_release` 最后一个 IPIPE 模块会在多必需发布模块场景过早判 RELEASE_SUCCESS——新增 `worker_driver._verify_required_releases`，对 profile 的每个 `required_for_release` 模块（build_id 取各自归档 SUCCESS 证据）逐一 `verify_release`：任一未发布 → park `RELEASE_WAITING`（不强推），必需模块无 SUCCESS build → `RELEASE_EVIDENCE_INCOMPLETE`，全部发布验证通过才落 RELEASE_SUCCESS；无 required 列表（单模块）行为不变。补聚合/等待/缺失/单模块四用例。回归 `815` 项全绿
+- R-M5：重复故障路由不再信模型输出的签名——新增 `_authoritative_failure_signature(run_id)` 从归档的运行时 FAILURE 证据取签名，DIAGNOSE 路由的跨 run 逃逸守卫改用该权威签名（仅当无运行时失败证据、如 REVIEW 来源诊断时回落模型签名）；模型即便报不同签名也无法绕过对已知复现根因的升级。补权威覆盖用例（证据 `SIG-real` 已知跨 run，诊断报 `SIG-model-dodge` 仍升级 ARCHITECTURE_REVIEW）。回归 `816` 项全绿
 
 ## 2026-09-20
 

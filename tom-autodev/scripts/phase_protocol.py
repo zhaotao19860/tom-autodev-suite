@@ -1103,12 +1103,18 @@ class PhaseProtocol:
                 return "STOPPED", None, "DIAGNOSIS_INCOMPLETE"
             if route != "REPAIR":
                 return route, None, "OK"
-            # Deterministic cross-run guard (MEDIUM-004): even when the diagnosis proposes
-            # yet another REPAIR, a root cause the FailureCase library has already seen
-            # unresolved across >= CROSS_RUN_RECURRENCE_THRESHOLD runs is escalated to
-            # architecture review instead of blindly repaired again. The signature is read
-            # from the diagnosis the producer just filed, never reconstructed from events.
-            escalation = self._cross_run_escalation(content.get("failure_signature"))
+            # Deterministic cross-run guard (MEDIUM-004 / R-M5): even when the diagnosis
+            # proposes yet another REPAIR, a root cause the FailureCase library has already
+            # seen unresolved across >= CROSS_RUN_RECURRENCE_THRESHOLD runs is escalated to
+            # architecture review. The signature is taken from the AUTHORITATIVE runtime
+            # failure evidence, not the model's diagnosis, so a model cannot dodge the guard by
+            # emitting a different signature; the model's own signature is only a fallback when
+            # there is no runtime failure evidence (e.g. a REVIEW-origin diagnosis).
+            signature = (
+                self._authoritative_failure_signature(action["run_id"])
+                or content.get("failure_signature")
+            )
+            escalation = self._cross_run_escalation(signature)
             if escalation is not None:
                 return escalation
             # A code-only repair leaves the Spec and the DAG standing, so it re-enters
@@ -1122,6 +1128,24 @@ class PhaseProtocol:
         if not isinstance(target, str):
             raise ValueError("COMPLETION_TARGET_REQUIRED")
         return target, None, "OK"
+
+    def _authoritative_failure_signature(self, run_id: str) -> str | None:
+        """The failure signature of the runtime failure that drove this run into DIAGNOSE,
+        read from the archived IPIPE FAILURE evidence rather than the model's diagnosis (R-M5).
+
+        The cross-run guard must not trust a signature the model emitted -- a model could
+        otherwise dodge escalation by reporting a different root cause. Returns the most recent
+        FAILURE IPIPE evidence's signature, or None when there is no runtime failure evidence
+        (e.g. a REVIEW-origin diagnosis), in which case the caller falls back to the diagnosis'
+        own signature."""
+        signature = None
+        for artifact in self.artifacts.phase_artifacts(run_id, "IPIPE"):
+            if not artifact.get("valid"):
+                continue
+            content = (artifact.get("envelope") or {}).get("content") or {}
+            if content.get("status") == "FAILURE" and isinstance(content.get("failure_signature"), str):
+                signature = content["failure_signature"]
+        return signature
 
     def _cross_run_escalation(
         self, signature: Any

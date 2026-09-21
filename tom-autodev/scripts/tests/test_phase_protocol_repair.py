@@ -1372,6 +1372,30 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
 
         self.assertEqual(target, ("SPEC", None, "OK"))
 
+    def test_escalation_uses_authoritative_runtime_signature_not_the_model(self):
+        # R-M5: the cross-run guard reads the signature from the archived runtime FAILURE
+        # evidence, so a model that emits a different signature in its diagnosis cannot dodge
+        # escalation of a known recurring root cause.
+        self.protocol.state.record_failure_case("SIG-real", "CODE", "run-a", resolved=False)
+        self.protocol.state.record_failure_case("SIG-real", "CODE", "run-b", resolved=False)
+
+        class _Art:
+            def phase_artifacts(self, run_id, phase):
+                return [{"valid": True, "envelope": {"content": {
+                    "status": "FAILURE", "failure_signature": "SIG-real"}}}]
+
+        original = self.protocol.artifacts
+        self.protocol.artifacts = _Art()
+        try:
+            diagnosis = self._diagnosis()
+            diagnosis["failure_signature"] = "SIG-model-dodge"  # model reports a different sig
+            action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-c"}
+            target = self.protocol._completion_target(action, {"content": diagnosis})
+        finally:
+            self.protocol.artifacts = original
+
+        self.assertEqual(target, ("ARCHITECTURE_REVIEW", None, "KNOWN_CROSS_RUN_FAILURE"))
+
     def test_policy_allows_the_plan_reentry_edge(self):
         allowed = self.protocol.transitions.validate("DIAGNOSE", "PLAN")
         still_allowed = self.protocol.transitions.validate("DIAGNOSE", "SPEC")
