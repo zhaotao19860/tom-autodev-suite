@@ -1,3 +1,5 @@
 # Spec Phase Contract
 
-Input is a G1-approved grill `ArtifactEnvelope`, requirement snapshot, project/language rules, repository evidence, independent test repository contract, and pinned iPipe environment profile. Output is a versioned `spec` envelope with behaviors (normal/boundary/exception/compatibility), interface decisions, external test interface and fixtures, environment/toolchain requirements, rollback, and acceptance traceability. Persist to KU and comment iCafe via the parent; G2 approval is required. Stop on open decisions, missing evidence, environment ambiguity, or input hash drift. Never edit code or run project tests.
+The authoritative contract (inputs / outputs / gate / schema / failure routing) lives in [`../../tom-autodev/references/phase-protocol.md`](../../tom-autodev/references/phase-protocol.md) and [`phase-artifacts.md`](../../tom-autodev/references/phase-artifacts.md); this file records only what is specific to Spec and not already there.
+
+Spec's job: convert closed requirement decisions into a versioned, reviewable behavioral contract (behaviors, test interface, environment, acceptance traceability) without embedding implementation code. Section order and completion gate are in `../SKILL.md`.

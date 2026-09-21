@@ -1,3 +1,5 @@
 # Plan Phase Contract
 
-Input is one G3-approved frontier node, Spec, WorkspaceGate evidence, language/project knowledge, test-repository contract, and pinned iPipe profile. Output is a `task-plan` envelope naming exact repositories/files/symbols, ordered business/test edits, test IDs/fixtures/assertions, iPipe parameters, knowledge queries, Review scope, rollback, and checkboxes with precondition/action/evidence. Persist to KU and comment iCafe through the parent; G4 approval is required. Stop on unresolved architecture or Spec conflict. Never compile or test locally.
+The authoritative contract (inputs / outputs / gate / schema / failure routing) lives in [`../../tom-autodev/references/phase-protocol.md`](../../tom-autodev/references/phase-protocol.md) and [`phase-artifacts.md`](../../tom-autodev/references/phase-artifacts.md); this file records only what is specific to Plan and not already there.
+
+Plan's job: turn one approved Task DAG node into an executable per-task plan (exact repos/files/symbols, ordered edits, test IDs/fixtures/assertions, iPipe parameters, checkbox steps) another agent can follow without rediscovering architecture. Resolve ambiguity before G4; on a Spec conflict return `SPEC_CONFLICT` to `tom-spec`. Field list and gate are in `../SKILL.md`.

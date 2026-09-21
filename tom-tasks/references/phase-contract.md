@@ -1,3 +1,9 @@
 # Tasks Phase Contract
 
-Input is a G2-approved `spec` envelope and its traceability. Output is a `task-dag` envelope: each node is one independently verifiable end-to-end behavior and contains its target business repository (`business_module`, a required field naming one registered business repo — the run's WORKSPACE binds the task to exactly that repo, so a cross-repo requirement never cuts a second repo's task against the first repo's worktree), business/test change surfaces, external test IDs and fixtures, expected iPipe evidence, dependencies, rollback, and completion predicate. Validate acyclicity and full acceptance coverage, persist to KU, and comment iCafe through the parent. G3 approval is required; stop on uncovered behavior, repository-only decomposition, cycle, or hash drift. Do not generate code or invoke iPipe.
+The authoritative contract (inputs / outputs / gate / schema / failure routing) lives in [`../../tom-autodev/references/phase-protocol.md`](../../tom-autodev/references/phase-protocol.md) and [`phase-artifacts.md`](../../tom-autodev/references/phase-artifacts.md); this file records only what is specific to Tasks and not already there.
+
+Tasks' job: decompose an approved Spec into an acyclic DAG of independently verifiable end-to-end behavior slices.
+
+Phase-specific rule:
+
+- Each node carries `business_module`, a required field naming exactly one registered business repo; WORKSPACE binds the task to that repo, so a cross-repo requirement never cuts a second repo's task against the first repo's worktree.

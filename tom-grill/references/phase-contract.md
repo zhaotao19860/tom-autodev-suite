@@ -1,7 +1,10 @@
 # Grill Phase Contract
 
-Input is an immutable Comate `RequirementSnapshot` plus project/language evidence and G0 approval. Output is a `decision-log` `ArtifactEnvelope` whose content is `CLARIFIED` or `NO_OPEN_DECISIONS`, with decision maker, options, decision, evidence refs, glossary delta, and optional ADR candidate. Persist the artifact in KU and add an iCafe comment through the parent controller. Approval is G1; stop on `DECISION_REQUIRED`, `REQUIREMENT_CHANGED`, missing snapshot, or hash mismatch. Do not create tasks, code, tests, or iPipe actions.
+The authoritative contract (inputs / outputs / gate / schema / failure routing) lives in [`../../tom-autodev/references/phase-protocol.md`](../../tom-autodev/references/phase-protocol.md) and [`phase-artifacts.md`](../../tom-autodev/references/phase-artifacts.md); this file records only what is specific to Grill and not already there.
 
-A snapshot may carry an empty `acceptance` list, because a plain iCafe card usually states intent rather than verifiable criteria. In that case record each criterion the requirement owner agrees to in `acceptance_delta` as `{id, statement, decided_by, evidence}`. Never rewrite the snapshot: it stays bound to the G0 content hash, and the parent unions snapshot `acceptance` with `acceptance_delta` when it validates Spec traceability. An `acceptance_delta` id that already exists in the snapshot is a redefinition and fails as `ACCEPTANCE_DELTA_CONFLICT`. Stop with `ACCEPTANCE_REQUIRED` when the union would stay empty; Spec cannot start without at least one criterion.
+Grill's job: close the human decisions that block a reliable Spec, and record the acceptance criteria the requirement owner commits to.
 
-Criteria already written in a pinned KU requirement directory are available as candidates through the parent's `acceptance-candidates` query. They are advisory drafts, never part of any phase action identity or approval `input_hash`, because a live document fetch would make those unstable. A candidate becomes an `acceptance_delta` entry only after the requirement owner confirms it, with the returned document id and content hash recorded as that entry's `evidence`.
+Phase-specific rules:
+
+- An `acceptance_delta` id that already exists in the snapshot is a redefinition and fails as `ACCEPTANCE_DELTA_CONFLICT`.
+- `acceptance-candidates` results are advisory drafts, never part of any phase action identity or approval `input_hash` — a live document fetch would make those unstable. A candidate becomes an `acceptance_delta` entry only after the requirement owner confirms it, with the returned document id and content hash recorded as that entry's `evidence`.
