@@ -46,6 +46,7 @@ Codex round-4 复核修复（`tom-autodev-suite_review_report_ce46b24.md`，多�
 
 - R4-M2：workflow_spec 漂移守卫下沉为共享纯校验 `workflow_spec.spec_drift(events)`——`phase_protocol._workflow_spec_drift` 在 `_complete` / `_ingest_ipipe_evidence` / `_ingest_release_evidence` 的幂等短路之后、任何副作用之前调用，故直连 `complete-phase`/ingest（绕过 `Orchestrator.next`）也不再能以 V1 授权执行改版后的 V2 策略；只读幂等回放不受影响。补 complete_phase 漂移阻断用例。回归 `822` 项全绿
 - R4-H1：merged SPEC+TASKS 在锁定 job 前新增 SPEC↔DAG 一致性预检——`worker_driver._merged_traceability_error` 对手里的 `{spec, dag}` 施加 TASKS 相位同一规则（DAG 的 `acceptance_coverage` 须等于 SPEC 的 `traceability` 验收点集），不符即返回 `TRACEABILITY_MISMATCH`+`retry_allowed`、job 留 PENDING，不再先提交 SPEC 再把 TASKS 卡死成 `PRODUCER_JOB_CONFLICT`。补"错 AC 的 DAG 可重投、一致 bundle 进 G2"用例。回归 `823` 项全绿
+- R4-M1：合并恢复只补建"该 SPEC 完成事件产生的" TASKS frontier——`_recover_merged_tasks` 重建前校验当前事件即 SPEC→TASKS 转移（`previous_state==SPEC`、`artifact_id`==该 SPEC 产物、且为 action 的 source event）；故意的 `WORKSPACE→TASKS` 重拆（previous_state==WORKSPACE）不再被旧 DAG 覆盖，转为 park 等新 producer。补"WORKSPACE 重拆不被恢复吞掉"用例，原崩溃恢复用例仍绿。回归 `824` 项全绿
 
 ## 2026-09-20
 

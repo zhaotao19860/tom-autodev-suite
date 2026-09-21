@@ -626,6 +626,32 @@ class FakeE2ETests(unittest.TestCase):
             knowledge_sync=knowledge)
         self.assertEqual((good["reason_code"], good["gate"]), ("APPROVAL_REQUIRED", "G2"))
 
+    def test_recover_merged_tasks_declines_a_deliberate_workspace_replan(self):
+        # R4-M1: recovery only rebuilds the TASKS frontier a SPEC completion produced. A
+        # deliberate WORKSPACE->TASKS re-split (previous_state WORKSPACE) must NOT be filled
+        # with the old DAG — it needs a fresh producer turn.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-818", "I15ClP2KW4ZGAK", "express")
+        job_id = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge)["producer_job"]["job_id"]
+        draft = {
+            "spec": copy.deepcopy(specialized_examples()["spec"]),
+            "dag": copy.deepcopy(specialized_examples()["task-dag"]),
+        }
+        need = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self._approval(run_id, need["gate"], need["approval_input_hash"])
+        worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertEqual(self.orchestrator.next(run_id)["state"], "WORKSPACE")
+
+        # Simulate the deliberate re-split back to TASKS from WORKSPACE.
+        latest = self.orchestrator.state.events(run_id)[-1]["event_id"]
+        self.orchestrator.state.transition(
+            run_id, "TASKS", {"previous_state": "WORKSPACE", "source_event_id": latest})
+        replan_event = self.orchestrator.state.events(run_id)[-1]["event_id"]
+        action = {"phase": "TASKS", "action_id": "replan-action",
+                  "source_event_id": replan_event, "child_skill": "tom-tasks"}
+        self.assertFalse(worker_driver._recover_merged_tasks(self.orchestrator, run_id, action))
+        self.assertIsNone(self.orchestrator.state.producer_job("producer:replan-action"))
+
     def test_worker_executes_workspace_binding(self):
         # A run parked at WORKSPACE: the worker cuts the owned worktrees, derives the G4
         # binding hash, and — since G4 is not yet approved for it — returns the hash to

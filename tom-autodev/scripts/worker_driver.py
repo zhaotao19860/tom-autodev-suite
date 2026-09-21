@@ -432,6 +432,19 @@ def _recover_merged_tasks(orchestrator: Any, run_id: str, action: dict[str, Any]
     spec_action_id = (spec_artifact.get("envelope") or {}).get("action_id")
     if not isinstance(spec_action_id, str) or not spec_action_id:
         return False
+    # Only recover the TASKS frontier this SPEC completion produced — not a deliberate
+    # WORKSPACE->TASKS re-split, which is a legitimate replan that must get a fresh DAG, not
+    # the old bundle (R4-M1). The current frontier's event must be the SPEC->TASKS transition
+    # (previous_state SPEC, carrying this SPEC artifact) and the action's own source event.
+    events = orchestrator.state.events(run_id)
+    current = events[-1] if events else {}
+    payload = current.get("payload") or {}
+    if (
+        current.get("event_id") != action.get("source_event_id")
+        or payload.get("previous_state") != "SPEC"
+        or payload.get("artifact_id") != spec_artifact.get("artifact_id")
+    ):
+        return False
     merged = orchestrator.state.producer_job(f"producer:{spec_action_id}")
     if not (isinstance(merged, dict) and merged.get("status") == "FULFILLED"):
         return False
