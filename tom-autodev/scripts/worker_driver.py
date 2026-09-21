@@ -383,6 +383,40 @@ def _submit_merged(
             "spec": spec_result, "tasks": tasks_result}
 
 
+def _recover_merged_tasks(orchestrator: Any, run_id: str, action: dict[str, Any]) -> bool:
+    """Rebuild a merged bundle's TASKS ProducerJob from the persisted dag after a crash
+    between the SPEC commit and the TASKS enqueue (R-M1).
+
+    In a merged SPEC+TASKS run the SPEC is committed first, then the TASKS job is checkpointed
+    with the dag (MEDIUM-002). If the process dies in between, the TASKS frontier has no
+    fulfilled job and advance() would re-invoke the model. The merged producer job (keyed on
+    the SPEC action) still holds the whole {spec, dag} draft, so this deterministically
+    reconstructs the TASKS job from that dag; the caller's HIGH-001 auto-consume then completes
+    TASKS with no new producer turn. Returns True when it reconstructed the job."""
+    if action.get("phase") != "TASKS":
+        return False
+    tasks_job_id = f"producer:{action['action_id']}"
+    existing = orchestrator.state.producer_job(tasks_job_id)
+    if isinstance(existing, dict) and existing.get("status") == "FULFILLED":
+        return False
+    spec_artifact = orchestrator.artifacts.latest_phase(run_id, "SPEC", None)
+    if not spec_artifact.get("valid"):
+        return False
+    spec_action_id = (spec_artifact.get("envelope") or {}).get("action_id")
+    if not isinstance(spec_action_id, str) or not spec_action_id:
+        return False
+    merged = orchestrator.state.producer_job(f"producer:{spec_action_id}")
+    if not (isinstance(merged, dict) and merged.get("status") == "FULFILLED"):
+        return False
+    dag = (merged.get("draft") or {}).get("dag")
+    if not isinstance(dag, dict):
+        return False
+    _enqueue_producer_job(
+        orchestrator, run_id, {"action": action, "skill": action.get("child_skill")})
+    orchestrator.state.fulfill_producer_job(tasks_job_id, dag)
+    return True
+
+
 def execute_controller(
     orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
@@ -868,6 +902,13 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             action = decision["action"]
             job_id = f"producer:{action['action_id']}"
             existing = orchestrator.state.producer_job(job_id)
+            if not (isinstance(existing, dict) and existing.get("status") == "FULFILLED"):
+                # R-M1: a merged SPEC+TASKS bundle whose SPEC committed but whose TASKS job
+                # was never enqueued (crash in that window) — reconstruct the TASKS job from
+                # the merged producer's persisted dag so the frontier completes below via the
+                # HIGH-001 auto-consume path, without re-invoking the model.
+                if _recover_merged_tasks(orchestrator, run_id, action):
+                    existing = orchestrator.state.producer_job(job_id)
             if (isinstance(existing, dict) and existing.get("status") == "FULFILLED"
                     and isinstance(existing.get("draft"), dict)):
                 # Auto-consume the persisted draft (HIGH-001): after approval, the worker

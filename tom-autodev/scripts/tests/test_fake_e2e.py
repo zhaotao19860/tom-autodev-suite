@@ -1114,6 +1114,47 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
         self.assertIn("TASKS", [s.get("phase") for s in result.get("auto_completed", [])])
 
+    def test_merged_tasks_recovers_when_crash_before_tasks_enqueue(self):
+        # R-M1: crash after the merged SPEC commits but BEFORE the TASKS job is even enqueued
+        # (the earlier window MEDIUM-002's checkpoint did not cover). The merged producer job
+        # still holds the whole {spec, dag}, so advance() reconstructs the TASKS job from it —
+        # SPEC is not orphaned and the producer is not re-invoked.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-813", "I15ClP2KW4ZGAK", "express")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+        draft = {
+            "spec": copy.deepcopy(specialized_examples()["spec"]),
+            "dag": copy.deepcopy(specialized_examples()["task-dag"]),
+        }
+        need = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertEqual(need["reason_code"], "APPROVAL_REQUIRED")
+        self._approval(run_id, need["gate"], need["approval_input_hash"])
+
+        real_enqueue = worker_driver._enqueue_producer_job
+        state = {"crashed": False}
+
+        def flaky_enqueue(orch, rid, decision):
+            # Crash the first enqueue after SPEC commits — the TASKS checkpoint never lands.
+            if not state["crashed"]:
+                state["crashed"] = True
+                raise RuntimeError("simulated crash before TASKS enqueue")
+            return real_enqueue(orch, rid, decision)
+
+        worker_driver._enqueue_producer_job = flaky_enqueue
+        try:
+            with self.assertRaises(RuntimeError):
+                worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        finally:
+            worker_driver._enqueue_producer_job = real_enqueue
+
+        # SPEC committed; TASKS neither committed nor even checkpointed as a job.
+        self.assertTrue(self.orchestrator.artifacts.latest_phase(run_id, "SPEC", None)["valid"])
+        self.assertFalse(self.orchestrator.artifacts.latest_phase(run_id, "TASKS", None).get("valid"))
+        result = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        self.assertTrue(self.orchestrator.artifacts.latest_phase(run_id, "TASKS", None)["valid"])
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
+        self.assertIn("TASKS", [s.get("phase") for s in result.get("auto_completed", [])])
+
     def test_worker_auto_consumes_the_persisted_draft_after_approval(self):
         # HIGH-001: once a draft is recorded, approving its gate lets the worker finish the
         # phase on the next advance() — no second submit_draft, no new producer turn.

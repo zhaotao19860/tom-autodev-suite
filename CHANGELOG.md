@@ -25,6 +25,7 @@ Codex round-3 复核修复（`tom-autodev-suite_review_report_77a933b.md`，分�
 - R-H1：schema 合法但前置绑定错的草案不再锁死 ProducerJob——`worker_driver` 在 `fulfill` 前新增 `_validate_before_fulfill()`，复用协议纯校验 `_predecessor_binding_error`（REVIEW 的 change_set_hash、PLAN/IMPLEMENT revision、DIAGNOSE frozen_revisions、SPEC/TASKS 覆盖）；不符即返回 `retry_allowed` 且不锁 job，修正稿可重投同一 frontier，不再 `PRODUCER_JOB_CONFLICT`。只用绑定校验（不含 envelope/审批校验），未批准的 gated 草案仍能 fulfill 并 park 在其闸门。`_submit_merged` 的 SPEC 半同样前置校验。回归 `807` 项全绿
 - R-H2（part 1/2，绑定感知的模块调度）：iPipe 多模块的"已通过"判定由 status/module 粗判改为绑定感知——协议抽出 `_ipipe_passed_modules(events)`（校验 pipeline/release-rule/环境/**revision** 对当前 submission）与公开 `ipipe_outstanding_modules(run_id)`，`_ipipe_outstanding_modules(events, content)` 复用同一核；`worker_driver._next_ipipe_module` 改为委托该协议判定，删除 worker 自己的 status-only `_ipipe_passed_modules`。修复后旧 revision 的成功（被修复改写后）不再被误当完成而跳过该模块（stuck-path A）。回归 `807` 项全绿
 - R-H2（part 2/2，崩溃-提交窗口可重放 finalize）：末模块证据已落盘、IPIPE→RELEASE 状态提交前崩溃时，`_next_ipipe_module` 返回 None 但 run 仍在 IPIPE——`_execute_ipipe` 不再 dead-end 于 `IPIPE_NO_OUTSTANDING_MODULE`，而是调 `_finalize_ipipe` 重放最后一份归档 SUCCESS 证据的 ingest（同 module action id 幂等重存，outstanding 空即执行 IPIPE→RELEASE 转移）；无可重放 SUCCESS 证据则回落原停滞报告。回归 `808` 项全绿
+- R-M1：merged SPEC+TASKS 在 SPEC 提交后、TASKS job 入队前崩溃的更早窗口现可恢复——`worker_driver._recover_merged_tasks` 从合并 producer job（键于 SPEC action，仍持 `{spec, dag}`）确定性补建 TASKS ProducerJob，`_drive` 的 PRODUCER_WAIT 分支在无 fulfilled TASKS job 时先试恢复，再走 HIGH-001 auto-consume 完成 TASKS，不重唤模型；补该窗口的崩溃注入用例。回归 `809` 项全绿
 
 ## 2026-09-20
 
