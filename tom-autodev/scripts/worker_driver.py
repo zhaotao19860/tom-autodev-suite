@@ -561,6 +561,12 @@ def _execute_ipipe(
     # call, so a restart resumes from the first module still outstanding.
     module = _next_ipipe_module(orchestrator, run_id, action, profile, knowledge_sync)
     if module is None:
+        # No required module outstanding but the run is still in IPIPE: a crash between the
+        # last module's evidence write and the IPIPE->RELEASE state commit (R-H2 part B).
+        # Replay that finalize idempotently instead of dead-ending on the stuck state.
+        finalized = _finalize_ipipe(orchestrator, run_id, knowledge_sync)
+        if finalized is not None:
+            return finalized
         return {"ok": False, "reason_code": "IPIPE_NO_OUTSTANDING_MODULE", "run_id": run_id}
     binding = _ipipe_module_binding(orchestrator, run_id, action, module)
     if not binding:
@@ -617,6 +623,32 @@ def _execute_ipipe(
     landed = orchestrator.status(run_id).get("state")
     return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
             "build_id": build_id, "monitor_status": status, "module": module, "result": ingested}
+
+
+def _finalize_ipipe(
+    orchestrator: Any, run_id: str, knowledge_sync: Any | None
+) -> dict[str, Any] | None:
+    """Replayable IPIPE->RELEASE finalize for the crash-before-commit window (R-H2 part B).
+
+    Every required module has a current-binding SUCCESS (the caller reached here because no
+    module is outstanding) yet the run is still in IPIPE -- the last module's evidence was
+    archived and the process died before the transition committed. Re-ingesting that archived
+    evidence is idempotent (same module action id re-stores to the same row) and, finding
+    nothing outstanding, performs the IPIPE->RELEASE transition. Returns None when there is no
+    replayable success evidence to finalize from (so the caller falls back to its stuck-state
+    report rather than inventing a transition)."""
+    latest = orchestrator.artifacts.latest_phase(run_id, "IPIPE", None)
+    if not latest.get("valid"):
+        return None
+    content = (latest.get("envelope") or {}).get("content")
+    if not isinstance(content, dict) or content.get("status") != "SUCCESS":
+        return None
+    ingested = orchestrator.phase_protocol(knowledge_sync).ingest_ipipe_evidence(run_id, content)
+    if not ingested.get("ok"):
+        return None
+    landed = orchestrator.status(run_id).get("state")
+    return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id,
+            "state": landed, "result": ingested, "finalized": True}
 
 
 def _next_ipipe_module(

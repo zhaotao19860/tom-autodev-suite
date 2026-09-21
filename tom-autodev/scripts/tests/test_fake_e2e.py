@@ -2186,6 +2186,44 @@ class IpipeModuleDriveTests(unittest.TestCase):
             worker_driver._ipipe_module_binding(self._Orch(events=events), "run", action, "third")
         )
 
+    def test_finalize_replays_ingestion_when_stuck_in_ipipe(self):
+        # R-H2 part B: no module outstanding but still in IPIPE (a crash between the last
+        # module's artifact write and the state commit) -> re-ingest the last archived
+        # SUCCESS evidence, which idempotently performs the IPIPE->RELEASE transition.
+        class _Art:
+            def __init__(self, artifact):
+                self._artifact = artifact
+
+            def latest_phase(self, run_id, phase, task):
+                return self._artifact
+
+        class _Proto:
+            def __init__(self):
+                self.calls = []
+
+            def ingest_ipipe_evidence(self, run_id, content):
+                self.calls.append(content)
+                return {"ok": True, "reason_code": "OK", "state": "RELEASE"}
+
+        class _O:
+            def __init__(self, artifact):
+                self.artifacts = _Art(artifact)
+                self._protocol = _Proto()
+
+            def phase_protocol(self, knowledge_sync=None):
+                return self._protocol
+
+            def status(self, run_id):
+                return {"state": "RELEASE"}
+
+        success = {"valid": True, "envelope": {"content": {"status": "SUCCESS", "module": "bgwagent"}}}
+        orch = _O(success)
+        result = worker_driver._finalize_ipipe(orch, "run", None)
+        self.assertEqual((result["state"], result["finalized"]), ("RELEASE", True))
+        self.assertEqual(orch._protocol.calls[0]["module"], "bgwagent")
+        # No replayable success evidence -> None, so the caller keeps its stuck-state report.
+        self.assertIsNone(worker_driver._finalize_ipipe(_O({"valid": False}), "run", None))
+
 
 if __name__ == "__main__":
     unittest.main()
