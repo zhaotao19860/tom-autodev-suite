@@ -1144,10 +1144,10 @@ class PhaseProtocol:
         return "ARCHITECTURE_REVIEW", None, verdict["reason_code"]
 
     def _record_cross_run_failure(self, run_id: str, content: dict[str, Any]) -> None:
-        """Record one occurrence of a runtime failure's signature in the cross-run
-        FailureCase library, so recurrence is detected on the real IPIPE->DIAGNOSE path and
-        not only when a caller invokes orchestrator.route_failure (MEDIUM-004). Best-effort:
-        the library must never fail the transition it observes."""
+        """Record one occurrence of a runtime failure's signature in the cross-run FailureCase
+        library. Retained for callers that record outside a transition commit; the IPIPE->
+        DIAGNOSE path now records atomically via commit_transition_result's failure_accounting
+        (R-M6). Best-effort: the library must never fail the transition it observes."""
         signature = content.get("failure_signature")
         if not isinstance(signature, str) or not signature:
             return
@@ -1159,18 +1159,6 @@ class PhaseProtocol:
             _log.warning(
                 "failure-case write failed for run %s signature %s (best-effort)",
                 run_id, signature, exc_info=True,
-            )
-
-    def _resolve_run_failures(self, run_id: str) -> None:
-        """On a verified success (RELEASE_SUCCESS), clear the cross-run escalation streak of
-        every FailureCase this run hit — the pipeline proved those root causes repaired, so a
-        later, unrelated recurrence starts fresh instead of escalating immediately (MEDIUM-004
-        part 2). Best-effort: resolving the library must never fail the release itself."""
-        try:
-            self.state.resolve_failure_cases_for_run(run_id)
-        except Exception:
-            _log.warning(
-                "failure-case resolve failed for run %s (best-effort)", run_id, exc_info=True
             )
 
     def _ready_task_excluding(self, run_id: str, completing_task: str | None) -> str | None:
@@ -1358,16 +1346,24 @@ class PhaseProtocol:
             "task_id": None, "draft_hash": _canonical_hash(draft), "ingest_hash": content_hash,
             "knowledge_receipt": receipt,
         }
+        # Fold the cross-run FailureCase write into the SAME transaction as the IPIPE->DIAGNOSE
+        # transition (R-M6), so a crash or a replay between commit and a best-effort write can
+        # never leave a real failure unrecorded. Recorded only on the first COMMIT.
+        failure_accounting = None
+        signature = content.get("failure_signature") if isinstance(content, dict) else None
+        if target == "DIAGNOSE" and isinstance(signature, str) and signature:
+            failure_accounting = {"record": {
+                "signature": signature, "classification": content.get("classification"),
+                "run_id": run_id,
+            }}
         committed = self.state.commit_transition_result(
             run_id, action["source_event_id"], target,
             {"previous_state": "IPIPE", "artifact_id": stored["artifact_id"],
              "action_id": action["action_id"], "source_event_id": action["source_event_id"],
              "policy_decision": transition},
-            result_key, result,
+            result_key, result, failure_accounting=failure_accounting,
         )
         if committed.get("status") in {"COMMITTED", "REPLAY"}:
-            if committed.get("status") == "COMMITTED" and target == "DIAGNOSE":
-                self._record_cross_run_failure(run_id, content)
             return committed["result"]
         if committed.get("status") == "RESULT_CONFLICT":
             return _failure("COMPLETION_CONFLICT", run_id=run_id)
@@ -1539,11 +1535,9 @@ class PhaseProtocol:
             {"previous_state": "RELEASE", "artifact_id": stored["artifact_id"],
              "action_id": action["action_id"], "source_event_id": action["source_event_id"],
              "policy_decision": transition},
-            result_key, result,
+            result_key, result, failure_accounting={"resolve_run": run_id},
         )
         if committed.get("status") in {"COMMITTED", "REPLAY"}:
-            if committed.get("status") == "COMMITTED":
-                self._resolve_run_failures(run_id)
             return committed["result"]
         if committed.get("status") == "RESULT_CONFLICT":
             return _failure("COMPLETION_CONFLICT", run_id=run_id)

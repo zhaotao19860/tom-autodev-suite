@@ -605,6 +605,35 @@ class FailureCaseLibraryTests(unittest.TestCase):
         # Already resolved: a second pass is a no-op.
         self.assertEqual(store.resolve_failure_cases_for_run("run-a"), [])
 
+    def test_record_accounting_folds_into_the_transition_and_is_replay_safe(self):
+        # R-M6: the FailureCase write is atomic with the IPIPE->DIAGNOSE commit, and a replay
+        # of that commit returns the saved result without double-counting the occurrence.
+        store = self._store()
+        entered = store.transition("run-x", "IPIPE", {"seed": 1})
+        result = {"ok": True, "phase": "IPIPE"}
+        accounting = {"record": {"signature": "SIG", "classification": "CODE", "run_id": "run-x"}}
+        first = store.commit_transition_result(
+            "run-x", entered["event_id"], "DIAGNOSE", {"p": 1}, "ipipe:run-x:a", result,
+            failure_accounting=accounting)
+        self.assertEqual(first["status"], "COMMITTED")
+        self.assertEqual(store.failure_case("SIG")["occurrences"], 1)
+        replay = store.commit_transition_result(
+            "run-x", entered["event_id"], "DIAGNOSE", {"p": 1}, "ipipe:run-x:a", result,
+            failure_accounting=accounting)
+        self.assertEqual(replay["status"], "REPLAY")
+        self.assertEqual(store.failure_case("SIG")["occurrences"], 1)
+
+    def test_resolve_accounting_folds_into_the_release_commit(self):
+        # R-M6: the resolve is atomic with the RELEASE_SUCCESS commit.
+        store = self._store()
+        store.record_failure_case("SIG", "CODE", "run-y", resolved=False)
+        entered = store.transition("run-y", "RELEASE", {"seed": 1})
+        committed = store.commit_transition_result(
+            "run-y", entered["event_id"], "RELEASE_SUCCESS", {"p": 1}, "rel:run-y:a",
+            {"ok": True}, failure_accounting={"resolve_run": "run-y"})
+        self.assertEqual(committed["status"], "COMMITTED")
+        self.assertTrue(store.failure_case("SIG")["resolved"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -292,8 +292,16 @@ class StateStore:
         payload: dict[str, Any],
         result_key: str,
         result: dict[str, Any],
+        failure_accounting: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """CAS the current checkpoint and persist its definite result atomically."""
+        """CAS the current checkpoint and persist its definite result atomically.
+
+        `failure_accounting`, when given, folds the cross-run FailureCase write/resolve into
+        the SAME transaction as the transition (R-M6), so a crash or a replay can never leave a
+        real failure unrecorded or a proven fix unresolved: `{"record": {signature,
+        classification, run_id}}` records the occurrence, `{"resolve_run": run_id}` resolves the
+        run's cases. Applied only on the first COMMIT (a REPLAY returns the saved result, and
+        the accounting already committed atomically), so counts never double."""
         payload_json = _encode(payload)
         requested_result_json = _encode(result)
         with self._connect() as connection:
@@ -335,6 +343,16 @@ class StateStore:
                 """,
                 (result_key, _encode(final_result), created_at),
             )
+            if isinstance(failure_accounting, dict):
+                record = failure_accounting.get("record")
+                if isinstance(record, dict) and record.get("signature") and record.get("run_id"):
+                    self._record_failure_case_tx(
+                        connection, record["signature"], record.get("classification"),
+                        record["run_id"],
+                    )
+                resolve_run = failure_accounting.get("resolve_run")
+                if isinstance(resolve_run, str) and resolve_run:
+                    self._resolve_failure_cases_tx(connection, resolve_run)
         return {"status": "COMMITTED", "result": final_result}
 
     def intent(
@@ -953,45 +971,56 @@ class StateStore:
         """
         if not isinstance(signature, str) or not signature:
             raise ValueError("FAILURE_SIGNATURE_INVALID")
-        now = _now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM failure_cases WHERE signature = ?", (signature,)
-            ).fetchone()
-            if existing is None:
-                connection.execute(
-                    """
-                    INSERT INTO failure_cases(
-                        signature, classification, run_ids_json, occurrences, resolved,
-                        first_seen_run, first_seen_at, last_seen_run, last_seen_at
-                    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
-                    """,
-                    (signature, classification, json.dumps([run_id]), int(resolved),
-                     run_id, now, run_id, now),
-                )
-            else:
-                if not resolved and bool(existing["resolved"]):
-                    # First failure after a resolution: a new unresolved streak, not more
-                    # evidence that the old (fixed) cause is still recurring.
-                    run_ids = [run_id]
-                else:
-                    run_ids = json.loads(existing["run_ids_json"])
-                    if run_id not in run_ids:
-                        run_ids.append(run_id)
-                connection.execute(
-                    """
-                    UPDATE failure_cases SET classification = ?, run_ids_json = ?,
-                        occurrences = ?, resolved = ?, last_seen_run = ?, last_seen_at = ?
-                    WHERE signature = ?
-                    """,
-                    (classification or existing["classification"], json.dumps(run_ids),
-                     existing["occurrences"] + 1, int(resolved), run_id, now, signature),
-                )
+            self._record_failure_case_tx(connection, signature, classification, run_id, resolved)
             row = connection.execute(
                 "SELECT * FROM failure_cases WHERE signature = ?", (signature,)
             ).fetchone()
         return _failure_case_row(row)
+
+    def _record_failure_case_tx(
+        self, connection: sqlite3.Connection, signature: str,
+        classification: str | None, run_id: str, resolved: bool = False,
+    ) -> None:
+        """The FailureCase insert/update, on a caller-supplied transaction, so it can be made
+        atomic with the state transition that observed the failure (R-M6) instead of a
+        best-effort post-commit write that a crash or a replay could drop."""
+        if not isinstance(signature, str) or not signature:
+            raise ValueError("FAILURE_SIGNATURE_INVALID")
+        now = _now()
+        existing = connection.execute(
+            "SELECT * FROM failure_cases WHERE signature = ?", (signature,)
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO failure_cases(
+                    signature, classification, run_ids_json, occurrences, resolved,
+                    first_seen_run, first_seen_at, last_seen_run, last_seen_at
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+                """,
+                (signature, classification, json.dumps([run_id]), int(resolved),
+                 run_id, now, run_id, now),
+            )
+            return
+        if not resolved and bool(existing["resolved"]):
+            # First failure after a resolution: a new unresolved streak, not more
+            # evidence that the old (fixed) cause is still recurring.
+            run_ids = [run_id]
+        else:
+            run_ids = json.loads(existing["run_ids_json"])
+            if run_id not in run_ids:
+                run_ids.append(run_id)
+        connection.execute(
+            """
+            UPDATE failure_cases SET classification = ?, run_ids_json = ?,
+                occurrences = ?, resolved = ?, last_seen_run = ?, last_seen_at = ?
+            WHERE signature = ?
+            """,
+            (classification or existing["classification"], json.dumps(run_ids),
+             existing["occurrences"] + 1, int(resolved), run_id, now, signature),
+        )
 
     def resolve_failure_cases_for_run(self, run_id: str) -> list[str]:
         """Mark every unresolved FailureCase this run participated in as resolved.
@@ -1002,19 +1031,28 @@ class StateStore:
         skipped."""
         if not isinstance(run_id, str) or not run_id:
             return []
-        resolved: list[str] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                "SELECT signature, run_ids_json FROM failure_cases WHERE resolved = 0"
-            ).fetchall()
-            for row in rows:
-                if run_id in json.loads(row["run_ids_json"]):
-                    connection.execute(
-                        "UPDATE failure_cases SET resolved = 1 WHERE signature = ?",
-                        (row["signature"],),
-                    )
-                    resolved.append(row["signature"])
+            resolved = self._resolve_failure_cases_tx(connection, run_id)
+        return resolved
+
+    def _resolve_failure_cases_tx(
+        self, connection: sqlite3.Connection, run_id: str
+    ) -> list[str]:
+        """Resolve this run's unresolved FailureCases on a caller-supplied transaction (R-M6)."""
+        if not isinstance(run_id, str) or not run_id:
+            return []
+        resolved: list[str] = []
+        rows = connection.execute(
+            "SELECT signature, run_ids_json FROM failure_cases WHERE resolved = 0"
+        ).fetchall()
+        for row in rows:
+            if run_id in json.loads(row["run_ids_json"]):
+                connection.execute(
+                    "UPDATE failure_cases SET resolved = 1 WHERE signature = ?",
+                    (row["signature"],),
+                )
+                resolved.append(row["signature"])
         return resolved
 
     def failure_case(self, signature: str) -> dict[str, Any] | None:
