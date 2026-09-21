@@ -6,6 +6,12 @@ suite had no version control before then.
 
 ## 2026-09-21
 
+子 skill 后续补强（本轮未改 workflow 核心代码）：
+
+- 统一 producer DraftContent 合同、merged SPEC/DAG 与恢复语义，修复 Review verdict/severity/澄清项语义及 NPL 位宽/overlay 错误硬规则；补 AC 覆盖、C++ 触发/排除与 XFlow 跨层字段合同。
+- 将 tom-autodebug 1.5.0 的完整 relay/tmux/进程取证脚本与回归并入 tom-diagnose，保留兼容配置；BGW 远程入口迁移、GitNexus 可选。
+- 新增 Review 固定提交范围收集器及隔离 Git 回归，未引入 QA 平台上传链；新增八个可复用模型场景，迁移范围及剩余控制器问题见 `SKILL_CONSOLIDATION.md`。
+
 skill 精简与自包含（减少对外部 skill 的依赖；控制面脚本/契约未变，均为文档/子 skill 内容）：
 
 - 精简 skill 数：把瘦身的 `setup-tom-autodev`（一次性项目注册子 skill）折进 `tom-autodev` 自身——注册能力保留为 `tom-autodev` 的「项目注册（setup）」相位，详情落到 `tom-autodev/references/setup.md`，SKILL.md 增一节短指针，语义不变（`start` 仍要求 `READY` profile；setup 仍是人工监督、不启 run/不生成代码/不触发 iPipe）。删除独立目录 `setup-tom-autodev/`；`scripts/install_links.py` 的自动枚举去掉对该名的显式分支（仅按 `tom-` 前缀）；README 结构/前置/参考文档同步，套件数 13 → 12
@@ -17,6 +23,7 @@ skill 精简与自包含（减少对外部 skill 的依赖；控制面脚本/契
 Codex round-3 复核修复（`tom-autodev-suite_review_report_77a933b.md`，分步进行）：
 
 - R-H1：schema 合法但前置绑定错的草案不再锁死 ProducerJob——`worker_driver` 在 `fulfill` 前新增 `_validate_before_fulfill()`，复用协议纯校验 `_predecessor_binding_error`（REVIEW 的 change_set_hash、PLAN/IMPLEMENT revision、DIAGNOSE frozen_revisions、SPEC/TASKS 覆盖）；不符即返回 `retry_allowed` 且不锁 job，修正稿可重投同一 frontier，不再 `PRODUCER_JOB_CONFLICT`。只用绑定校验（不含 envelope/审批校验），未批准的 gated 草案仍能 fulfill 并 park 在其闸门。`_submit_merged` 的 SPEC 半同样前置校验。回归 `807` 项全绿
+- R-H2（part 1/2，绑定感知的模块调度）：iPipe 多模块的"已通过"判定由 status/module 粗判改为绑定感知——协议抽出 `_ipipe_passed_modules(events)`（校验 pipeline/release-rule/环境/**revision** 对当前 submission）与公开 `ipipe_outstanding_modules(run_id)`，`_ipipe_outstanding_modules(events, content)` 复用同一核；`worker_driver._next_ipipe_module` 改为委托该协议判定，删除 worker 自己的 status-only `_ipipe_passed_modules`。修复后旧 revision 的成功（被修复改写后）不再被误当完成而跳过该模块（stuck-path A）。回归 `807` 项全绿（part 2：末模块 artifact 落盘后、状态提交前崩溃的可重放 finalize，下一步）
 
 ## 2026-09-20
 

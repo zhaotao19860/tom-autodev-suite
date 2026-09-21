@@ -1570,17 +1570,8 @@ class PhaseProtocol:
             return "APPROVAL_INPUT_MISMATCH"
         return None if approval.get("effective_decision") == "APPROVE" else "APPROVAL_REQUIRED"
 
-    def _ipipe_outstanding_modules(
-        self, events: list[dict[str, Any]], content: dict[str, Any]
-    ) -> list[str]:
-        """Required modules with no passing pipeline evidence yet.
-
-        Only a success can wait: a failure or a blocked environment is the answer for
-        the whole run, and holding it back to ask the remaining pipelines would delay
-        the diagnosis without changing it.
-        """
-        if content.get("status") != "SUCCESS":
-            return []
+    def _ipipe_required_modules(self, events: list[dict[str, Any]]) -> list[str]:
+        """The run's required-for-release modules, from its pinned profile."""
         intake = events[0].get("payload") if events else None
         profile_path = intake.get("profile_path") if isinstance(intake, dict) else None
         if not isinstance(profile_path, str) or not profile_path:
@@ -1589,20 +1580,32 @@ class PhaseProtocol:
         profile = loaded.get("profile") if loaded.get("ready") else None
         if not isinstance(profile, dict):
             return []
-        required = _required_modules(profile.get("pipeline_profile"))
+        return _required_modules(profile.get("pipeline_profile"))
+
+    def _ipipe_passed_modules(self, events: list[dict[str, Any]]) -> set[str]:
+        """Required modules whose archived SUCCESS evidence matches their CURRENT submission
+        binding — pipeline / release-rule / environment / revision (R-H2).
+
+        Binding-aware, not status-only: a success recorded against an old revision (later
+        superseded by a repair that changed the revision) no longer counts, so the worker's
+        "next module" decision matches this completion judgment instead of skipping a module
+        whose current code was never actually built."""
+        required = set(self._ipipe_required_modules(events))
         if not required:
-            return []
+            return set()
         run_id = events[0].get("run_id") if events else None
-        passed = {str(content.get("module"))}
         payload = events[-1].get("payload") if events else None
-        if not isinstance(payload, dict):
-            return [module for module in required if module not in passed]
-        loaded = load_profile(profile_path, check_paths=False)
+        if not run_id or not isinstance(payload, dict):
+            return set()
+        intake = events[0].get("payload") if events else None
+        profile_path = intake.get("profile_path") if isinstance(intake, dict) else None
+        loaded = load_profile(profile_path, check_paths=False) if isinstance(profile_path, str) else {}
         profile = loaded.get("profile") if loaded.get("ready") else None
         pipeline = profile.get("pipeline_profile") if isinstance(profile, dict) else None
         environment = profile.get("environment_profile") if isinstance(profile, dict) else None
         expected_environment = _canonical_hash(environment)
-        for artifact in self.artifacts.phase_artifacts(run_id, "IPIPE") if run_id else []:
+        passed: set[str] = set()
+        for artifact in self.artifacts.phase_artifacts(run_id, "IPIPE"):
             if not artifact.get("valid"):
                 continue
             envelope = artifact.get("envelope")
@@ -1626,6 +1629,37 @@ class PhaseProtocol:
             ):
                 continue
             passed.add(str(module))
+        return passed
+
+    def ipipe_outstanding_modules(self, run_id: str) -> list[str]:
+        """Required modules still lacking a current-binding SUCCESS, computed from the run's
+        archived evidence (R-H2). Empty when there are no required modules or all have passed.
+        The worker calls this so its module scheduling shares the protocol's binding-aware
+        completion judgment rather than a status-only over-approximation."""
+        events = self.state.events(run_id)
+        required = self._ipipe_required_modules(events)
+        if not required:
+            return []
+        passed = self._ipipe_passed_modules(events)
+        return [module for module in required if module not in passed]
+
+    def _ipipe_outstanding_modules(
+        self, events: list[dict[str, Any]], content: dict[str, Any]
+    ) -> list[str]:
+        """Required modules with no passing pipeline evidence yet.
+
+        Only a success can wait: a failure or a blocked environment is the answer for
+        the whole run, and holding it back to ask the remaining pipelines would delay
+        the diagnosis without changing it.
+        """
+        if content.get("status") != "SUCCESS":
+            return []
+        required = self._ipipe_required_modules(events)
+        if not required:
+            return []
+        passed = self._ipipe_passed_modules(events)
+        # The just-stored current module counts even if the archived read raced it.
+        passed.add(str(content.get("module")))
         return [module for module in required if module not in passed]
 
     def _ipipe_binding_error(

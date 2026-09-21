@@ -559,7 +559,7 @@ def _execute_ipipe(
     # the run in IPIPE and the driver loop re-enters here for the next module; the last
     # module's ingestion performs the transition. Recomputed from archived evidence each
     # call, so a restart resumes from the first module still outstanding.
-    module = _next_ipipe_module(orchestrator, run_id, action, profile)
+    module = _next_ipipe_module(orchestrator, run_id, action, profile, knowledge_sync)
     if module is None:
         return {"ok": False, "reason_code": "IPIPE_NO_OUTSTANDING_MODULE", "run_id": run_id}
     binding = _ipipe_module_binding(orchestrator, run_id, action, module)
@@ -620,37 +620,24 @@ def _execute_ipipe(
 
 
 def _next_ipipe_module(
-    orchestrator: Any, run_id: str, action: dict[str, Any], profile: dict[str, Any]
+    orchestrator: Any, run_id: str, action: dict[str, Any], profile: dict[str, Any],
+    knowledge_sync: Any | None = None,
 ) -> str | None:
     """The next module whose pipeline the worker should drive (HIGH-003 part 2).
 
     A profile that registers no `required_for_release` pipelines is the single-module case:
-    use the module the IPIPE binding was pinned to. Otherwise return the first required
-    module with no archived passing evidence yet — the outstanding set shrinks as each
-    module's evidence lands, so this walks every required module and returns None once all
-    have passed (the last ingestion already performed the transition)."""
+    use the module the IPIPE binding was pinned to. Otherwise defer to the protocol's
+    binding-aware outstanding computation (R-H2) — a success recorded against an old revision
+    (superseded by a repair) no longer counts, so the worker never skips a module whose
+    current code was not actually built. Returns None once every required module has a
+    current-binding success."""
     from phase_protocol import _required_modules
 
     required = _required_modules(profile.get("pipeline_profile"))
     if not required:
         return (action.get("controller_binding") or {}).get("module")
-    passed = _ipipe_passed_modules(orchestrator, run_id)
-    for module in required:
-        if module not in passed:
-            return module
-    return None
-
-
-def _ipipe_passed_modules(orchestrator: Any, run_id: str) -> set[str]:
-    """Modules that already have archived, valid SUCCESS pipeline evidence for this run."""
-    passed: set[str] = set()
-    for artifact in orchestrator.artifacts.phase_artifacts(run_id, "IPIPE"):
-        if not artifact.get("valid"):
-            continue
-        content = (artifact.get("envelope") or {}).get("content") or {}
-        if content.get("status") == "SUCCESS" and isinstance(content.get("module"), str):
-            passed.add(content["module"])
-    return passed
+    outstanding = orchestrator.phase_protocol(knowledge_sync).ipipe_outstanding_modules(run_id)
+    return outstanding[0] if outstanding else None
 
 
 def _ipipe_module_binding(
