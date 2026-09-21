@@ -759,6 +759,46 @@ def _build_ipipe_evidence(binding: dict[str, Any], monitored: dict[str, Any]) ->
     }
 
 
+def _verify_required_releases(
+    orchestrator: Any, run_id: str, runtime: Any, revisions: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Gate RELEASE_SUCCESS on EVERY required-for-release module being published (R-H3).
+
+    The single-module path already verified the latest IPIPE build; a profile that registers
+    several `required_for_release` pipelines must not release on that one build while another
+    module was never published. Returns None when there are no extra required modules or all
+    are verified-published; otherwise a RELEASE_WAITING park (a module not yet published) or a
+    failure (verify failed / a required module has no success build)."""
+    from phase_protocol import _required_modules
+
+    required = _required_modules(profile.get("pipeline_profile"))
+    if not required:
+        return None
+    builds: dict[str, str] = {}
+    for artifact in orchestrator.artifacts.phase_artifacts(run_id, "IPIPE"):
+        if not artifact.get("valid"):
+            continue
+        content = (artifact.get("envelope") or {}).get("content") or {}
+        if (content.get("status") == "SUCCESS" and content.get("module") in required
+                and isinstance(content.get("build_id"), str)):
+            builds[content["module"]] = content["build_id"]
+    for module in required:
+        build_id = builds.get(module)
+        if not build_id:
+            return {"ok": False, "reason_code": "RELEASE_EVIDENCE_INCOMPLETE",
+                    "run_id": run_id, "module": module}
+        verified = runtime.verify_release(build_id, revisions)
+        if not verified.get("ok"):
+            if verified.get("status") == "RELEASE_WAITING":
+                return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                        "parked": "RELEASE_WAITING", "controller": "release",
+                        "module": module, "build_id": build_id, "detail": verified}
+            return {"ok": False, "reason_code": "RELEASE_VERIFY_FAILED", "run_id": run_id,
+                    "module": module, "build_id": build_id, "detail": verified}
+    return None
+
+
 def _execute_release(
     orchestrator: Any, run_id: str, action: dict[str, Any], ipipe_api: Any,
     knowledge_sync: Any | None = None,
@@ -801,6 +841,12 @@ def _execute_release(
                     "controller": "release", "build_id": build_id, "detail": verified}
         return {"ok": False, "reason_code": "RELEASE_VERIFY_FAILED", "detail": verified,
                 "run_id": run_id, "build_id": build_id}
+    gate = _verify_required_releases(orchestrator, run_id, runtime, derived["revisions"], pinned["profile"])
+    if gate is not None:
+        # A multi-module release only lands once EVERY required-for-release module's build is
+        # published — otherwise the last module's success would release the whole run while
+        # another module was never published (R-H3).
+        return gate
     content = _build_release_evidence(ipipe_content, verified)
     ingested = protocol.ingest_release_evidence(
         run_id, content, {"approval_id": approval_id, "input_hash": action.get("input_hash")}

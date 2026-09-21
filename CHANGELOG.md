@@ -27,6 +27,7 @@ Codex round-3 复核修复（`tom-autodev-suite_review_report_77a933b.md`，分�
 - R-H2（part 2/2，崩溃-提交窗口可重放 finalize）：末模块证据已落盘、IPIPE→RELEASE 状态提交前崩溃时，`_next_ipipe_module` 返回 None 但 run 仍在 IPIPE——`_execute_ipipe` 不再 dead-end 于 `IPIPE_NO_OUTSTANDING_MODULE`，而是调 `_finalize_ipipe` 重放最后一份归档 SUCCESS 证据的 ingest（同 module action id 幂等重存，outstanding 空即执行 IPIPE→RELEASE 转移）；无可重放 SUCCESS 证据则回落原停滞报告。回归 `808` 项全绿
 - R-M1：merged SPEC+TASKS 在 SPEC 提交后、TASKS job 入队前崩溃的更早窗口现可恢复——`worker_driver._recover_merged_tasks` 从合并 producer job（键于 SPEC action，仍持 `{spec, dag}`）确定性补建 TASKS ProducerJob，`_drive` 的 PRODUCER_WAIT 分支在无 fulfilled TASKS job 时先试恢复，再走 HIGH-001 auto-consume 完成 TASKS，不重唤模型；补该窗口的崩溃注入用例。回归 `809` 项全绿
 - R-M6：FailureCase 记账不再是 commit 后 best-effort——`record_failure_case`/`resolve_failure_cases_for_run` 抽出连接内 `_tx` 版，`commit_transition_result` 新增可选 `failure_accounting`，把入库（IPIPE→DIAGNOSE）/解决（RELEASE_SUCCESS）折进与状态提交**同一事务**：无 commit↔记账崩溃窗口、best-effort DB 失败不再丢记，且仅首次 COMMIT 执行（REPLAY 返回已存结果）故计数不翻倍；移除两处 commit 后调用，补 state_store 原子记账 + 重放幂等用例。回归 `811` 项全绿
+- R-H3（多模块发布聚合）：`_execute_release` 只 `verify_release` 最后一个 IPIPE 模块会在多必需发布模块场景过早判 RELEASE_SUCCESS——新增 `worker_driver._verify_required_releases`，对 profile 的每个 `required_for_release` 模块（build_id 取各自归档 SUCCESS 证据）逐一 `verify_release`：任一未发布 → park `RELEASE_WAITING`（不强推），必需模块无 SUCCESS build → `RELEASE_EVIDENCE_INCOMPLETE`，全部发布验证通过才落 RELEASE_SUCCESS；无 required 列表（单模块）行为不变。补聚合/等待/缺失/单模块四用例。回归 `815` 项全绿
 
 ## 2026-09-20
 

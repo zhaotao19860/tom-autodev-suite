@@ -2266,5 +2266,66 @@ class IpipeModuleDriveTests(unittest.TestCase):
         self.assertIsNone(worker_driver._finalize_ipipe(_O({"valid": False}), "run", None))
 
 
+class ReleaseAggregationTests(unittest.TestCase):
+    """R-H3: a multi-module release only lands once every required module is published."""
+
+    _MULTI = {"pipeline_profile": {"pipelines": [
+        {"module": "x86bgw", "required_for_release": True},
+        {"module": "bgwagent", "required_for_release": True},
+    ]}}
+
+    class _Art:
+        def __init__(self, modules):
+            self._modules = modules
+
+        def phase_artifacts(self, run_id, phase):
+            return [
+                {"valid": True, "envelope": {"content": {
+                    "status": "SUCCESS", "module": m, "build_id": f"build-{m}"}}}
+                for m in self._modules
+            ]
+
+    class _Orch:
+        def __init__(self, modules):
+            self.artifacts = ReleaseAggregationTests._Art(modules)
+
+    class _Runtime:
+        def __init__(self, waiting=(), failing=()):
+            self.waiting = set(waiting)
+            self.failing = set(failing)
+            self.calls = []
+
+        def verify_release(self, build_id, revisions):
+            self.calls.append(build_id)
+            module = build_id.replace("build-", "")
+            if module in self.waiting:
+                return {"ok": False, "status": "RELEASE_WAITING"}
+            if module in self.failing:
+                return {"ok": False, "status": "RELEASE_FAILED"}
+            return {"ok": True, "release_id": f"rel-{module}"}
+
+    def test_single_module_profile_gates_nothing(self):
+        self.assertIsNone(worker_driver._verify_required_releases(
+            self._Orch(["x86bgw"]), "run", self._Runtime(), {}, {"pipeline_profile": {}}))
+
+    def test_all_required_published_passes(self):
+        runtime = self._Runtime()
+        self.assertIsNone(worker_driver._verify_required_releases(
+            self._Orch(["x86bgw", "bgwagent"]), "run", runtime, {}, self._MULTI))
+        self.assertEqual(sorted(runtime.calls), ["build-bgwagent", "build-x86bgw"])
+
+    def test_one_module_unpublished_parks_release_waiting(self):
+        gate = worker_driver._verify_required_releases(
+            self._Orch(["x86bgw", "bgwagent"]), "run",
+            self._Runtime(waiting=["bgwagent"]), {}, self._MULTI)
+        self.assertEqual((gate["parked"], gate["module"]), ("RELEASE_WAITING", "bgwagent"))
+
+    def test_missing_required_build_is_incomplete(self):
+        gate = worker_driver._verify_required_releases(
+            self._Orch(["x86bgw"]), "run", self._Runtime(), {}, self._MULTI)
+        self.assertEqual(
+            (gate["reason_code"], gate["module"]), ("RELEASE_EVIDENCE_INCOMPLETE", "bgwagent"))
+
+
 if __name__ == "__main__":
     unittest.main()
