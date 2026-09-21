@@ -31,6 +31,8 @@ Codex round-3 复核修复（`tom-autodev-suite_review_report_77a933b.md`，分�
 - R-M5：重复故障路由不再信模型输出的签名——新增 `_authoritative_failure_signature(run_id)` 从归档的运行时 FAILURE 证据取签名，DIAGNOSE 路由的跨 run 逃逸守卫改用该权威签名（仅当无运行时失败证据、如 REVIEW 来源诊断时回落模型签名）；模型即便报不同签名也无法绕过对已知复现根因的升级。补权威覆盖用例（证据 `SIG-real` 已知跨 run，诊断报 `SIG-model-dodge` 仍升级 ARCHITECTURE_REVIEW）。回归 `816` 项全绿
 - R-M4：失败签名分离"位置"与"根因"——`_failure_signature` 现在把每个失败 job 的错误消息经 `_normalize_error`（剔除 hex id/hash、路径、数字/行号/时间戳等易变 token）后的指纹纳入签名：同 stage/job 的两个不同错误（不同断言/异常）得到不同签名、不再合并成一个跨 run FailureCase 被误升级；同一根因即便消息只差 build id/行号/时间/路径仍映射同一签名。补"不同错误不合并""同错误跨 build 仍匹配"两用例。回归 `818` 项全绿
 - R-M2：workflow_spec 版本漂移守卫——`orchestrator.next()` 先跑 `_workflow_spec_drift`，run 的 pinned `workflow_spec_hash`（G0 冻结）≠ live `canonical_hash()` 时在任何副作用前返回 `WORKFLOW_SPEC_DRIFT`，不再让 run 以 V1 授权静默执行改版后的 V2 策略（scope/gate/transition），须显式迁移或还原 spec；无 pin 的旧 run 不守卫（worker `classify_next` 已把非 ok next() 映射为 BLOCKED 而 park）。补漂移阻断/还原解除用例。回归 `819` 项全绿
+- R-M3：replay/跨模型差分按完整 producer identity 匹配——`cross_model_diff` 改为**按 prompt version 分组**、组内比模型（组间不再借用彼此的输出掩盖分歧），整体 DIVERGENT/CONSISTENT/INSUFFICIENT 由各组聚合（例 `[p1/A→X, p1/B→Y, p2/A→Y]` 得整体 DIVERGENT、`groups[p1]=DIVERGENT`、`groups[p2]=INSUFFICIENT_EVIDENCE`，旧的仅按 model 键会误判 CONSISTENT）；`golden_replay` 的 receipt 佐证要求缓存条目 **prompt+model 身份一致**（不再仅凭 output hash 相同），错误 prompt/model 的缓存不能为 receipt 作证。补分组分歧 + 身份佐证两用例。回归 `821` 项全绿
+- Codex round-3 复核 9 项 finding（HIGH R-H1/H2/H3、MEDIUM R-M1..M6）全部修复并各带回归用例，控制面回归 `821` 项全绿
 
 ## 2026-09-20
 

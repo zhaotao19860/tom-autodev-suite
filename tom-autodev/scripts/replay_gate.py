@@ -13,29 +13,49 @@ def _output_hash(draft: Any) -> str:
 
 
 def cross_model_diff(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compare the draft-cache entries for one input across the models that produced them.
+    """Compare the draft-cache entries for one input across the models that produced them,
+    grouped by prompt identity (R-M3).
 
-    Byte-identical output only proves integrity, not quality parity — but a divergence is a
-    hard signal a cross-model swap changed behavior. Needs at least two *known* model
-    identities to conclude: with fewer (e.g. the agent-turn backend records model=None),
-    it returns INSUFFICIENT_EVIDENCE rather than a false CONSISTENT. Advisory: it reports,
-    it does not itself block.
+    Models are only comparable within the SAME prompt version: otherwise a different prompt's
+    output for model A could stand in for A in another prompt's group and mask a real
+    divergence. Each prompt group needs at least two *known* model identities to conclude
+    (with fewer — e.g. the agent-turn backend records model=None — it is INSUFFICIENT_EVIDENCE
+    rather than a false CONSISTENT); a group divergence is a hard signal a cross-model swap
+    changed behavior. The overall status is DIVERGENT if any group diverges, else CONSISTENT
+    if any group could be compared, else INSUFFICIENT_EVIDENCE. Byte-identical output only
+    proves integrity, not quality parity. Advisory: it reports, it does not itself block.
     """
-    by_model = {(entry.get("model") or "agent-turn"): entry["output_hash"] for entry in entries}
-    known_models = sorted({entry.get("model") for entry in entries if entry.get("model")})
-    distinct_outputs = sorted(set(by_model.values()))
-    if len(known_models) < 2:
-        status = "INSUFFICIENT_EVIDENCE"
-    elif len(distinct_outputs) <= 1:
-        status = "CONSISTENT"
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        groups.setdefault(str(entry.get("prompt_version") or ""), []).append(entry)
+    group_reports: dict[str, dict[str, Any]] = {}
+    for prompt, group in groups.items():
+        known_models = sorted({e.get("model") for e in group if e.get("model")})
+        distinct = sorted({e["output_hash"] for e in group})
+        if len(known_models) < 2:
+            status = "INSUFFICIENT_EVIDENCE"
+        elif len(distinct) <= 1:
+            status = "CONSISTENT"
+        else:
+            status = "DIVERGENT"
+        group_reports[prompt] = {
+            "known_models": known_models,
+            "models": {(e.get("model") or "agent-turn"): e["output_hash"] for e in group},
+            "distinct_outputs": len(distinct),
+            "status": status,
+        }
+    statuses = {report["status"] for report in group_reports.values()}
+    if "DIVERGENT" in statuses:
+        overall = "DIVERGENT"
+    elif "CONSISTENT" in statuses:
+        overall = "CONSISTENT"
     else:
-        status = "DIVERGENT"
+        overall = "INSUFFICIENT_EVIDENCE"
     return {
         "input_hashes": sorted({entry["input_hash"] for entry in entries}),
-        "models": by_model,
-        "known_models": known_models,
-        "distinct_outputs": len(distinct_outputs),
-        "status": status,
+        "groups": group_reports,
+        "distinct_outputs": len(sorted({entry["output_hash"] for entry in entries})),
+        "status": overall,
     }
 
 
@@ -44,9 +64,11 @@ def golden_replay(state: Any, run_id: str) -> dict[str, Any]:
 
     For every producer fill the run recorded, confirm (1) a cached draft exists for its
     input_hash, (2) each cached draft still hashes to its stored output_hash (integrity),
-    and (3) the receipt's own output_hash is backed by one of those cached drafts — so a
-    receipt cannot claim an output that no cached draft actually produced. Returns ok=False
-    with the offending inputs otherwise — the basis a golden-replay CI gate reads. Read-only.
+    and (3) the receipt's own output_hash is backed by a cached draft of the SAME producer
+    identity (prompt version + model), so a receipt cannot be vouched for by a cache entry
+    from a different prompt/model that merely happens to share an output hash (R-M3). Returns
+    ok=False with the offending inputs otherwise — the basis a golden-replay CI gate reads.
+    Read-only.
     """
     receipts = state.model_execution_receipts(run_id)
     checked = 0
@@ -65,7 +87,11 @@ def golden_replay(state: Any, run_id: str) -> dict[str, Any]:
             if _output_hash(entry["draft"]) != entry["output_hash"]:
                 mismatches.append({"input_hash": input_hash, "model": entry.get("model"),
                                    "reason": "cache_hash_drift"})
-            if entry["output_hash"] == receipt_output:
+            if (
+                entry["output_hash"] == receipt_output
+                and entry.get("prompt_version") == receipt.get("prompt_version")
+                and entry.get("model") == receipt.get("model")
+            ):
                 backed = True
         if not backed:
             mismatches.append({"input_hash": input_hash, "reason": "receipt_not_backed_by_cache",
