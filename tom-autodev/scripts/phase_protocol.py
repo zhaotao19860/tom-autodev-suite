@@ -532,6 +532,18 @@ class PhaseProtocol:
             return "SOURCE_REVISION_MISMATCH"
         return None
 
+    def _workflow_spec_drift(self, run_id: str) -> dict[str, Any] | None:
+        """Refuse to add a new side effect under a drifted workflow spec (R4-M2).
+
+        The shared execution-time guard, so `complete`/`ingest_*` (reached directly via the CLI,
+        bypassing `Orchestrator.next`) cannot run V2 policy on a V1 authorization. Callers place
+        it AFTER their idempotent-replay short-circuit, so re-reading an already-committed result
+        is unaffected — only a fresh side effect is blocked."""
+        drift = workflow_spec.spec_drift(self.state.events(run_id))
+        if drift is None:
+            return None
+        return _failure("WORKFLOW_SPEC_DRIFT", run_id=run_id, **drift)
+
     def complete(self, run_id: str, envelope: dict[str, Any]) -> dict[str, Any]:
         try:
             return self._complete(run_id, envelope)
@@ -551,6 +563,9 @@ class PhaseProtocol:
             if existing.get("draft_hash") != draft_hash:
                 return _failure("COMPLETION_CONFLICT", run_id=run_id)
             return self._validated_cached_completion(run_id, existing)
+        drift = self._workflow_spec_drift(run_id)
+        if drift is not None:
+            return drift
         if self._blocking_pending(run_id):
             return _failure("RECOVERY_REQUIRED", run_id=run_id, retry_allowed=False)
         action = self.next(run_id)
@@ -1237,6 +1252,9 @@ class PhaseProtocol:
             if existing.get("ingest_hash") != content_hash:
                 return _failure("COMPLETION_CONFLICT", run_id=run_id)
             return self._validated_cached_ipipe_ingestion(run_id, existing)
+        drift = self._workflow_spec_drift(run_id)
+        if drift is not None:
+            return drift
         events = self.state.events(run_id)
         if events and events[-1].get("state") != "IPIPE":
             prior = self.artifacts.latest_phase(run_id, "IPIPE", None)
@@ -1471,6 +1489,9 @@ class PhaseProtocol:
             if existing.get("ingest_hash") != content_hash:
                 return _failure("COMPLETION_CONFLICT", run_id=run_id)
             return self._validated_cached_release_ingestion(run_id, existing)
+        drift = self._workflow_spec_drift(run_id)
+        if drift is not None:
+            return drift
         events = self.state.events(run_id)
         if events and events[-1].get("state") != "RELEASE":
             prior = self.artifacts.latest_phase(run_id, "RELEASE", None)

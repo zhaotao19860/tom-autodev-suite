@@ -181,21 +181,14 @@ class Orchestrator:
         MEDIUM-001 pins `workflow_spec_hash` (and the class's phase modes) at G0, but knowledge
         scope, gates and transitions are still read from the live module. If the deployed spec
         changed under a paused run, continuing would run it under an unapproved policy while its
-        receipt still cites the old version. Rather than silently re-label or re-route, `next()`
-        refuses with `WORKFLOW_SPEC_DRIFT` at the read/decision point — before any side effect —
-        so the run is explicitly migrated (or the spec restored) instead of executing V2 policy
-        on a V1 authorization. A legacy run with no pin (pre-v2 INTAKE) is not guarded."""
-        events = self.state.events(run_id)
-        pinned = workflow_spec.pinned_spec_hash(events)
-        if pinned is None:
+        receipt still cites the old version. Rather than silently re-label or re-route, refuse
+        with `WORKFLOW_SPEC_DRIFT` before any side effect so the run is explicitly migrated (or
+        the spec restored). A legacy run with no pin (pre-v2 INTAKE) is not guarded. The same
+        pure check gates the protocol's completion/ingestion entries (R4-M2)."""
+        drift = workflow_spec.spec_drift(self.state.events(run_id))
+        if drift is None:
             return None
-        current = workflow_spec.canonical_hash()
-        if pinned == current:
-            return None
-        return {
-            "ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT", "run_id": run_id,
-            "pinned_spec_hash": pinned, "current_spec_hash": current,
-        }
+        return {"ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT", "run_id": run_id, **drift}
 
     def _stale_submit_evidence(self, run_id: str) -> dict[str, Any] | None:
         """Refuse a SUBMIT action whose Review no longer covers its Change Set."""

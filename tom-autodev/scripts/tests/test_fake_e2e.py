@@ -301,6 +301,22 @@ class FakeE2ETests(unittest.TestCase):
         # Restoring the spec unblocks the run — the pin is honoured, not silently re-labelled.
         self.assertTrue(self.orchestrator.next(run_id)["ok"])
 
+    def test_complete_phase_also_blocks_on_workflow_spec_drift(self):
+        # R4-M2: the drift guard is a shared execution-time check, not only on next() — a direct
+        # complete_phase entry (which bypasses Orchestrator.next) refuses under drift too, before
+        # any side effect.
+        import workflow_spec
+
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-816", "I15ClP2KW4ZGAK", "full")
+        real = workflow_spec.canonical_hash
+        workflow_spec.canonical_hash = lambda: "drifted-spec-hash"
+        try:
+            blocked = self.orchestrator.complete_phase(
+                run_id, {"run_id": run_id, "action_id": "x"}, knowledge_sync=knowledge)
+        finally:
+            workflow_spec.canonical_hash = real
+        self.assertEqual(blocked["reason_code"], "WORKFLOW_SPEC_DRIFT")
+
     def test_bgw_and_xflow_enter_one_comate_controller_with_exact_project_binding(self):
         for project, card, parent, skill in (
             ("bgw", "BGW-101", "I15ClP2KW4ZGAK", None),

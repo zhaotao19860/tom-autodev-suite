@@ -348,6 +348,22 @@ def pinned_spec_hash(events: list[dict[str, Any]] | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def spec_drift(events: list[dict[str, Any]] | None) -> dict[str, str] | None:
+    """`{pinned_spec_hash, current_spec_hash}` when a run's pinned workflow_spec version no
+    longer matches the live spec, else None (R-M2 / R4-M2).
+
+    The shared pure check behind every execution-time drift guard: a run pins its spec hash at
+    G0, so if the deployed spec changed under it, continuing would run it under an unapproved
+    policy. A legacy run with no pin returns None (not guarded)."""
+    pinned = pinned_spec_hash(events)
+    if pinned is None:
+        return None
+    current = canonical_hash()
+    if pinned == current:
+        return None
+    return {"pinned_spec_hash": pinned, "current_spec_hash": current}
+
+
 # Per-phase knowledge / collaboration write policy (slimming Stage B). Each archived phase
 # artifact declares whether it publishes a human-readable KU doc and/or comments the iCafe
 # card. The artifact itself is ALWAYS stored in the artifact_store — correctness and

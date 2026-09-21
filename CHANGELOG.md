@@ -42,6 +42,10 @@ Codex round-3 复核修复（`tom-autodev-suite_review_report_77a933b.md`，分�
 - R-M3：replay/跨模型差分按完整 producer identity 匹配——`cross_model_diff` 改为**按 prompt version 分组**、组内比模型（组间不再借用彼此的输出掩盖分歧），整体 DIVERGENT/CONSISTENT/INSUFFICIENT 由各组聚合（例 `[p1/A→X, p1/B→Y, p2/A→Y]` 得整体 DIVERGENT、`groups[p1]=DIVERGENT`、`groups[p2]=INSUFFICIENT_EVIDENCE`，旧的仅按 model 键会误判 CONSISTENT）；`golden_replay` 的 receipt 佐证要求缓存条目 **prompt+model 身份一致**（不再仅凭 output hash 相同），错误 prompt/model 的缓存不能为 receipt 作证。补分组分歧 + 身份佐证两用例。回归 `821` 项全绿
 - Codex round-3 复核 9 项 finding（HIGH R-H1/H2/H3、MEDIUM R-M1..M6）全部修复并各带回归用例，控制面回归 `821` 项全绿
 
+Codex round-4 复核修复（`tom-autodev-suite_review_report_ce46b24.md`，多为 round-3 修复的更深边界；分步进行）：
+
+- R4-M2：workflow_spec 漂移守卫下沉为共享纯校验 `workflow_spec.spec_drift(events)`——`phase_protocol._workflow_spec_drift` 在 `_complete` / `_ingest_ipipe_evidence` / `_ingest_release_evidence` 的幂等短路之后、任何副作用之前调用，故直连 `complete-phase`/ingest（绕过 `Orchestrator.next`）也不再能以 V1 授权执行改版后的 V2 策略；只读幂等回放不受影响。补 complete_phase 漂移阻断用例。回归 `822` 项全绿
+
 ## 2026-09-20
 
 Codex 评审全量修复（分步进行；每步全绿后推进）：
