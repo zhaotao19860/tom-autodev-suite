@@ -279,6 +279,28 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(express_payload["change_class"], "express")
         self.assertNotEqual(express_payload["workflow_modes"], payload["workflow_modes"])
 
+    def test_next_blocks_when_the_workflow_spec_drifts_from_the_run_pin(self):
+        # R-M2: a run pins the workflow_spec version at G0; if the deployed spec changes under
+        # it, next() refuses with WORKFLOW_SPEC_DRIFT before any side effect rather than running
+        # the new policy on the old authorization.
+        import workflow_spec
+
+        started = self.orchestrator.start(
+            "BGW-814", "bgw", requirement_snapshot=snapshot("BGW-814"))
+        run_id = started["run_id"]
+        self.assertTrue(self.orchestrator.next(run_id)["ok"])  # pinned == live
+
+        real = workflow_spec.canonical_hash
+        workflow_spec.canonical_hash = lambda: "drifted-spec-hash"
+        try:
+            drifted = self.orchestrator.next(run_id)
+        finally:
+            workflow_spec.canonical_hash = real
+        self.assertEqual(drifted["reason_code"], "WORKFLOW_SPEC_DRIFT")
+        self.assertEqual(drifted["current_spec_hash"], "drifted-spec-hash")
+        # Restoring the spec unblocks the run — the pin is honoured, not silently re-labelled.
+        self.assertTrue(self.orchestrator.next(run_id)["ok"])
+
     def test_bgw_and_xflow_enter_one_comate_controller_with_exact_project_binding(self):
         for project, card, parent, skill in (
             ("bgw", "BGW-101", "I15ClP2KW4ZGAK", None),

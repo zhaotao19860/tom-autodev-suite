@@ -162,6 +162,9 @@ class Orchestrator:
 
     def next(self, run_id: str) -> dict[str, Any]:
         """Return the next Comate-owned phase/controller action without remote writes."""
+        drift = self._workflow_spec_drift(run_id)
+        if drift is not None:
+            return drift
         was_submit = self.status(run_id).get("state") == "SUBMIT"
         recovered = self._recover_skipped_submit(run_id)
         if isinstance(recovered, dict) and not recovered.get("ok"):
@@ -171,6 +174,28 @@ class Orchestrator:
             if stale is not None:
                 return stale
         return self.phase_protocol().next(run_id)
+
+    def _workflow_spec_drift(self, run_id: str) -> dict[str, Any] | None:
+        """Block a run whose pinned workflow_spec version no longer matches the live spec (R-M2).
+
+        MEDIUM-001 pins `workflow_spec_hash` (and the class's phase modes) at G0, but knowledge
+        scope, gates and transitions are still read from the live module. If the deployed spec
+        changed under a paused run, continuing would run it under an unapproved policy while its
+        receipt still cites the old version. Rather than silently re-label or re-route, `next()`
+        refuses with `WORKFLOW_SPEC_DRIFT` at the read/decision point — before any side effect —
+        so the run is explicitly migrated (or the spec restored) instead of executing V2 policy
+        on a V1 authorization. A legacy run with no pin (pre-v2 INTAKE) is not guarded."""
+        events = self.state.events(run_id)
+        pinned = workflow_spec.pinned_spec_hash(events)
+        if pinned is None:
+            return None
+        current = workflow_spec.canonical_hash()
+        if pinned == current:
+            return None
+        return {
+            "ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT", "run_id": run_id,
+            "pinned_spec_hash": pinned, "current_spec_hash": current,
+        }
 
     def _stale_submit_evidence(self, run_id: str) -> dict[str, Any] | None:
         """Refuse a SUBMIT action whose Review no longer covers its Change Set."""
