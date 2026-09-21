@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 import re
@@ -140,6 +142,7 @@ class CafeClient:
         digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
         return f"<!-- {_COMMENT_PREFIX}:{digest} -->"
 
+    @guard_execution
     def comment(self, card_id: str, content: str, idempotency_key: str) -> dict[str, Any]:
         parsed = self._parse_card_id(card_id)
         if parsed is None:
@@ -224,6 +227,7 @@ class CafeClient:
         receipt = self._comment_receipt(canonical_id, verified["comment"], duplicate=False)
         return self._persist_comment_receipt(intent, receipt)
 
+    @guard_execution
     def update_status(self, card_id: str, status: str, expected_current: str) -> dict[str, Any]:
         parsed = self._parse_card_id(card_id)
         if parsed is None:
@@ -366,6 +370,7 @@ class CafeClient:
             }
         )
 
+    @guard_execution
     def close(
         self,
         card_id: str,

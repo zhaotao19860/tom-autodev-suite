@@ -605,6 +605,9 @@ class AutoResumeHookTests(unittest.TestCase):
         def latest_states(self):
             return [{"run_id": "run-1", "state": "PLAN"}]
 
+        def events(self, run_id):
+            return []  # This fixture represents a legacy handoff without a policy pin.
+
         def incomplete_handoffs(self, run_id):
             return [self.handoff] if run_id == "run-1" and self.handoff else []
 

@@ -226,6 +226,10 @@ class PhaseProtocolTests(unittest.TestCase):
             self.state.transition(run_id, state, payload)
             with self.subTest(state=state):
                 action = self.protocol().next(run_id)
+                if state == "RELEASE":
+                    self.assertFalse(action["ok"], action)
+                    self.assertEqual(action["reason_code"], "PIPELINE_PLAN_REQUIRED")
+                    continue
                 self.assertEqual(action["controller"], controller)
                 self.assertIsNone(action["child_skill"])
         self.state.transition("run-terminal", "RELEASE_SUCCESS", {})

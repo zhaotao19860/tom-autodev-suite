@@ -18,6 +18,8 @@ transition policy never authorised.
 
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -151,6 +153,7 @@ def plan(orchestrator: Any, run_id: str, previous_path: str | Path) -> dict[str,
     }
 
 
+@guard_execution
 def apply(orchestrator: Any, run_id: str, approval_id: str, previous_path: str | Path) -> dict[str, Any]:
     """Move the pin against an approval bound to this exact move."""
     key = _next_repin_key(orchestrator.state, run_id)
@@ -182,6 +185,7 @@ def apply(orchestrator: Any, run_id: str, approval_id: str, previous_path: str |
     return {"ok": True, "reason_code": "OK", "run_id": run_id, **stored}
 
 
+@guard_execution
 def request(
     orchestrator: Any,
     run_id: str,

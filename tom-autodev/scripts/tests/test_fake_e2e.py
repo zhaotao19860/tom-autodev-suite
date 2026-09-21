@@ -21,6 +21,8 @@ from orchestrator import main as cli_main
 import worker_driver
 from clients.icafe_client import CafeClient
 from knowledge_sync import KnowledgeSync
+from pipeline_plan import frozen_plan
+from workflow_spec import WORKFLOW_VERSION
 
 from test_collaboration import FakeGroupClient
 from test_ipipe_runtime import FakeApi, trigger_binding
@@ -1044,7 +1046,7 @@ class FakeE2ETests(unittest.TestCase):
         for receipt in receipts:
             self.assertEqual(receipt["backend"], "agent-turn")
             self.assertIsNone(receipt["model"])
-            self.assertEqual(receipt["prompt_version"], "workflow-spec-v1")
+            self.assertEqual(receipt["prompt_version"], WORKFLOW_VERSION)
             self.assertTrue(receipt["input_hash"] and receipt["output_hash"])
             self.assertTrue(receipt["validators_passed"])
         # Idempotent: re-recording the same fill returns the same row, never a duplicate.
@@ -1119,16 +1121,16 @@ class FakeE2ETests(unittest.TestCase):
         receipts = self.orchestrator.state.model_execution_receipts(summary["run_id"])
         for receipt in receipts:
             cached = self.orchestrator.state.cached_draft(
-                receipt["input_hash"], "workflow-spec-v1", None)
+                receipt["input_hash"], WORKFLOW_VERSION, None)
             self.assertIsNotNone(cached, receipt["phase"])
-            self.assertEqual(cached["prompt_version"], "workflow-spec-v1")
+            self.assertEqual(cached["prompt_version"], WORKFLOW_VERSION)
             self.assertIsNone(cached["model"])
         # The cache is authoritative and immutable per key: a conflicting re-cache is a hit
         # that returns the original draft, never an overwrite.
         first = receipts[0]
-        original = self.orchestrator.state.cached_draft(first["input_hash"], "workflow-spec-v1", None)
+        original = self.orchestrator.state.cached_draft(first["input_hash"], WORKFLOW_VERSION, None)
         recache = self.orchestrator.state.cache_draft(
-            first["input_hash"], "workflow-spec-v1", None, {"tampered": True})
+            first["input_hash"], WORKFLOW_VERSION, None, {"tampered": True})
         self.assertTrue(recache["cached"])
         self.assertEqual(recache["output_hash"], original["output_hash"])
 
@@ -1814,20 +1816,14 @@ class FakeE2ETests(unittest.TestCase):
             result = self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)
             self.assertTrue(result["ok"], result)
 
-        self.assertEqual(self.orchestrator.next(run_id)["controller"], "submit")
-        revision_set = {
-            "business": {"module": "baidu/team/app", "branch": "main", "revision": "r2"},
-            "test": {"module": "baidu/team/app-tests", "branch": "main", "revision": "t2"},
-        }
-        submit_hash = canonical_hash({"run_id": run_id, "revision_set": revision_set})
-        g7 = self._approval(run_id, "G7", submit_hash)
-        change_set = {
-            "run_id": run_id, "change_set_id": "CS-1",
-            "revision_set_id": f"RS-{project}", "repo_path": str(self.root / f"{project}-business"),
-            "module": "baidu/team/app", "target_branch": "main", "commit_revision": "r2",
-            "card_id": card, "owner": "owner@example.test", "revision_set": revision_set,
-            "input_hash": submit_hash,
-        }
+        submit_action = self.orchestrator.next(run_id)
+        self.assertEqual(submit_action["controller"], "submit")
+        from submit_descriptor import build_and_archive
+
+        built = build_and_archive(self.orchestrator, run_id, submit_action["task_id"])
+        self.assertTrue(built["ok"], built)
+        change_set = built["descriptor"]
+        g7 = self._approval(run_id, "G7", change_set["input_hash"])
         submitted = self.orchestrator.submit_to_ipipe(
             run_id, change_set, g7,
             icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
@@ -1837,19 +1833,17 @@ class FakeE2ETests(unittest.TestCase):
         # so the last submission advances the frontier straight to IPIPE.
         self.assertEqual(self.orchestrator.next(run_id)["controller"], "ipipe")
 
-        revisions = {
-            "run_id": run_id, "revision_set_id": f"RS-{project}",
-            "repositories": [
-                {"kind": "business", "module": "baidu/team/app", "revision": "r2", "branch": "main"},
-                {"kind": "test", "module": "baidu/team/app-tests", "revision": "t2", "branch": "main"},
-            ],
-            "parameters": {"mode": "remote"},
-        }
+        plan = frozen_plan(self.orchestrator.state.events(run_id))
+        self.assertIsNotNone(plan)
+        revisions = plan["revision_set"]
+        target_binding = plan["modules"]["baidu/team/app"]
         api = FakeApi()
         candidate = {
-            "id": "build-1", "pipelineConfId": "pipe-1", "module": "baidu/team/app",
-            "revision": "r2", "revisions": {"baidu/team/app": "r2", "baidu/team/app-tests": "t2"},
-            "params": {"mode": "remote"}, "status": "SUCCESS",
+            "id": "build-1", "pipelineConfId": target_binding["pipeline_id"],
+            "module": target_binding["module"],
+            "revision": target_binding["source_revisions"]["business"],
+            "revisions": {entry["module"]: entry["revision"] for entry in revisions["repositories"]},
+            "params": copy.deepcopy(revisions["parameters"]), "status": "SUCCESS",
             "stageBuilds": [{"id": "stage-1", "stageName": "compile", "status": "SUCCESS"}],
         }
         api.candidates = []
@@ -1883,12 +1877,13 @@ class FakeE2ETests(unittest.TestCase):
         self.assertTrue(monitored["ok"], monitored)
         ipipe = copy.deepcopy(specialized_examples()["ipipe-evidence"])
         ipipe.update({
-            "pipeline_id": "pipe-1", "build_id": "build-1", "module": "baidu/team/app",
-            "revisions": {"business": "r2", "tests": "t2"},
+            "pipeline_id": target_binding["pipeline_id"], "build_id": "build-1",
+            "module": target_binding["module"],
+            "revisions": copy.deepcopy(target_binding["source_revisions"]),
             "stages": [{"stage_id": "stage-1", "status": "SUCCESS", "job_ids": ["job-1"]}],
             "jobs": [{"job_id": "job-1", "status": "SUCCESS", "evidence_refs": ["ipipe:build-1/job-1"]}],
             "environment_fingerprint": canonical_hash(profile["environment_profile"]),
-            "release_rule": "manual-approval",
+            "release_rule": target_binding["release_rule"],
             "remote_evidence_refs": monitored["evidence_refs"],
             "release_evidence": monitored["evidence_refs"],
         })
@@ -2382,6 +2377,7 @@ class IpipeModuleDriveTests(unittest.TestCase):
             def __init__(self, artifact):
                 self.artifacts = _Art(artifact)
                 self._protocol = _Proto()
+                self.state = IpipeModuleDriveTests._State([])
 
             def phase_protocol(self, knowledge_sync=None):
                 return self._protocol
@@ -2417,9 +2413,14 @@ class ReleaseAggregationTests(unittest.TestCase):
                 for m in self._modules
             ]
 
+    class _State:
+        def events(self, run_id):
+            return []
+
     class _Orch:
         def __init__(self, modules):
             self.artifacts = ReleaseAggregationTests._Art(modules)
+            self.state = ReleaseAggregationTests._State()
 
     class _Runtime:
         def __init__(self, waiting=(), failing=()):

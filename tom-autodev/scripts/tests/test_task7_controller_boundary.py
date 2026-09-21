@@ -14,6 +14,8 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchestrator import Orchestrator, main
+from pipeline_plan import frozen_plan
+from test_ipipe_runtime import FakeApi
 from test_schema_validation import specialized_examples
 
 
@@ -250,7 +252,7 @@ class Task7ProductionControllerTests(unittest.TestCase):
         return final_approval
 
     def _bind_submission(self, approval=None, runtime=None):
-        return self.orchestrator.submit_to_ipipe(
+        result = self.orchestrator.submit_to_ipipe(
             self.run_id,
             self.change_set,
             approval or self.approval,
@@ -258,6 +260,35 @@ class Task7ProductionControllerTests(unittest.TestCase):
                 self.orchestrator.state, self.run_id
             ),
         )
+        if result.get("ok"):
+            self._bind_ipipe_build()
+        return result
+
+    def _bind_ipipe_build(self):
+        plan = frozen_plan(self.orchestrator.state.events(self.run_id))
+        self.assertIsNotNone(plan)
+        content = self._ipipe_content()
+        target = plan["modules"][content["module"]]
+        api = FakeApi()
+        api.pipeline = {"id": target["pipeline_id"], "module": target["module"]}
+        build = {
+            "id": content["build_id"], "pipelineConfId": target["pipeline_id"],
+            "module": target["module"], "revision": target["source_revisions"]["business"],
+            "revisions": {
+                entry["module"]: entry["revision"]
+                for entry in plan["revision_set"]["repositories"]
+            },
+            "params": copy.deepcopy(plan["revision_set"]["parameters"]),
+            "status": "SUCCESS", "stageBuilds": [],
+        }
+        api.candidates = [build]
+        api.builds[content["build_id"]] = build
+        runtime = self.orchestrator.ipipe_runtime(
+            self.run_id, api, sleeper=lambda _seconds: None,
+        )
+        discovered = runtime.discover(self.profile, plan["revision_set"], target["module"])
+        self.assertTrue(discovered["ok"], discovered)
+        self.assertEqual(discovered["build_id"], content["build_id"])
 
     def _ipipe_content(self):
         content = copy.deepcopy(specialized_examples()["ipipe-evidence"])

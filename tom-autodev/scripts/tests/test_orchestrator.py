@@ -1274,14 +1274,22 @@ class MultiRepoSubmitFrontierTests(unittest.TestCase):
                 "test": {"module": f"baidu/team/{task_id}-tests", "revision": "test-rev", "branch": "main"},
             },
         }, sort_keys=True).encode()
+        review = orchestrator.artifacts.latest_phase(run_id, "REVIEW", task_id)
         return orchestrator.artifacts.put(run_id, "change-set", content, {
             "verdict": verdict, "task_id": task_id, "revision_set_id": f"RS-{task_id}",
+            **({"reviewed_artifact_id": review["artifact_id"]} if review.get("valid") else {}),
         })
 
     @staticmethod
     def _submission(orchestrator, run_id, change_set_id, module):
+        revision_set_id = "RS"
+        for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
+            if artifact.get("kind") == "change-set":
+                descriptor = json.loads(artifact["content"])
+                if descriptor["change_set_id"] == change_set_id:
+                    revision_set_id = descriptor["revision_set_id"]
         return orchestrator.artifacts.put(run_id, "submission", b"{}", {
-            "change_set_id": change_set_id, "revision_set_id": "RS",
+            "change_set_id": change_set_id, "revision_set_id": revision_set_id,
             "controller_binding": {"module": module, "pipeline_id": "p"},
         })
 
@@ -1457,7 +1465,7 @@ class MultiRepoSubmitFrontierTests(unittest.TestCase):
                 {"module": "baidu/other/second"}, last,
             )
 
-        self.assertEqual([item["change_set_id"] for item in submissions], ["CS-0", "CS-1"])
+        self.assertEqual([item["change_set_id"] for item in submissions], ["CS-1", "CS-0"])
         self.assertEqual(chosen["controller_binding"]["module"], primary_module)
 
 

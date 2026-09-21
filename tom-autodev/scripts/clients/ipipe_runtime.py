@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 import re
@@ -64,6 +66,7 @@ class IpipeRuntime:
         self._build_bindings: dict[str, dict[str, Any]] = {}
         self._stage_bindings: dict[str, dict[str, Any]] = {}
 
+    @guard_execution
     def discover(
         self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None
     ) -> dict[str, Any]:
@@ -134,6 +137,7 @@ class IpipeRuntime:
             "input_hash": _canonical_hash(self._trigger_binding(context)),
         }
 
+    @guard_execution
     def trigger(
         self,
         profile: dict[str, Any],
@@ -213,6 +217,7 @@ class IpipeRuntime:
             return _failure("REVISION_MISMATCH", intent_id=intent["intent_id"], retry_allowed=False)
         return self._trigger_receipt(intent["intent_id"], context, candidate)
 
+    @guard_execution
     def monitor(self, build_id: str, deadline: str) -> dict[str, Any]:
         binding = self._load_build_binding(build_id)
         if binding is None:
@@ -476,6 +481,7 @@ class IpipeRuntime:
             "case_failures": bound["case_failures"],
         }
 
+    @guard_execution
     def rerun(
         self,
         stage_build_id: str,
@@ -780,6 +786,35 @@ class IpipeRuntime:
         }
         return self.verify_release(build_id, revision_set)
 
+    @guard_execution
+    def verify_planned_release(self, build_id: str, target: dict[str, Any]) -> dict[str, Any]:
+        """Verify the current frozen target before checking the build's platform release."""
+        from pipeline_plan import build_matches, frozen_plan, verification_key, canonical_hash
+        plan = frozen_plan(self.state.events(self.run_id))
+        if (plan is None or not isinstance(target, dict)
+                or plan["modules"].get(target.get("module")) != target):
+            return _failure("PIPELINE_PLAN_MISMATCH")
+        if plan.get("profile_content_hash") != canonical_hash(self.validated_profile):
+            return _failure("PIPELINE_PLAN_PROFILE_MISMATCH")
+        binding = self._load_build_binding(build_id)
+        if not build_matches(binding, target):
+            return _failure("BUILD_BINDING_MISMATCH")
+        verified = self.verify_release_of_build(build_id)
+        if not verified.get("ok"):
+            return verified
+        proof = {
+            "pipeline_id": target["pipeline_id"], "module": target["module"],
+            "build_id": build_id, "release_id": verified["release_id"],
+            "revisions": target["source_revisions"],
+            "environment_fingerprint": target["environment_fingerprint"],
+            "release_rule": target["release_rule"], "status": "SUCCESS",
+            "release_evidence": verified["evidence_refs"],
+            "remote_evidence_refs": verified["evidence_refs"],
+        }
+        self.state.save_idempotency_result(
+            verification_key(self.run_id, build_id, target, verified["release_id"]), proof)
+        return {**verified, "proof": proof}
+
     def _trigger_receipt(self, intent_id: str, context: dict[str, Any], build: dict[str, Any]) -> dict[str, Any]:
         if not _matches_build(build, context):
             return _failure("REVISION_MISMATCH", intent_id=intent_id, retry_allowed=False)
@@ -969,16 +1004,19 @@ class IpipeRuntime:
             except Exception as error:
                 return _failure(_transport_reason(error, "STAGE_DETAIL_QUERY_FAILED"))
         excerpt = _log_text([jobs, details], self.log_limit)
-        signature = _failure_signature(
-            binding.get("pipeline_id"), binding.get("module"), failed_stages, jobs
-        )
+        # A stage occurrence may already have frozen a pre-v2 signature. Re-observing it
+        # must preserve that identity (including a partial checkpoint across stages), not
+        # overwrite an immutable key or silently attach its history to a newly split cause.
+        candidate = _failure_signature(binding.get("pipeline_id"), binding.get("module"), failed_stages, jobs)
+        try:
+            signature = _freeze_stage_failure_signature(
+                self.state, self.run_id, [stage["stage_build_id"] for stage in failed_stages], candidate
+            )
+        except ValueError:
+            return _failure("FAILURE_SIGNATURE_CONFLICT", status="INVALID")
         for stage in failed_stages:
             stage["failure_signature"] = signature
             self._stage_bindings[stage["stage_build_id"]]["stage"] = stage
-            self.state.save_idempotency_result(
-                f"ipipe.stage-failure:{self.run_id}:{stage['stage_build_id']}",
-                {"failure_signature": signature},
-            )
         classification = _classification(failed_stages, jobs, binding["stage_classes"])
         refs = _build_evidence(build_id, binding, stages)
         refs.extend(f"ipipe:stage/{stage['stage_build_id']}" for stage in failed_stages)
@@ -1304,35 +1342,141 @@ def _same_stage(requested: dict[str, Any], candidate: dict[str, Any]) -> bool:
     return bool(requested.get("name")) and requested.get("name") == candidate.get("name")
 
 
-def _normalize_error(text: Any) -> str:
-    """A build-independent fingerprint of an error message (R-M4 / R4-M3).
+_FAILURE_SIGNATURE_PREFIX = "ipipe-failure:v2:"
+_OCCURRENCE_FIELD = re.compile(
+    r"\b(?P<label>(?:build|request|req)(?:[-_ ]?(?:id|number|no))?"
+    r"|rev(?:ision)?|commit(?:[-_ ]?(?:id|sha))?|hash|sha(?:256)?)"
+    r"(?P<separator>[\"']?\s*[:=#]\s*[\"']?|\s+[\"']?)"
+    r"(?P<value>[a-z0-9][a-z0-9_.-]*)(?![a-z0-9_])", re.IGNORECASE,
+)
+_CAUSE_FIELD = re.compile(
+    r"\b(?:(?:test[-_ ]?)?case(?:[-_ ]?id)?|test(?:[-_ ]?id)?"
+    r"|error[-_ ]?code|status|errno|hresult)"
+    r"(?:[\"']?\s*[:=#]\s*[\"']?|\s+[\"']?)(?P<value>[a-z0-9][a-z0-9_.-]*)", re.IGNORECASE,
+)
+_BUILD_PATH = re.compile(r"(?<![\w])(?:[a-z]:[\\/]|/)[^\s'\"]+", re.IGNORECASE)
 
-    Normalizes only the genuinely volatile tokens as UNITS — full UUIDs, ISO timestamps, file
-    paths (with their trailing :line), and long hex ids / hashes (build ids, commit shas) — so
-    the SAME root cause still matches after only those changed. It deliberately does NOT strip
-    plain decimal numbers: an HTTP status or error code (401 vs 503) is a distinguishing part of
-    the root cause, so blanket digit removal would merge unrelated failures. UUIDs are matched
-    as a whole (their inner 4-char groups would otherwise survive and split the same error)."""
+
+def _freeze_stage_failure_signature(
+    state: StateStore, run_id: str, stage_ids: list[str], candidate: str
+) -> str:
+    """Choose and checkpoint one signature atomically across an occurrence's stages.
+
+    A pre-v2 partial checkpoint supplies the old identity. Conflicting preexisting rows
+    are evidence corruption, never a reason to pick one. One transaction also prevents
+    concurrent monitor calls from writing different identities to different stage keys.
+    This uses StateStore's connection/encoding policy without changing its schema.
+    """
+    from state_store import _encode
+
+    keys = sorted({f"ipipe.stage-failure:{run_id}:{stage_id}" for stage_id in stage_ids})
+    if not keys:
+        return candidate
+    with state._connect() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        frozen: set[str] = set()
+        missing = []
+        for key in keys:
+            row = connection.execute(
+                "SELECT result_json FROM idempotency_results WHERE idempotency_key = ?", (key,)
+            ).fetchone()
+            if row is None:
+                missing.append(key)
+                continue
+            recorded = json.loads(row["result_json"])
+            value = recorded.get("failure_signature") if isinstance(recorded, dict) else None
+            if not isinstance(value, str) or not value:
+                raise ValueError("FAILURE_SIGNATURE_CONFLICT")
+            frozen.add(value)
+        if len(frozen) > 1:
+            raise ValueError("FAILURE_SIGNATURE_CONFLICT")
+        signature = next(iter(frozen)) if frozen else candidate
+        encoded = _encode({"failure_signature": signature})
+        now = datetime.now(timezone.utc).isoformat()
+        connection.executemany(
+            "INSERT INTO idempotency_results(idempotency_key, result_json, created_at) VALUES (?, ?, ?)",
+            [(key, encoded, now) for key in missing],
+        )
+        return signature
+
+
+def _normalize_error(text: Any) -> str:
+    """Normalize occurrence noise while retaining cause identity (signature v2).
+
+    Numeric/hex length alone says nothing about volatility: error codes, test IDs and
+    exception names remain literal and case-sensitive. Only explicit occurrence fields,
+    UUIDs, timestamps and build-root paths are normalized. Build paths retain the filename
+    and pytest ``::case`` suffix. No 200-character cut may hide the actual failed case.
+    The runtime already bounds raw job messages before passing them here.
+    """
     if not isinstance(text, str) or not text:
         return ""
-    lowered = text.lower()
-    # Full UUIDs as one unit (before the hex-run rule, which would fragment them).
-    lowered = re.sub(
-        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", lowered)
-    # ISO-ish timestamps.
-    lowered = re.sub(r"\d{4}-\d{2}-\d{2}[t ][0-9:.]+z?", "<ts>", lowered)
-    # File paths (and any trailing :line/:col they carry).
-    lowered = re.sub(r"[/\\][^\s'\"]+", "<path>", lowered)
-    # Long hex ids / hashes (build ids, commit shas) — kept short hex (e.g. codes) intact.
-    lowered = re.sub(r"\b[0-9a-f]{8,}\b", "<hex>", lowered)
-    lowered = re.sub(r"\s+", " ", lowered).strip()
-    return lowered[:200]
+    protected: list[str] = []
+    marker = "\x00cause-"
+    while marker in text:
+        marker += "-"
+
+    def protect_cause(match: re.Match[str]) -> str:
+        # Only UUID/date-looking values need protection from the global unit rules.
+        # Masking prose ("test build 987") would hide the real build label from the pass
+        # below and reintroduce occurrence noise.
+        if "-" not in match["value"]:
+            return match[0]
+        protected.append(match["value"])
+        prefix = match[0][:-len(match["value"])]
+        return f"{prefix}{marker}{len(protected) - 1}\x00"
+
+    def occurrence(match: re.Match[str]) -> str:
+        value = match["value"].rstrip(".")
+        # The label supplies the semantics; the token check avoids consuming prose such
+        # as "build failed" and "request rejected" as if those words were identifiers.
+        if value.lower().endswith(("error", "exception")):
+            return match[0]
+        if not (any(char.isdigit() for char in value) or re.fullmatch(r"[a-f0-9]{6,}", value, re.IGNORECASE)):
+            return match[0]
+        suffix = match["value"][len(value):]
+        return f"{match['label'].lower()}{match['separator']}<id>{suffix}"
+
+    def build_path(match: re.Match[str]) -> str:
+        path = match[0].replace("\\", "/")
+        root = re.match(r"^(?:[a-z]:)?/(?:work|workspace|build|tmp|var/tmp)/", path, re.IGNORECASE)
+        if root is None:
+            return match[0]
+        stripped = path.rstrip(").,;]}")
+        punctuation = path[len(stripped):]
+        source, separator, case = stripped.partition("::")
+        source = re.sub(r":\d+(?::\d+)?$", "", source)
+        relative = source[root.end():].split("/")
+        # The generated checkout/build directory is volatile; retain the source's
+        # relative path so api/test_base.py and dns/test_base.py remain different tests.
+        if len(relative) > 1 and (any(char.isdigit() for char in relative[0]) or relative[0] in {"<uuid>", "<ts>"}):
+            relative[0] = "<build-id>"
+        return f"<build-path>/{'/'.join(relative)}{separator}{case}{punctuation}"
+
+    normalized = _CAUSE_FIELD.sub(protect_cause, text)
+    normalized = _OCCURRENCE_FIELD.sub(occurrence, normalized)
+    normalized = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        "<uuid>", normalized, flags=re.IGNORECASE,
+    )
+    normalized = re.sub(
+        r"\b\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?\b",
+        "<ts>", normalized, flags=re.IGNORECASE,
+    )
+    normalized = _BUILD_PATH.sub(build_path, normalized)
+    for index, value in enumerate(protected):
+        normalized = normalized.replace(f"{marker}{index}\x00", value)
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def _failure_signature(
     pipeline_id: Any, module: Any, stages: list[dict[str, Any]], jobs: list[dict[str, Any]]
 ) -> str:
     """A STABLE root-cause signature, independent of this occurrence's build identity.
+
+    New occurrences carry an explicit v2 namespace. Historical unversioned digests may
+    have merged unrelated causes and are never automatic aliases; frozen occurrences
+    retain their original identity in _failure_evidence. See references/failure-signatures.md.
 
     The same structural failure recurring in a later run is the same root cause, so the
     signature is hashed over what identifies the failure across runs — the pipeline and
@@ -1373,7 +1517,7 @@ def _failure_signature(
             }
         ),
     }
-    return _canonical_hash(value)
+    return _FAILURE_SIGNATURE_PREFIX + _canonical_hash(value)
 
 
 def _log_text(value: Any, limit: int) -> str:

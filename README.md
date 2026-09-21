@@ -65,6 +65,29 @@ Review 同时检查“是否满足代码/项目规则”和“是否实现批准
 - **恢复依据持久化记录。** 同一动作复用已保存的草案和已确认回执。外部结果不明时先核对结果，再决定是否重试。
 - **输出可以检查。** Schema 校验字段，语义校验检查验收覆盖、版本和前驱绑定；固定场景用于观察不同模型的决策差异。
 
+### 如何避免修复后仍发布旧版本
+
+全部当前任务提交完成后，控制器生成并保存一份 `pipeline_plan`：明确每个必需模块的代码、产品测试、依赖仓版本、流水线和环境。调度、构建证据和发布验证都读取这份计划；运行期间查询到的新 CR patchset 不会自动替换已批准的版本。不同任务携带同一仓库的不同版本时，必须能在本地 Git 中证明继承关系；分叉或对象缺失返回 `REVISION_AMBIGUOUS`，先整合并重新评审提交。
+
+计划必须能从当前提交证据解析出所有配置仓库的版本；缺失时返回 `REVISION_UNRESOLVED`，不会猜测远端 HEAD。计划生成后再变更或重新绑定项目配置，需要重新生成与该配置匹配的计划。
+
+默认情况下，一个模块依赖本次计划的所有仓库，因此任一仓版本改变都会要求重新验证。只有项目负责人确认流水线能独立验证、发布时，才在项目 profile 的相应 `pipelines` 条目中明确声明 `depends_on`：
+
+```yaml
+pipeline_profile:
+  # 保留已有 pipeline_id、stage_classes、release_rule 等字段
+  pipelines:
+    - module: baidu/team/service-a
+      pipeline_id: "pipeline-a"
+      stage_classes: [unit]
+      required_for_release: true
+      depends_on: []  # 只依赖自身与共享产品测试仓
+```
+
+`depends_on: [baidu/team/service-b]` 会增加 B 及其传递依赖；自身和产品测试仓始终不可排除。省略该字段表示依赖全部仓库。共享测试版本变化时，所有相关模块均需重新验证。配置变更遵循已有 profile 审批和版本绑定。
+
+G9 审批绑定整份计划和所有必需模块的成功证据。控制器逐一向平台核验实际发布结果，将全部模块的回执保存为一个发布产物；任何模块未发布、版本不符或缺少平台证明，run 都不能进入 `RELEASE_SUCCESS`。
+
 这能减少模型参与机械步骤，但不能保证不同模型生成的代码同样好。更换模型仍应运行 [skill 行为评测](evals/README.md)。
 
 ## 首次使用
@@ -173,13 +196,19 @@ G5 改动审批、G7 提交/初始流水线触发、G9 发布相关审批仍保�
 | 看到的状态或原因 | 含义与下一步 |
 |---|---|
 | `PRODUCER_WAIT` | 等模型草案。回到 Comate 处理该 job；不重复创建 run |
+| `DRAFT_SCHEMA_INVALID` / `TASK_ID_MISMATCH` | 草案在锁定前被拒绝，可对同一 job 提交修正版；历史无效草案会先归档拒绝原因，再重开 job，修正版重新绑定审批 |
 | `APPROVAL_WAIT` / `APPROVAL_REQUIRED` | 等具体内容获批。确认仓库、版本、动作和指纹后审批 |
 | `REVIEW_INCOMPLETE` / `REVIEW_NEEDS_CLARIFICATION` | 补全审查范围，或请需求负责人回答明确的问题 |
 | `PROJECT_NOT_READY` / `BASELINE_UNVERIFIED` | 补配置或匹配的基线证据，不跳过检查 |
 | `WORKFLOW_SPEC_DRIFT` / `PROFILE_CONFLICT` | 运行中使用的规则或配置改变；核对版本，走相应恢复/重绑定流程 |
+| `PIPELINE_PLAN_REQUIRED` / `PIPELINE_PLAN_PROFILE_MISMATCH` / `REVISION_UNRESOLVED` / `REVISION_AMBIGUOUS` | 计划缺失、配置不匹配或仓库版本不完整；补齐当前评审和提交证据，再生成匹配计划 |
 | `WORKER_LEASE_HELD` | 当前 run 已有 worker 驱动，避免并发启动第二个 |
 | iPipe 未结束 / `RELEASE_WAITING` | 等平台结果或指定发布流程；轮询超时不等于业务测试失败 |
 | 外部操作结果不明 | 先核对平台和回执，不能直接重发提交或重跑 |
+
+本次控制策略版本为 `workflow-spec-v2`。升级前已开始的 v1 run 会被漂移守卫阻断；可在原版本完成旧 run，或在新版本重新启动并审批。没有版本 pin 的历史 run 仍可查询、停止和读取已完成回执，但没有冻结计划时不能新增发布成功记录。不要直接修改数据库里的版本 hash；当前没有自动迁移旧审批的工具。
+
+故障签名也带版本：新的 v2 保留错误码和测试 case 身份，仅去除有明确含义的构建噪声。旧记录原样保留，不自动与 v2 合并；历史清点命令和兼容边界见[故障签名说明](tom-autodev/references/failure-signatures.md)。
 
 ### 当前边界
 

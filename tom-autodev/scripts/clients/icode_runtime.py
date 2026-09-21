@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 import os
@@ -116,6 +118,7 @@ class IcodeRuntime:
             "cli": cli,
         }
 
+    @guard_execution
     def submit(self, change_set: dict[str, Any], approval: dict[str, Any]) -> dict[str, Any]:
         invalid = self._validate_change_set(change_set)
         if invalid is not None:

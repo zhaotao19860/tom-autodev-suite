@@ -1,5 +1,17 @@
 # Producer Contract
 
+Before locking a ProducerJob as FULFILLED, the worker uses the same approval-free
+`PhaseProtocol.validate_draft` as completion: schema, task, predecessor, content/hash,
+revision and evidence checks. Merged SPEC/TASKS uses the same content validator for both
+halves. A rejection leaves the job retryable when the content itself is invalid.
+
+For a historical FULFILLED invalid draft, normal resume/submit revalidates it. Only proven
+content invalidity for the same current action permits a transactional CAS reopen; the old
+draft, payload, hashes, validation and matching cache entries are archived in
+`producer_job_attempts`. Model receipts and approval history remain. Valid drafts awaiting
+approval, stale actions, damaged context, published artifacts and uncertain external writes
+are not automatically replaced. A corrected draft receives its own approval input hash.
+
 The suite's worker owns execution order. A child skill is a bounded producer of content, not a second workflow engine. These rules apply to GRILL, SPEC, TASKS, PLAN, IMPLEMENT, REVIEW and DIAGNOSE.
 
 ## Read once, return one draft

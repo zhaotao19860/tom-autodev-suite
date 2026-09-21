@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 import os
@@ -121,6 +123,7 @@ class KuClient:
         marker = f"<!-- tom-autodev-run-root:{_identity(parent_doc_id, title)} -->"
         return f"{markdown.rstrip()}\n\n{marker}"
 
+    @guard_execution
     def ensure_run_root(
         self, parent_doc_id: str, title: str, markdown: str
     ) -> dict[str, Any]:
@@ -221,6 +224,7 @@ class KuClient:
         )
         return publish if not publish["ok"] else self._root_result(created, publish)
 
+    @guard_execution
     def create_artifact(self, parent_doc_id: str, title: str, markdown: str) -> dict[str, Any]:
         persistence = self._persistence()
         if persistence is not None:
@@ -358,6 +362,7 @@ class KuClient:
                 self.sleeper(self.settle_wait_seconds)
         return None
 
+    @guard_execution
     def update_index(self, doc_id: str, entry: dict[str, Any]) -> dict[str, Any]:
         persistence = self._persistence()
         if persistence is not None:

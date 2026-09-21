@@ -142,6 +142,11 @@ def _semantic_invalid_paths(profile: dict[str, Any]) -> list[str]:
         if not isinstance(entry, dict):
             continue
         module = entry.get("module")
+        dependencies = entry.get("depends_on")
+        if dependencies is not None and (not isinstance(dependencies, list)
+                or any(not isinstance(dep, str) or dep not in known for dep in dependencies)
+                or len(set(dependencies)) != len(dependencies)):
+            invalid.append(f"pipeline_profile.pipelines[{index}].depends_on")
         if module not in known or module in seen:
             invalid.append(f"pipeline_profile.pipelines[{index}].module")
         else:

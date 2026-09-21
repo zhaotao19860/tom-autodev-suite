@@ -142,6 +142,15 @@
        "release_rule": {
         "type": "string",
         "minLength": 1
+       },
+       "depends_on": {
+        "type": "array",
+        "uniqueItems": true,
+        "items": {
+         "type": "string",
+         "minLength": 1
+        },
+        "description": "Additional repository modules this pipeline depends on. Omitted means all repositories; [] explicitly declares independence. Own module and product tests are always included."
        }
       },
       "additionalProperties": false

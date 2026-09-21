@@ -147,6 +147,22 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS producer_jobs_run_id
                     ON producer_jobs(run_id, job_id);
+                CREATE TABLE IF NOT EXISTS producer_job_attempts (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    source_event_id TEXT NOT NULL,
+                    draft_hash TEXT NOT NULL,
+                    draft_json TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    validation_json TEXT NOT NULL,
+                    cache_json TEXT NOT NULL,
+                    fulfilled_at TEXT NOT NULL,
+                    invalidated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS producer_attempts_job
+                    ON producer_job_attempts(job_id, sequence);
                 CREATE TABLE IF NOT EXISTS model_execution_receipts (
                     receipt_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -828,6 +844,94 @@ class StateStore:
                 "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
         return _producer_job_row(row) if row is not None else None
+
+    def reopen_invalid_producer_job(
+        self, run_id: str, job_id: str, expected: dict[str, Any],
+        action: dict[str, Any], validation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """CAS-reopen a content-invalid draft and archive the entire rejected attempt.
+
+        The worker supplies the common validator's rejection. Action changes,
+        concurrent replacement, completed actions and uncertain external writes
+        fail closed. Cache eviction is restricted to the archived content hash;
+        model receipts and approval history are never removed.
+        """
+        if validation.get("ok") is not False or validation.get("content_invalid") is not True:
+            return {"ok": False, "reason_code": "DRAFT_INVALIDITY_UNPROVEN"}
+        encoded_validation = _encode(validation)
+        encoded_draft = _encode(expected["draft"])
+        draft_hash = hashlib.sha256(encoded_draft.encode("utf-8")).hexdigest()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if (
+                row is None or row["run_id"] != run_id or row["status"] != "FULFILLED"
+                or row["draft_json"] != encoded_draft or row["updated_at"] != expected.get("updated_at")
+                or row["payload_json"] != _encode(expected["payload"])
+            ):
+                return {"ok": False, "reason_code": "PRODUCER_JOB_CONFLICT"}
+            payload = json.loads(row["payload_json"])
+            event = connection.execute(
+                "SELECT event_id FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1", (run_id,)
+            ).fetchone()
+            if (
+                event is None or event["event_id"] != action.get("source_event_id")
+                or payload.get("source_event_id") != action.get("source_event_id")
+                or payload.get("action_id") != action.get("action_id")
+                or job_id != f"producer:{action.get('action_id')}"
+            ):
+                return {"ok": False, "reason_code": "STALE_PRODUCER_JOB"}
+            completed = connection.execute(
+                "SELECT 1 FROM idempotency_results WHERE idempotency_key = ?",
+                (f"phase-completion:{run_id}:{action['action_id']}",),
+            ).fetchone()
+            pending = connection.execute(
+                """SELECT 1 FROM external_intents i LEFT JOIN receipts r ON r.intent_id = i.intent_id
+                   WHERE i.run_id = ? AND r.intent_id IS NULL LIMIT 1""", (run_id,)
+            ).fetchone()
+            if completed or pending:
+                return {"ok": False, "reason_code": "RECOVERY_REQUIRED"}
+            cached = connection.execute(
+                "SELECT * FROM draft_cache WHERE input_hash = ? AND output_hash = ?",
+                (payload.get("input_hash"), draft_hash),
+            ).fetchall()
+            now = _now()
+            cursor = connection.execute(
+                """INSERT INTO producer_job_attempts (
+                    job_id, run_id, action_id, source_event_id, draft_hash, draft_json,
+                    payload_json, validation_json, cache_json, fulfilled_at, invalidated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, run_id, action["action_id"], action["source_event_id"], draft_hash,
+                 encoded_draft, row["payload_json"], encoded_validation,
+                 json.dumps([dict(item) for item in cached], ensure_ascii=False, sort_keys=True),
+                 row["updated_at"], now),
+            )
+            connection.execute(
+                "DELETE FROM draft_cache WHERE input_hash = ? AND output_hash = ?",
+                (payload.get("input_hash"), draft_hash),
+            )
+            connection.execute(
+                "UPDATE producer_jobs SET status = 'PENDING', draft_json = NULL, updated_at = ? WHERE job_id = ?",
+                (now, job_id),
+            )
+            return {"ok": True, "reason_code": "PRODUCER_JOB_REOPENED", "attempt_id": cursor.lastrowid}
+
+    def producer_job_attempts(self, job_id: str) -> list[dict[str, Any]]:
+        """Read rejected drafts and their validation evidence in attempt order."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM producer_job_attempts WHERE job_id = ? ORDER BY sequence", (job_id,)
+            ).fetchall()
+        return [{
+            "attempt_id": row["sequence"], "job_id": row["job_id"], "run_id": row["run_id"],
+            "action_id": row["action_id"], "source_event_id": row["source_event_id"],
+            "draft_hash": row["draft_hash"], "draft": json.loads(row["draft_json"]),
+            "payload": json.loads(row["payload_json"]), "validation": json.loads(row["validation_json"]),
+            "cache_entries": json.loads(row["cache_json"]), "fulfilled_at": row["fulfilled_at"],
+            "invalidated_at": row["invalidated_at"],
+        } for row in rows]
 
     def pending_producer_jobs(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:

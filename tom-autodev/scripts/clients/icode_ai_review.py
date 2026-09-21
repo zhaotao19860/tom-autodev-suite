@@ -12,6 +12,8 @@ Polling is a read and stays outside the ledger.
 
 from __future__ import annotations
 
+from execution_guard import execution_guard, guard_execution
+
 import json
 import os
 import shutil
@@ -51,6 +53,7 @@ class IcodeAiReview:
         self.poll_interval = poll_interval
         self.max_polls = max_polls
 
+    @guard_execution
     def start(self, change_number: Any, revision: Any) -> dict[str, Any]:
         """Trigger one review, or replay the conversation id already recorded."""
         if not _nonempty(revision) or not _positive_int(change_number):
@@ -114,6 +117,10 @@ class IcodeAiReview:
 
     def poll(self, conversation_id: Any) -> dict[str, Any]:
         """Read one review's findings, waiting while the platform still owes them."""
+        if self.artifacts is not None:
+            blocked = execution_guard(self.state, self.run_id)
+            if blocked is not None:
+                return blocked
         if not _nonempty(conversation_id):
             return _failure("AI_REVIEW_CONVERSATION_REQUIRED")
         cli = self._cli()

@@ -22,6 +22,9 @@ class _State:
     def latest_states(self):
         return [{"run_id": "run-1", "state": self.state, "event_id": "e-1"}]
 
+    def events(self, run_id):
+        return [{"run_id": run_id, "state": self.state, "payload": {}}]
+
     def external_results(self, _run_id):
         if self.build_id is None:
             return []

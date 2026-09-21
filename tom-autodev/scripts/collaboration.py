@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 import re
@@ -233,6 +235,7 @@ class CollaborationSession:
         request = {**binding, "roles": resolved["roles"], "friendlyLevel": 3}
         return {"reason_code": "OK", "request": request, "input_hash": _hash(request)}
 
+    @guard_execution
     def create(
         self, run_id: str, project: str, card: dict[str, Any], members: dict[str, Any], *,
         approval_id: str | None = None, input_hash: str | None = None,
@@ -288,6 +291,7 @@ class CollaborationSession:
         content = _failure_markdown(failure_bundle, recipients)
         return self.send_message(run_id, content, recipients, _hash({"content": content, "at_users": recipients}))
 
+    @guard_execution
     def send_message(self, run_id: str, content: str, at_users: list[str], idempotency_key: str) -> dict[str, Any]:
         session = self._session(run_id)
         if session is None:

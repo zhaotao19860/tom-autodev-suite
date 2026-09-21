@@ -25,7 +25,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-WORKFLOW_VERSION = "workflow-spec-v1"
+WORKFLOW_VERSION = "workflow-spec-v2"
 
 # Side effects a skill-backed phase (and INTAKE, which is a controller by name but is
 # registered as a phase) may perform. Controller states carry their own narrower lists.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import execution_guard
+
 import hashlib
 from datetime import datetime, timezone
 from typing import Any
@@ -126,6 +128,9 @@ class InfoflowApprovalTransport:
         self.reply_consumer = reply_consumer
 
     def request(self, gateway_request: dict[str, Any]) -> dict[str, Any]:
+        blocked = execution_guard(self.state, gateway_request.get("run_id") if isinstance(gateway_request, dict) else None)
+        if blocked is not None:
+            return blocked
         if not isinstance(gateway_request, dict):
             raise ValueError("APPROVAL_ENVELOPE_INVALID")
         required = ("run_id", "approval_id", "input_hash", "deadline_at", "member_policy")
@@ -222,6 +227,11 @@ class InfoflowApprovalTransport:
         return self._resolved(stored["record"])
 
     def _resolved(self, record: dict[str, Any]) -> ApprovalGatewayResult:
+        # Re-reading a delivered card can persist its new reply or timeout
+        # handoff. Treat request/reconcile/wait as execution at this boundary.
+        blocked = execution_guard(self.state, record.get("run_id"))
+        if blocked is not None:
+            return blocked
         record = self._with_reply(record)
         observed = self.clock()
         if record["status"] == "PENDING" and observed >= _deadline(record["deadline_at"]):

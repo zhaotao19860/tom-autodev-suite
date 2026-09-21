@@ -13,6 +13,8 @@ into the submission behind a review that never saw it.
 
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 import subprocess
@@ -165,6 +167,7 @@ def owned_row(
     return rows.get((task_id, str(Path(path).expanduser().resolve())))
 
 
+@guard_execution
 def build_and_archive(orchestrator: Any, run_id: str, task_id: str) -> dict[str, Any]:
     """Archive the descriptor for one task, or say precisely why it cannot be built."""
     try:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import execution_guard, guard_execution
+
 import base64
 import hashlib
 import json
@@ -36,6 +38,7 @@ class RunSummary:
         self.control_root = Path(control_root or Path(__file__).resolve().parents[1]).resolve()
         self.validation_runner = validation_runner or self._run_validation
 
+    @guard_execution
     def build(self, run_id: str) -> dict[str, Any]:
         events = self.state.events(run_id)
         if not events: return {"ok": False, "reason_code": "RUN_NOT_FOUND", "run_id": run_id}
@@ -61,6 +64,9 @@ class RunSummary:
         return {"ok": True, "reason_code": "OK", **value, "artifact_id": archived["artifact_id"]}
 
     def propose(self, summary: dict[str, Any], allowed_roots: list[Path]) -> dict[str, Any]:
+        blocked = execution_guard(self.state, summary.get("run_id") if isinstance(summary, dict) else None)
+        if blocked is not None:
+            return blocked
         loaded, error = self._verified_summary(summary)
         if error: return {"ok": False, "reason_code": error}
         if self.knowledge_sync is None: return {"ok": False, "reason_code": "KNOWLEDGE_SYNC_REQUIRED", "run_id": loaded["run_id"]}
@@ -92,6 +98,9 @@ class RunSummary:
 
     def apply(self, proposal_id: str, approval_id: str) -> dict[str, Any]:
         stored = self.state.optimization_proposal(proposal_id)
+        blocked = execution_guard(self.state, stored.get("run_id") if isinstance(stored, dict) else None)
+        if blocked is not None:
+            return blocked
         proposal, error = self._verified_proposal(stored, proposal_id)
         if error: return {"ok": False, "reason_code": error, "proposal_id": proposal_id}
         if stored["status"] == "ARCHIVING": return {"ok": False, "reason_code": "G10_ARCHIVING", "proposal_id": proposal_id}
@@ -151,6 +160,10 @@ class RunSummary:
 
     def heartbeat(self, proposal_id: str, owner_token: str) -> dict[str, Any]:
         """Renew a claimed G10 apply lease without exposing the state-store API."""
+        stored = self.state.optimization_proposal(proposal_id)
+        blocked = execution_guard(self.state, stored.get("run_id") if isinstance(stored, dict) else None)
+        if blocked is not None:
+            return blocked
         try:
             return self.state.heartbeat_optimization_apply(proposal_id, owner_token)
         except ValueError as error:

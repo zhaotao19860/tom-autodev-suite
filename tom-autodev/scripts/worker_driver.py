@@ -23,6 +23,8 @@ Decision kinds:
 
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import copy
 import logging
 import subprocess
@@ -33,7 +35,6 @@ from typing import Any
 
 import workflow_spec
 from phase_protocol import _canonical_hash
-from schema_validator import validate_named_schema
 
 _log = logging.getLogger(__name__)
 
@@ -161,6 +162,7 @@ def _settled_approval_id(orchestrator: Any, run_id: str, gate: str, input_hash: 
     return None
 
 
+@guard_execution
 def execute_auto(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None) -> dict[str, Any]:
     """Complete one AUTO_COMPLETE phase without an agent turn.
 
@@ -266,31 +268,24 @@ def _produce(
     (draft read back from the persisted ProducerJob). fulfill/receipt are idempotent, so
     completing from a persisted draft after approval re-runs this safely.
     """
+    recovered = _recover_invalid_producer_draft(
+        orchestrator, run_id, job_id, action, knowledge_sync)
+    if recovered is not None and not recovered.get("ok"):
+        return {**recovered, "job_id": job_id}
+    precheck = _validate_before_fulfill(
+        orchestrator, run_id, draft, knowledge_sync, action=action)
+    if precheck is not None:
+        return {**precheck, "job_id": job_id}
+    try:
+        orchestrator.state.fulfill_producer_job(job_id, draft)
+    except ValueError as error:
+        return {"ok": False, "reason_code": str(error), "job_id": job_id}
     events = orchestrator.state.events(run_id)
     if workflow_spec.phase_mode_for_run(events, action["phase"]) == "merged":
         return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync)
 
     envelope = build_envelope(action, draft)
-    # Validate the draft BEFORE locking the ProducerJob to it (HIGH-002): a schema-invalid
-    # draft leaves the job PENDING so a corrected draft can retry the same frontier, instead
-    # of locking it to a bad draft that every later submit conflicts with. The receipt's
-    # validators_passed then reflects a check that actually ran.
     schema_name = action.get("result_schema")
-    issues = validate_named_schema(draft, schema_name) if schema_name else []
-    if issues:
-        return {"ok": False, "reason_code": "DRAFT_SCHEMA_INVALID", "retry_allowed": True,
-                "job_id": job_id, "schema": schema_name,
-                "schema_errors": [{"path": i.path, "kind": i.kind} for i in issues]}
-    # Run the full no-side-effect validation (schema + semantic + predecessor binding) BEFORE
-    # locking the job to this draft (R-H1). A draft that is schema-valid but context-invalid
-    # -- e.g. a REVIEW whose change_set_hash no longer matches the current IMPLEMENT candidate,
-    # or a PLAN/DIAGNOSE with mismatched revisions -- must leave the job PENDING so a corrected
-    # draft can retry the same frontier, instead of locking it and making every retry a
-    # PRODUCER_JOB_CONFLICT. complete_phase re-runs this check under its own compare-and-swap.
-    precheck = _validate_before_fulfill(orchestrator, run_id, draft, knowledge_sync)
-    if precheck is not None:
-        return {**precheck, "job_id": job_id}
-    orchestrator.state.fulfill_producer_job(job_id, draft)
     _record_model_receipt(orchestrator, run_id, action, draft, [schema_name])
     gate = action.get("required_human_gate")
     if gate is not None:
@@ -303,48 +298,61 @@ def _produce(
 
 
 def _validate_before_fulfill(
-    orchestrator: Any, run_id: str, content: dict[str, Any], knowledge_sync: Any | None
+    orchestrator: Any, run_id: str, content: Any, knowledge_sync: Any | None,
+    *, action: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Pure, no-side-effect semantic/predecessor pre-fulfill check (R-H1).
-
-    Returns a retryable rejection when the draft is schema-valid but fails the
-    predecessor-binding checks complete_phase would run -- a REVIEW whose change_set_hash no
-    longer matches the current IMPLEMENT candidate, a PLAN/IMPLEMENT with mismatched
-    revisions, a DIAGNOSE with the wrong frozen revisions, or SPEC/TASKS coverage drift -- so
-    the ProducerJob is only ever locked to a draft that will actually commit and a corrected
-    draft can retry the same frontier. Returns None to proceed. A raced/stale frontier
-    (next() not ok) also returns None -- complete_phase reconciles that under compare-and-swap.
-    Uses the binding check only (not full envelope/approval validation), so an as-yet
-    un-approved gated draft is still allowed to fulfill and park on its gate."""
+    """Use completion's entire approval-free validator before freezing a draft."""
     protocol = orchestrator.phase_protocol(knowledge_sync)
-    action = protocol.next(run_id)
+    action = action if action is not None else orchestrator.next(run_id)
     if not action.get("ok"):
+        return action
+    merged = workflow_spec.phase_mode_for_run(orchestrator.state.events(run_id), action["phase"]) == "merged"
+    if merged:
+        if not (isinstance(content, dict) and isinstance(content.get("spec"), dict)
+                and isinstance(content.get("dag"), dict)):
+            return {"ok": False, "reason_code": "MERGED_DRAFT_INVALID",
+                    "content_invalid": True, "retry_allowed": True}
+        checked = protocol.validate_merged_draft(
+            action, build_envelope(action, content["spec"]), content["dag"])
+    elif not isinstance(content, dict):
+        checked = {"ok": False, "reason_code": "SCHEMA_INVALID", "content_invalid": True}
+    else:
+        checked = protocol.validate_draft(action, build_envelope(action, content))
+    if checked.get("ok"):
         return None
-    reason = protocol._predecessor_binding_error(action, content)
-    if reason is None:
+    return {
+        **checked,
+        "reason_code": "DRAFT_SCHEMA_INVALID" if checked.get("reason_code") == "SCHEMA_INVALID" else checked.get("reason_code"),
+        "retry_allowed": checked.get("content_invalid") is True,
+        "validator": "PhaseProtocol.validate_merged_draft" if merged else "PhaseProtocol.validate_draft",
+    }
+
+
+def _recover_invalid_producer_draft(
+    orchestrator: Any, run_id: str, job_id: str, action: dict[str, Any],
+    knowledge_sync: Any | None,
+) -> dict[str, Any] | None:
+    """Reopen only a stored draft that fails the same validation as new production.
+
+    An approval wait or transport failure is not proof of invalid content. The
+    original bytes, hashes, receipt and cache evidence survive any successful CAS.
+    """
+    existing = orchestrator.state.producer_job(job_id)
+    if not isinstance(existing, dict) or existing.get("status") != "FULFILLED":
         return None
-    return {"ok": False, "reason_code": reason, "retry_allowed": True}
-
-
-def _merged_traceability_error(draft: dict[str, Any]) -> str | None:
-    """The SPEC<->DAG acceptance-coverage consistency the TASKS phase enforces, evaluated on the
-    merged {spec, dag} draft BEFORE the job is locked (R4-H1).
-
-    The TASKS predecessor check requires the DAG's acceptance_coverage to equal the SPEC's
-    traceability acceptance points; checking it here (both halves are in hand) means a DAG that
-    covers the wrong points is rejected retryable instead of committing SPEC and dead-locking
-    the TASKS half of the same bundle."""
-    spec = draft.get("spec") if isinstance(draft.get("spec"), dict) else {}
-    dag = draft.get("dag") if isinstance(draft.get("dag"), dict) else {}
-    expected = {
-        item.get("acceptance_point_id") for item in spec.get("traceability", [])
-        if isinstance(item, dict)
-    }
-    actual = {
-        item.get("acceptance_point_id") for item in dag.get("acceptance_coverage", [])
-        if isinstance(item, dict)
-    }
-    return None if actual == expected else "TRACEABILITY_MISMATCH"
+    rejected = _validate_before_fulfill(
+        orchestrator, run_id, existing.get("draft"), knowledge_sync, action=action)
+    if rejected is None:
+        return None
+    if rejected.get("content_invalid") is not True:
+        return rejected
+    # A written artifact means completion already crossed the publication boundary.
+    # Preserve it for explicit reconciliation even if a later validator rejects it.
+    for artifact in orchestrator.artifacts.phase_artifacts(run_id, action["phase"]):
+        if (artifact.get("envelope") or {}).get("action_id") == action.get("action_id"):
+            return {"ok": False, "reason_code": "RECOVERY_REQUIRED"}
+    return orchestrator.state.reopen_invalid_producer_job(
+        run_id, job_id, existing, action, rejected)
 
 
 def _submit_merged(
@@ -357,28 +365,7 @@ def _submit_merged(
     express declaration covers it). Both artifacts are still written and validated against
     their own schemas, so everything downstream reads a normal spec and a normal task-dag.
     """
-    if not (isinstance(draft, dict) and isinstance(draft.get("spec"), dict) and isinstance(draft.get("dag"), dict)):
-        return {"ok": False, "reason_code": "MERGED_DRAFT_INVALID", "job_id": job_id}
-    # Validate both halves BEFORE locking the job (HIGH-002): a schema-invalid spec or dag
-    # leaves the merged job PENDING for a corrected retry rather than locking a bad bundle.
-    issues = validate_named_schema(draft["spec"], "spec") + validate_named_schema(draft["dag"], "task-dag")
-    if issues:
-        return {"ok": False, "reason_code": "DRAFT_SCHEMA_INVALID", "retry_allowed": True,
-                "job_id": job_id,
-                "schema_errors": [{"path": i.path, "kind": i.kind} for i in issues]}
-    # Semantic/predecessor pre-check of the SPEC half before locking the merged job (R-H1):
-    # a schema-valid but context-invalid spec leaves the job PENDING for a corrected retry.
     spec_envelope = build_envelope(action, draft["spec"])
-    precheck = _validate_before_fulfill(orchestrator, run_id, draft["spec"], knowledge_sync)
-    if precheck is not None:
-        return {**precheck, "job_id": job_id}
-    # The DAG half must cover exactly the SPEC's acceptance points — the same consistency the
-    # TASKS phase enforces — checked BEFORE locking the bundle (R4-H1). A schema-valid DAG that
-    # covers the wrong acceptance points otherwise commits SPEC and then dead-locks TASKS.
-    trace_error = _merged_traceability_error(draft)
-    if trace_error is not None:
-        return {"ok": False, "reason_code": trace_error, "retry_allowed": True, "job_id": job_id}
-    orchestrator.state.fulfill_producer_job(job_id, draft)
     _record_model_receipt(orchestrator, run_id, action, draft, ["spec", "task-dag"])
 
     gate = action.get("required_human_gate")
@@ -401,6 +388,10 @@ def _submit_merged(
     # SPEC done + TASKS orphaned and re-invoking the producer for the bundle.
     _enqueue_producer_job(
         orchestrator, run_id, {"action": tasks_action, "skill": tasks_action.get("child_skill")})
+    precheck = _validate_before_fulfill(
+        orchestrator, run_id, draft["dag"], knowledge_sync, action=tasks_action)
+    if precheck is not None:
+        return {"ok": False, "reason_code": "MERGED_TASKS_FAILED", "detail": precheck}
     orchestrator.state.fulfill_producer_job(f"producer:{tasks_action['action_id']}", draft["dag"])
     tasks_envelope = build_envelope(tasks_action, draft["dag"])
     tasks_result = orchestrator.complete_phase(run_id, tasks_envelope, knowledge_sync=knowledge_sync)
@@ -451,12 +442,18 @@ def _recover_merged_tasks(orchestrator: Any, run_id: str, action: dict[str, Any]
     dag = (merged.get("draft") or {}).get("dag")
     if not isinstance(dag, dict):
         return False
+    if _validate_before_fulfill(orchestrator, run_id, dag, None, action=action) is not None:
+        # A legacy bundle may have committed SPEC before discovering its invalid
+        # DAG. Keep that bundle as evidence, and request a new TASKS draft against
+        # the already-approved SPEC instead of freezing the same invalid DAG again.
+        return False
     _enqueue_producer_job(
         orchestrator, run_id, {"action": action, "skill": action.get("child_skill")})
     orchestrator.state.fulfill_producer_job(tasks_job_id, dag)
     return True
 
 
+@guard_execution
 def execute_controller(
     orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
@@ -711,6 +708,10 @@ def _finalize_ipipe(
     nothing outstanding, performs the IPIPE->RELEASE transition. Returns None when there is no
     replayable success evidence to finalize from (so the caller falls back to its stuck-state
     report rather than inventing a transition)."""
+    from pipeline_plan import frozen_plan
+    if frozen_plan(orchestrator.state.events(run_id)) is not None:
+        result = orchestrator.phase_protocol(knowledge_sync).finalize_planned_ipipe(run_id)
+        return {**result, "state": orchestrator.status(run_id).get("state"), "finalized": True}
     latest = orchestrator.artifacts.latest_phase(run_id, "IPIPE", None)
     if not latest.get("valid"):
         return None
@@ -737,6 +738,11 @@ def _next_ipipe_module(
     (superseded by a repair) no longer counts, so the worker never skips a module whose
     current code was not actually built. Returns None once every required module has a
     current-binding success."""
+    from pipeline_plan import frozen_plan
+    plan = frozen_plan(orchestrator.state.events(run_id))
+    if plan is not None:
+        outstanding = orchestrator.phase_protocol(knowledge_sync).ipipe_outstanding_modules(run_id)
+        return outstanding[0] if outstanding else None
     from phase_protocol import _required_modules
 
     required = _required_modules(profile.get("pipeline_profile"))
@@ -755,6 +761,10 @@ def _ipipe_module_binding(
     bound to the submission recorded for it, whose `controller_binding` carries the
     pipeline_id / release_rule / revisions / environment fingerprint that iPipe evidence and
     the G7 trigger hash are derived from (HIGH-003 part 2)."""
+    from pipeline_plan import frozen_plan
+    plan = frozen_plan(orchestrator.state.events(run_id))
+    if plan is not None:
+        return plan["modules"].get(module)
     primary = action.get("controller_binding") or {}
     if primary.get("module") == module:
         return primary
@@ -813,6 +823,27 @@ def _verify_required_releases(
     when there are no required modules or all are verified-published; otherwise a RELEASE_WAITING
     park (a module not yet published) or a failure (verify failed / a required module has no
     success build)."""
+    from pipeline_plan import frozen_plan, release_builds
+    plan = frozen_plan(orchestrator.state.events(run_id))
+    if plan is not None:
+        selected = release_builds(orchestrator.artifacts, orchestrator.state, run_id, plan)
+        proofs = {}
+        for module, artifact in selected.items():
+            build_id = artifact["envelope"]["content"]["build_id"]
+            verified = runtime.verify_planned_release(build_id, plan["modules"][module])
+            if not verified.get("ok"):
+                if verified.get("status") == "RELEASE_WAITING":
+                    return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                            "parked": "RELEASE_WAITING", "controller": "release",
+                            "module": module, "build_id": build_id, "detail": verified}
+                return {"ok": False, "reason_code": "RELEASE_VERIFY_FAILED", "run_id": run_id,
+                        "module": module, "build_id": build_id, "detail": verified}
+            proofs[module] = verified["proof"]
+        primary = proofs[plan["required_modules"][-1]]
+        combined = {key: list(dict.fromkeys(ref for proof in proofs.values() for ref in proof[key]))
+                    for key in ("release_evidence", "remote_evidence_refs")}
+        return {"ok": True, "reason_code": "RELEASES_VERIFIED", "content": {
+            **primary, **combined, "pipeline_plan_hash": plan["plan_hash"], "module_releases": proofs}}
     from phase_protocol import _required_modules
 
     required = _required_modules(profile.get("pipeline_profile"))
@@ -860,6 +891,23 @@ def _execute_release(
         return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G9",
                 "approval_input_hash": action.get("input_hash"), "controller": "release"}
     protocol = orchestrator.phase_protocol(knowledge_sync)
+    from pipeline_plan import frozen_plan
+    plan = frozen_plan(orchestrator.state.events(run_id))
+    if plan is not None:
+        runtime = orchestrator.ipipe_runtime(run_id, ipipe_api)
+        if isinstance(runtime, dict):
+            return runtime
+        verified = _verify_required_releases(orchestrator, run_id, runtime, {})
+        if verified.get("reason_code") != "RELEASES_VERIFIED":
+            return verified
+        ingested = protocol.ingest_release_evidence(
+            run_id, verified["content"], {"approval_id": approval_id, "input_hash": action["input_hash"]})
+        if not ingested.get("ok"):
+            return {"ok": False, "reason_code": "RELEASE_EVIDENCE_INGEST_FAILED", "detail": ingested,
+                    "run_id": run_id}
+        return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id,
+                "state": orchestrator.status(run_id).get("state"), "result": ingested,
+                "build_id": verified["content"]["build_id"], "release_id": verified["content"]["release_id"]}
     ipipe_artifact = protocol.artifacts.latest_phase(run_id, "IPIPE", None)
     ipipe_content = ipipe_artifact.get("envelope", {}).get("content") if ipipe_artifact.get("valid") else None
     if not isinstance(ipipe_content, dict) or not isinstance(ipipe_content.get("build_id"), str):
@@ -927,6 +975,7 @@ def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, A
 # States a deterministic auto-advance may complete on its own. Controller side effects
 # (submit / iPipe / release) are deliberately NOT auto-run here: they touch external
 # systems and each keeps its own gate, so the loop parks on them for an explicit step.
+@guard_execution
 def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
             icode_runtime: Any | None = None, ipipe_api: Any | None = None,
@@ -990,6 +1039,11 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         if kind == PRODUCER_WAIT:
             action = decision["action"]
             job_id = f"producer:{action['action_id']}"
+            recovered = _recover_invalid_producer_draft(
+                orchestrator, run_id, job_id, action, knowledge_sync)
+            if recovered is not None and not recovered.get("ok"):
+                return {"ok": False, "reason_code": "PRODUCER_COMPLETE_FAILED",
+                        "run_id": run_id, "detail": recovered, "auto_completed": steps}
             existing = orchestrator.state.producer_job(job_id)
             if not (isinstance(existing, dict) and existing.get("status") == "FULFILLED"):
                 # R-M1: a merged SPEC+TASKS bundle whose SPEC committed but whose TASKS job
@@ -1055,6 +1109,7 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             "auto_completed": steps}
 
 
+@guard_execution
 def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
            icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
            icode_runtime: Any | None = None, ipipe_api: Any | None = None,

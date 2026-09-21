@@ -193,7 +193,8 @@ class RevisionSetTests(unittest.TestCase):
                     for item in submissions
                 ]
 
-        return type("Fake", (), {"artifacts": Artifacts()})()
+        state = type("LegacyState", (), {"events": lambda self, run_id: []})()
+        return type("Fake", (), {"artifacts": Artifacts(), "state": state})()
 
     def _with_reviews(self, reviews):
         original = orchestrator_module._open_repo_reviews

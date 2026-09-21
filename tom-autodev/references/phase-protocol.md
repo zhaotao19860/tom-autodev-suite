@@ -49,6 +49,23 @@ A `PLAN -> IMPLEMENT` event pins the completed Plan's artifact ID and content ha
 
 The following phases are controller-owned. They use the same envelope shape but do not delegate adapter ownership to child skills.
 
+SUBMIT freezes a `pipeline_plan` from each task's current Review-bound descriptor and exact
+`(change_set_id, revision_set_id)` receipt. Conflicting snapshots of one repository require
+local Git ancestry proof; missing objects or divergent commits return `REVISION_AMBIGUOUS`.
+No live CR query mutates this plan. A module's build identity covers its own repository,
+the product-test repository and declared transitive dependencies; omitted `depends_on`
+means all repositories. The plan itself also binds the immutable submission references.
+Identical build inputs may reuse an owned successful build even after a new receipt;
+changed code, tests, dependencies, pipeline, release rule or environment require new evidence.
+
+Planned IPIPE evidence binds its parent to that module's input hash and must match a durable
+runtime build binding. RELEASE's action hash includes the plan hash and every required
+IPIPE artifact. `module_releases` records the complete module set and each proof must match
+the runtime's persisted platform-verification receipt. Platform release records must name
+the build and its complete revision map. A new release write without a frozen plan returns
+`PIPELINE_PLAN_REQUIRED`; completed historical receipts remain readable. `workflow-spec-v2`
+blocks active v1 runs through the common execution guard rather than reusing old approvals.
+
 | Phase | Required inputs | Output and receipts | Completion predicate | Approval ownership/binding | Stop conditions |
 |---|---|---|---|---|---|
 | `WORKSPACE` | G3-approved `task-dag`, selected frontier task, project profile, repository ownership and baseline evidence | WorkspaceGate receipt with owned worktree IDs, exact business/test baseline revisions, lock/cleanup evidence, and content hash | Both worktrees are owned, clean against the recorded baseline, and all required repositories/test profile are verified; the business worktree is the repo the task's `business_module` names (a multi-repo run selects by module, not `business_repos[0]`); receipt is a prerequisite for Plan | No new approval: G3 remains approval of the complete Task DAG/frontier; G4 is exclusively parent approval of the completed exact Task Plan hash | `BASELINE_UNVERIFIED`, ownership/lock conflict, missing test repository, `WORKSPACE_TASK_REPO_UNRESOLVED`/`WORKSPACE_TASK_REPO_MISMATCH`, stale graph/profile, or hash drift |

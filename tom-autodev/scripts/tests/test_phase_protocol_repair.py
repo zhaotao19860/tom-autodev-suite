@@ -1002,17 +1002,70 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
         )
 
     def test_release_descriptor_is_not_a_phase_result_action_or_run_summary(self):
+        from types import SimpleNamespace
+
+        from clients.ipipe_runtime import IpipeRuntime
+        from pipeline_plan import create_plan
+        from test_ipipe_runtime import FakeApi
+
         run_id = "run-controller-release"
-        self.seed(
-            run_id, "IPIPE", None, specialized_examples()["ipipe-evidence"],
-            revisions={"business": "r2", "tests": "t2"},
-        )
+        profile = production_profile()
+        profile_path = Path(self.temporary.name) / "release-profile.json"
+        profile_path.write_text(json.dumps(
+            profile, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        profile_hash = hashlib.sha256(profile_path.read_bytes()).hexdigest()
+        revisions = {"business": "r2", "tests": "t2"}
+        binding = {
+            "pipeline_id": "pipe-1", "module": "resolver",
+            "release_rule": "all stages pass", "source_revisions": revisions,
+            "environment_fingerprint": canonical_hash(profile["environment_profile"]),
+        }
+        receipt = {"module": "resolver", "revision_set": {
+            "business": {"module": "resolver", "branch": "main", "revision": "r2"},
+            "test": {"module": "resolver-tests", "branch": "main", "revision": "t2"},
+        }}
         submission = self.artifacts.put(
-            run_id, "submission", b"submitted", {"revision": "r2"}
+            run_id, "submission", json.dumps(receipt).encode(), {
+                "controller_binding": binding, "change_set_id": "release-change",
+                "revision_set_id": canonical_hash(receipt["revision_set"]),
+            },
         )
+        plan = create_plan(SimpleNamespace(
+            artifacts=self.artifacts, phase_protocol=lambda: self.protocol), run_id, profile)
+        target = plan["modules"]["resolver"]
+        approval_id = "approval-release-fixture-g7"
+        approval_input_hash = canonical_hash(receipt)
+        self.approvals.approve(approval_id=approval_id, run_id=run_id, gate="G7",
+                               input_hash=approval_input_hash)
+        self.state.transition(run_id, "IPIPE", {
+            "previous_state": "SUBMIT", "requirement_id": "BGW-1", "project": "bgw",
+            "profile_path": str(profile_path), "profile_hash": profile_hash,
+            **{key: target[key] for key in (
+                "pipeline_id", "module", "release_rule", "source_revisions", "environment_fingerprint")},
+            "submission_artifact_id": target["artifact_id"], "submission_hash": target["sha256"],
+            "submissions": plan["submissions"], "pipeline_plan": plan,
+            "approval_id": approval_id, "approval_input_hash": approval_input_hash,
+        })
+        content = copy.deepcopy(specialized_examples()["ipipe-evidence"])
+        content.update({key: binding[key] for key in (
+            "pipeline_id", "module", "release_rule", "environment_fingerprint")})
+        content["revisions"] = revisions
+        api = FakeApi()
+        api.pipeline = {"id": target["pipeline_id"], "module": target["module"]}
+        api.candidates = [{
+            "id": content["build_id"], "pipelineConfId": target["pipeline_id"],
+            "module": target["module"], "revision": "r2", "params": {},
+            "revisions": {"resolver": "r2", "resolver-tests": "t2"},
+        }]
+        runtime = IpipeRuntime(self.state, self.approvals, run_id, api,
+                               validated_profile=profile, profile_hash=profile_hash)
+        discovered = runtime.discover(profile, plan["revision_set"], "resolver")
+        self.assertTrue(discovered["ok"], discovered)
+        self.seed(run_id, "IPIPE", None, content,
+                  parent_hash=target["binding_hash"], revisions=revisions)
         self.state.transition(run_id, "RELEASE", {
-            "profile_hash": "a" * 64,
-            "source_revisions": {"business": "r2", "tests": "t2"},
+            "profile_hash": profile_hash,
+            "source_revisions": revisions,
             "submission_artifact_id": submission["artifact_id"],
             "submission_hash": submission["sha256"],
         })

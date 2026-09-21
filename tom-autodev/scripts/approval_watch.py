@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import execution_guard, guard_execution
+
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -89,6 +91,13 @@ class ApprovalWatcher:
 
     def tick(self) -> list[dict[str, Any]]:
         outcomes = []
+        # Starting the gateway is also an effect. If every known run is blocked,
+        # return the policy failures before bringing up any external client.
+        run_ids = {item["run_id"] for item in self.orchestrator.state.latest_states()}
+        run_ids.update(item["run_id"] for item in self.orchestrator.approvals.pending())
+        blocked = [execution_guard(self.orchestrator.state, run_id) for run_id in sorted(run_ids)]
+        if blocked and all(item is not None for item in blocked):
+            return blocked
         channel = self._ensure_channel()
         if channel is not None:
             outcomes.append(channel)
@@ -129,6 +138,10 @@ class ApprovalWatcher:
             if latest["state"] in _TERMINAL_STATES:
                 continue
             run_id = latest["run_id"]
+            blocked = execution_guard(self.orchestrator.state, run_id)
+            if blocked is not None:
+                notices.append(blocked)
+                continue
             brief = build(self.orchestrator, run_id)
             if brief["waiting_on"] or brief["in_flight"] or brief.get("blocked"):
                 continue
@@ -246,6 +259,10 @@ class ApprovalWatcher:
             if latest["state"] in _TERMINAL_STATES:
                 continue
             run_id = latest["run_id"]
+            blocked = execution_guard(self.orchestrator.state, run_id)
+            if blocked is not None:
+                notices.append(blocked)
+                continue
             key = f"progress-notice:{run_id}:{latest['event_id']}"
             if self.orchestrator.state.idempotency_result(key) is not None:
                 continue
@@ -344,6 +361,9 @@ class ApprovalWatcher:
 
     def _settle(self, approval: dict[str, Any]) -> dict[str, Any] | None:
         run_id = approval["run_id"]
+        blocked = execution_guard(self.orchestrator.state, run_id)
+        if blocked is not None:
+            return blocked
         approval_id = approval["approval_id"]
         client = self.client_factory()
         result = self.orchestrator.wait_infoflow_approval(
@@ -652,6 +672,9 @@ def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[st
     if len(candidates) > 1:
         return {"ok": True, "reason_code": "MULTIPLE_RESUME_HANDOFFS"}
     handoff_id, run_id, data = sorted(candidates, key=lambda item: item[0])[0]
+    blocked = execution_guard(orchestrator.state, run_id)
+    if blocked is not None:
+        return blocked
     events_reader = getattr(orchestrator.state, "events", None)
     latest_events = events_reader(run_id) if callable(events_reader) else []
     if latest_events and latest_events[-1].get("event_id") != data.get("event_id"):
@@ -759,6 +782,7 @@ def notify_every_parked_run(orchestrator: Any, notify_client: Any) -> dict[str, 
     return {"ok": True, "reason_code": "OK", "notices": notices}
 
 
+@guard_execution
 def notify_ide_turn(orchestrator: Any, run_id: str, notify_client: Any) -> dict[str, Any]:
     """Tell the operator in 如流 that the run is parked waiting for the IDE.
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import execution_guard, guard_execution
+
 import hashlib
 import json
 import logging
@@ -31,6 +33,9 @@ _STABLE_DEPENDENCY_REASONS = frozenset({
     "CONTENT_HASH_MISMATCH", "SCHEMA_INVALID", "EVIDENCE_REF_INVALID",
     "EVIDENCE_REQUIRED", "PERSISTENCE_SECRET_REJECTED", "KNOWLEDGE_RECEIPT_INVALID",
     "APPROVAL_NOT_FOUND", "APPROVAL_INPUT_MISMATCH", "APPROVAL_RUN_MISMATCH",
+    "PIPELINE_PLAN_INVALID", "PIPELINE_PLAN_MISMATCH", "RELEASE_EVIDENCE_INCOMPLETE",
+    "ARTIFACT_INTEGRITY_FAILED",
+    "BUILD_BINDING_MISMATCH",
 })
 _DRAFT_KEYS = frozenset(
     {
@@ -96,6 +101,7 @@ class PhaseProtocol:
         self.evidence_gate = evidence_gate
         self.transitions = transition_policy
 
+    @guard_execution
     def next(self, run_id: str) -> dict[str, Any]:
         try:
             return self._next(run_id)
@@ -197,6 +203,18 @@ class PhaseProtocol:
         if state in {"PLAN", "IMPLEMENT", "REVIEW"} and task_id is None:
             return _failure("TASK_FRONTIER_EMPTY", run_id=run_id, state=state)
         predecessor = self._predecessor(run_id, selected.get("predecessor"), task_id)
+        from pipeline_plan import frozen_plan, release_builds
+        plan = frozen_plan(events) if state in {"IPIPE", "RELEASE"} else None
+        release_inputs = None
+        if state == "RELEASE" and plan is not None:
+            ipipe_payload = next(event["payload"] for event in reversed(events) if event["state"] == "IPIPE")
+            binding_error = self._ipipe_binding_error(events, ipipe_payload)
+            if binding_error is not None:
+                return _failure(binding_error, run_id=run_id)
+            release_inputs = release_builds(self.artifacts, self.state, run_id, plan)
+            predecessor = release_inputs[plan["required_modules"][-1]]
+        if state == "RELEASE" and plan is None:
+            return _failure("PIPELINE_PLAN_REQUIRED", run_id=run_id)
         if selected.get("predecessor") and predecessor is None:
             return _failure("PREDECESSOR_REQUIRED", run_id=run_id, state=state, task_id=task_id)
         source_revisions = self._source_revisions(current, predecessor)
@@ -208,6 +226,8 @@ class PhaseProtocol:
             if not transition.get("allowed"):
                 return _failure(transition.get("reason_code", "INVALID_TRANSITION"), run_id=run_id, state=state)
         input_artifacts = [] if predecessor is None else [_artifact_reference(predecessor)]
+        if release_inputs is not None:
+            input_artifacts = [_artifact_reference(item) for item in release_inputs.values()]
         parent_hash = predecessor["envelope"]["content_hash"] if predecessor is not None else None
         action_inputs = {
             "run_id": run_id,
@@ -219,6 +239,7 @@ class PhaseProtocol:
             "input_artifacts": input_artifacts,
             "parent_artifact_hash": parent_hash,
             "source_revisions": source_revisions,
+            **({"pipeline_plan_hash": plan["plan_hash"]} if plan else {}),
             **({"intake_prerequisites": _intake_prerequisites(events)} if state == "INTAKE" else {}),
             **({"controller_binding": _ipipe_controller_binding(current.get("payload"))} if state == "IPIPE" else {}),
             **({"baseline_revisions": source_revisions} if state == "IMPLEMENT" else {}),
@@ -261,6 +282,7 @@ class PhaseProtocol:
             "input_hash": input_hash,
             "parent_artifact_hash": parent_hash,
             "source_revisions": source_revisions,
+            **({"pipeline_plan_hash": plan["plan_hash"]} if plan else {}),
             **({"baseline_revisions": source_revisions} if state == "IMPLEMENT" else {}),
             **({"controller_binding": _ipipe_controller_binding(current.get("payload"))} if state == "IPIPE" else {}),
             "source_evidence_refs": _source_evidence_refs(events, predecessor),
@@ -289,6 +311,30 @@ class PhaseProtocol:
             return _failure(_exception_reason(error, "RESULT_VALIDATION_FAILED"))
 
     def _validate_result(self, action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        checked = self.validate_draft(action, result)
+        if not checked.get("ok"):
+            return checked
+        collaboration_error = self._collaboration_session_error(action, result)
+        if collaboration_error is not None:
+            return _failure(collaboration_error)
+        approval_error = self._approval_error(action, result)
+        if approval_error is not None:
+            return _failure(approval_error)
+        return checked
+
+    def validate_draft(self, action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        """Validate the entire draft without requiring approval or writing state.
+
+        Producer fulfillment and completion share this check. Only errors proven to
+        belong to the content carry ``content_invalid``; stale actions, unavailable
+        context and approval failures must never authorize replacing a stored draft.
+        """
+        try:
+            return self._validate_draft(action, result)
+        except Exception as error:
+            return _failure(_exception_reason(error, "RESULT_VALIDATION_FAILED"))
+
+    def _validate_draft(self, action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(action, dict) or not action.get("ok") or not isinstance(result, dict):
             return _failure("INVALID_INPUT")
         if action.get("controller") not in {None, "intake"}:
@@ -313,18 +359,11 @@ class PhaseProtocol:
             return _failure("ACTION_ID_MISMATCH")
         if result.get("action_id") != action.get("action_id"):
             return _failure("ACTION_ID_MISMATCH")
-        collaboration_error = self._collaboration_session_error(action, result)
-        if collaboration_error is not None:
-            return _failure(collaboration_error)
         if result.get("phase") != action.get("phase"):
             return _failure("PHASE_MISMATCH")
         if result.get("task_id") != action.get("task_id"):
             return _failure("TASK_ID_MISMATCH")
         content = result.get("content")
-        if isinstance(content, dict) and action.get("task_id") is not None:
-            content_task = content.get("task_id")
-            if content_task is not None and content_task != action["task_id"]:
-                return _failure("TASK_ID_MISMATCH")
         if result.get("schema_version") != "1":
             return _failure("SCHEMA_VERSION_INVALID")
         if result.get("input_hash") != action.get("input_hash"):
@@ -337,34 +376,15 @@ class PhaseProtocol:
                 or not isinstance(content, dict)
                 or result.get("source_revisions") != content.get("revisions")
             ):
-                return _failure("SOURCE_REVISION_MISMATCH")
+                return _failure("SOURCE_REVISION_MISMATCH", content_invalid=(
+                    not isinstance(content, dict) or not _valid_revisions(content.get("revisions"))))
         elif result.get("source_revisions") != action.get("source_revisions"):
             return _failure("SOURCE_REVISION_MISMATCH")
         if action.get("phase") != "INTAKE" and result.get("parent_artifact_hash") is None:
             return _failure("PARENT_ARTIFACT_MISMATCH")
-        schema_name = action.get("result_schema")
-        if not isinstance(schema_name, str):
-            return _failure("RESULT_SCHEMA_REQUIRED")
-        schema_issues = validate_named_schema(content, schema_name)
-        if schema_issues:
-            return {
-                **_failure("SCHEMA_INVALID"),
-                "schema_errors": [{"path": issue.path, "kind": issue.kind} for issue in schema_issues],
-            }
-        predecessor_error = self._predecessor_binding_error(action, content)
-        if predecessor_error is not None:
-            return _failure(predecessor_error)
-        if action.get("phase") == "INTAKE" and content != action.get("content"):
-            return _failure("REQUIREMENT_CHANGED")
-        # A controller-authored action carries the exact content it expects back (INTAKE's
-        # snapshot, an express auto-derived GRILL log). The submitted content must match it
-        # so the deterministic artifact cannot be tampered on the way to completion.
-        if (
-            action.get("phase") != "INTAKE"
-            and action.get("content") is not None
-            and content != action.get("content")
-        ):
-            return _failure("AUTO_CONTENT_MISMATCH")
+        checked = self.validate_content(action, content)
+        if not checked.get("ok"):
+            return checked
         expected_hash = _canonical_hash(content)
         if result.get("content_hash") != expected_hash:
             return _failure("CONTENT_HASH_MISMATCH")
@@ -384,10 +404,64 @@ class PhaseProtocol:
         )
         if result.get("approval_input_hash") != expected_approval_hash:
             return _failure("APPROVAL_INPUT_MISMATCH")
-        approval_error = self._approval_error(action, result)
-        if approval_error is not None:
-            return _failure(approval_error)
         return {"ok": True, "reason_code": "OK", "draft": json.loads(_canonical_json(result))}
+
+    def validate_content(
+        self, action: dict[str, Any], content: Any, *, predecessor_content: Any = None,
+    ) -> dict[str, Any]:
+        """The content half of draft validation, also used for a merged TASKS tail.
+
+        A merged tail has no issued action until SPEC commits. Its prospective
+        TASKS context is checked against the supplied SPEC using this same validator;
+        the real TASKS action still receives full envelope validation at completion.
+        """
+        try:
+            if isinstance(content, dict) and action.get("task_id") is not None:
+                task = content.get("task_id")
+                if task is not None and task != action["task_id"]:
+                    return _failure("TASK_ID_MISMATCH", content_invalid=True)
+            schema_name = action.get("result_schema")
+            if not isinstance(schema_name, str):
+                return _failure("RESULT_SCHEMA_REQUIRED")
+            issues = validate_named_schema(content, schema_name)
+            if issues:
+                return {**_failure("SCHEMA_INVALID", content_invalid=True), "schema": schema_name, "schema_errors": [
+                    {"path": issue.path, "kind": issue.kind} for issue in issues
+                ]}
+            definition = _PHASES.get(action.get("phase"), {})
+            if predecessor_content is None and definition.get("predecessor"):
+                predecessor = self._predecessor(
+                    action["run_id"], definition["predecessor"], action.get("task_id"))
+                if predecessor is None:
+                    return _failure("PREDECESSOR_REQUIRED")
+                if predecessor["envelope"]["content_hash"] != action.get("parent_artifact_hash"):
+                    return _failure("PARENT_ARTIFACT_MISMATCH")
+                predecessor_content = predecessor["envelope"].get("content")
+            checked = self._validate_predecessor_binding(
+                action, content, predecessor_content=predecessor_content)
+            if not checked.get("ok"):
+                return checked
+            if action.get("content") is not None and content != action["content"]:
+                reason = "REQUIREMENT_CHANGED" if action.get("phase") == "INTAKE" else "AUTO_CONTENT_MISMATCH"
+                return _failure(reason, content_invalid=True)
+            try:
+                ensure_persistable(content)
+            except ValueError as error:
+                return _failure(str(error), content_invalid=True)
+            return {"ok": True, "reason_code": "OK"}
+        except Exception as error:
+            return _failure(_exception_reason(error, "RESULT_VALIDATION_FAILED"))
+
+    def validate_merged_draft(
+        self, action: dict[str, Any], spec_envelope: dict[str, Any], dag: Any,
+    ) -> dict[str, Any]:
+        checked = self.validate_draft(action, spec_envelope)
+        if not checked.get("ok"):
+            return checked
+        return self.validate_content(
+            {**action, "phase": "TASKS", "result_schema": "task-dag", "task_id": None},
+            dag, predecessor_content=spec_envelope["content"],
+        )
 
     def _collaboration_session_error(
         self, action: dict[str, Any], result: dict[str, Any]
@@ -434,20 +508,31 @@ class PhaseProtocol:
             return "COLLABORATION_SESSION_INVALID"
         return None
 
-    def _predecessor_binding_error(self, action: dict[str, Any], content: Any) -> str | None:
+    def _predecessor_binding_error(
+        self, action: dict[str, Any], content: Any, *, predecessor_content: Any = None,
+    ) -> str | None:
+        checked = self._validate_predecessor_binding(
+            action, content, predecessor_content=predecessor_content)
+        return None if checked.get("ok") else checked["reason_code"]
+
+    def _validate_predecessor_binding(
+        self, action: dict[str, Any], content: Any, *, predecessor_content: Any = None,
+    ) -> dict[str, Any]:
+        """Distinguish invalid content from missing or inconsistent source evidence."""
         if not isinstance(content, dict):
-            return "SCHEMA_INVALID"
+            return _failure("SCHEMA_INVALID", content_invalid=True)
         phase = action.get("phase")
         run_id = action["run_id"]
         task_id = action.get("task_id")
         definition = _PHASES.get(phase, {})
-        predecessor = self._predecessor(run_id, definition.get("predecessor"), task_id)
-        predecessor_content = predecessor.get("envelope", {}).get("content") if predecessor else None
+        if predecessor_content is None:
+            predecessor = self._predecessor(run_id, definition.get("predecessor"), task_id)
+            predecessor_content = predecessor.get("envelope", {}).get("content") if predecessor else None
 
         if phase == "SPEC":
             root = self.artifacts.latest_phase(run_id, "INTAKE", None)
             if not root.get("valid"):
-                return "TRACEABILITY_MISMATCH"
+                return _failure("TRACEABILITY_MISMATCH")
             try:
                 snapshot_points = set(normalized_acceptance_ids(
                     root["envelope"]["content"].get("acceptance")
@@ -457,20 +542,21 @@ class PhaseProtocol:
                     if isinstance(predecessor_content, dict) else []
                 ))
             except AcceptanceValueError:
-                return "TRACEABILITY_MISMATCH"
+                return _failure("TRACEABILITY_MISMATCH")
             # A card may arrive without acceptance criteria; tom-grill records the ones
             # it agreed with the requirement owner as a delta. The snapshot is never
             # rewritten, so the G0 approval stays bound to the original card hash.
             if snapshot_points & grill_points:
-                return "ACCEPTANCE_DELTA_CONFLICT"
+                return _failure("ACCEPTANCE_DELTA_CONFLICT")
             expected = snapshot_points | grill_points
             if not expected:
-                return "ACCEPTANCE_CRITERIA_MISSING"
+                return _failure("ACCEPTANCE_CRITERIA_MISSING")
             actual = {
                 item.get("acceptance_point_id") for item in content.get("traceability", [])
                 if isinstance(item, dict)
             }
-            return None if actual == expected else "TRACEABILITY_MISMATCH"
+            if actual != expected:
+                return _failure("TRACEABILITY_MISMATCH", content_invalid=True)
 
         if phase == "TASKS" and isinstance(predecessor_content, dict):
             expected = {
@@ -481,21 +567,24 @@ class PhaseProtocol:
                 item.get("acceptance_point_id") for item in content.get("acceptance_coverage", [])
                 if isinstance(item, dict)
             }
-            return None if actual == expected else "TRACEABILITY_MISMATCH"
+            if actual != expected:
+                return _failure("TRACEABILITY_MISMATCH", content_invalid=True)
 
         if phase == "PLAN" and isinstance(predecessor_content, dict):
             node = next((
                 item for item in predecessor_content.get("nodes", [])
                 if isinstance(item, dict) and item.get("task_id") == task_id
             ), None)
-            if node is None or content.get("g4_input_hash") != action.get("input_hash"):
-                return "G4_INPUT_MISMATCH" if node is not None else "TASK_PLAN_MISMATCH"
+            if node is None:
+                return _failure("TASK_PLAN_MISMATCH")
+            if content.get("g4_input_hash") != action.get("input_hash"):
+                return _failure("G4_INPUT_MISMATCH", content_invalid=True)
             repository_revisions = {
                 item.get("role"): item.get("revision")
                 for item in content.get("repositories", []) if isinstance(item, dict)
             }
             if repository_revisions != action.get("source_revisions"):
-                return "SOURCE_REVISION_MISMATCH"
+                return _failure("SOURCE_REVISION_MISMATCH", content_invalid=True)
             plan_tests = {
                 item.get("test_id") for item in content.get("tests", []) if isinstance(item, dict)
             }
@@ -505,32 +594,34 @@ class PhaseProtocol:
                 or plan_fixtures != set(node.get("fixtures", []))
                 or set(content.get("acceptance_point_ids", [])) != set(node.get("acceptance_point_ids", []))
             ):
-                return "TASK_PLAN_MISMATCH"
+                return _failure("TASK_PLAN_MISMATCH", content_invalid=True)
 
         if phase == "IMPLEMENT" and isinstance(predecessor_content, dict):
             baselines = {
                 item.get("role"): item.get("revision")
                 for item in predecessor_content.get("repositories", []) if isinstance(item, dict)
             }
-            if content.get("baseline_revisions") != baselines or baselines != action.get("baseline_revisions"):
-                return "BASELINE_REVISION_MISMATCH"
+            if baselines != action.get("baseline_revisions"):
+                return _failure("BASELINE_REVISION_MISMATCH")
+            if content.get("baseline_revisions") != baselines:
+                return _failure("BASELINE_REVISION_MISMATCH", content_invalid=True)
             expected_tests = {
                 item.get("test_id") for item in predecessor_content.get("tests", [])
                 if isinstance(item, dict)
             }
             if set(content.get("test_ids", [])) != expected_tests:
-                return "CHANGE_SET_MISMATCH"
+                return _failure("CHANGE_SET_MISMATCH", content_invalid=True)
 
         if phase == "REVIEW" and isinstance(predecessor_content, dict):
             if (
                 content.get("change_set_hash") != predecessor_content.get("candidate_hash")
                 or content.get("baseline_revisions") != predecessor_content.get("baseline_revisions")
             ):
-                return "REVIEW_PREDECESSOR_MISMATCH"
+                return _failure("REVIEW_PREDECESSOR_MISMATCH", content_invalid=True)
 
         if phase == "DIAGNOSE" and content.get("frozen_revisions") != action.get("source_revisions"):
-            return "SOURCE_REVISION_MISMATCH"
-        return None
+            return _failure("SOURCE_REVISION_MISMATCH", content_invalid=True)
+        return {"ok": True, "reason_code": "OK"}
 
     def _workflow_spec_drift(self, run_id: str) -> dict[str, Any] | None:
         """Refuse to add a new side effect under a drifted workflow spec (R4-M2).
@@ -539,12 +630,21 @@ class PhaseProtocol:
         bypassing `Orchestrator.next`) cannot run V2 policy on a V1 authorization. Callers place
         it AFTER their idempotent-replay short-circuit, so re-reading an already-committed result
         is unaffected — only a fresh side effect is blocked."""
-        drift = workflow_spec.spec_drift(self.state.events(run_id))
-        if drift is None:
+        return execution_guard(self.state, run_id)
+
+    def _new_result_guard(self, run_id: str, result_key: str) -> dict[str, Any] | None:
+        # The inner protocol may re-read an existing result without new effects.
+        # Check before its broad domain-error handler so policy/ledger failures
+        # stay visible to the caller instead of becoming completion failures.
+        if self.state.idempotency_result(result_key) is not None:
             return None
-        return _failure("WORKFLOW_SPEC_DRIFT", run_id=run_id, **drift)
+        return execution_guard(self.state, run_id)
 
     def complete(self, run_id: str, envelope: dict[str, Any]) -> dict[str, Any]:
+        action_id = envelope.get("action_id") if isinstance(envelope, dict) else None
+        blocked = self._new_result_guard(run_id, f"phase-completion:{run_id}:{action_id}")
+        if blocked is not None:
+            return blocked
         try:
             return self._complete(run_id, envelope)
         except Exception as error:
@@ -1246,10 +1346,48 @@ class PhaseProtocol:
         return None
 
     def ingest_ipipe_evidence(self, run_id: str, content: dict[str, Any]) -> dict[str, Any]:
+        build_id = content.get("build_id") if isinstance(content, dict) else None
+        blocked = self._new_result_guard(run_id, f"ipipe-ingest:{run_id}:{build_id}")
+        if blocked is not None:
+            return blocked
         try:
             return self._ingest_ipipe_evidence(run_id, content)
         except Exception as error:
             return _failure(_exception_reason(error, "IPIPE_EVIDENCE_INGEST_FAILED"), run_id=run_id)
+
+    @guard_execution
+    def finalize_planned_ipipe(self, run_id: str) -> dict[str, Any]:
+        """Finish a new plan whose required evidence was safely reused or already archived."""
+        try:
+            from pipeline_plan import frozen_plan, release_builds
+            action = self.next(run_id)
+            if not action.get("ok"):
+                return action
+            if action.get("state") != "IPIPE":
+                return _failure("INVALID_STATE", run_id=run_id)
+            events = self.state.events(run_id)
+            plan = frozen_plan(events)
+            if plan is None:
+                return _failure("PIPELINE_PLAN_MISMATCH", run_id=run_id)
+            selected = release_builds(self.artifacts, self.state, run_id, plan)
+            approval_error = self._controller_approval_error(run_id, events[-1]["payload"], "G7")
+            if approval_error:
+                return _failure(approval_error, run_id=run_id)
+            transition = self.transitions.validate("IPIPE", "RELEASE")
+            if not transition.get("allowed"):
+                return _failure("INVALID_TRANSITION", run_id=run_id)
+            primary = selected[plan["required_modules"][-1]]
+            result = {"ok": True, "reason_code": "OK", "phase_complete": True,
+                      "artifact_id": primary["artifact_id"], "phase": "IPIPE"}
+            committed = self.state.commit_transition_result(
+                run_id, action["source_event_id"], "RELEASE",
+                {"previous_state": "IPIPE", "artifact_id": primary["artifact_id"],
+                 "pipeline_plan_hash": plan["plan_hash"], "policy_decision": transition},
+                f"ipipe-finalize:{run_id}:{action['action_id']}", result)
+            return committed["result"] if committed.get("status") in {"COMMITTED", "REPLAY"} else _failure(
+                "STALE_ACTION", run_id=run_id)
+        except ValueError as error:
+            return _failure(str(error), run_id=run_id)
 
     def _ingest_ipipe_evidence(self, run_id: str, content: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(content, dict) or not isinstance(content.get("build_id"), str):
@@ -1319,7 +1457,8 @@ class PhaseProtocol:
             "action_id": artifact_action_id, "source_event_id": action["source_event_id"],
             "host": "comate", "run_id": run_id, "phase": "IPIPE", "task_id": None,
             "schema_version": "1", "input_hash": action["input_hash"], "content_hash": content_hash,
-            "source_revisions": revisions, "parent_artifact_hash": target_submission["sha256"],
+            "source_revisions": revisions,
+            "parent_artifact_hash": target_submission.get("binding_hash", target_submission["sha256"]),
             "knowledge_doc_id": None, "knowledge_url": None, "knowledge_version": None,
             "icafe_comment_id": None, "evidence_refs": content.get("remote_evidence_refs", []),
             "approval_id": payload.get("approval_id"),
@@ -1369,7 +1508,7 @@ class PhaseProtocol:
             not current_submission.get("valid")
             or not isinstance(current_target, dict)
             or current_submission.get("sha256") != current_target.get("sha256")
-            or current_submission.get("sha256") != final["parent_artifact_hash"]
+            or current_target.get("binding_hash", current_submission.get("sha256")) != final["parent_artifact_hash"]
         ):
             return _failure("PREDECESSOR_REQUIRED", run_id=run_id)
         approval_error = self._controller_approval_error(run_id, payload, "G7")
@@ -1424,6 +1563,10 @@ class PhaseProtocol:
     def ingest_release_evidence(
         self, run_id: str, content: dict[str, Any], approval: dict[str, Any]
     ) -> dict[str, Any]:
+        build_id = content.get("build_id") if isinstance(content, dict) else None
+        blocked = self._new_result_guard(run_id, f"release-ingest:{run_id}:{build_id}")
+        if blocked is not None:
+            return blocked
         try:
             return self._ingest_release_evidence(run_id, content, approval)
         except Exception as error:
@@ -1437,6 +1580,10 @@ class PhaseProtocol:
         recorded for the change the pipeline actually passed, never a different or later
         build, and never before a passing pipeline exists.
         """
+        from pipeline_plan import frozen_plan, release_binding_error
+        plan = frozen_plan(self.state.events(run_id))
+        if plan is not None:
+            return release_binding_error(self.artifacts, self.state, run_id, plan, content)
         predecessor = self._predecessor(run_id, "IPIPE", None)
         if predecessor is None:
             return "PREDECESSOR_REQUIRED"
@@ -1531,9 +1678,8 @@ class PhaseProtocol:
         binding_error = self._release_binding_error(run_id, content)
         if binding_error is not None:
             return _failure(binding_error, run_id=run_id)
-        predecessor = self._predecessor(run_id, "IPIPE", None)
-        parent_hash = predecessor["envelope"]["content_hash"]
-        revisions = predecessor["envelope"]["content"]["revisions"]
+        parent_hash = action["parent_artifact_hash"]
+        revisions = action["source_revisions"]
         draft = {
             "action_id": action["action_id"], "source_event_id": action["source_event_id"],
             "host": "comate", "run_id": run_id, "phase": "RELEASE", "task_id": None,
@@ -1620,6 +1766,10 @@ class PhaseProtocol:
 
     def _ipipe_required_modules(self, events: list[dict[str, Any]]) -> list[str]:
         """The run's required-for-release modules, from its pinned profile."""
+        from pipeline_plan import frozen_plan
+        plan = frozen_plan(events)
+        if plan is not None:
+            return plan["required_modules"]
         intake = events[0].get("payload") if events else None
         profile_path = intake.get("profile_path") if isinstance(intake, dict) else None
         if not isinstance(profile_path, str) or not profile_path:
@@ -1638,6 +1788,10 @@ class PhaseProtocol:
         superseded by a repair that changed the revision) no longer counts, so the worker's
         "next module" decision matches this completion judgment instead of skipping a module
         whose current code was never actually built."""
+        from pipeline_plan import frozen_plan, successful_builds
+        plan = frozen_plan(events)
+        if plan is not None:
+            return set(successful_builds(self.artifacts, self.state, plan["run_id"], plan))
         required = set(self._ipipe_required_modules(events))
         if not required:
             return set()
@@ -1707,7 +1861,9 @@ class PhaseProtocol:
             return []
         passed = self._ipipe_passed_modules(events)
         # The just-stored current module counts even if the archived read raced it.
-        passed.add(str(content.get("module")))
+        from pipeline_plan import frozen_plan
+        if frozen_plan(events) is None:
+            passed.add(str(content.get("module")))
         return [module for module in required if module not in passed]
 
     def _ipipe_binding_error(
@@ -1735,6 +1891,7 @@ class PhaseProtocol:
             repository.get("module") for repository in repositories
             if isinstance(repository, dict) and isinstance(repository.get("module"), str)
         }
+        modules.add(profile["test_repo"]["module"])
         payload_module = payload.get("module")
         expected_release_rule = _registered_release_rule(pipeline, payload_module)
         # A cross-repository requirement has one pipeline per module, so identity is
@@ -1777,7 +1934,29 @@ class PhaseProtocol:
             "source_revisions": revisions,
             "environment_fingerprint": expected_environment,
         }
-        if submission.get("metadata", {}).get("controller_binding") != expected_submission_binding:
+        from pipeline_plan import frozen_plan, build_matches
+        plan = frozen_plan(events)
+        if plan is not None:
+            if plan.get("profile_content_hash") != _canonical_hash(profile):
+                return "PIPELINE_PLAN_PROFILE_MISMATCH"
+            planned = plan["modules"].get(module)
+            if target != planned:
+                return "PIPELINE_PLAN_MISMATCH"
+            frozen_submission = next((s for s in plan["submissions"]
+                                      if s["artifact_id"] == target["artifact_id"]), None)
+            if (frozen_submission is None or submission.get("metadata", {}).get("controller_binding")
+                    != frozen_submission.get("controller_binding")):
+                return "SUBMISSION_BINDING_MISMATCH"
+            if any(target.get(key) != value for key, value in expected_submission_binding.items()):
+                return "PIPELINE_PLAN_MISMATCH"
+            if content is not None:
+                durable = self.state.idempotency_result(
+                    f"ipipe.build-binding:{plan['run_id']}:{content.get('build_id')}")
+                if (not isinstance(durable, dict) or durable.get("run_id") != plan["run_id"]
+                        or durable.get("build_id") != content.get("build_id")
+                        or not build_matches(durable.get("binding"), target)):
+                    return "BUILD_BINDING_MISMATCH"
+        elif submission.get("metadata", {}).get("controller_binding") != expected_submission_binding:
             return "SUBMISSION_BINDING_MISMATCH"
         if content is not None:
             if not isinstance(content, dict):
@@ -1800,6 +1979,10 @@ class PhaseProtocol:
         events: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         """The submission the evidence is about, keyed by the module it reports."""
+        from pipeline_plan import frozen_plan
+        plan = frozen_plan(events)
+        if plan is not None:
+            return plan["modules"].get(module)
         if module == payload.get("module"):
             return {
                 "artifact_id": payload.get("submission_artifact_id"),

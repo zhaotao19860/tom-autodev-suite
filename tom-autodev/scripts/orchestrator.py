@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import execution_guard, guard_execution
+
 import hashlib
 import json
 import logging
@@ -185,10 +187,7 @@ class Orchestrator:
         with `WORKFLOW_SPEC_DRIFT` before any side effect so the run is explicitly migrated (or
         the spec restored). A legacy run with no pin (pre-v2 INTAKE) is not guarded. The same
         pure check gates the protocol's completion/ingestion entries (R4-M2)."""
-        drift = workflow_spec.spec_drift(self.state.events(run_id))
-        if drift is None:
-            return None
-        return {"ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT", "run_id": run_id, **drift}
+        return execution_guard(self.state, run_id)
 
     def _stale_submit_evidence(self, run_id: str) -> dict[str, Any] | None:
         """Refuse a SUBMIT action whose Review no longer covers its Change Set."""
@@ -287,6 +286,7 @@ class Orchestrator:
             return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
         return None
 
+    @guard_execution
     def recover_rebuilt_change_set(
         self, run_id: str, task_id: str, plan_artifact_id: str
     ) -> dict[str, Any]:
@@ -354,6 +354,7 @@ class Orchestrator:
             return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
         return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
 
+    @guard_execution
     def recover_stale_rebuilt_plan(
         self,
         run_id: str,
@@ -477,6 +478,7 @@ class Orchestrator:
             return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
         return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
 
+    @guard_execution
     def recover_stale_submit(
         self, run_id: str, task_id: str, plan_artifact_id: str
     ) -> dict[str, Any]:
@@ -515,6 +517,7 @@ class Orchestrator:
             return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
         return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
 
+    @guard_execution
     def complete_phase(
         self,
         run_id: str,
@@ -537,6 +540,7 @@ class Orchestrator:
             result = {**result, "submit_descriptor": descriptor}
         return result
 
+    @guard_execution
     def optimize(
         self,
         run_id: str,
@@ -925,6 +929,7 @@ class Orchestrator:
             "input_hash": input_hash, "workspace_binding": binding,
         }
 
+    @guard_execution
     def advance(
         self,
         run_id: str,
@@ -1087,6 +1092,7 @@ class Orchestrator:
             return {"run_id": run_id, "state": current_state, "reason_code": "ADVANCE_CONFLICT"}
         return {"run_id": run_id, "state": current_state, "reason_code": "STALE_ACTION"}
 
+    @guard_execution
     def route_failure(
         self,
         run_id: str,
@@ -1264,6 +1270,13 @@ class Orchestrator:
         run_id: str | None = None,
         responder: str | None = None,
     ) -> dict[str, Any]:
+        bound_run = run_id
+        if bound_run is None:
+            record = self.approvals.get(approval_id)
+            bound_run = record.get("run_id") if isinstance(record, dict) else None
+        blocked = execution_guard(self.state, bound_run)
+        if blocked is not None:
+            return blocked
         return self.approvals.resolve(approval_id, decision, input_hash, channel, run_id=run_id, responder=responder, state_store=self.state)
 
     def collaboration_session(self, group_client: Any) -> CollaborationSession:
@@ -1315,6 +1328,19 @@ class Orchestrator:
         icode_runtime: Any,
     ) -> dict[str, Any]:
         """Submit through the owned iCode boundary and form the IPIPE checkpoint."""
+        # This receipt is a pure return. Everything else, including runtime
+        # preflight, must wait for a matching workflow policy before executing.
+        if isinstance(change_set, dict) and isinstance(approval, dict):
+            identifiers = [change_set.get(key) for key in (
+                "change_set_id", "revision_set_id", "input_hash")]
+            if all(isinstance(value, str) and value for value in identifiers):
+                existing = self.state.idempotency_result(
+                    f"submit-to-ipipe:{run_id}:{identifiers[0]}:{identifiers[1]}")
+                if existing is not None:
+                    return existing
+        blocked = execution_guard(self.state, run_id)
+        if blocked is not None:
+            return blocked
         try:
             return self._submit_to_ipipe(run_id, change_set, approval, icode_runtime)
         except Exception:
@@ -1487,8 +1513,16 @@ class Orchestrator:
         transition = self.transition_policy.validate("SUBMIT", "IPIPE")
         if not transition.get("allowed"):
             return {"run_id": run_id, "state": "SUBMIT", **transition, "ok": False}
-        submissions = _recorded_submissions(self, run_id)
+        from pipeline_plan import create_plan
+        try:
+            plan = create_plan(self, run_id, profile)
+        except ValueError as error:
+            return {"ok": False, "reason_code": str(error), "run_id": run_id}
+        submissions = plan["submissions"]
         primary = _primary_submission(profile, submissions, controller_binding, submission)
+        primary_target = plan["modules"].get(primary["controller_binding"]["module"])
+        if primary_target is None:
+            primary_target = plan["modules"][plan["required_modules"][0]]
         payload = {
             "previous_state": "SUBMIT",
             "requirement_id": intake["requirement_id"],
@@ -1498,10 +1532,12 @@ class Orchestrator:
             # The single-pipeline IPIPE checks still read these, so they name the
             # primary business repository rather than whichever submission happened to
             # be last; `submissions` carries the rest for the per-module checks.
-            **primary["controller_binding"],
-            "submission_artifact_id": primary["artifact_id"],
-            "submission_hash": primary["sha256"],
+            **{key: primary_target[key] for key in (
+                "pipeline_id", "module", "release_rule", "source_revisions", "environment_fingerprint")},
+            "submission_artifact_id": primary_target["artifact_id"],
+            "submission_hash": primary_target["sha256"],
             "submissions": submissions,
+            "pipeline_plan": plan,
             "approval_id": approval_id,
             "approval_input_hash": input_hash,
             "policy_decision": transition,
@@ -1577,6 +1613,7 @@ class Orchestrator:
             "profile_hash": recorded_hash,
         }
 
+    @guard_execution
     def request_infoflow_approval(
         self,
         run_id: str,
@@ -1730,6 +1767,7 @@ class Orchestrator:
             }
         return {**outcome, "reason_code": "APPROVAL_DELIVERY_FAILED", "retry_allowed": True}
 
+    @guard_execution
     def wait_infoflow_approval(self, run_id: str, approval_id: str, input_hash: str, infoflow_client: Any, timeout_seconds: float) -> dict[str, Any]:
         approval = self.approvals.get(approval_id)
         if approval is None or approval.get("run_id") != run_id or approval.get("run_id") == "legacy":
@@ -1800,6 +1838,7 @@ class Orchestrator:
         self.state.save_idempotency_result(response_key, result)
         return result
 
+    @guard_execution
     def receive_infoflow_reply(self, run_id: str, approval_id: str, input_hash: str, response: Any) -> dict[str, Any]:
         if not isinstance(response, dict) or any(response.get(key) != value for key, value in {"run_id": run_id, "approval_id": approval_id, "input_hash": input_hash, "channel": "infoflow"}.items()):
             return self.approvals.reject_envelope(
@@ -1813,6 +1852,7 @@ class Orchestrator:
             )
         return self.approvals.receive(approval_id, decision, input_hash, "infoflow", response.get("responder"), run_id=run_id, state_store=self.state)
 
+    @guard_execution
     def reissue_infoflow_approval(
         self,
         run_id: str,
@@ -1880,12 +1920,14 @@ class Orchestrator:
             infoflow_client=infoflow_client,
         )
 
+    @guard_execution
     def heartbeat_infoflow_approval(self, run_id: str, approval_id: str, observed_at: str) -> dict[str, Any]:
         approval = self.approvals.get(approval_id)
         if approval is None or approval.get("run_id") != run_id or approval.get("run_id") == "legacy":
             return {"run_id": run_id, "reason_code": "APPROVAL_RUN_MISMATCH"}
         return self.approvals.record_heartbeat(approval_id, observed_at)
 
+    @guard_execution
     def timeout_infoflow_approval(self, run_id: str, approval_id: str, input_hash: str) -> dict[str, Any]:
         approval = self.approvals.get(approval_id)
         if (
@@ -2090,21 +2132,8 @@ def _reviewed_tasks(orchestrator: Any, run_id: str) -> list[str]:
 
 
 def _recorded_submissions(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
-    """The submissions already landed, in a stable order for the IPIPE payload."""
-    submissions = []
-    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
-        if artifact.get("kind") != "submission":
-            continue
-        metadata = artifact.get("metadata") or {}
-        binding = metadata.get("controller_binding")
-        submissions.append({
-            "artifact_id": artifact.get("artifact_id"),
-            "sha256": artifact.get("sha256"),
-            "change_set_id": metadata.get("change_set_id"),
-            "revision_set_id": metadata.get("revision_set_id"),
-            "controller_binding": binding if isinstance(binding, dict) else {},
-        })
-    return sorted(submissions, key=lambda item: str(item.get("change_set_id") or ""))
+    from pipeline_plan import current_submissions
+    return current_submissions(orchestrator, run_id)
 
 
 def _outstanding_submissions(orchestrator: Any, run_id: str) -> list[str]:
@@ -2136,97 +2165,48 @@ def _outstanding_submissions(orchestrator: Any, run_id: str) -> list[str]:
             if isinstance(node, dict) and isinstance(node.get("task_id"), str) and node["task_id"]:
                 dag_nodes.append(node["task_id"])
     current_passing = protocol._current_passing(run_id) if dag_nodes else set()
-    current_change_set: dict[str, str] = {}
-    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
-        if artifact.get("kind") != "change-set":
-            continue
-        metadata = artifact.get("metadata") or {}
-        task_id = metadata.get("task_id")
-        try:
-            change_set_id = json.loads(artifact["content"].decode("utf-8"))["change_set_id"]
-        except (AttributeError, KeyError, ValueError, UnicodeDecodeError):
-            continue
-        if metadata.get("verdict") == "PASS" and isinstance(task_id, str) and task_id:
-            # `artifacts_for_run` is ordered by creation, so the last descriptor for a
-            # task is the one the current Review passed. Against a live DAG, a PASS
-            # older than that DAG is not current and must not close the node.
-            if dag_nodes and not protocol._task_reviewed(run_id, task_id):
-                continue
-            current_change_set[task_id] = str(change_set_id)
-    submitted_change_sets = {
-        str(item.get("change_set_id")) for item in _recorded_submissions(orchestrator, run_id)
-    }
+    from pipeline_plan import current_descriptors
+    descriptors = current_descriptors(orchestrator, run_id)
+    submitted_tasks = _submitted_tasks(orchestrator, run_id, descriptors)
     if dag_nodes:
-        open_nodes = [task for task in dag_nodes if task not in current_passing]
-        unsubmitted = [
-            task for task in current_passing
-            if current_change_set.get(task) not in submitted_change_sets
-        ]
-        return sorted(set(open_nodes) | set(unsubmitted))
-    if not current_change_set:
-        return []
-    return sorted(
-        task
-        for task in set(_reviewed_tasks(orchestrator, run_id))
-        if current_change_set.get(task) not in submitted_change_sets
-    )
+        return sorted(set(dag_nodes) - (current_passing & submitted_tasks))
+    return sorted(set(descriptors) - submitted_tasks)
+
+
+def _submitted_tasks(orchestrator: Any, run_id: str,
+                     descriptors: dict[str, Any] | None = None) -> set[str]:
+    from pipeline_plan import current_descriptors
+    if descriptors is None:
+        descriptors = current_descriptors(orchestrator, run_id)
+    submitted = {(item.get("change_set_id"), item.get("revision_set_id"))
+                 for item in _recorded_submissions(orchestrator, run_id)}
+    return {task for task, entry in descriptors.items()
+            if (entry["descriptor"].get("change_set_id"),
+                entry["descriptor"].get("revision_set_id")) in submitted}
 
 
 def _current_pass_change_sets(orchestrator: Any, run_id: str) -> dict[str, str]:
-    """task_id -> current PASS change_set_id for tasks whose Review covers the DAG."""
-    protocol = orchestrator.phase_protocol()
-    dag = orchestrator.artifacts.latest_phase(run_id, "TASKS", None)
-    dag_nodes = bool(dag.get("valid"))
-    found: dict[str, str] = {}
-    for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
-        if artifact.get("kind") != "change-set":
-            continue
-        metadata = artifact.get("metadata") or {}
-        task_id = metadata.get("task_id")
-        try:
-            change_set_id = json.loads(artifact["content"].decode("utf-8"))["change_set_id"]
-        except (AttributeError, KeyError, ValueError, UnicodeDecodeError):
-            continue
-        if metadata.get("verdict") != "PASS" or not isinstance(task_id, str) or not task_id:
-            continue
-        if dag_nodes and not protocol._task_reviewed(run_id, task_id):
-            continue
-        found[task_id] = str(change_set_id)
-    return found
+    """Task -> current descriptor ID; submission completion also checks its revision."""
+    from pipeline_plan import current_descriptors
+    return {task: str(entry["descriptor"]["change_set_id"])
+            for task, entry in current_descriptors(orchestrator, run_id).items()}
 
 
 def _latest_unsubmitted_reviewed_task(orchestrator: Any, run_id: str) -> str | None:
-    """The newest DAG-covering PASS whose current Change Set is not in iCode."""
-    submitted = {
-        str(item.get("change_set_id")) for item in _recorded_submissions(orchestrator, run_id)
-    }
-    current = _current_pass_change_sets(orchestrator, run_id)
-    unsubmitted = [
-        task_id for task_id, change_set_id in current.items()
-        if change_set_id not in submitted
-    ]
+    """The newest DAG-covering PASS whose exact revision is not in iCode."""
+    unsubmitted = set(_current_pass_change_sets(orchestrator, run_id)) - _submitted_tasks(orchestrator, run_id)
     if not unsubmitted:
         return None
-    protocol = orchestrator.phase_protocol()
-    reviews = protocol._passing_reviews(run_id)
-    return max(unsubmitted, key=lambda task_id: reviews.get(task_id, 0))
+    reviews = orchestrator.phase_protocol()._passing_reviews(run_id)
+    return max(unsubmitted, key=lambda task: (reviews.get(task, 0), task))
 
 
 def _submit_followup_state(orchestrator: Any, run_id: str) -> str:
-    """Where SUBMIT goes after this change set is recorded.
-
-    Stay in SUBMIT while another already-reviewed change set still owes iCode.
-    Return to WORKSPACE when later DAG nodes still need a Review. Only go to
-    IPIPE when every current PASS is in and the DAG has no open nodes.
-    """
     outstanding = _outstanding_submissions(orchestrator, run_id)
     if not outstanding:
         return "IPIPE"
-    submitted = {
-        str(item.get("change_set_id")) for item in _recorded_submissions(orchestrator, run_id)
-    }
-    current = _current_pass_change_sets(orchestrator, run_id)
-    if any(current.get(task) not in submitted for task in outstanding if task in current):
+    current = set(_current_pass_change_sets(orchestrator, run_id))
+    if (set(outstanding) & current) - _submitted_tasks(orchestrator, run_id):
         return "SUBMIT"
     return "WORKSPACE"
 
@@ -2351,6 +2331,11 @@ def _ipipe_revision_set(
     patchset. A repair or a fold that adds a patchset therefore stays ownable, while a
     build of somebody else's change still fails to match.
     """
+    from pipeline_plan import frozen_plan
+    plan = frozen_plan(orchestrator.state.events(run_id))
+    if plan is not None:
+        return {"ok": True, "reason_code": "OK", "drift": {},
+                "revisions": plan["revision_set"]}
     business = [item for item in (profile.get("business_repos") or []) if isinstance(item, dict)]
     test_repo = profile.get("test_repo") or {}
     if not business or not test_repo:
@@ -2403,6 +2388,7 @@ def _ipipe_revision_set(
     }
 
 
+@guard_execution
 def _ipipe_adopt(
     orchestrator: Any, runtime: Any, run_id: str, module: Any, window_seconds: float
 ) -> dict[str, Any]:
@@ -2472,7 +2458,7 @@ def _primary_submission(
     """
     repos = profile.get("business_repos") or []
     primary_module = repos[0].get("module") if repos and isinstance(repos[0], dict) else None
-    for item in submissions:
+    for item in reversed(submissions):
         if item["controller_binding"].get("module") == primary_module:
             return item
     return {
@@ -2949,6 +2935,7 @@ def main(argv: list[str] | None = None) -> int:
     return _cli_exit_code(result)
 
 
+@guard_execution
 def _submit(
     orchestrator: Any, run_id: str, task_id: str, approval_id: str | None, icode_skill: str,
     icode_runtime: Any | None = None,

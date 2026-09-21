@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from execution_guard import guard_execution
+
 import hashlib
 import json
 from typing import Any
@@ -114,6 +116,7 @@ class KnowledgeSync:
             run_id=run_id,
         )
 
+    @guard_execution
     def publish_phase(self, run_id: str, artifact: dict[str, Any], scope: str = "both") -> dict[str, Any]:
         # scope (slimming Stage B): "both" = KU doc + iCafe comment; "ku_only" = KU doc, no
         # comment; "icafe_only" = milestone comment, no KU doc; "skip" = neither. The phase

@@ -13,6 +13,8 @@ deciding engineering on its own is the one thing this must not do.
 
 from __future__ import annotations
 
+from execution_guard import execution_guard
+
 import time
 import hashlib
 import json
@@ -81,6 +83,9 @@ class IpipeWatcher:
         return outcomes
 
     def _observe(self, run_id: str) -> list[dict[str, Any]]:
+        blocked = execution_guard(self.orchestrator.state, run_id)
+        if blocked is not None:
+            return [blocked]
         build_ids = self._build_ids(run_id)
         if not build_ids:
             return [{"ok": True, "reason_code": "NO_BUILD_YET", "run_id": run_id}]
