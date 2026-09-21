@@ -20,7 +20,18 @@ Run independent reports:
 
 Every finding contains axis, severity, repository, path/symbol/line, evidence reference, affected acceptance criterion, blocking flag, and `classification`.
 
+## Review Method
+
+Pure-prompt heuristics, read-only — never compile or run. Load:
+
+- [`references/review-heuristics.md`](references/review-heuristics.md): **always.** Data-flow/boundary/adversarial/variant/recovery/consistency/contract passes and the D-01..D-07 semantic defects, each tagged to an axis.
+- [`references/security-checklist.md`](references/security-checklist.md): when the change touches web/HTTP, auth, crypto, deserialization, or external input. Feeds Standards.
+- [`references/rule-catalog.md`](references/rule-catalog.md): rule-ID + severity read-checks (G-SECRET/EXCEPT/INPUT/SEC/DB/PERF/LOG/ARCH, BIZ-*).
+- [`references/severity-taxonomy.md`](references/severity-taxonomy.md) and [`references/false-positive-suppression.md`](references/false-positive-suppression.md): when disposing findings.
+
 ## Finding Reception
+
+Run every candidate finding through the sink-first FP firewall (`false-positive-suppression.md`) before recording it: prefer a missed report over a false one. Map its triage to `classification` — reject → `REJECTED_WITH_REASON`, 待确认/unknown → `NEEDS_CLARIFICATION`, confirmed → `CONFIRMED`. Do not import raw HIGH/MEDIUM/BLOCK verdict words into the artifact; severity lives in `severity`/`blocking`, disposition lives in `classification`.
 
 Classify every provider suggestion exactly once, in the finding's required `classification` field:
 
