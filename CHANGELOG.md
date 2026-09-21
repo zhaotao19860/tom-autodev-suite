@@ -49,6 +49,7 @@ Codex round-4 复核修复（`tom-autodev-suite_review_report_ce46b24.md`，多�
 - R4-M1：合并恢复只补建"该 SPEC 完成事件产生的" TASKS frontier——`_recover_merged_tasks` 重建前校验当前事件即 SPEC→TASKS 转移（`previous_state==SPEC`、`artifact_id`==该 SPEC 产物、且为 action 的 source event）；故意的 `WORKSPACE→TASKS` 重拆（previous_state==WORKSPACE）不再被旧 DAG 覆盖，转为 park 等新 producer。补"WORKSPACE 重拆不被恢复吞掉"用例，原崩溃恢复用例仍绿。回归 `824` 项全绿
 - R4-M4：权威失败签名绑定当前 DIAGNOSE occurrence——`_authoritative_failure_signature` 改读 DIAGNOSE 入口事件：仅 `previous_state==IPIPE` 的诊断有权威运行时签名，取自该事件 `artifact_id` 指向的失败产物；REVIEW 等来源返回 None、回落诊断自带签名。故 IPIPE(S)→修→REVIEW(T)→诊断时按当前 T 路由，不再被历史 S 覆盖。补 IPIPE 来源权威覆盖 + REVIEW 来源不被 S 误升级两用例。回归 `825` 项全绿
 - R4-M3：错误归一改为按单元归一易变 token、不再无脑删数字——`_normalize_error` 只把完整 UUID→`<uuid>`、ISO 时间戳→`<ts>`、文件路径(含 `:line`)→`<path>`、长 hex(≥8, build/commit id)→`<hex>`，**保留纯十进制**（401≠503 是根因区分位，blanket 删数字会误合并）；UUID 整体匹配、内部 4 位段不再残留而拆分同一错误。更新 R-M4 跨 build 用例只变 path/hex/uuid/时间，补 401/503 不合并 + 仅 UUID 变化仍同签两用例。回归 `827` 项全绿
+- R4-H2（逐模块独立发布）：新增 `IpipeRuntime.verify_release_of_build(build_id)` 按 build **自身绑定**的 revision set 核验，`_verify_required_releases` 改为对每个 required 模块调它——未改模块的已过 build 按它自己构建时的 revision set 发布，不再因兄弟模块改动导致当前整仓集不符而卡在 RELEASE(`REVISION_MISMATCH`)。补 verify_release_of_build 真绑定用例 + 聚合用例改逐 build 核验。回归 `828` 项全绿。（报告在"影响范围"另点出既存的 `_recorded_submissions` 按 change_set_id 取首个可能选到旧 submission——应按当前获审 Change Set 选，属独立子项，待单独处理）
 
 ## 2026-09-20
 

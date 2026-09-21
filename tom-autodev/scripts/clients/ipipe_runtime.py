@@ -764,6 +764,22 @@ class IpipeRuntime:
             "evidence_refs": refs,
         }
 
+    def verify_release_of_build(self, build_id: str) -> dict[str, Any]:
+        """Verify a build against its OWN recorded binding — per-module independent release
+        (R4-H2). A required module releases the build that passed its pipeline, verified on that
+        build's own revision set, not on the current whole-repo set (which a sibling module's
+        later change would invalidate, leaving an unchanged module's valid build stuck). Reuses
+        verify_release's platform checks by feeding it the build's own revision identity."""
+        binding = self._load_build_binding(build_id)
+        if binding is None:
+            return _failure("BUILD_OWNERSHIP_UNVERIFIED")
+        revision_set = {
+            "run_id": self.run_id,
+            "revision_set_id": binding.get("revision_set_id"),
+            "repositories": binding.get("repositories"),
+        }
+        return self.verify_release(build_id, revision_set)
+
     def _trigger_receipt(self, intent_id: str, context: dict[str, Any], build: dict[str, Any]) -> dict[str, Any]:
         if not _matches_build(build, context):
             return _failure("REVISION_MISMATCH", intent_id=intent_id, retry_allowed=False)

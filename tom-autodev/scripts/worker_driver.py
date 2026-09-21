@@ -800,16 +800,19 @@ def _build_ipipe_evidence(binding: dict[str, Any], monitored: dict[str, Any]) ->
 
 
 def _verify_required_releases(
-    orchestrator: Any, run_id: str, runtime: Any, revisions: dict[str, Any],
-    profile: dict[str, Any],
+    orchestrator: Any, run_id: str, runtime: Any, profile: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Gate RELEASE_SUCCESS on EVERY required-for-release module being published (R-H3).
+    """Gate RELEASE_SUCCESS on EVERY required-for-release module being published (R-H3),
+    verifying each module against ITS OWN build's revision set (R4-H2, per-module independent
+    release).
 
-    The single-module path already verified the latest IPIPE build; a profile that registers
-    several `required_for_release` pipelines must not release on that one build while another
-    module was never published. Returns None when there are no extra required modules or all
-    are verified-published; otherwise a RELEASE_WAITING park (a module not yet published) or a
-    failure (verify failed / a required module has no success build)."""
+    A profile that registers several `required_for_release` pipelines must not release on one
+    module's build while another was never published; and each module is verified on the
+    revision set its build passed on (`verify_release_of_build`), so an unchanged module's valid
+    build is not stuck when a sibling module changed the current whole-repo set. Returns None
+    when there are no required modules or all are verified-published; otherwise a RELEASE_WAITING
+    park (a module not yet published) or a failure (verify failed / a required module has no
+    success build)."""
     from phase_protocol import _required_modules
 
     required = _required_modules(profile.get("pipeline_profile"))
@@ -828,7 +831,7 @@ def _verify_required_releases(
         if not build_id:
             return {"ok": False, "reason_code": "RELEASE_EVIDENCE_INCOMPLETE",
                     "run_id": run_id, "module": module}
-        verified = runtime.verify_release(build_id, revisions)
+        verified = runtime.verify_release_of_build(build_id)
         if not verified.get("ok"):
             if verified.get("status") == "RELEASE_WAITING":
                 return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
@@ -881,7 +884,7 @@ def _execute_release(
                     "controller": "release", "build_id": build_id, "detail": verified}
         return {"ok": False, "reason_code": "RELEASE_VERIFY_FAILED", "detail": verified,
                 "run_id": run_id, "build_id": build_id}
-    gate = _verify_required_releases(orchestrator, run_id, runtime, derived["revisions"], pinned["profile"])
+    gate = _verify_required_releases(orchestrator, run_id, runtime, pinned["profile"])
     if gate is not None:
         # A multi-module release only lands once EVERY required-for-release module's build is
         # published — otherwise the last module's success would release the whole run while

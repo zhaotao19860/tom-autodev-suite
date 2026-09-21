@@ -2427,7 +2427,7 @@ class ReleaseAggregationTests(unittest.TestCase):
             self.failing = set(failing)
             self.calls = []
 
-        def verify_release(self, build_id, revisions):
+        def verify_release_of_build(self, build_id):
             self.calls.append(build_id)
             module = build_id.replace("build-", "")
             if module in self.waiting:
@@ -2438,23 +2438,24 @@ class ReleaseAggregationTests(unittest.TestCase):
 
     def test_single_module_profile_gates_nothing(self):
         self.assertIsNone(worker_driver._verify_required_releases(
-            self._Orch(["x86bgw"]), "run", self._Runtime(), {}, {"pipeline_profile": {}}))
+            self._Orch(["x86bgw"]), "run", self._Runtime(), {"pipeline_profile": {}}))
 
     def test_all_required_published_passes(self):
         runtime = self._Runtime()
         self.assertIsNone(worker_driver._verify_required_releases(
-            self._Orch(["x86bgw", "bgwagent"]), "run", runtime, {}, self._MULTI))
+            self._Orch(["x86bgw", "bgwagent"]), "run", runtime, self._MULTI))
+        # Each module is verified against its OWN build (per-module independent release).
         self.assertEqual(sorted(runtime.calls), ["build-bgwagent", "build-x86bgw"])
 
     def test_one_module_unpublished_parks_release_waiting(self):
         gate = worker_driver._verify_required_releases(
             self._Orch(["x86bgw", "bgwagent"]), "run",
-            self._Runtime(waiting=["bgwagent"]), {}, self._MULTI)
+            self._Runtime(waiting=["bgwagent"]), self._MULTI)
         self.assertEqual((gate["parked"], gate["module"]), ("RELEASE_WAITING", "bgwagent"))
 
     def test_missing_required_build_is_incomplete(self):
         gate = worker_driver._verify_required_releases(
-            self._Orch(["x86bgw"]), "run", self._Runtime(), {}, self._MULTI)
+            self._Orch(["x86bgw"]), "run", self._Runtime(), self._MULTI)
         self.assertEqual(
             (gate["reason_code"], gate["module"]), ("RELEASE_EVIDENCE_INCOMPLETE", "bgwagent"))
 

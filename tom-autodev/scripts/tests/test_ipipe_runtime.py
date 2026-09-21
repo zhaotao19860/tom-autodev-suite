@@ -761,6 +761,27 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(exact["reason_code"], "OK")
         self.assertEqual(exact["release_id"], "release-1")
 
+    def test_verify_release_of_build_uses_the_builds_own_revision_set(self):
+        # R4-H2 (per-module independent release): a build is verified against its OWN recorded
+        # binding, so an unchanged module's already-passed build releases without the caller
+        # supplying the current whole-repo revision set (which a sibling's change would shift).
+        self.bind_build(status="SUCCESS")
+        self.api.stages["build-1"] = [{"id": "stage-1", "status": "SUCCESS"}]
+        self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        self.api.releases = [{
+            "id": "release-1", "module": "baidu/team/app", "branch": "main",
+            "pipelineBuildId": "build-1", "releaseRule": "manual-approval",
+            "releaseStatus": "SUCCESS",
+            "revisions": {"baidu/team/app": "app-rev", "baidu/team/app-tests": "test-rev"},
+        }]
+        released = self.runtime.verify_release_of_build("build-1")
+        self.assertEqual((released["reason_code"], released["release_id"]), ("OK", "release-1"))
+        # An unbound build has no own revision set to release against.
+        self.assertEqual(
+            self.runtime.verify_release_of_build("build-unknown")["reason_code"],
+            "BUILD_OWNERSHIP_UNVERIFIED")
+
     def test_verify_release_requires_current_successful_build_and_nonempty_successful_stages(self):
         self.bind_build(status="SUCCESS")
         exact_release = {
