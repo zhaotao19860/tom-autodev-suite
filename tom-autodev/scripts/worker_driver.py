@@ -326,6 +326,27 @@ def _validate_before_fulfill(
     return {"ok": False, "reason_code": reason, "retry_allowed": True}
 
 
+def _merged_traceability_error(draft: dict[str, Any]) -> str | None:
+    """The SPEC<->DAG acceptance-coverage consistency the TASKS phase enforces, evaluated on the
+    merged {spec, dag} draft BEFORE the job is locked (R4-H1).
+
+    The TASKS predecessor check requires the DAG's acceptance_coverage to equal the SPEC's
+    traceability acceptance points; checking it here (both halves are in hand) means a DAG that
+    covers the wrong points is rejected retryable instead of committing SPEC and dead-locking
+    the TASKS half of the same bundle."""
+    spec = draft.get("spec") if isinstance(draft.get("spec"), dict) else {}
+    dag = draft.get("dag") if isinstance(draft.get("dag"), dict) else {}
+    expected = {
+        item.get("acceptance_point_id") for item in spec.get("traceability", [])
+        if isinstance(item, dict)
+    }
+    actual = {
+        item.get("acceptance_point_id") for item in dag.get("acceptance_coverage", [])
+        if isinstance(item, dict)
+    }
+    return None if actual == expected else "TRACEABILITY_MISMATCH"
+
+
 def _submit_merged(
     orchestrator: Any, run_id: str, job_id: str, action: dict[str, Any],
     draft: dict[str, Any], knowledge_sync: Any | None,
@@ -351,6 +372,12 @@ def _submit_merged(
     precheck = _validate_before_fulfill(orchestrator, run_id, draft["spec"], knowledge_sync)
     if precheck is not None:
         return {**precheck, "job_id": job_id}
+    # The DAG half must cover exactly the SPEC's acceptance points — the same consistency the
+    # TASKS phase enforces — checked BEFORE locking the bundle (R4-H1). A schema-valid DAG that
+    # covers the wrong acceptance points otherwise commits SPEC and then dead-locks TASKS.
+    trace_error = _merged_traceability_error(draft)
+    if trace_error is not None:
+        return {"ok": False, "reason_code": trace_error, "retry_allowed": True, "job_id": job_id}
     orchestrator.state.fulfill_producer_job(job_id, draft)
     _record_model_receipt(orchestrator, run_id, action, draft, ["spec", "task-dag"])
 

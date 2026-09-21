@@ -597,6 +597,35 @@ class FakeE2ETests(unittest.TestCase):
                                          {"spec": copy.deepcopy(specialized_examples()["spec"])}, knowledge_sync=k2)
         self.assertEqual(bad["reason_code"], "MERGED_DRAFT_INVALID")
 
+    def test_merged_dag_inconsistent_with_spec_is_retryable_without_locking(self):
+        # R4-H1: a merged bundle whose DAG is internally consistent and schema-valid but whose
+        # acceptance coverage does not match the SPEC's traceability is rejected retryable
+        # BEFORE the job is locked, so a corrected bundle retries the same frontier instead of
+        # committing SPEC then dead-locking TASKS with PRODUCER_JOB_CONFLICT.
+        run_id, knowledge, _req = self._run_to_grill_action("BGW-817", "I15ClP2KW4ZGAK", "express")
+        job_id = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge)["producer_job"]["job_id"]
+
+        dag = copy.deepcopy(specialized_examples()["task-dag"])
+        # Internally consistent (node + coverage agree) but on the wrong acceptance point.
+        dag["nodes"][0]["acceptance_point_ids"] = ["AC-OTHER"]
+        dag["acceptance_coverage"] = [{"acceptance_point_id": "AC-OTHER", "task_ids": ["T-1"]}]
+        bad = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id,
+            {"spec": copy.deepcopy(specialized_examples()["spec"]), "dag": dag},
+            knowledge_sync=knowledge)
+        self.assertEqual(bad["reason_code"], "TRACEABILITY_MISMATCH")
+        self.assertTrue(bad["retry_allowed"])
+        self.assertEqual(self.orchestrator.state.producer_job(job_id)["status"], "PENDING")
+
+        # A consistent bundle proceeds on the same frontier — no PRODUCER_JOB_CONFLICT.
+        good = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id,
+            {"spec": copy.deepcopy(specialized_examples()["spec"]),
+             "dag": copy.deepcopy(specialized_examples()["task-dag"])},
+            knowledge_sync=knowledge)
+        self.assertEqual((good["reason_code"], good["gate"]), ("APPROVAL_REQUIRED", "G2"))
+
     def test_worker_executes_workspace_binding(self):
         # A run parked at WORKSPACE: the worker cuts the owned worktrees, derives the G4
         # binding hash, and — since G4 is not yet approved for it — returns the hash to
