@@ -4,7 +4,7 @@
 
 > 仅在 Comate 宿主内作为控制面入口使用。项目/语言知识放在子 skill 里；没有独立的 release 组件——发布是一个由远程证据背书、经审批的终态控制器动作。
 
-> **仓库结构**：本仓库是 tom-autodev 套件。控制面本体（约 90 个脚本、schema、references）都在 **`tom-autodev/`** 子目录下，同级目录是配套子 skill（`tom-grill` / `tom-spec` / `tom-tasks` / `tom-plan` / `tom-implement` / `tom-review` / `tom-diagnose` / `tom-lang-*` / `tom-project-*` / **`setup-tom-autodev`**）。下文所有相对路径（`scripts/`、`references/`、`schemas/`）与命令均**以 `tom-autodev/` 为基准**——即先 `cd tom-autodev/` 再执行。
+> **仓库结构**：本仓库是 tom-autodev 套件。控制面本体（约 90 个脚本、schema、references）都在 **`tom-autodev/`** 子目录下，同级目录是配套子 skill（`tom-grill` / `tom-spec` / `tom-tasks` / `tom-plan` / `tom-implement` / `tom-review` / `tom-diagnose` / `tom-lang-*` / `tom-project-*`）。项目注册（setup）已并入 `tom-autodev` 自身（见 `tom-autodev/references/setup.md`）。下文所有相对路径（`scripts/`、`references/`、`schemas/`）与命令均**以 `tom-autodev/` 为基准**——即先 `cd tom-autodev/` 再执行。
 
 
 ---
@@ -200,11 +200,11 @@ worker 只在两类 job 上 park：**ApprovalJob**（等人工 APPROVE）与 **P
 
 > 所有命令从 `scripts/` 目录跑：`python3 orchestrator.py <子命令> ...`（也可 `python3 -m`）。控制面状态库默认在 `--config-root` 下的 `state.sqlite`。
 
-### 0. 前置：用 setup-tom-autodev 注册项目
+### 0. 前置：注册项目（tom-autodev 的 setup 相位）
 
-跑任何需求前，项目必须先经 **`setup-tom-autodev`** 子 skill 一次性注册（人工监督、只做登记，不启动 run、不生成代码、不触发 iPipe）。它产出并校验一份 project profile：
+跑任何需求前，项目必须先经 **`tom-autodev` 的项目注册（setup）** 一次性登记（人工监督、只做登记，不启动 run、不生成代码、不触发 iPipe）。它产出并校验一份 project profile（详见 `tom-autodev/references/setup.md`）：
 
-1. 在 Comate 里对目标项目调用 `setup-tom-autodev`，把要素交给它：`project_id`；业务仓路径/模块/分支/锁键；**独立**产测仓与夹具归属；语言/项目子 skill（如 `tom-lang-c-cpp` + `tom-project-bgw`）；知识源（KU）与新鲜度；外部测试接口；只读源码 Review 组件；**稳定的** iPipe 流水线 profile（预置模板 + 允许的运行时参数，不建动态阶段）；环境 profile（runner/镜像/工具版本/硬件或模拟器/数据/服务/容量，且显式声明哪些 unit/regression/integration/NCS/release 阶段在**远程**跑——无本地兜底）；Comate + 如流审批渠道与角色成员；release rule/版本映射。
+1. 在 Comate 里对目标项目发起注册，把要素交给它：`project_id`；业务仓路径/模块/分支/锁键；**独立**产测仓与夹具归属；语言/项目子 skill（如 `tom-lang-c-cpp` + `tom-project-bgw`）；知识源（KU）与新鲜度；外部测试接口；只读源码 Review 组件；**稳定的** iPipe 流水线 profile（预置模板 + 允许的运行时参数，不建动态阶段）；环境 profile（runner/镜像/工具版本/硬件或模拟器/数据/服务/容量，且显式声明哪些 unit/regression/integration/NCS/release 阶段在**远程**跑——无本地兜底）；Comate + 如流审批渠道与角色成员；release rule/版本映射。
 2. 它跑 `project_registry.validate_profile`；缺字段则返回 `PROJECT_NOT_READY` 并列出**确切缺哪些**。
 3. 校验通过后把 profile 存到 `~/.tom-autodev/config/projects/<project>.yaml`（或显式 `--config-root` 下的 `config/projects/<project>.yaml`），并记下内容 hash + 人工登记证据。密钥只留在登录文件/环境变量里，绝不读出或打印。覆盖已有 profile 需人工确认 + 提供上一份的精确 hash。
 4. 只有 `READY` 才允许后续 `tom-autodev.start`。
@@ -431,9 +431,10 @@ cd scripts/tests && python3 -m unittest discover -s . -p "test_*.py"
 - `references/phase-protocol.md` — 相位执行契约（WorkerDriver 拥有时序）
 - `references/approval-policy.md` — 审批策略（请求审批前读）
 - `references/failure-taxonomy.md` — 失败分类
+- `references/setup.md` — 项目注册（setup，首次跑需求前）
 - `references/project-registry.md` — 项目注册与选择
 
-> 本 skill 属于 tom-autodev 套件（共 13 个），需一起安装才能完成端到端流程。
+> 本 skill 属于 tom-autodev 套件（共 12 个），需一起安装才能完成端到端流程。
 
 
 

@@ -11,6 +11,10 @@ Use this skill as the control-plane entry for a run. Keep project/language knowl
 
 This is a Comate-only entrypoint. There is no alternate host or entrypoint. The runtime has no standalone release component; release is an approved terminal controller action backed by remote evidence.
 
+## Project Registration (Setup)
+
+Register a new project or language once before this skill can process its requirements. Setup is a one-time, human-supervised operation that produces a validated profile at `~/.tom-autodev/config/projects/<project>.yaml`; it never starts a run, generates code, submits iCode, or triggers iPipe. Only a `READY` profile allows `start`. See [`references/setup.md`](references/setup.md).
+
 ## Start and Resume
 
 1. Require an explicit project and human-confirmed iCafe card.
@@ -109,4 +113,5 @@ Only a proposal created from archived run evidence may be applied. Bind a `G10` 
 - Read `references/phase-artifacts.md` for phase contracts.
 - Read `references/approval-policy.md` before requesting approval.
 - Read `references/failure-taxonomy.md` before handling failure.
+- Read `references/setup.md` to register a project before its first run.
 - Read `references/project-registry.md` during setup or project selection.

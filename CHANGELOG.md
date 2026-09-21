@@ -4,6 +4,16 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-21
+
+skill 精简与自包含（减少对外部 skill 的依赖；控制面脚本/契约未变，均为文档/子 skill 内容）：
+
+- 精简 skill 数：把瘦身的 `setup-tom-autodev`（一次性项目注册子 skill）折进 `tom-autodev` 自身——注册能力保留为 `tom-autodev` 的「项目注册（setup）」相位，详情落到 `tom-autodev/references/setup.md`，SKILL.md 增一节短指针，语义不变（`start` 仍要求 `READY` profile；setup 仍是人工监督、不启 run/不生成代码/不触发 iPipe）。删除独立目录 `setup-tom-autodev/`；`scripts/install_links.py` 的自动枚举去掉对该名的显式分支（仅按 `tom-` 前缀）；README 结构/前置/参考文档同步，套件数 13 → 12
+- `tom-lang-npl` 自包含化：把 `npl-coder` 的 **NPL 语言**知识并入——`references/npl-docs/` 收 NPL_Specification/Coding_Guidelines/Compilation_Error_Fixup 三件套（字节一致），新建 `npl-idioms.md`（特性门控/强度仲裁/芯片条件编译/flex-editor/总线模型 + Critical Constraints）与 `npl-compile-diagnostics.md`（nlc/xfc 两段式、build.sh 假成功陷阱、6 类 pitfall），`npl-core-rules.md` 增 Hard Language Constraints（无 `return`、`@NPL_PRAGMA` 映射等，已去重），SKILL.md 只加指针；chip PDF / CNA 源 / 运营记忆按边界不并（归 `tom-project-xflow`）
+- `tom-review` 自包含化：把 `code-review-qa` 的**语言无关**评审方法论并入（纯 prompt、零运行时依赖）——新建 `review-heuristics.md`（数据流/边界/对抗/契约 + D-01..D-07 语义缺陷，按 Standards/Spec 轴打标）、`security-checklist.md`（OWASP + 业务逻辑 + 置信规则）、`severity-taxonomy.md`（红/黄旗→`severity`+`blocking`）、`false-positive-suppression.md`（sink-first 误报防火墙→`REJECTED_WITH_REASON`/`NEEDS_CLARIFICATION`）、`rule-catalog.md`（G-SECRET/EXCEPT/INPUT/SEC/DB/PERF/LOG/ARCH、BIZ-* 只读检查项）；上传/方舟/Bug-QA/iCafe 拉取/PRD 检索链与全部脚本一律剥离（评审只读、副作用归 orchestrator）
+- 相位契约去重：7 个相位 skill 的 `references/phase-contract.md` 收敛为指向父级 `tom-autodev/references/phase-protocol.md` + `phase-artifacts.md` 的指针，仅保留各自独有内容（如 tom-grill 的 `ACCEPTANCE_DELTA_CONFLICT` 与 acceptance-candidates advisory、tom-tasks 的 `business_module`），消除 SKILL.md/契约/父表三处重复维护的漂移面
+- 控制面回归 `806` 项仍全绿（本批仅 `install_links.py` 触及脚本，`test_install_links.py` 覆盖通过）
+
 ## 2026-09-20
 
 Codex 评审全量修复（分步进行；每步全绿后推进）：

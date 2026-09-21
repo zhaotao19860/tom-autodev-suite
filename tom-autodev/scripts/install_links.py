@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     skills = args.skills or sorted(
         path.name
         for path in root.iterdir()
-        if path.is_dir() and (path.name.startswith("tom-") or path.name == "setup-tom-autodev")
+        if path.is_dir() and path.name.startswith("tom-")
     )
     destinations = [Path(item) for item in args.destinations] if args.destinations else DEFAULT_DESTINATIONS
     actions = install_links(root, destinations, skills, dry_run=args.dry_run)
