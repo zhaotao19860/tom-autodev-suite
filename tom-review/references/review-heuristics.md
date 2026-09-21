@@ -4,7 +4,7 @@ Language-agnostic reading methodology for the two axes. Apply by reading the FIX
 
 ## Reading Passes
 
-Run these passes over every changed symbol.
+Select passes relevant to the changed behavior and its affected callers. Pair them with [`spec-coverage.md`](spec-coverage.md) so a whole omitted behavior is not missed by reviewing only changed symbols.
 
 - **Data-flow tracing** [Standards + Spec]: follow each external input end to end — where it enters, what transforms it, where it is used. On the path look for missing validation (no null/range check), type mismatch (a string used as an int), and missing escaping (raw input concatenated into a sink). Missing convention-level checks feed Standards; wrong resulting behavior feeds Spec.
 - **Boundary derivation** [Spec]: construct extreme inputs — null/empty, zero, max value/overlong, concurrency, timeout, disconnect — and check the code stays correct against the required behavior.
@@ -17,7 +17,7 @@ Run these passes over every changed symbol.
 
 ## Semantic Defect Catalog (D-01..D-07)
 
-Dimensions that require understanding the semantic path — pattern-matching cannot judge them. Each defect: trigger / exclusion / axis. Only raise findings at MEDIUM or above (see [`severity-taxonomy.md`](severity-taxonomy.md)).
+Dimensions that require understanding the semantic path — pattern-matching cannot judge them. Each defect: trigger / exclusion / axis. Prioritize concrete `P0`–`P2` defects using [`severity-taxonomy.md`](severity-taxonomy.md); a suspicious pattern alone is not a finding.
 
 ### D-01 Multi-step rollback / partial-completion recovery [Spec]
 
@@ -44,13 +44,13 @@ Dimensions that require understanding the semantic path — pattern-matching can
 ### D-05 Comment / code semantic contradiction [Standards; escalate to Spec if it hides a real defect]
 
 - **Trigger**: an inline/method comment describes behavior that contradicts the adjacent code.
-- **Exclusion**: comment is a stale TODO not affecting correctness (drop or LOW); comment is an example, not a contract.
+- **Exclusion**: comment is a stale TODO not affecting correctness (omit unsolicited style advice); comment is an example, not a contract.
 - **Output**: evidence must give (1) the intent the comment states, (2) the actual code behavior, (3) the specific contradiction.
 
 ### D-06 Field mis-assignment / narrowing precision loss [Spec]
 
 - **Trigger**: (a) assignment/setter sides have clearly mismatched field semantics (a value meaning A written to field B), or a property-copy mis-maps fields; (b) a narrowing cast (long→int, double→float, int64→int32) with no range check; (c) floating-point compared with `==`/`!=`.
-- **Exclusion**: intentional cast with a known-safe range; a tolerance comparison already exists.
+- **Exclusion**: intentional cast with a proven-safe range; exact floating equality is required or operands are exactly representable; an appropriate tolerance comparison already exists. Numeric syntax alone is not evidence of wrong behavior.
 
 ### D-07 Common defects — div-zero / uninitialized / switch-default / infinite loop [Spec]
 
@@ -59,4 +59,4 @@ Dimensions that require understanding the semantic path — pattern-matching can
 
 ## Baseline severity fallback
 
-When a dimension file marks a severity explicitly, honor that mark. Only when unmarked, fall back to the taxonomy in [`severity-taxonomy.md`](severity-taxonomy.md). Do not let a generic fallback silently pull an explicitly-conditional-HIGH item back down. Style-only issues (naming suggestions, formatting) are not emitted as findings.
+Choose severity from the reachable trigger and observable consequence using [`severity-taxonomy.md`](severity-taxonomy.md). Rule priorities guide investigation; they do not override missing evidence or the approved contract. Style-only issues (naming suggestions, formatting) are not emitted as unsolicited findings.

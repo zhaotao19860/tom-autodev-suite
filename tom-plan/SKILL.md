@@ -11,9 +11,7 @@ Turn one approved Task DAG node into an executable plan another agent can follow
 
 ## Inputs and Output
 
-Consume the approved Spec, one frontier task, WorkspaceGate evidence, language/project rules, knowledge and impact references, test-repository contract, and stable iPipe profile. Produce a versioned `Task Plan` containing:
-
-Follow [`references/phase-contract.md`](references/phase-contract.md). Return a `task-plan` ArtifactEnvelope to the parent for KU persistence, iCafe linking, and G4 approval.
+Consume the approved Spec, one frontier task, WorkspaceGate evidence, language/project rules, knowledge and impact references, test-repository contract, and stable iPipe profile. Follow the [producer contract](../tom-autodev/references/producer-contract.md), [task-plan schema](../tom-autodev/schemas/task-plan.schema.json) and [phase-specific rules](references/phase-contract.md). Return `task-plan` DraftContent containing:
 
 - exact repositories and files/modules/symbols to create or modify;
 - consumed interfaces and interfaces produced for later tasks;
@@ -21,13 +19,13 @@ Follow [`references/phase-contract.md`](references/phase-contract.md). Return a 
 - valid, boundary, invalid, compatibility and regression test IDs, fixtures, assertions, and expected results;
 - iPipe checkout, build, unit, regression, integration, environment and evidence parameters;
 - knowledge queries, blast-radius scope, Review scope, completion predicate, rollback, and excluded work;
-- checkbox steps with a precondition, one action, and observable evidence.
+- ordered checklist items; encode the precondition, action and observable completion check inside the schema's `item` text. A checklist is not a persisted execution log.
 
-Use concrete names from current revisions. Do not write “appropriate handling”, “add tests”, “later”, or an undefined type/function. If the plan conflicts with Spec, return `SPEC_CONFLICT` to `tom-spec`; do not reinterpret the conflict.
+Use concrete names from pinned revisions. Copy `g4_input_hash` from the action and preserve the DAG's acceptance IDs, test IDs, fixtures and target module. Apply [behavior and test design](../tom-spec/references/behavior-and-tests.md) to assertions. For risky edits name the intermediate compatibility state and how implementation can recognize a completed step after interruption. If the plan conflicts with Spec, report `SPEC_CONFLICT` to the parent instead of reinterpreting it.
 
 ## Gate
 
-Before G4, verify every acceptance criterion and task field is covered, every step is independently checkable, business and test changes form one Change Set, and no step invokes local project compilation or tests. Wait for human approval before `tom-implement` consumes the plan.
+Before handoff, verify every criterion/task field is covered, each step is checkable, and business/test changes form one Change Set without local project execution. The parent applies the current action's G4/mode; do not request a redundant gate or start implementation yourself.
 
 Do not generate code, modify repositories, run project tests, call iCode/iPipe, or create a second task in this phase.
 

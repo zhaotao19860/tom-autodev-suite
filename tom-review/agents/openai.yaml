@@ -1,4 +1,4 @@
 interface:
   display_name: "Tom Review"
   short_description: "Review Change Sets against standards and Spec"
-  default_prompt: "Review this fixed-baseline Change Set on Standards and Spec axes"
+  default_prompt: "Use $tom-review to review this fixed-baseline Change Set on Standards and Spec axes."

@@ -21,6 +21,6 @@ Provide language-level rules for approved Spec and Task Plan work. Keep project 
 
 Use `references/testing-and-review.md` for behavior-first test and source-review checks. Design valid, boundary, invalid, compatibility, and regression cases at the highest stable external interface. Put compiler, unit, regression, and integration execution parameters in iPipe evidence; never run project validation locally on Mac.
 
-The checklist is mandatory for every C/C++ Change Set: inspect callers and ABI, ownership/lifetime, bounds/overflow, concurrency, errors, serialization, and platform assumptions; pair each business patch with independent product-test fixtures and test IDs. Classify remote failures before proposing repair and preserve the exact iPipe evidence references in the phase ArtifactEnvelope.
+For each C/C++ Change Set, select the checklist areas affected by its behavior: callers/ABI, ownership/lifetime, bounds/overflow, concurrency, errors, serialization and platform assumptions. Keep independent product-test fixtures and test IDs aligned with the business behavior. Classify remote failures before proposing repair; return actual iPipe evidence references in the caller's supported DraftContent fields. The worker packages the envelope.
 
 **REQUIRED PARENT:** Return language decisions and source/test guidance to `tom-plan`, `tom-implement`, or `tom-review`; do not call iCode/iPipe directly.

@@ -7,13 +7,15 @@
 - Do not assume a C/C++ analogy defines NPL semantics. Verify behavior in current NPL sources or approved documentation.
 - Test through an external product boundary and trace each assertion to an approved behavior; do not assert generated internal representation unless the Spec makes it observable.
 
-## Hard Language Constraints
+## Language Rules and Target Checks
 
 - NPL has no `return` statement. Wrap early-exit / conditional logic in `if (condition) { ... }` instead of returning.
-- Egress and ingress top-level functions (each function called from the pipeline entry) must have an `@NPL_PRAGMA(<fn>, mapping:"<physical block>")` entry in the chip directive file, or the compile reports `<fn> is not in the physical component list`. To add pipeline logic, merge it into an already-mapped function rather than declaring a new top-level function.
+- Assignment sizing is directional: a wider lvalue receives a zero-extended narrower rvalue; a narrower lvalue than the rvalue is a compile error (NPL 1.5.1, Assignment operators). Validate bus/interface widths and back-end packing separately; do not reject every unequal-width assignment.
+- Overlays may target base `bit`/`bit[n]` fields or an entire struct base and may overlap. They may not target another overlay, may not themselves be structs, and may not partially overlay a struct base (NPL 1.5.1 §9.3). There is no blanket byte-alignment rule: the specification itself uses a 2-bit `ing_port_num[9:8]` overlay (§4.2.5).
+- Check the pinned back-end's mapping directives for new top-level functions. If it reports `<fn> is not in the physical component list`, provide the required mapping or place logic in a compatible already-mapped function. Directive/mapping requirements are target compiler constraints, not universal language syntax.
 - Tables and buses have hardware capacity limits (table/TCAM depth, container width). Treat every capacity number as a chip fact from project/iPipe evidence, never a memorized constant; exceeding it is a `resource overflow`, not a syntax bug.
-- No duplicate definitions and no duplicate field name in the same bus/scope; struct overlays must be byte-aligned.
-- See `npl-idioms.md` for the full critical-constraints table and generation patterns, and `npl-compile-diagnostics.md` for the front-end vs back-end fix procedure.
+- No duplicate definitions and no duplicate field name in the same bus/scope. Establish header/field validity before use through the guard or validity mechanism supported by the pinned dialect and current source.
+- See `npl-idioms.md` for generation patterns, `npl-compile-diagnostics.md` for stage-gated diagnosis, and `docs-index.md` for the smallest normative reference needed.
 
 ## Review and Test Checklist
 

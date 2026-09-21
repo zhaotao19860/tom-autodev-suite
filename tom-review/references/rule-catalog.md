@@ -1,77 +1,21 @@
 # Rule Catalog
 
-A catalog of rule-ID heuristics folded from the standalone QA quality gates. tom-review **executes nothing** — every rule here is a thing the reviewer checks by **reading** the FIXED-baseline diff. There are no scripts. SQL-injection, ReDoS, arch-layer, hardcoded-secret, and sensitive-logging rules are read-checks, not scans.
+These are source-reading cues internalized from QA review practice, not executed scans. Load only relevant families; do not claim a script or analyzer ran. Apply [`false-positive-suppression.md`](false-positive-suppression.md), then [`severity-taxonomy.md`](severity-taxonomy.md). Priority below is a starting point conditioned on a demonstrated consequence.
 
-Map severity to disposition via [`severity-taxonomy.md`](severity-taxonomy.md): a HIGH rule with a complete flow → `blocking: true` + `CONFIRMED`; a MEDIUM rule → non-blocking, and `NEEDS_CLARIFICATION` when context is missing. Gate every security rule through [`false-positive-suppression.md`](false-positive-suppression.md) §1 first. Most axis assignments are Standards (conventions); behavior-correctness cases feed Spec.
+| Rule | Typical priority | Check and exclusion |
+|---|---|---|
+| `G-SECRET-001/004` | `P1` | Actual credentials/private keys committed in source or config and exposed across a trust boundary. Distinguish documented dummy fixtures from real secrets; redact evidence. Environment expansion alone does not prove the resolved value is handled safely |
+| `G-SECRET-002` / `G-LOG-002` | `P1` credentials; `P2` bounded personal-data exposure | Logs/errors reveal credentials, signing material, or protected personal data to unauthorized readers. Remove or mask sensitive data; lowering to debug is insufficient. Report one defect, not one per matching rule |
+| `G-EXCEPT-001/002/004/005` | `P2`, escalate for data loss/recovery failure | A catch/finally loses the required failure signal or original cause, masks failure as success, or breaks cleanup. Intentional handling, a documented best-effort boundary, or a preserved causal chain can refute the candidate |
+| `G-INPUT-001/002/004` | `P2`, escalate for memory safety/security | A reachable invalid value produces wrong behavior or violates the boundary contract. Do not require repeated checks when type guarantees or upstream validation already establish the invariant |
+| `G-SEC-001` | `P1` | Controllable data changes executable SQL structure despite applicable binding/validation; string concatenation alone is not proof |
+| `G-SEC-002` | `P2`, escalate for credential compromise | Sensitive traffic crosses an untrusted link without required protection. Judge the trust boundary; an internal hostname alone is not an exemption |
+| `G-DB-001` | `P1` | An unintended unbounded UPDATE/DELETE causes material data loss. A documented full-table operation or reviewed migration is not automatically defective |
+| `G-PERF-001` | `P2` or `P1` denial of service | A feasible input/length triggers pathological regex cost on a relevant path. Inspect engine and input bounds; nested quantifiers alone do not establish exploitability |
+| `G-PERF-002/003` | `P2` | Query shape, loading strategy, or repeated remote work violates a supported workload/latency constraint. Require scale/index/call-path evidence; no blanket rule that LAZY is always better |
+| `G-ARCH-001` | `P2` | A concrete dependency violates an approved layering policy or causes a demonstrated compatibility/maintenance defect. Package names or direct client construction alone are insufficient |
+| `BIZ-*` | Per project contract | Cite the actual pinned project rule and consequence. Examples from another project do not establish a new mandatory rule |
 
-Report IDs may carry a sub-rule suffix (e.g. `G-SECRET-002-TOKEN`, `G-SEC-001-...`). Match on the main ID prefix; a suffix does not change the main rule.
+For a project wrapper bypass, establish which required timeout/authentication/retry/telemetry policy is lost. For retry advice, prove the operation is safely retryable and use bounded retry semantics. IDE/OS metadata and naming preferences are normally cleanup observations, not release blockers; a file containing secrets or active configuration is judged by its actual effect.
 
-## Sensitive information (G-SECRET) — Standards
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-SECRET-001 | HIGH | Hardcoded password / token / API key / AK/SK — literal in an assignment, constant, `@Value` default, Bearer string, or a connection string with an embedded password |
-| G-SECRET-002 | HIGH (PII sub-rules MEDIUM) | Logging PII or signing material — password/pwd, token/jwt/authorization, secretKey/apiKey/privateKey/AK/SK, signature material (HIGH); phone / ID / bank card / email (MEDIUM, needs masking) |
-| G-SECRET-004 | HIGH | Sensitive value in a config file not sourced from an env var / secret manager (config takes bare values; code requires a quoted literal, so `secret: ${ENV}` is not a hit) |
-
-## Exception handling (G-EXCEPT) — Standards
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-EXCEPT-001 | MEDIUM | Empty catch block (exception silently swallowed) |
-| G-EXCEPT-002 | MEDIUM | Catch a broad exception then only log, no handling |
-| G-EXCEPT-004 | MEDIUM | Throw a new exception in `finally`, masking the original |
-| G-EXCEPT-005 | MEDIUM | Rethrow without the cause and without recording the original stack (exception chain lost) |
-
-## Input validation (G-INPUT) — Standards / Spec
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-INPUT-001 | MEDIUM | Public API parameter with no null check |
-| G-INPUT-002 | MEDIUM | Numeric parameter with no range check |
-| G-INPUT-004 | MEDIUM | External data (request body) not validated |
-
-## Security (G-SEC) — Standards
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-SEC-001 | HIGH | DB access via string concatenation instead of a parameterized query (SQL injection — confirm attacker-controllable source per FP §4) |
-| G-SEC-002 | MEDIUM | URL built with plaintext HTTP instead of HTTPS (internal domains exempt) |
-
-## Database (G-DB) — Spec / Standards
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-DB-001 | HIGH | UPDATE/DELETE with no WHERE — unconditional full-table write/delete (migration paths exempt) |
-
-## Performance (G-PERF) — Standards
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-PERF-001 | MEDIUM (HIGH on external input) | Regex with nested/overlapping quantifiers — catastrophic backtracking (ReDoS); escalate when it matches external input |
-| G-PERF-002 | MEDIUM | SQL predicate column wrapped in a function, or a leading-wildcard LIKE, defeating the index |
-| G-PERF-003 | MEDIUM | ORM EAGER association loading where LAZY + batched fetch is correct |
-
-## Logging (G-LOG) — Standards
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-LOG-002 | MEDIUM | Wrong log level — sensitive debug material (signature/secret/credential) logged at info; should be debug |
-
-## Architecture (G-ARCH) — Standards
-
-| ID | Severity | What to look for |
-|----|----------|------------------|
-| G-ARCH-001 | MEDIUM | Inner package (domain/core) imports an outer/infrastructure concrete implementation — dependency-direction violation |
-
-## Business-specific (BIZ-*) — Standards / Spec
-
-Project-defined rules the reviewer applies by reading, matched to the project's own conventions rather than a config file.
-
-| ID pattern | Severity | What to look for |
-|------------|----------|------------------|
-| BIZ-001 (example) | HIGH | Third-party service called directly (e.g. raw HTTP client) instead of through the project's unified client wrapper (loses shared timeout/retry/circuit-breaker) |
-| BIZ-RETRY-001 (example) | HIGH | A third-party network call (e.g. TTS/ASR) with no retry/backoff — a jitter directly fails the user request |
-| BIZ-FILE-001 (example) | HIGH | Local IDE / AI-assistant / OS metadata committed (`CLAUDE.md`, `.claude/`, `.DS_Store`, `.idea/`) — should be gitignored |
-
-BIZ rules are open-ended: read the project's conventions and flag deviations by the same ID + severity + read-check shape.
+Language-specific undefined behavior, lifetime, packet parsing, and concurrency belong to the selected `tom-lang-*` reference. Review provider findings and any available static-analysis evidence are inputs to classify, not automatic verdicts.

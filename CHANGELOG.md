@@ -6,6 +6,14 @@ suite had no version control before then.
 
 ## 2026-09-21
 
+### 使用文档与 skill 整合发布
+
+- 重写 README：用职责表和流程图解释人工、模型、worker、iPipe 的分工，提供套件安装、一次性项目注册、自然语言入口、CLI 启动/查询和等待原因处理。
+- 统一示例从仓库根目录执行；新增 `docs/OPERATIONS.md`，区分 CLI 与 worker 的 `resume/advance`，说明 `submit_draft` 是 Python API、`start` 不启动后台模型，纠正不存在的 `trace` 命令和 `ipipe-rerun --parameter` 用法。
+- 首页按当前实现披露修复 hash 合同、尚未接线的单 run 修复预算、跨仓任务边界和发布确认语义；移除过时测试数量与无条件自动恢复承诺。
+- 提交包含下述子 skill 补强、内置远程脚本、固定提交范围收集器和可复用评测场景；原外部参考仓库保留，不再作为相关子 skill 的运行时依赖。
+- 提交前重新验证：控制面 821 项、Review 收集器 6 项及 Diagnose 隔离回归通过；12 个 skill 校验、20 个文档 CLI 入口与新增本地链接检查通过。原 NPL 规范缺失图片已在索引披露，未修改原文档。
+
 子 skill 后续补强（本轮未改 workflow 核心代码）：
 
 - 统一 producer DraftContent 合同、merged SPEC/DAG 与恢复语义，修复 Review verdict/severity/澄清项语义及 NPL 位宽/overlay 错误硬规则；补 AC 覆盖、C++ 触发/排除与 XFlow 跨层字段合同。

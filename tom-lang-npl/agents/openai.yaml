@@ -1,4 +1,4 @@
 interface:
   display_name: "Tom NPL"
   short_description: "Apply NPL generation and error rules"
-  default_prompt: "Apply NPL language rules to this approved XFlow task"
+  default_prompt: "Apply NPL language rules to this task using the caller's project profile"

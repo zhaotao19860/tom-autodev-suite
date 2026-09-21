@@ -1,85 +1,48 @@
-# False-Positive Suppression
+# Evidence and False-Positive Checks
 
-**Always loaded.** This is tom-review's false-positive firewall. Before emitting any security or defect finding, pass §1. Any known-benign pattern in §2 is suppressed and never written. Discipline: **宁可漏报不要误报** — prefer a missed report over a false one.
+Use the check for the candidate's defect type. Source-to-sink tracing is for injection and similar input-driven exploits; it is not a prerequisite for every security or correctness defect.
 
-Industry consensus (Snyk/Sonar/Datadog/Qodana 2025, LLM4PFA, ZeroFalse): ~30% of default SAST rules are false positives, mostly "pattern match divorced from context." Two lowering paths, both done by reading here:
+## Evidence by defect type
 
-1. **Sink-first taint flow**: from the dangerous sink, trace backward to the external input (source). If no path reaches attacker-controllable input, suppress.
-2. **Path feasibility + context-aware reasoning**: use variable names, annotations, signatures, and the call chain to judge whether the path is reachable at runtime.
+| Type | Evidence required for `CONFIRMED` |
+|---|---|
+| Injection, traversal, SSRF, unsafe deserialization | Actual controllable source; dangerous operation; reachable source-to-operation path; why applicable guards do not stop it; concrete input and observable effect |
+| Authorization defect | Actor and granted permissions; protected resource/operation; reachable missing/bypassed check; concrete unauthorized result |
+| Secret/log exposure, cryptography, security configuration | Actual sensitive value or security purpose; applicable trust boundary/contract; exposure or failing property and its concrete consequence. Attacker-controlled input is not required |
+| Ordinary logic, error handling, compatibility, recovery, performance | Location/contract boundary; specific input/configuration/timing; observable consequence; expected behavior supported by Spec or an applicable project rule |
+| Required behavior absent | AC/Spec location; responsible module/interface; complete inspected scope; demonstrated missing behavior. Follow [`spec-coverage.md`](spec-coverage.md); no fictitious source line |
 
-## Mapping to tom-review classifications
+Record revision and actual evidence references. The path may be one direct call or many; an arbitrary minimum hop count must not suppress a direct vulnerability. Check the proposed repair against the same counterexample and relevant compatibility constraints.
 
-The FP firewall does not have its own verdict vocabulary — it re-points into the required `classification` field:
+## Disposition
 
-- Suppressed (any §1 check fails, or a §2 blacklist match) → `REJECTED_WITH_REASON`, with a technical `disposition_reason` naming the check/pattern that cleared it. Not written as a blocking finding.
-- Insufficient evidence to either confirm or clear → `NEEDS_CLARIFICATION`, with the missing evidence in `disposition_reason`.
-- Survives §1 and §2 with a complete source→sink flow → `CONFIRMED`.
+- Confirmed counterexample that survives self-refutation: `CONFIRMED`; assign impact using [`severity-taxonomy.md`](severity-taxonomy.md).
+- Evidence positively disproves the suggestion, shows it is outside this task, or establishes only an optional preference: `REJECTED_WITH_REASON`, `blocking: false`, with the precise reason. Do not claim safety merely because evidence is missing.
+- Missing fact prevents judging required behavior or a material risk: `NEEDS_CLARIFICATION`, `blocking: false`; give the question/evidence needed. This classification stops the parent even with a false blocking flag.
+- Required files/Spec/provider scope could not be inspected: Review `INCOMPLETE`; do not report missing implementations from an incomplete search.
+- Speculative patterns without an established defect or a material review gap need not become new findings. Every suggestion supplied by a review provider still receives an explicit disposition.
 
-## §1 Self-check (run before every security/defect finding)
+Never reduce severity solely to make uncertain evidence look confirmed. Do not fabricate a proof-of-exploit or a reproduction result; source-only reasoning describes a counterexample, not an executed test.
 
-- [ ] Is this location really a dangerous sink? (DB exec, command exec, HTML render, file read/write, deserialization) — if not → suppress.
-- [ ] Is the interpolated variable from attacker-controllable external input? (HTTP body/query/header/path, MQ message, third-party API return, file content) — if the source is a constant, enum, server-side config, or internal computation → suppress.
-- [ ] Does a framework/middleware already guard it? (parameterized query placeholders, named-parameter queries, template auto-escape, an HTML-escape util) — if yes → suppress.
-- [ ] Is the path reachable on the call graph? Entry must be public / controller / MQ listener to count — if only test code or dead code calls it → suppress.
-- [ ] Does the literal really carry that vulnerability's semantics? (a string containing "from" is not necessarily SQL; "drop" is not necessarily DDL; "<script>" may be a test fixture) — if not → suppress.
-- [ ] Does the proposed fix actually solve it? Run the fixed code in your head — if the fix breaks equivalence/function → re-evaluate; it may not be a bug.
+## Context checks
 
-Any check firing "suppress" → do not write the finding; dispose it `REJECTED_WITH_REASON`. When you cannot judge clearly → `NEEDS_CLARIFICATION` and note the reason; prefer a miss over a false positive.
+1. **Reachability:** identify a real entry and allowed configuration. Public methods are not the only entries: callbacks, scheduled jobs, exported library APIs, packet handlers, and product tests can matter. A disabled-by-default feature is not unreachable if the supported configuration enables it.
+2. **Existing protection:** verify the actual parameter binding, escaping, validation, authorization, ownership, or compensation on this path; a similarly named utility elsewhere is insufficient.
+3. **Contract and intent:** check approved behavior before judging deletion, fallback, consistency, or timing. Lack of intent evidence is not proof of intentional safety.
+4. **Baseline:** distinguish a change-induced defect from an unrelated existing issue. Do not infer a missing implementation just because it is absent from added lines.
+5. **Secret handling:** quote only redacted values; retain enough location/type evidence for repair. Changing the log level does not remove a credential leak.
 
-## §2 Known false-positive blacklist (match → skip)
+## Common patterns that need context
 
-### 2.1 SQL keywords in a non-SQL literal
+| Pattern | Correct interpretation |
+|---|---|
+| SQL words in logs, URLs, messages, or tests | Not a SQL operation by themselves; find the actual executable query |
+| `#{x}`, `?`, `:x`, `${x}`, `@{x}` | Resolve the actual framework/API binding semantics. In MyBatis, `#{}` binds and `${}` substitutes; these spellings do not establish safety across all languages/APIs |
+| Framework configuration `${ENV}` | Usually property expansion, not SQL; determine where its resolved value is used |
+| Constant/enum/config value passed to an operation | May disprove attacker control if its provenance is verified; it does not exempt secret exposure or logic defects |
+| MD5/SHA1, ordinary randomness | Judge the purpose: a non-adversarial checksum or sampling differs from password storage, token generation, or integrity against an attacker |
+| Escaping or validation exists | Confirm it is appropriate for this sink and cannot be bypassed; context-specific escaping is not interchangeable |
+| Test/template/generated file | Path alone grants no exemption. Product-test correctness, shipped templates, generated runtime code, and committed secrets remain relevant |
+| Removed tenant filter or consistency update | Trace the authorization/replication design; neither removal alone nor “perhaps intentional” proves the outcome |
 
-Error messages, log lines, user hints, URL query names, and test assertions often contain a lone SQL keyword (`from` / `into` / `where` / `select` / `drop`). A literal with only a single such keyword and no complete SQL structure (`SELECT...FROM`, `INSERT INTO`, `UPDATE...SET`, `DELETE FROM`) is non-SQL → suppress.
-
-### 2.2 Placeholder semantics
-
-| Placeholder | Meaning | Safe? |
-|-------------|---------|-------|
-| `#{xxx}` | parameterized bind | safe |
-| `${xxx}` | string substitution | unsafe — only the true injection source; use for table/column/orderBy identifiers |
-| `@{xxx}` | non-standard (framework SpEL/param ref) | default safe — do **not** treat like `${}`; confirm framework semantics first |
-| `:xxx` | named parameter | safe |
-| `?` | positional parameter | safe |
-
-Only `${xxx}` is a SQL-injection source. Confirm the framework before flagging `@{xxx}`.
-
-### 2.3 Other known FPs (suppress)
-
-- A password-hash algorithm used for a **checksum / cache key / etag** — flag only when used for password hashing / signing / token generation.
-- Non-crypto randomness used for **UI animation / sampling / load spreading** — flag only for password/token/CSRF/IV.
-- A command exec whose argument is a pure constant literal with no interpolation.
-- A sink whose downstream template applies escaping.
-- An HTTP-client call whose URL is a constant or from config (not SSRF).
-- A bcrypt hash whose salt comes from a generated salt (not a "hardcoded salt").
-
-### 2.4 Framework/config `${var}`
-
-`${var}` in `logback*.xml`, `log4j2*.xml`, `application*.yml` / `bootstrap*.yml` / `spring*.xml`, `pom.xml` / `build.xml` is a context/property variable, not SQL → suppress. Treat `${var}` as a SQL source only in a MyBatis mapper (`<mapper namespace>` / `<select|insert|update|delete>` nodes, or a `*Mapper.xml` / `mybatis-config.xml` filename).
-
-### 2.5 Business-model changes are not data leaks
-
-Removing a filter/`where` condition alone does not establish a data leak. Require the triple: (1) **source** — the attacker-controllable parameter the removed condition let through; (2) **sink** — the DAO call that crosses a tenant/permission boundary; (3) **flow** — a concrete counter-example where user A thereby reads user B's data. Missing any of the three → treat as an intentional business change, suppress.
-
-### 2.6 Scaffold / template / generated code
-
-Hardcoded constants, magic numbers, and pinned versions under paths containing `skills/`, `templates/`, `scaffold/`, `archetype/`, `stub/`, or in files marked `@generated` / `// generated` / `# AUTO-GENERATED`, are template artifacts → suppress, unless that file is itself the reviewed change and the constant is a dynamically-computed critical path.
-
-### 2.7 Intentional business design
-
-Access-control / consistency / deletion / fallback / timing findings often have a technically-exploitable flow yet are intentional by design (tenant id auto-injected by middleware; eventual-consistency/compensation; deliberate deletion; deliberate open-API fallback; timing change with no Spec constraint). A complete flow proves technical exploitability, not business intent. When the baseline and Spec cannot rule out "designed this way," dispose `NEEDS_CLARIFICATION` (or `REJECTED_WITH_REASON` if the Spec confirms intent) rather than a blocking finding.
-
-## §3 Reachability
-
-From a suspicious point, ask backward: (1) **entry reachability** — is the caller a controller/listener/scheduled entry, or only test/dead code (suppress)? (2) **parameter controllability** — does the interpolated variable trace to a request/message payload, or to config/constant (suppress)? (3) **filter presence** — does it pass a validator/sanitizer/parameterized-query/escape/allow-list before the sink that cannot be bypassed (suppress)? (4) **feature flag** — is the path behind a disabled flag (suppress, note "re-evaluate if enabled")?
-
-## §4 Evidence completeness before emitting
-
-For a **security** finding, the evidence must carry all five: `source` (attacker-controllable input point + variable name + origin), `sink` (full dangerous call expression + line), `flow` (source→sink path, >=2 hops), `why_not_safe` (why the framework/context did not stop it), `proof_of_exploit` (one concrete counter-example input + effect).
-
-- All five present, each specific → `CONFIRMED` at the rule's severity.
-- `source` cannot be filled (not external input) → suppress → `REJECTED_WITH_REASON` (uncontrollable input is not a vulnerability), regardless of the other fields.
-- One field missing, or `proof_of_exploit` only "theoretically possible" → `NEEDS_CLARIFICATION` (record which field).
-- Two or more missing → suppress, do not emit.
-
-For a **non-security** finding (exception handling, input validation, logic bug), require three: `location`, `trigger_condition` (the scenario that triggers it), `consequence` (a concrete observable effect). Any one missing or filled vaguely → suppress, do not emit.
+Deduplicate candidates by defect and affected behavior. Keep the strongest evidence and related locations instead of reporting the same secret as separate secret, logging, and configuration defects.

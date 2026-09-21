@@ -1,9 +1,11 @@
 # BGW Runtime Topology and iPipe Parameters
 
-This file is project knowledge for `tom-autodev`. It names the live BGW test topology,
+This file is project knowledge for `tom-autodev`. It records a BGW test topology,
 where to read logs, how to inspect versions and counters, and which iPipe stage
 parameters belong to which compiled product. It does not execute iPipe, iCode, or
-remote writes. The parent controller fills parameters, requests G8, and reruns stages.
+remote writes. Match the current profile and runner evidence before using recorded
+hosts, paths, versions or pipeline IDs; a historical address is not a target binding.
+The parent controller fills parameters, requests G8, and reruns stages.
 
 ## Test Topology
 
@@ -76,8 +78,10 @@ pid from: ps -e -o pid= -o args= | grep '[.]/bgw'
 listen: ss -lntp | grep 6666
 ```
 
-The parent may use `tom-autodebug` for these read-only checks. Do not replace the
-server binary while diagnosing `P0新case回归`.
+The parent may use [tom-diagnose's bundled remote mode](../../tom-diagnose/references/remote-operations.md)
+for these checks against its authorized target. Confirm the current profile still
+uses this topology before connecting. Do not replace the server binary while
+diagnosing `P0新case回归`.
 
 ## Counter and Stats Inspection
 

@@ -20,17 +20,17 @@ Also produce a glossary delta and an ADR candidate only when a decision is hard 
 
 A run may start from a plain card whose `acceptance` list is empty. Record every criterion agreed with the requirement owner in `acceptance_delta` as `{id, statement, decided_by, evidence}`. Never rewrite the snapshot; the parent unions it with the delta before Spec. Either result may carry an `acceptance_delta`, and collecting acceptance criteria is not itself a decision.
 
-Follow [`references/phase-contract.md`](references/phase-contract.md) and the parent [`tom-autodev`](../tom-autodev/references/phase-protocol.md). Return an ArtifactEnvelope to the parent; never call external adapters directly.
+Follow the [producer contract](../tom-autodev/references/producer-contract.md) and [decision-log schema](../tom-autodev/schemas/decision-log.schema.json). Return `decision-log` DraftContent; the parent creates the envelope, receipts and applicable gate. See [phase-specific rules](references/phase-contract.md).
 
 ## Procedure
 
 1. Read the requirement, acceptance points, attachments, current code, project rules, and knowledge references.
 2. Record a Decision Map only when scope, repository boundaries, test interface, environment ability, or release boundary is unclear.
 3. Verify facts independently. Add each unresolved human tradeoff to a queue ordered by dependency.
-4. Ask one question at a time. State the decision needed, the known options, the evidence already checked, and the consequence of each option. Wait for a decision before asking the next question.
-5. If the snapshot has no acceptance criteria, ask the requirement owner for them the same way: one criterion at a time, each stated so that a test or a named observation point can decide it. Reject a criterion that needs source reading to judge; that belongs in Spec evidence. When the project pins a KU requirement directory, `tom-autodev acceptance-candidates <project>` returns the criteria already written there as a starting list; treat them as unconfirmed drafts, put them to the owner one at a time, and carry the returned `source` into each accepted entry's `evidence`. Never promote a candidate the owner did not confirm.
+4. Ask only unresolved blocking questions, ordered by dependency. Group closely related choices into one concise request when the owner can decide them together. Include checked evidence and the consequence of each option. Do not ask again for a decision explicit in the request or approved input.
+5. If acceptance criteria are missing, propose observable criteria grounded in the request and ask the owner to confirm or amend the group. Existing owner-supplied criteria are already intent, not a reason to repeat confirmation. Each criterion needs a test or named observation point; source-reading details belong in Spec evidence. When the parent supplies `acceptance-candidates` from a pinned KU directory, treat them as unconfirmed drafts and carry each accepted candidate's source into its evidence. Never silently promote inferred criteria.
 6. If no decision is required, return `NO_OPEN_DECISIONS`; do not invent a question to make the phase look complete.
-7. After each answer, update the Decision Log and invalidate downstream context whose input hash changed.
+7. After each answer, return the updated Decision Log and identify changed assumptions; the controller invalidates affected downstream context. Do not mutate the original snapshot or state ledger.
 
 ## Stop Conditions
 

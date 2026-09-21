@@ -1,32 +1,26 @@
-# Severity Taxonomy
+# Severity, Disposition, and Blocking
 
-Bind "subjective code smell" to hard thresholds so a finding is raised only when it crosses a line — this keeps convention judgments from becoming noise. Judge by reading; tom-review runs no metric scripts, so treat the thresholds below as reading guides, not tool output.
+These are separate decisions. Use the enum values in `review.schema.json`, not HIGH/MEDIUM/BLOCK.
 
-Re-express every crossing into tom-review's `severity` + `blocking` + `classification`:
+| Severity | Observable impact when triggered | Default for a confirmed defect |
+|---|---|---|
+| `P0` | Active or immediately reachable catastrophic data loss, widespread outage, or critical compromise | Blocking |
+| `P1` | Required capability broken, credible security compromise, unrecoverable operation, or major compatibility/data-integrity failure | Blocking |
+| `P2` | Bounded but reproducible behavior/contract defect under a specific condition | Blocking when an approved acceptance point or mandatory project rule is violated; otherwise explain why it is non-blocking |
+| `P3` | Low-impact maintenance concern without required-behavior failure | Do not raise unsolicited style findings; a provider suggestion may be disposed as non-blocking |
 
-- **Red flag** — deterministic, crosses a hard threshold → high `severity`, `blocking: true`, `classification: CONFIRMED` (evidence must establish the crossing).
-- **Yellow flag** — advisory, context-dependent → `severity: MEDIUM`, `blocking: false`, `classification: NEEDS_CLARIFICATION` with the missing context recorded in `disposition_reason`. Never let a yellow flag hold the run.
+Choose severity from the demonstrated consequence and reachable trigger. A rule catalog priority is a starting point, not evidence. State a concrete reason for a `P2` blocking choice in `evidence`; do not automatically let all medium-impact defects pass.
 
-## Red flags (blocking + CONFIRMED)
+| Classification | Meaning | `blocking` |
+|---|---|---|
+| `CONFIRMED` | Evidence establishes a defect or applicable mandatory-rule violation | Per impact and contract above |
+| `REJECTED_WITH_REASON` | Refuted, outside the approved scope, or merely optional advice without an established defect | `false`; explain which reason applies |
+| `NEEDS_CLARIFICATION` | A specific missing answer prevents judging required behavior or a material risk | `false`, but the parent **still stops** for clarification |
 
-| Item | Threshold | Axis / note |
-|------|-----------|-------------|
-| God class | single class > 1000 lines | Standards (responsibility) |
-| Circular dependency | A→B→C→A | Standards; needs whole-graph context — confirm before blocking |
-| Domain layer depends on framework | inner package imports a concrete infrastructure class | Standards (arch layer, see G-ARCH-001 in [`rule-catalog.md`](rule-catalog.md)) |
-| External service call with no interface | directly `new`-ing a concrete HTTP/DB client | Standards (unsupported abstraction) |
-| Hardcoded secret | AK/SK / token / password literal | Standards (see G-SECRET-001) |
+For an unresolved material question, severity describes the consequence being investigated, not a confirmed exploit. `disposition_reason` names the missing fact and evidence needed. Never emit `ACCEPT` while any `NEEDS_CLARIFICATION` remains. A provider that cannot inspect the required scope is `INCOMPLETE`, not a list of invented defects.
 
-## Yellow flags (non-blocking MEDIUM + NEEDS_CLARIFICATION)
+## Metrics and preferences
 
-| Item | Threshold |
-|------|-----------|
-| Class coupling (CBO) | > 10 |
-| Function parameters | > 5 |
-| Nesting depth | > 4 levels |
-| Duplicated block | > 10 lines |
-| Single-implementation interface | an interface with only one impl (over-abstraction) |
+Class length, parameter count, nesting, coupling, duplication, a single-implementation interface, or direct client construction are investigation cues. They do not establish a defect or approval block by themselves. Check the pinned project policy and concrete effect first. Optional refactoring advice does not become a clarification question merely because the author has not justified it.
 
-A yellow flag is a prompt to confirm intent with the parent, not a defect on its own. If reading confirms it is intentional and justified, dispose it `REJECTED_WITH_REASON`; if it cannot be judged from the baseline, keep it `NEEDS_CLARIFICATION`.
-
-> When a heuristic in [`review-heuristics.md`](review-heuristics.md) marks its own severity (e.g. D-01 HIGH), that mark wins. This table is the fallback only for items with no explicit mark.
+Do not require interfaces, retries, or abstractions absent a project contract or demonstrated failure. Retrying a non-idempotent operation can introduce a defect. A known approved design is not overturned by a generic checklist threshold.

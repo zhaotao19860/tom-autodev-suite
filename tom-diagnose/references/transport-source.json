@@ -1,0 +1,28 @@
+{
+  "source": "local tom-autodebug",
+  "version": "1.5.0",
+  "imported_at": "2026-09-21",
+  "runtime_dependency_on_source": false,
+  "files": [
+    {
+      "path": "scripts/autodebug.sh",
+      "source_version": "tom-autodebug 1.5.0",
+      "sha256": "3791cd03f38272971a05f3babd56d929417caf4e5fd7b3d7089971daeebdb273"
+    },
+    {
+      "path": "scripts/remote/proc_audit.sh",
+      "source_version": "tom-autodebug 1.5.0",
+      "sha256": "4edf257ade64648ab86c2cd446f00eb7e489b0b384964fa17fd65edac744c33a"
+    },
+    {
+      "path": "scripts/remote/proc_stop.sh",
+      "source_version": "tom-autodebug 1.5.0",
+      "sha256": "603d7215defdf0ea62e5ee71489a417a3a230bf3c58f38b5767486bda8165817"
+    },
+    {
+      "path": "tests/test_autodebug.sh",
+      "source_version": "tom-autodebug 1.5.0",
+      "sha256": "8436dba2bc76ffef1d709f7f699cb6e7e6964841b35886d825b1a6b08734f3d1"
+    }
+  ]
+}

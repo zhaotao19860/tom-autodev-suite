@@ -1,4 +1,4 @@
 interface:
   display_name: "Tom Diagnose"
-  short_description: "Establish root causes before repairs"
-  default_prompt: "Diagnose this Review or iPipe failure and classify the repair route"
+  short_description: "Diagnose workflow failures and remote hosts"
+  default_prompt: "Use $tom-diagnose to investigate this failure or explicit remote host and report the evidence and next step."

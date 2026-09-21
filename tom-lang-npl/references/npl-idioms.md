@@ -1,17 +1,19 @@
 # NPL Generation Idioms
 
-Language-level construction patterns for generating and reviewing NPL. These are shape rules, not project facts: confirm concrete file names, bus names, table budgets, and chip macros against the target project (`tom-project-xflow`) and current source before applying. Project-specific names below are illustrative examples, not the contract.
+Construction patterns for generating and reviewing NPL. Confirm file names, buses, table budgets, chip macros, and compiler behavior against the caller's project profile and current source. The wrapper layout and numbered editor zones below are project examples, not universal NPL requirements. Normative language rules live in `npl-core-rules.md`.
 
 ## 1. Feature-Gating Wrapper (real + stub)
 
-Gate every new feature behind a `#define` and give it a matched empty stub so the pipeline still links when the feature is off.
+When the project uses compile-time feature gates, follow its real/stub include convention so the disabled path remains defined. A gate must select exactly one implementation; merely defining a macro does not exclude the real file.
 
 ```npl
 // feature_knobs.npl
 #define MY_FEATURE 1
 
 // <feature>/<feature>_process.npl  — real implementation
+#ifdef MY_FEATURE
 function my_feature_do_something() { ... }
+#endif
 
 // wrapper/<feature>_process.npl    — stub, guarded by #ifndef
 #ifndef MY_FEATURE
@@ -21,12 +23,12 @@ function my_feature_do_something() { /* empty stub */ }
 
 Rules:
 - The stub signature must match the real function exactly; a mismatch changes the compiled component list.
-- A new feature is a set of files (parser / process / tables / flex-editor) plus one wrapper stub, not a single edit.
+- Change only the parser/process/table/editor files the feature actually needs; do not create empty layers to match the example.
 - Never leave a top-level function referenced but undefined in the disabled path.
 
 ## 2. Strength-Based Arbitration
 
-When more than one table or stage can write the same result field, resolve by strength, not by write order. Higher strength wins; an ACL/override layer sits at the top of the chain.
+When the project resolves competing table results by strength, extend its declared strength chain and tie behavior. Establish numeric priority from the current declaration; do not infer a universal ACL order from the example below.
 
 ```
 result field = highest-strength writer among the candidate producers
@@ -56,7 +58,7 @@ Rules:
 
 ## 4. Zone-Based Editing (Flex Editor)
 
-The flex editor runs its zones in REVERSE order (highest zone first). Header edits must be placed in the zone that matches the layer being rewritten, because a later-running (lower) zone sees the output of the earlier (higher) one.
+In the XFlow reference layout, numbered editor zones run highest first. Confirm the actual ordering and header dependencies from the current program/editor configuration before choosing a zone.
 
 | Zone | Typical purpose (project example) |
 |------|-----------------------------------|
@@ -67,12 +69,12 @@ The flex editor runs its zones in REVERSE order (highest zone first). Header edi
 | 0 | System headers (CPU, mirror, ERSPAN) |
 
 Rules:
-- Execution is 4→0; reason about edits in that order, not top-to-bottom in the file.
-- `add_header` / `delete_header` placement is order-sensitive — see `npl-compile-diagnostics.md` for the `add_header` tap-point rule and the delete-merge pitfall.
+- For the illustrated 4→0 layout, reason about edits in that order. Use the target's configured order when it differs.
+- `add_header` / `delete_header` placement is order-sensitive — see `npl-compile-diagnostics.md` for conditional tap-point and delete-granularity cases.
 
 ## 5. Bus-Architecture Model
 
-Metadata flows between stages through named buses, not through shared globals. Each field has exactly one producing stage per pass and one or more downstream consumers.
+Metadata flows between stages through named buses. Record initialization, all writers, ordering/arbitration, and downstream readers for each changed field; several writers may be intentional in a legal strength or sequential path.
 
 Typical bus roles (names are project-specific — confirm in source):
 - an object/result bus — lookup results (destination, next-hop, forwarding index, etc.)
@@ -80,23 +82,23 @@ Typical bus roles (names are project-specific — confirm in source):
 - separate ingress vs egress buses, plus scratch buses for intermediate values.
 
 Rules:
-- A field must be assigned before any stage reads it; an unassigned bus field is a compile error, not a silent zero.
+- Establish the value or specified default on every path before a field is consumed; do not assume the compiler diagnoses every uninitialized use.
 - Do not write the same bus field from two producers unless the arbitration/strength model allows it (multiple parser extractions into one container is rejected).
-- Field width in the bus definition must match every producer and consumer assignment exactly.
+- Check declared width across producers and consumers, including intentional zero extension, slicing, and any target-specific packing constraint.
 
 ## 6. NPL Critical Constraints (check FIRST when generating or reviewing)
 
-These are the language/hardware invariants that most often break a generated change. The authoritative rows also live in `npl-core-rules.md`; this table is the generation-time quick check.
+Use the checklist below to select a check, then apply the language rules in `npl-core-rules.md` or the current target's evidence. A historical diagnostic is not a language invariant.
 
 | Constraint | Rule | Symptom when violated |
 |-----------|------|-----------------------|
-| `isValid()` guard | Header fields used in table keys / conditions must be guarded by `isValid()` | "field used without validity check" |
-| Bit-width match | Every assignment must match the exact declared bit width | "type mismatch" / width error |
+| Header validity | Establish validity before key/condition use with the pinned dialect's actual mechanism | invalid-header behavior or compiler diagnostic |
+| Assignment sizing | Wider targets zero-extend; narrower targets require an explicit legal conversion/slice | width error or unintended value |
 | Table / TCAM depth | Tables have hardware capacity limits (a chip fact) | "resource overflow" |
 | Parser / MPB offsets | Byte offsets must stay consistent parser↔bus↔MPB | "offset mismatch" |
 | Field uniqueness | No duplicate field name in the same bus/scope | "duplicate definition" |
-| Overlay alignment | Struct overlays must be byte-aligned | "alignment error" |
+| Overlay legality | Check base/type restrictions; sub-byte overlays on bit fields are allowed by the language | invalid overlay declaration or target packing constraint |
 | No `return` | NPL has no `return`; wrap early-exit logic in `if (...)` | parse/semantic error |
-| Top-level mapping | Egress/ingress top-level functions need an `@NPL_PRAGMA(...mapping...)` entry | "not in the physical component list" |
+| Top-level mapping | Check the target compiler's directive requirements | "not in the physical component list" |
 
 For the two-stage compile model and the concrete fix procedure behind these symptoms, see `npl-compile-diagnostics.md`.

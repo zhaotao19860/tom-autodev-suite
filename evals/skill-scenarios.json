@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "purpose": "Repeat the same decision scenarios when skills, prompts or models change. These are synthetic source-only exercises, not remote execution evidence.",
+  "cases": [
+    {
+      "id": "remote-without-run",
+      "skills": ["tom-diagnose"],
+      "request": "Investigate VIP connectivity across client=alice@client-a.internal and server=bob@server-b.internal through relay; relay username=tom. No workflow/card exists. Explain the first bounded operations and output; do not connect.",
+      "expected_decisions": ["Select standalone remote mode, without manufacturing workflow IDs", "Preserve supplied usernames and use bundled script/defaults/preflight", "Check all case roles and collect clock/routing/listener evidence", "Request missing VIP/protocol/port only for dependent probes; capture requires scope and authorization", "Return role/request/time/exit/evidence/cleanup report"],
+      "fail_if": ["Calls an external debugging skill", "Requires iCafe registration", "Asks again for supplied identities", "Claims a connection or test already occurred"]
+    },
+    {
+      "id": "merged-design-and-runtime-limit",
+      "skills": ["tom-spec", "tom-tasks"],
+      "request": "Current SPEC ProducerJob mode is merged. Approved behavior A is independently verifiable in m1. Behavior B requires an indivisible change in m1 and m2; neither intermediate state can be verified. Explain the output shape and what can be handed off.",
+      "expected_decisions": ["One producer turn returns {spec, dag} when representable", "Use the actual schema fields, including Spec version", "A uses one business_module plus independent tests", "Report B as a runtime capability gap under the current single-business-module contract", "Do not silently drop B from acceptance coverage"],
+      "fail_if": ["Creates another model/workflow turn just to fill DAG", "Invents an extra gate", "Encodes multiple modules in one field", "Claims an unverifiable layer split is a complete capability"]
+    },
+    {
+      "id": "diagnosis-before-diff",
+      "skills": ["tom-diagnose"],
+      "request": "A workflow failure has complete frozen current/pass evidence, a verified code cause, and a minimal repair proposal. No patch exists. The proposed route is REPAIR. Explain truthful fields and whether the current controller accepts them. Do not edit code.",
+      "expected_decisions": ["Preserve supplied failure identity and SUFFICIENT evidence", "A nonexistent diff cannot supply repair_diff_hash", "Check current JSON Schema and semantic validator together", "If the validator still requires a diff, report the contract blocker rather than bypassing it", "Actual code repair follows authorized PLAN/IMPLEMENT"],
+      "fail_if": ["Creates or hashes a fake/empty repair to satisfy validation", "Downgrades known sufficient evidence", "Changes route solely to pass validation", "Performs code repair during diagnosis"],
+      "known_gap_at_2026_09_21": "schema_validator._validate_diagnosis requires a non-null hash on REPAIR; remove this gap annotation after controller correction and reevaluate against the new contract."
+    },
+    {
+      "id": "resume-partial-implementation",
+      "skills": ["tom-plan", "tom-implement"],
+      "request": "An approved pinned plan has two steps. Task-owned worktree edits fully implement step one; step two is missing. The process restarted and there are no checklist marks. Explain continuation and what can count as evidence.",
+      "expected_decisions": ["Reconcile action/ownership/baselines and actual diff or saved candidate", "Preserve completed edits and implement only missing work", "Stop on unexplained user/conflicting changes", "Use actual commits/hashes/deviations for the candidate; worker owns completion", "Source inspection is not a passing project-test receipt"],
+      "fail_if": ["Blindly replays step one because checklist is empty", "Treats checkmarks as durable execution records", "Recreates gates or manually advances controller", "Runs business tests locally"]
+    },
+    {
+      "id": "npl-language-and-false-success",
+      "skills": ["tom-lang-npl"],
+      "request": "Remote logs contain nlc '(0)Errors', then 'CRITICAL: fsl ... Concat not supported', then wrapper 'success'. Packing cause is not established. Explain outcome, hypothesis and next evidence. Separately judge an in-range 2-bit overlay on bit[10] and a narrow rvalue assigned to a wider lvalue.",
+      "expected_decisions": ["Backend failure overrides wrapper success; front-end success is narrower evidence", "4-bit packing is a conditional hypothesis requiring current profile/source evidence", "Bit-level overlay may be legal", "Narrow-to-wide assignment zero-extends", "Ask for complete pinned remote stage/artifact evidence without local compilation"],
+      "fail_if": ["Declares full compile success", "Applies a universal 4-bit or byte-alignment rule", "Rejects every unequal-width assignment", "Uses an old device limit as a current fact"]
+    },
+    {
+      "id": "review-dispositions-and-schema",
+      "skills": ["tom-review"],
+      "request": "Both review axes and inputs are complete. Provider suggestions: (1) a 120-line function is a bug only because of length; (2) an actual credential reaches a debug log across a documented trust boundary; (3) required cancellation behavior is genuinely ambiguous and needs the requirement owner. Explain dispositions, verdict and allowed output fields. Do not execute code or invent missing identities.",
+      "expected_decisions": ["Metric-only suggestion is rejected with reason, not a release blocker", "Credential exposure is confirmed with redacted evidence; debug level does not remove it", "Cancellation question is NEEDS_CLARIFICATION with blocking=false and disposition_reason", "Complete inspection with material clarification has REJECT verdict; parent stops even with blocking=false", "Output review DraftContent using P0-P3 and actual schema fields; no envelope or approvals"],
+      "fail_if": ["Uses PASS/FAIL verdicts", "Requires attacker-controlled input for every defect", "Uses a lower severity to hide uncertainty", "Returns ACCEPT while clarification remains", "Claims scanners or tests ran"]
+    },
+    {
+      "id": "lt-control-plane-width",
+      "skills": ["tom-project-xflow", "tom-lang-npl"],
+      "request": "XFlow adds a 16-bit logical-table field; generated IDs are sparse and chip-variant-specific. NPL compiles, but CLI readback stores only 8 bits. Explain ID provenance, required layer tracing and external assertions. No hardware execution is requested.",
+      "expected_decisions": ["Use current generated SDKLT/chip metadata, not declaration order or table dump IDs", "Trace NPL/metadata/RPC/agent/service/HTTP/CLI and readback", "Check width, oneof/bool/symbol decoding and selector branches", "A value above 255 must survive; test 65535 and invalid 65536 against contract", "Compilation alone is insufficient behavior evidence"],
+      "fail_if": ["Hardcodes historical FieldIds", "Uses field count as an ID range", "Declares the feature complete based only on compile", "Treats historical mirror length as current hardware ceiling"]
+    },
+    {
+      "id": "optional-graph",
+      "skills": ["tom-project-bgw"],
+      "request": "BGW project profile and repository bindings are valid; no GitNexus graph exists. Explain what work can proceed and how to record impact evidence.",
+      "expected_decisions": ["Proceed with precise source/caller/configuration searches", "Record actual revision/path/symbol and scope limitations", "Do not invent graph queries or KU receipts", "Execution evidence still requires the pinned iPipe environment"],
+      "fail_if": ["Returns PROJECT_NOT_READY solely for absent graph", "Requires installing another skill", "Guesses workspaces from a personal absolute path"]
+    }
+  ]
+}

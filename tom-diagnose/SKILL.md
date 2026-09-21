@@ -1,32 +1,34 @@
 ---
 name: tom-diagnose
-description: Use when Review, iPipe, release, code, or product-test evidence reports a failure that may require a repair or environment decision.
+description: Use when Review, iPipe, release or product-test evidence needs root-cause diagnosis, or when an explicitly identified internal host needs bounded relay/tmux remote investigation of logs, processes, routing or VIP connectivity.
 ---
 
 # Tom Diagnose
 
-## Inputs and Output
+## Select the context
 
-Consume a Failure Evidence Bundle containing stage/job, complete logs, failing and passing revisions, diff, Spec/Task Plan, Review findings, baseline, environment fingerprint, knowledge/impact references, and previous repair history. Produce a `Diagnosis` with reproduction status, comparison evidence, failure classification, one root-cause hypothesis, minimal verification, confidence, and recommended route.
+| Supplied context | Mode and output |
+|---|---|
+| A run/action or frozen Review/iPipe/release failure bundle | **Workflow diagnosis:** return `diagnosis` DraftContent to the parent under the [producer contract](../tom-autodev/references/producer-contract.md). |
+| An explicit host and a request to inspect it, without a workflow job | **Remote investigation:** use the bundled [remote operations](references/remote-operations.md); return a human-readable evidence report. No iCafe run, project registration or fake pipeline IDs are needed. |
+| Workflow failure plus missing live-host evidence | Keep workflow mode. Present a bounded evidence request to the parent; use remote operations only for its authorized target/commands. Observations supplement, but never replace, iPipe execution receipts. |
 
-Follow [`references/phase-contract.md`](references/phase-contract.md). Emit the `diagnosis` ArtifactEnvelope to the parent for KU persistence, iCafe linking, and G6 approval; do not call iPipe directly.
+Remote operation does not authorize deployment, an iPipe rerun or code repair. BNS/Matrix/container transports are unsupported by the bundled relay helper; require an exact supported SSH target instead of guessing.
 
-## Procedure
+## Diagnose from evidence
 
-1. Freeze the failing revision, test revision, baseline, pipeline build, stage/job, and environment fingerprint.
-2. Confirm whether the failure is reproducible from existing iPipe evidence; do not claim a local build/test as reproduction.
-3. Compare the failing revision with the latest passing revision using the same stage, inputs, toolchain, and environment evidence.
-4. Separate code/test behavior from `ENV_UNSATISFIED`, `ENV_TRANSIENT`, `PIPELINE_TRANSIENT`, `REVISION_MISMATCH`, and release-platform failures.
-5. Use repository impact and knowledge evidence to select one causal hypothesis. State what evidence would disprove it.
-6. Verify only the minimal hypothesis using existing evidence or an explicitly approved iPipe diagnostic stage. If root cause or verification is missing, return `DIAGNOSIS_INCOMPLETE`.
-7. For a confirmed product/test cause, return a minimal Spec repair proposal and updated Task Plan request. Do not edit code in this phase.
+Read [root-cause protocol](references/root-cause-protocol.md). Freeze the failure identity, business/test revisions, stage/job, environment and log window; compare with a valid passing baseline. Trace the first broken component boundary, form one falsifiable hypothesis, and specify a minimal discriminating observation. Keep observed facts, inference and unknowns separate.
 
-## Repair Budget
+Read project runtime topology only for the selected project; NPL compile evidence also uses the suite's `tom-lang-npl` diagnostics. Only confirmed Review findings are failure inputs; a question about intended behavior returns to the requirement owner.
 
-Pass diagnosis history to `repair_policy.next_action`. Environment and baseline failures never return a business repair. Two identical no-progress signatures stop automatic proposals; three unsuccessful approved fixes force architecture Review; five repair rounds stop the task.
+Environment, transport, revision and stale-artifact failures do not justify business patches. A flaky or non-reproduced failure needs additional evidence, not repeated speculative edits. Do not edit code in workflow diagnosis; repair implementation belongs to the approved PLAN/IMPLEMENT path.
 
-## Gate
+## Workflow output and limits
 
-Human G6 approval must cover the Diagnosis, repair direction, updated Task Plan, and later repair diff. Review findings must first be `CONFIRMED`; `NEEDS_CLARIFICATION` pauses the run. Never guess from a log tail, turn an environment error into a code patch, run project tests on Mac, or call iCode/iPipe directly.
+Use the action's [diagnosis schema](../tom-autodev/schemas/diagnosis.schema.json) and [phase-specific mapping](references/phase-contract.md). Preserve the authoritative failure signature and repair history. The controller owns retry budgets, G6, routing and durable case updates; the model supplies evidence, not a new counter or replacement signature. Two no-progress rounds, three failed fixes and five-round limits must be checked against durable history, not recalled conversation.
 
-**REQUIRED PARENT:** Return the Diagnosis or explicit stop reason to `tom-autodev`.
+If root cause or verification is absent, use `DIAGNOSIS_INCOMPLETE` with explicit missing evidence. If a required controller/schema field cannot be truthfully represented, return a contract blocker; never manufacture a repair diff, identity or remote receipt to make validation pass.
+
+## Remote output
+
+Report target/role, time window and clock skew, request IDs and exit status, redacted observations, hypothesis/counter-evidence, next useful observation and cleanup status. Use only the resources loaded for this case. The full relay/session/process tooling is bundled here; no external debugging skill is required.

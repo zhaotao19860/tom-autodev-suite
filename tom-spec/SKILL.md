@@ -13,11 +13,11 @@ Convert closed requirement decisions into a reviewable behavioral contract. Spec
 
 Require a `RequirementSnapshot`, `CLARIFIED` or `NO_OPEN_DECISIONS` result, Decision Log, project/language rules, repository evidence, independent product-test repository contract, and current iPipe environment profile. Return `DECISION_REQUIRED` if any behavior or human tradeoff remains open.
 
-Follow [`references/phase-contract.md`](references/phase-contract.md). Emit the versioned `spec` ArtifactEnvelope, publish through the parent KnowledgeSync boundary, and include the iCafe comment receipt in the envelope.
+Follow the [producer contract](../tom-autodev/references/producer-contract.md), [spec schema](../tom-autodev/schemas/spec.schema.json) and [phase-specific rules](references/phase-contract.md). Return versioned `spec` DraftContent. In a worker-requested merged SPEC job, also apply [tom-tasks](../tom-tasks/SKILL.md) to this same Spec and return one `{spec, dag}` bundle; this is one producer turn, not a recursive workflow.
 
 ## Spec Contract
 
-Produce these sections in order:
+Cover these topics using the schema's actual fields; keep narrative in supported text/evidence fields rather than inventing JSON properties:
 
 1. Problem Statement and Solution.
 2. Numbered user/system behaviors, including normal, boundary, exceptional, and compatibility behavior.
@@ -27,7 +27,7 @@ Produce these sections in order:
 6. Out of Scope, risks, rollback boundary, and release evidence requirements.
 7. Traceability: each iCafe acceptance criterion maps to one or more Spec behaviors and planned iPipe evidence.
 
-Prefer the highest stable existing test interface that observes the target behavior. Add a new interface only when existing interfaces cannot express the requirement, and record why.
+Prefer the highest stable existing test interface that observes the target behavior. Add a new interface only when existing interfaces cannot express the requirement, and record why. Use [behavior and test design](references/behavior-and-tests.md) for state, boundary, failure and expected-result rules.
 
 ## Completion Gate
 
@@ -38,8 +38,8 @@ Before G2 approval, verify:
 - Business and independent test repositories describe the same behavior version.
 - Environment Requirements are sufficient to decide whether an iPipe runner is eligible.
 - Scope, exception, compatibility, and rollback statements do not conflict.
-- The Spec has a monotonic `spec_version` and canonical `content_hash`.
+- The Spec has a monotonic `version` (the content schema's field); the controller computes content identity from the actual content.
 
-Stop on missing evidence instead of filling gaps with assumptions. Do not create the Task DAG, edit code, run project tests, or call iCode/iPipe in this phase.
+Stop on missing evidence instead of filling gaps with assumptions. Create a DAG only for an explicitly merged job; otherwise leave it to TASKS. Do not edit code, run project tests, call iCode/iPipe or create extra gates.
 
 **REQUIRED PARENT:** Return the Spec artifact and evidence references to `tom-autodev` for G2 approval.

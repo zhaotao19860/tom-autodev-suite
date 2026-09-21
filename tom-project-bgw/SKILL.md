@@ -7,22 +7,22 @@ description: Use when tom-autodev targets the BGW C/C++ project and needs reposi
 
 ## Profile
 
-Treat `/Users/tom/icode/bgw` as the candidate BGW workspace only after setup confirms the actual business repositories, iCode modules, target branches, locks, and current revisions. BGW tasks are multi-repository but each task remains one end-to-end externally observable capability slice.
+Resolve BGW workspaces from the validated project profile and owned workspace binding. A requirement may span repositories; each runtime task binds one business module and its independent test repository as an externally observable capability slice. An indivisible multi-business-repository task is a runtime capability gap, not permission to guess workspace ownership.
 
 Require an independent BGW product-test repository. Require a configured source-only Review provider, stable iPipe pipeline template, environment profile, approval channels, and release rule. Missing or unreadable values return `PROJECT_NOT_READY`; never infer a test repository or pipeline from a directory name.
 
 ## Knowledge Priority
 
 1. Current BGW business repositories at the recorded revision and repository rules.
-2. GitNexus graphs for each participating repository and cross-repository impact.
-3. BGW test precedents, environment rules, and approved historical errors.
+2. Approved behavior/protocol documents and current BGW test precedents and environment rules.
+3. Versioned historical cases, applied only when their trigger and environment match.
 4. External/reference repositories only as cited evidence; they never override current code.
 
-Record repository, revision, path/symbol, source type, and index freshness for every reference. Re-index or stop impact analysis when the graph is older than the target revision.
+Record repository, revision, path/symbol and source type for each reference. GitNexus is optional supporting impact evidence. When its graph is missing, stale or incomplete, use precise source/caller/configuration search and record the limitation; do not return `PROJECT_NOT_READY` solely because a graph is unavailable. Record query and index freshness only when using a graph.
 
 ## Required BGW Test and Knowledge Profile
 
-The profile must explicitly name each business repository/module, independent product-test repository, branch/revision policy, external test interface, fixture/data source, and the iPipe build/unit/regression/integration stages. Never infer a test repository, executable, compiler flag, environment, or release target from `/Users/tom/icode/bgw` or a directory name. GitNexus queries are supporting impact evidence only; source and approved KU documents remain authoritative. Record graph query, index revision/freshness, cited KU URL/version, and fixture/test-plan hashes in every Task Plan and remote result.
+The profile must explicitly name each business repository/module, independent product-test repository, branch/revision policy, external test interface, fixture/data source, and the iPipe build/unit/regression/integration stages. Never infer a test repository, executable, compiler flag, environment, or release target from a directory name. Record the source paths/revisions, cited document versions, and fixture/test-plan hashes that actually support the Task Plan or remote result; do not invent graph queries or KU receipts.
 
 BGW tests must assert the stable externally observable gateway/API/protocol boundary and include valid, boundary, malformed, compatibility, and regression cases. Environment readiness must include runner OS/architecture, image/toolchain digests, services/data/capacity, and reproducible cleanup. All build, unit, regression, integration, packaging, and release commands run only in the pinned iPipe runner; Mac performs source generation/Review and evidence parsing.
 

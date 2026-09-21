@@ -7,46 +7,49 @@ description: Use when a fixed-baseline Change Set needs independent Standards an
 
 ## Inputs
 
-Require the approved Spec and Task Plan, Change Set, business/test repository revisions, Review Baseline, language/project rules, knowledge and impact references, and matching input hashes. Review the exact diff, not an approximate current workspace.
+Read the approved Spec/Task Plan, Change Set, Review Baseline, pinned business/test revisions, language/project rules, and impact evidence. Review the exact diff against matching inputs.
 
-Follow [`references/phase-contract.md`](references/phase-contract.md). Emit a `review` ArtifactEnvelope with both reports and receipts; the parent alone performs G7/iCode gating.
+Use [scope collection](references/scope-collection.md) when the input lacks a complete per-repository file inventory. The bundled helper reads fixed commits without checkout or project execution; its output is supporting evidence, not a review verdict.
+
+Follow [`references/phase-contract.md`](references/phase-contract.md). Return `review` **DraftContent** for the current ProducerJob through `submit-draft`. The worker owns the envelope, hashes, receipts, and completion; the parent owns G7/iCode gating.
 
 ## Two Axes
 
-Run independent reports:
+Assess both axes separately in the same draft; two axes do not require two model calls:
 
 - **Standards:** repository and language/project conventions, affected callers, naming, duplication, responsibility, unsupported abstraction, scope, and tests that assert external behavior.
 - **Spec:** required behavior, exceptions, compatibility, test interface, acceptance coverage, iPipe plan, and business/test semantic alignment.
 
-Every finding contains axis, severity, repository, path/symbol/line, evidence reference, affected acceptance criterion, blocking flag, and `classification`.
+Use the output slots in `phase-contract.md`. Put repository/revision and actual evidence references in `location`/`evidence`; never invent code lines for omissions.
 
 ## Review Method
 
-Pure-prompt heuristics, read-only — never compile or run. Load:
+Review is source-only: never run project code, compile, or test. Load by the changed behavior:
 
-- [`references/review-heuristics.md`](references/review-heuristics.md): **always.** Data-flow/boundary/adversarial/variant/recovery/consistency/contract passes and the D-01..D-07 semantic defects, each tagged to an axis.
+- [`references/spec-coverage.md`](references/spec-coverage.md): **always.** Check the current task's acceptance points, including required behavior with no new code line.
+- [`references/review-heuristics.md`](references/review-heuristics.md): for changed executable behavior and affected callers; select the relevant data-flow, boundary, recovery, consistency, and contract passes.
 - [`references/security-checklist.md`](references/security-checklist.md): when the change touches web/HTTP, auth, crypto, deserialization, or external input. Feeds Standards.
-- [`references/rule-catalog.md`](references/rule-catalog.md): rule-ID + severity read-checks (G-SECRET/EXCEPT/INPUT/SEC/DB/PERF/LOG/ARCH, BIZ-*).
+- [`references/rule-catalog.md`](references/rule-catalog.md): read the rule families triggered by the changed language and behavior; a reading checklist is not scanner execution evidence.
 - [`references/severity-taxonomy.md`](references/severity-taxonomy.md) and [`references/false-positive-suppression.md`](references/false-positive-suppression.md): when disposing findings.
+
+For ordinary prose/comments, check changed claims and references. Expand for executable commands, configuration, public behavior, or agent instructions. Keep both axes; skip unrelated rule families.
 
 ## Finding Reception
 
-Run every candidate finding through the sink-first FP firewall (`false-positive-suppression.md`) before recording it: prefer a missed report over a false one. Map its triage to `classification` — reject → `REJECTED_WITH_REASON`, 待确认/unknown → `NEEDS_CLARIFICATION`, confirmed → `CONFIRMED`. Do not import raw HIGH/MEDIUM/BLOCK verdict words into the artifact; severity lives in `severity`/`blocking`, disposition lives in `classification`.
+Use evidence appropriate to the defect type: injection needs source-to-sink tracing; secrets/configuration and logic defects have different requirements. Emit `P0`–`P3`, independently of classification and blocking. Metric thresholds alone are not defects.
 
 Classify every provider suggestion exactly once, in the finding's required `classification` field:
 
 - `CONFIRMED`: current code, Spec, rules, and impact evidence establish the issue.
-- `REJECTED_WITH_REASON`: evidence shows it is inapplicable or conflicts with an approved decision; record the technical reason in `disposition_reason`, and do not mark it blocking — a suggestion you just refuted cannot hold the run.
-- `NEEDS_CLARIFICATION`: Spec, revision, location, impact, or reproduction evidence is insufficient; state what is missing in `disposition_reason`. The run stops with `REVIEW_NEEDS_CLARIFICATION` rather than going to `tom-diagnose`, which root-causes failures and cannot answer a question.
+- `REJECTED_WITH_REASON`: refuted, outside this task, or optional advice without a defect; give the precise `disposition_reason`, with `blocking: false`.
+- `NEEDS_CLARIFICATION`: an answer is needed to judge required behavior/material risk; give the missing fact and owner in `disposition_reason`, with `blocking: false`. **This still stops the run** with `REVIEW_NEEDS_CLARIFICATION`. Optional refactoring advice does not qualify.
 
-`disposition_reason` is required for both non-confirmed values, and an `ACCEPT` verdict over a `NEEDS_CLARIFICATION` finding is rejected as inconsistent: the schema will not let the artifact claim the code is clean and unexamined at once.
-
-Do not use `pending`, `unverified`, or `incomplete` as finding states. `INCOMPLETE` is reserved for a Review provider that is unavailable, times out, lacks scope, or lacks a Spec.
+`disposition_reason` is required for both non-confirmed values. Do not invent classification values. Provider/input/scope gaps are Review `INCOMPLETE`.
 
 ## Verdict and Gate
 
-Return `PASS` only when both axes pass and no blocking `CONFIRMED` finding remains. The Review result carries no approval. Return `FAIL` for a blocking confirmed finding. Return `INCOMPLETE` for provider capability gaps. Any `NEEDS_CLARIFICATION`, stale/hash-mismatched baseline, missing input, or other non-PASS result stops parent submission. Only `PASS` may allow the parent to request a separately hash-bound G7 iCode approval for this exact Change Set; confirmed blocking findings return to `tom-diagnose`, never directly to code edits.
+Use only `ACCEPT`, `REJECT`, or `INCOMPLETE`, following the contract's decision table. `ACCEPT` requires complete axes, no blocker, and no `NEEDS_CLARIFICATION`; only it permits the parent to request hash-bound G7. Review carries no approval. Confirmed blockers route through `tom-diagnose`; unanswered questions return to their owner.
 
 Do not modify code, run project compile/tests, call iCode/iPipe, or silently accept a suggestion in this phase.
 
-**REQUIRED PARENT:** Return both reports, finding classifications, verdict, baseline, and input hash to `tom-autodev`.
+**REQUIRED PARENT:** Return the Review DraftContent and its actual supporting evidence to `tom-autodev`; the worker owns phase completion.
