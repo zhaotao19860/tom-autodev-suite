@@ -281,6 +281,15 @@ def _produce(
         return {"ok": False, "reason_code": "DRAFT_SCHEMA_INVALID", "retry_allowed": True,
                 "job_id": job_id, "schema": schema_name,
                 "schema_errors": [{"path": i.path, "kind": i.kind} for i in issues]}
+    # Run the full no-side-effect validation (schema + semantic + predecessor binding) BEFORE
+    # locking the job to this draft (R-H1). A draft that is schema-valid but context-invalid
+    # -- e.g. a REVIEW whose change_set_hash no longer matches the current IMPLEMENT candidate,
+    # or a PLAN/DIAGNOSE with mismatched revisions -- must leave the job PENDING so a corrected
+    # draft can retry the same frontier, instead of locking it and making every retry a
+    # PRODUCER_JOB_CONFLICT. complete_phase re-runs this check under its own compare-and-swap.
+    precheck = _validate_before_fulfill(orchestrator, run_id, draft, knowledge_sync)
+    if precheck is not None:
+        return {**precheck, "job_id": job_id}
     orchestrator.state.fulfill_producer_job(job_id, draft)
     _record_model_receipt(orchestrator, run_id, action, draft, [schema_name])
     gate = action.get("required_human_gate")
@@ -291,6 +300,30 @@ def _produce(
                     "approval_input_hash": envelope["approval_input_hash"], "job_id": job_id}
         envelope["approval_id"] = approval_id
     return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
+
+
+def _validate_before_fulfill(
+    orchestrator: Any, run_id: str, content: dict[str, Any], knowledge_sync: Any | None
+) -> dict[str, Any] | None:
+    """Pure, no-side-effect semantic/predecessor pre-fulfill check (R-H1).
+
+    Returns a retryable rejection when the draft is schema-valid but fails the
+    predecessor-binding checks complete_phase would run -- a REVIEW whose change_set_hash no
+    longer matches the current IMPLEMENT candidate, a PLAN/IMPLEMENT with mismatched
+    revisions, a DIAGNOSE with the wrong frozen revisions, or SPEC/TASKS coverage drift -- so
+    the ProducerJob is only ever locked to a draft that will actually commit and a corrected
+    draft can retry the same frontier. Returns None to proceed. A raced/stale frontier
+    (next() not ok) also returns None -- complete_phase reconciles that under compare-and-swap.
+    Uses the binding check only (not full envelope/approval validation), so an as-yet
+    un-approved gated draft is still allowed to fulfill and park on its gate."""
+    protocol = orchestrator.phase_protocol(knowledge_sync)
+    action = protocol.next(run_id)
+    if not action.get("ok"):
+        return None
+    reason = protocol._predecessor_binding_error(action, content)
+    if reason is None:
+        return None
+    return {"ok": False, "reason_code": reason, "retry_allowed": True}
 
 
 def _submit_merged(
@@ -312,10 +345,15 @@ def _submit_merged(
         return {"ok": False, "reason_code": "DRAFT_SCHEMA_INVALID", "retry_allowed": True,
                 "job_id": job_id,
                 "schema_errors": [{"path": i.path, "kind": i.kind} for i in issues]}
+    # Semantic/predecessor pre-check of the SPEC half before locking the merged job (R-H1):
+    # a schema-valid but context-invalid spec leaves the job PENDING for a corrected retry.
+    spec_envelope = build_envelope(action, draft["spec"])
+    precheck = _validate_before_fulfill(orchestrator, run_id, draft["spec"], knowledge_sync)
+    if precheck is not None:
+        return {**precheck, "job_id": job_id}
     orchestrator.state.fulfill_producer_job(job_id, draft)
     _record_model_receipt(orchestrator, run_id, action, draft, ["spec", "task-dag"])
 
-    spec_envelope = build_envelope(action, draft["spec"])
     gate = action.get("required_human_gate")
     if gate is not None:
         approval_id = _settled_approval_id(orchestrator, run_id, gate, spec_envelope["approval_input_hash"])

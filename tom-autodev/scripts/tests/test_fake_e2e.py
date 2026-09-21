@@ -1156,6 +1156,53 @@ class FakeE2ETests(unittest.TestCase):
             knowledge_sync=knowledge)
         self.assertEqual(good["reason_code"], "APPROVAL_REQUIRED")
 
+    def test_review_context_invalid_draft_is_retryable_without_locking(self):
+        # R-H1: a REVIEW draft that is schema-valid but whose change_set_hash no longer
+        # matches the current IMPLEMENT candidate is rejected as retryable WITHOUT locking
+        # the ProducerJob, so a corrected draft retries the same frontier instead of an
+        # unrecoverable PRODUCER_JOB_CONFLICT. REVIEW has no output gate, so this reaches
+        # the failure without a human first approving a bad draft.
+        card = "BGW-812"
+        run_id, knowledge = self._run_to_workspace(card, "bgw", "I15ClP2KW4ZGAK")
+        requirement = snapshot(card)
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+        self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"], "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"], "workspace_receipts": receipts,
+        })
+        reviewed_revisions = None
+        for phase in ("PLAN", "IMPLEMENT"):
+            action = self.orchestrator.next(run_id)
+            self.assertEqual(action["phase"], phase, action)
+            if phase == "IMPLEMENT":
+                reviewed_revisions = self._commit_reviewed_worktrees(receipts)
+            content = self._phase_content(action, requirement, reviewed_revisions)
+            envelope = self._phase_envelope(action, content, run_id)
+            self.assertTrue(
+                self.orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge)["ok"])
+
+        review_action = self.orchestrator.next(run_id)
+        self.assertEqual(review_action["phase"], "REVIEW")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+
+        valid = self._phase_content(review_action, requirement, reviewed_revisions)
+        stale = copy.deepcopy(valid)
+        stale["change_set_hash"] = canonical_hash({"wrong": "candidate"})
+        rejected = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id, stale, knowledge_sync=knowledge)
+        self.assertEqual(rejected["reason_code"], "REVIEW_PREDECESSOR_MISMATCH")
+        self.assertTrue(rejected["retry_allowed"])
+        # The job was NOT locked to the bad draft.
+        self.assertEqual(self.orchestrator.state.producer_job(job_id)["status"], "PENDING")
+        # The corrected draft proceeds on the same frontier — no PRODUCER_JOB_CONFLICT.
+        fixed = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id, valid, knowledge_sync=knowledge)
+        self.assertTrue(fixed["ok"], fixed)
+        self.assertEqual(self.orchestrator.state.producer_job(job_id)["status"], "FULFILLED")
+
     def test_producer_job_concurrent_fulfill_is_idempotent_or_conflicts(self):
         # Two workers filling the same ProducerJob: an identical draft merges to one row;
         # a different draft for an already-fulfilled job conflicts rather than overwriting.

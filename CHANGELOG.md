@@ -14,6 +14,10 @@ skill 精简与自包含（减少对外部 skill 的依赖；控制面脚本/契
 - 相位契约去重：7 个相位 skill 的 `references/phase-contract.md` 收敛为指向父级 `tom-autodev/references/phase-protocol.md` + `phase-artifacts.md` 的指针，仅保留各自独有内容（如 tom-grill 的 `ACCEPTANCE_DELTA_CONFLICT` 与 acceptance-candidates advisory、tom-tasks 的 `business_module`），消除 SKILL.md/契约/父表三处重复维护的漂移面
 - 控制面回归 `806` 项仍全绿（本批仅 `install_links.py` 触及脚本，`test_install_links.py` 覆盖通过）
 
+Codex round-3 复核修复（`tom-autodev-suite_review_report_77a933b.md`，分步进行）：
+
+- R-H1：schema 合法但前置绑定错的草案不再锁死 ProducerJob——`worker_driver` 在 `fulfill` 前新增 `_validate_before_fulfill()`，复用协议纯校验 `_predecessor_binding_error`（REVIEW 的 change_set_hash、PLAN/IMPLEMENT revision、DIAGNOSE frozen_revisions、SPEC/TASKS 覆盖）；不符即返回 `retry_allowed` 且不锁 job，修正稿可重投同一 frontier，不再 `PRODUCER_JOB_CONFLICT`。只用绑定校验（不含 envelope/审批校验），未批准的 gated 草案仍能 fulfill 并 park 在其闸门。`_submit_merged` 的 SPEC 半同样前置校验。回归 `807` 项全绿
+
 ## 2026-09-20
 
 Codex 评审全量修复（分步进行；每步全绿后推进）：
