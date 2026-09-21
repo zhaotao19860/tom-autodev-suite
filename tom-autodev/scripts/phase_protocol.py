@@ -1145,22 +1145,31 @@ class PhaseProtocol:
         return target, None, "OK"
 
     def _authoritative_failure_signature(self, run_id: str) -> str | None:
-        """The failure signature of the runtime failure that drove this run into DIAGNOSE,
-        read from the archived IPIPE FAILURE evidence rather than the model's diagnosis (R-M5).
+        """The failure signature of the runtime failure that drove this run into its CURRENT
+        DIAGNOSE, read from that specific failure evidence rather than the model's diagnosis
+        (R-M5) and bound to the current DIAGNOSE occurrence rather than any historical one
+        (R4-M4).
 
-        The cross-run guard must not trust a signature the model emitted -- a model could
-        otherwise dodge escalation by reporting a different root cause. Returns the most recent
-        FAILURE IPIPE evidence's signature, or None when there is no runtime failure evidence
-        (e.g. a REVIEW-origin diagnosis), in which case the caller falls back to the diagnosis'
-        own signature."""
-        signature = None
-        for artifact in self.artifacts.phase_artifacts(run_id, "IPIPE"):
-            if not artifact.get("valid"):
-                continue
-            content = (artifact.get("envelope") or {}).get("content") or {}
-            if content.get("status") == "FAILURE" and isinstance(content.get("failure_signature"), str):
-                signature = content["failure_signature"]
-        return signature
+        The cross-run guard must not trust a signature the model emitted, and must not let a
+        stale earlier IPIPE failure answer for a later, differently-sourced diagnosis (e.g.
+        IPIPE(S) -> fix -> REVIEW(T) -> DIAGNOSE). So it reads the DIAGNOSE-entry event: only an
+        IPIPE-origin diagnosis has an authoritative runtime signature, taken from the failure
+        artifact that event points at. A REVIEW/other-origin diagnosis returns None, and the
+        caller falls back to the diagnosis' own signature."""
+        events = self.state.events(run_id)
+        payload = events[-1].get("payload") if events else None
+        payload = payload if isinstance(payload, dict) else {}
+        if payload.get("previous_state") != "IPIPE":
+            return None
+        artifact_id = payload.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            return None
+        artifact = self.artifacts.phase_artifact(artifact_id)
+        if not artifact.get("valid"):
+            return None
+        content = (artifact.get("envelope") or {}).get("content") or {}
+        signature = content.get("failure_signature")
+        return signature if isinstance(signature, str) and signature else None
 
     def _cross_run_escalation(
         self, signature: Any

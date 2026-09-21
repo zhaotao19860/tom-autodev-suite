@@ -1373,28 +1373,56 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
         self.assertEqual(target, ("SPEC", None, "OK"))
 
     def test_escalation_uses_authoritative_runtime_signature_not_the_model(self):
-        # R-M5: the cross-run guard reads the signature from the archived runtime FAILURE
-        # evidence, so a model that emits a different signature in its diagnosis cannot dodge
-        # escalation of a known recurring root cause.
+        # R-M5 / R4-M4: the guard reads the signature from the CURRENT DIAGNOSE's IPIPE failure
+        # evidence (via the entry event), so a model that emits a different signature cannot
+        # dodge escalation of a known recurring root cause.
+        run_id = "run-authsig"
+        self.protocol.state.transition(run_id, "IPIPE", {"seed": 1})
+        self.protocol.state.transition(
+            run_id, "DIAGNOSE", {"previous_state": "IPIPE", "artifact_id": "art-fail"})
         self.protocol.state.record_failure_case("SIG-real", "CODE", "run-a", resolved=False)
         self.protocol.state.record_failure_case("SIG-real", "CODE", "run-b", resolved=False)
 
         class _Art:
-            def phase_artifacts(self, run_id, phase):
-                return [{"valid": True, "envelope": {"content": {
-                    "status": "FAILURE", "failure_signature": "SIG-real"}}}]
+            def phase_artifact(self, artifact_id):
+                if artifact_id == "art-fail":
+                    return {"valid": True, "envelope": {"content": {
+                        "status": "FAILURE", "failure_signature": "SIG-real"}}}
+                return {"valid": False}
 
         original = self.protocol.artifacts
         self.protocol.artifacts = _Art()
         try:
             diagnosis = self._diagnosis()
             diagnosis["failure_signature"] = "SIG-model-dodge"  # model reports a different sig
-            action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-c"}
+            action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id}
             target = self.protocol._completion_target(action, {"content": diagnosis})
         finally:
             self.protocol.artifacts = original
 
         self.assertEqual(target, ("ARCHITECTURE_REVIEW", None, "KNOWN_CROSS_RUN_FAILURE"))
+
+    def test_review_origin_diagnosis_is_not_answered_by_a_stale_ipipe_signature(self):
+        # R4-M4: after IPIPE(S) -> fix -> REVIEW(T) -> DIAGNOSE, the current REVIEW-origin
+        # diagnosis must not be routed by the earlier IPIPE failure S. The authoritative source
+        # is scoped to the current DIAGNOSE entry (previous_state REVIEW -> no runtime signature),
+        # so the guard uses the diagnosis' own (current) signature, not stale S.
+        run_id = "run-review-origin"
+        self.protocol.state.transition(run_id, "IPIPE", {"seed": 1})
+        # Historical IPIPE failure S, already a known cross-run recurring root cause.
+        self.protocol.state.record_failure_case("SIG-S", "CODE", "run-a", resolved=False)
+        self.protocol.state.record_failure_case("SIG-S", "CODE", "run-b", resolved=False)
+        # Current diagnosis was entered from REVIEW, about a fresh, unknown issue T.
+        self.protocol.state.transition(
+            run_id, "DIAGNOSE", {"previous_state": "REVIEW", "artifact_id": "review-art"})
+        diagnosis = self._diagnosis()
+        diagnosis["failure_signature"] = "SIG-T"  # first-seen, not a cross-run case
+        action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id}
+
+        target = self.protocol._completion_target(action, {"content": diagnosis})
+
+        # Not escalated by the stale S — routed on the current T (repair, re-enters at SPEC).
+        self.assertEqual(target, ("SPEC", None, "OK"))
 
     def test_policy_allows_the_plan_reentry_edge(self):
         allowed = self.protocol.transitions.validate("DIAGNOSE", "PLAN")
