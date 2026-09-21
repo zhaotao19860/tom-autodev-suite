@@ -15,4 +15,6 @@ Every row emits one canonical parent class. The NPL subtype adds detail but neve
 
 Never convert a log tail into a root cause. Freeze revision, compare a passing revision under the same iPipe conditions, and use one falsifiable hypothesis.
 
+For fix/triage detail once a compile failure is classified (nlc front-end vs xfc back-end stages, the 6 canonical pitfalls, and structural back-end fixes), see `npl-compile-diagnostics.md`.
+
 For every class, retain stage/job IDs, business and test revisions, profile/environment fingerprints, fixture/test-plan hashes, and the complete evidence reference. Execution is iPipe-only: Mac must not invoke NPL compiler, NCS, simulator, Docker, unit, regression, or integration commands.
