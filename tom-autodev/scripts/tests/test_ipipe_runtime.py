@@ -1274,20 +1274,48 @@ class FailureSignatureTests(unittest.TestCase):
         self.assertNotEqual(one, two)
 
     def test_same_error_matches_across_builds_despite_volatile_tokens(self):
-        # R-M4: the same root cause whose message differs only by build id / line number /
-        # timestamp / path still maps to one signature.
+        # R-M4 / R4-M3: the same root cause whose message differs only by path (with its line),
+        # a hex build/commit id, a UUID, and a timestamp still maps to one signature.
         from clients.ipipe_runtime import _failure_signature
 
         stages = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL"}]
         first = _failure_signature("pipe-1", "bgw", stages, [{
             "name": "run-tests", "status": "FAIL", "job_build_id": "jb-A",
-            "message": "AssertionError at /work/b-1234/test_user.py:42 build 987 at 2026-09-21T10:00",
+            "message": ("AssertionError at /work/b-1234/test_user.py:42 rev 6f3a9c1d "
+                        "req 12345678-abcd-4eef-8afe-123456789abc at 2026-09-21T10:00:00Z"),
         }])
         second = _failure_signature("pipe-1", "bgw", stages, [{
             "name": "run-tests", "status": "FAIL", "job_build_id": "jb-B",
-            "message": "AssertionError at /work/b-5678/test_user.py:57 build 654 at 2026-09-22T11:30",
+            "message": ("AssertionError at /work/x-9/test_user.py:57 rev 8b2e5f7a "
+                        "req 87654321-dead-4ace-9abe-cba987654321 at 2026-09-22T11:30:00Z"),
         }])
         self.assertEqual(first, second)
+
+    def test_distinct_error_codes_are_not_merged(self):
+        # R4-M3: a plain decimal like an HTTP status is part of the root cause — 401 and 503
+        # must NOT collapse to one signature (blanket digit removal would merge them).
+        from clients.ipipe_runtime import _failure_signature
+
+        stages = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL"}]
+        unauthorized = _failure_signature("pipe-1", "bgw", stages, [
+            {"name": "call", "status": "FAIL", "message": "request failed with status 401"}])
+        unavailable = _failure_signature("pipe-1", "bgw", stages, [
+            {"name": "call", "status": "FAIL", "message": "request failed with status 503"}])
+        self.assertNotEqual(unauthorized, unavailable)
+
+    def test_uuid_only_change_keeps_the_same_signature(self):
+        # R4-M3: the same error differing only by a UUID matches — UUIDs are normalized as a
+        # unit, so their inner 4-char groups do not survive to split the signature.
+        from clients.ipipe_runtime import _failure_signature
+
+        stages = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL"}]
+        one = _failure_signature("pipe-1", "bgw", stages, [{
+            "name": "call", "status": "FAIL",
+            "message": "request 12345678-abcd-4eef-8afe-123456789abc rejected"}])
+        two = _failure_signature("pipe-1", "bgw", stages, [{
+            "name": "call", "status": "FAIL",
+            "message": "request 87654321-dead-4ace-9abe-cba987654321 rejected"}])
+        self.assertEqual(one, two)
 
 
 if __name__ == "__main__":

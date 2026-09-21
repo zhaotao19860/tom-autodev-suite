@@ -1289,18 +1289,26 @@ def _same_stage(requested: dict[str, Any], candidate: dict[str, Any]) -> bool:
 
 
 def _normalize_error(text: Any) -> str:
-    """A build-independent fingerprint of an error message (R-M4).
+    """A build-independent fingerprint of an error message (R-M4 / R4-M3).
 
-    Lowercased with volatile tokens stripped — hex ids / hashes / uuids, file paths, and any
-    digit runs (line numbers, timestamps, counts) — so the SAME root cause still matches after
-    only the build id, time or log order changed, while DISTINCT errors at the same stage/job
-    (a different assertion or exception) stay distinct instead of collapsing to one FailureCase."""
+    Normalizes only the genuinely volatile tokens as UNITS — full UUIDs, ISO timestamps, file
+    paths (with their trailing :line), and long hex ids / hashes (build ids, commit shas) — so
+    the SAME root cause still matches after only those changed. It deliberately does NOT strip
+    plain decimal numbers: an HTTP status or error code (401 vs 503) is a distinguishing part of
+    the root cause, so blanket digit removal would merge unrelated failures. UUIDs are matched
+    as a whole (their inner 4-char groups would otherwise survive and split the same error)."""
     if not isinstance(text, str) or not text:
         return ""
     lowered = text.lower()
-    lowered = re.sub(r"\b[0-9a-f]{6,}\b", "", lowered)   # hex ids / hashes / uuids
-    lowered = re.sub(r"[/\\][^\s'\"]+", "", lowered)      # file paths
-    lowered = re.sub(r"\d+", "", lowered)                  # numbers, line nos, timestamps
+    # Full UUIDs as one unit (before the hex-run rule, which would fragment them).
+    lowered = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", "<uuid>", lowered)
+    # ISO-ish timestamps.
+    lowered = re.sub(r"\d{4}-\d{2}-\d{2}[t ][0-9:.]+z?", "<ts>", lowered)
+    # File paths (and any trailing :line/:col they carry).
+    lowered = re.sub(r"[/\\][^\s'\"]+", "<path>", lowered)
+    # Long hex ids / hashes (build ids, commit shas) — kept short hex (e.g. codes) intact.
+    lowered = re.sub(r"\b[0-9a-f]{8,}\b", "<hex>", lowered)
     lowered = re.sub(r"\s+", " ", lowered).strip()
     return lowered[:200]
 
