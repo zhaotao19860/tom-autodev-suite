@@ -1288,6 +1288,23 @@ def _same_stage(requested: dict[str, Any], candidate: dict[str, Any]) -> bool:
     return bool(requested.get("name")) and requested.get("name") == candidate.get("name")
 
 
+def _normalize_error(text: Any) -> str:
+    """A build-independent fingerprint of an error message (R-M4).
+
+    Lowercased with volatile tokens stripped — hex ids / hashes / uuids, file paths, and any
+    digit runs (line numbers, timestamps, counts) — so the SAME root cause still matches after
+    only the build id, time or log order changed, while DISTINCT errors at the same stage/job
+    (a different assertion or exception) stay distinct instead of collapsing to one FailureCase."""
+    if not isinstance(text, str) or not text:
+        return ""
+    lowered = text.lower()
+    lowered = re.sub(r"\b[0-9a-f]{6,}\b", "", lowered)   # hex ids / hashes / uuids
+    lowered = re.sub(r"[/\\][^\s'\"]+", "", lowered)      # file paths
+    lowered = re.sub(r"\d+", "", lowered)                  # numbers, line nos, timestamps
+    lowered = re.sub(r"\s+", " ", lowered).strip()
+    return lowered[:200]
+
+
 def _failure_signature(
     pipeline_id: Any, module: Any, stages: list[dict[str, Any]], jobs: list[dict[str, Any]]
 ) -> str:
@@ -1295,12 +1312,15 @@ def _failure_signature(
 
     The same structural failure recurring in a later run is the same root cause, so the
     signature is hashed over what identifies the failure across runs — the pipeline and
-    module, and each failed stage/job by its configuration identity and status — never over
-    build_id / stage_build_id / job_build_id, which are fresh every build and would split
-    one root cause into a new FailureCase every run. A job is included only when it carries
-    a real name (its normalized name falls back to the occurrence job id when absent, which
-    would reintroduce per-run noise), and stages/jobs are sorted so ordering never shifts
-    the hash. (MEDIUM-004: separate the stable root cause from occurrence/build identity.)
+    module, each failed stage/job by its configuration identity and status, and a normalized
+    fingerprint of each failed job's error message (R-M4) — never over build_id /
+    stage_build_id / job_build_id, which are fresh every build and would split one root cause
+    into a new FailureCase every run. The error fingerprint is what separates two distinct
+    failures at the SAME stage/job (a different assertion, a different exception) so they are
+    not merged into one cross-run case; `_normalize_error` strips the volatile tokens so the
+    same error still matches across builds. A job is included only when it carries a real name
+    (its normalized name falls back to the occurrence job id when absent, which would
+    reintroduce per-run noise), and stages/jobs are sorted so ordering never shifts the hash.
     """
     value = {
         "pipeline_id": str(pipeline_id or ""),
@@ -1317,7 +1337,11 @@ def _failure_signature(
         ),
         "jobs": sorted(
             {
-                (str(item.get("name") or ""), str(item.get("status") or ""))
+                (
+                    str(item.get("name") or ""),
+                    str(item.get("status") or ""),
+                    _normalize_error(item.get("message")),
+                )
                 for item in jobs
                 if isinstance(item, dict)
                 and item.get("name")

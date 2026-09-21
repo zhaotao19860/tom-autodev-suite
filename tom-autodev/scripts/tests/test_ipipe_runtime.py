@@ -1260,6 +1260,35 @@ class FailureSignatureTests(unittest.TestCase):
         self.assertEqual(nameless_a, nameless_b)
         self.assertEqual(nameless_a, _failure_signature("pipe-1", "bgw", stages, []))
 
+    def test_distinct_errors_at_the_same_job_are_not_merged(self):
+        # R-M4: two different failures at the same stage/job (different assertion messages)
+        # must produce DIFFERENT signatures, or unrelated bugs collapse into one cross-run
+        # FailureCase and get wrongly escalated.
+        from clients.ipipe_runtime import _failure_signature
+
+        stages = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL"}]
+        one = _failure_signature("pipe-1", "bgw", stages, [
+            {"name": "run-tests", "status": "FAIL", "message": "AssertionError: expected user.id"}])
+        two = _failure_signature("pipe-1", "bgw", stages, [
+            {"name": "run-tests", "status": "FAIL", "message": "TimeoutError: connect to db"}])
+        self.assertNotEqual(one, two)
+
+    def test_same_error_matches_across_builds_despite_volatile_tokens(self):
+        # R-M4: the same root cause whose message differs only by build id / line number /
+        # timestamp / path still maps to one signature.
+        from clients.ipipe_runtime import _failure_signature
+
+        stages = [{"stage_conf_id": "conf-1", "name": "unit", "status": "FAIL"}]
+        first = _failure_signature("pipe-1", "bgw", stages, [{
+            "name": "run-tests", "status": "FAIL", "job_build_id": "jb-A",
+            "message": "AssertionError at /work/b-1234/test_user.py:42 build 987 at 2026-09-21T10:00",
+        }])
+        second = _failure_signature("pipe-1", "bgw", stages, [{
+            "name": "run-tests", "status": "FAIL", "job_build_id": "jb-B",
+            "message": "AssertionError at /work/b-5678/test_user.py:57 build 654 at 2026-09-22T11:30",
+        }])
+        self.assertEqual(first, second)
+
 
 if __name__ == "__main__":
     unittest.main()
