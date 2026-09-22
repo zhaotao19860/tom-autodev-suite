@@ -201,12 +201,12 @@ G5 改动审批、G7 提交/初始流水线触发、G9 发布相关审批仍保�
 | `REVIEW_INCOMPLETE` / `REVIEW_NEEDS_CLARIFICATION` | 补全审查范围，或请需求负责人回答明确的问题 |
 | `PROJECT_NOT_READY` / `BASELINE_UNVERIFIED` | 补配置或匹配的基线证据，不跳过检查 |
 | `WORKFLOW_SPEC_DRIFT` / `PROFILE_CONFLICT` | 运行中使用的规则或配置改变；核对版本，走相应恢复/重绑定流程 |
-| `PIPELINE_PLAN_REQUIRED` / `PIPELINE_PLAN_PROFILE_MISMATCH` / `REVISION_UNRESOLVED` / `REVISION_AMBIGUOUS` | 计划缺失、配置不匹配或仓库版本不完整；补齐当前评审和提交证据，再生成匹配计划 |
+| `PIPELINE_PLAN_REQUIRED` / `PIPELINE_PLAN_PROFILE_MISMATCH` / `REVISION_UNRESOLVED` / `REVISION_AMBIGUOUS` | 计划缺失、配置不匹配或仓库版本不完整；补齐当前评审和提交证据，再生成匹配计划。升级前已进入 IPIPE、仅缺 `pipeline_plan` 的历史 run 用 `recover-legacy-pipeline-plan` 从其获审提交回填冻结计划 |
 | `WORKER_LEASE_HELD` | 当前 run 已有 worker 驱动，避免并发启动第二个 |
 | iPipe 未结束 / `RELEASE_WAITING` | 等平台结果或指定发布流程；轮询超时不等于业务测试失败 |
 | 外部操作结果不明 | 先核对平台和回执，不能直接重发提交或重跑 |
 
-本次控制策略版本为 `workflow-spec-v2`。升级前已开始的 v1 run 会被漂移守卫阻断；可在原版本完成旧 run，或在新版本重新启动并审批。没有版本 pin 的历史 run 仍可查询、停止和读取已完成回执，但没有冻结计划时不能新增发布成功记录。不要直接修改数据库里的版本 hash；当前没有自动迁移旧审批的工具。
+本次控制策略版本为 `workflow-spec-v2`。升级前已开始的 v1 run 会被漂移守卫阻断；可在原版本完成旧 run，或在新版本重新启动并审批。没有版本 pin 的历史 run 仍可查询、停止和读取已完成回执，但没有冻结计划时不能新增发布成功记录。若旧 run 只是缺少 `pipeline_plan`（升级前已进入 IPIPE），可用 `recover-legacy-pipeline-plan` 从它自己获审的提交确定性回填冻结计划——该恢复不重新审批、不产生外部副作用，在途旧构建按模块重跑。除此之外没有自动迁移旧审批的工具；不要直接修改数据库里的版本 hash。
 
 故障签名也带版本：新的 v2 保留错误码和测试 case 身份，仅去除有明确含义的构建噪声。旧记录原样保留，不自动与 v2 合并；历史清点命令和兼容边界见[故障签名说明](tom-autodev/references/failure-signatures.md)。
 

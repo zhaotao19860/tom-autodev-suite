@@ -1355,6 +1355,19 @@ _CAUSE_FIELD = re.compile(
     r"(?:[\"']?\s*[:=#]\s*[\"']?|\s+[\"']?)(?P<value>[a-z0-9][a-z0-9_.-]*)", re.IGNORECASE,
 )
 _BUILD_PATH = re.compile(r"(?<![\w])(?:[a-z]:[\\/]|/)[^\s'\"]+", re.IGNORECASE)
+# Volatile CI checkout/build roots whose leading directory is machine-specific.
+# The relative source path below the root is preserved (so api/test_base.py and
+# dns/test_base.py stay distinct); only the volatile root, and a numeric/uuid
+# checkout directory right under it, are normalized. A too-narrow list makes the
+# same root cause fragment across runs when a site's CI root is missing here, so
+# this covers the common Linux CI roots — extend it for a site-specific root
+# (baidu BGW checkouts live under /home and /ssd*).
+_BUILD_ROOT = re.compile(
+    r"^(?:[a-z]:)?/(?:work|workspace|build|builds|tmp|var/tmp|var/lib|"
+    r"home|homes|users|root|opt|data|srv|mnt|media|export|"
+    r"ssd\w*|nvme\w*|disk\d*|jenkins|ci|runner|agent)/",
+    re.IGNORECASE,
+)
 
 
 def _freeze_stage_failure_signature(
@@ -1439,7 +1452,7 @@ def _normalize_error(text: Any) -> str:
 
     def build_path(match: re.Match[str]) -> str:
         path = match[0].replace("\\", "/")
-        root = re.match(r"^(?:[a-z]:)?/(?:work|workspace|build|tmp|var/tmp)/", path, re.IGNORECASE)
+        root = _BUILD_ROOT.match(path)
         if root is None:
             return match[0]
         stripped = path.rstrip(").,;]}")
@@ -1448,9 +1461,15 @@ def _normalize_error(text: Any) -> str:
         source = re.sub(r":\d+(?::\d+)?$", "", source)
         relative = source[root.end():].split("/")
         # The generated checkout/build directory is volatile; retain the source's
-        # relative path so api/test_base.py and dns/test_base.py remain different tests.
-        if len(relative) > 1 and (any(char.isdigit() for char in relative[0]) or relative[0] in {"<uuid>", "<ts>"}):
-            relative[0] = "<build-id>"
+        # relative path so api/test_base.py and dns/test_base.py remain different
+        # tests. A volatile directory is not always the first segment under the
+        # root (e.g. /opt/ci/run-111/... or /home/work/ci-1/...), so mask every
+        # directory segment that carries a number, uuid or timestamp while keeping
+        # the filename and any non-volatile source directories.
+        for index in range(len(relative) - 1):
+            segment = relative[index]
+            if segment in {"<uuid>", "<ts>"} or any(char.isdigit() for char in segment):
+                relative[index] = "<build-id>"
         return f"<build-path>/{'/'.join(relative)}{separator}{case}{punctuation}"
 
     normalized = _CAUSE_FIELD.sub(protect_cause, text)

@@ -75,6 +75,32 @@ class FailureNormalizationTests(unittest.TestCase):
             with self.subTest(left=left, right=right):
                 self.assertEqual(signature(left), signature(right))
 
+    def test_ci_checkout_roots_beyond_work_do_not_split_the_same_failure(self):
+        # The volatile checkout root (and a numeric/uuid build dir under it) must not
+        # fragment one root cause across CI machines whose root is not /work. baidu BGW
+        # checkouts live under /home and /ssd*; the volatile dir may also be nested.
+        pairs = [
+            ("failed at /home/work/ci-1/pkg/test_api.py:5", "failed at /home/work/ci-2/pkg/test_api.py:5"),
+            ("failed at /opt/ci/run-111/test_x.py:14", "failed at /opt/ci/run-222/test_x.py:14"),
+            ("failed at /ssd2/build-99/api/test_base.py::case_a", "failed at /ssd7/build-12/api/test_base.py::case_a"),
+            ("failed at /data/jobs/2026/pkg/test_run.py::t", "failed at /data/jobs/2025/pkg/test_run.py::t"),
+            ("failed at /home/work/run5/pkg/test_v2.py::t", "failed at /home/work/run8/pkg/test_v2.py::t"),
+        ]
+        for left, right in pairs:
+            with self.subTest(left=left, right=right):
+                self.assertEqual(signature(left), signature(right))
+
+    def test_distinct_tests_stay_distinct_under_broadened_roots(self):
+        # Broadening the recognized roots must not collapse genuinely different tests:
+        # the filename and non-volatile source directories are preserved.
+        pairs = [
+            ("failed at /home/work/ci-1/api/test_base.py::t", "failed at /home/work/ci-1/dns/test_base.py::t"),
+            ("failed at /opt/ci/run-111/test_api.py:1", "failed at /opt/ci/run-111/test_dns.py:1"),
+        ]
+        for left, right in pairs:
+            with self.subTest(left=left, right=right):
+                self.assertNotEqual(signature(left), signature(right))
+
     def test_v2_does_not_alias_an_unchanged_legacy_digest(self):
         # Even a message unchanged by v2 cannot prove that the old bucket was never mixed.
         payload = {

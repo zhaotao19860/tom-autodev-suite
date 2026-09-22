@@ -517,6 +517,65 @@ class Orchestrator:
             return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
         return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
 
+    def recover_legacy_pipeline_plan(self, run_id: str) -> dict[str, Any]:
+        """Backfill a frozen pipeline plan for a run that entered IPIPE before plans existed.
+
+        A run created under an older build has an IPIPE event with no ``pipeline_plan``,
+        so RELEASE fails closed with ``PIPELINE_PLAN_REQUIRED``.  This recovery reconstructs
+        the plan deterministically from the run's own immutable, reviewed submissions and its
+        pinned profile — exactly what a fresh SUBMIT->IPIPE would freeze now — and appends it
+        as an IPIPE event.  It does not submit, publish, approve, or call any runtime adapter,
+        and it changes no external state.  Any in-flight build is re-driven per module: an old
+        build cannot satisfy the frozen plan because its evidence never carries the plan's
+        binding hash, so this only unblocks RELEASE, it never blesses a stale build.
+        """
+        current = self.status(run_id)
+        if current.get("state") == "RUN_NOT_FOUND":
+            return current
+        events = current.get("events", [])
+        ipipe_events = [event for event in events if event.get("state") == "IPIPE"]
+        if not ipipe_events:
+            return {"ok": False, "reason_code": "RECOVERY_STATE_MISMATCH",
+                    "run_id": run_id, "state": current.get("state")}
+        latest_payload = ipipe_events[-1].get("payload")
+        if isinstance(latest_payload, dict) and latest_payload.get("pipeline_plan") is not None:
+            # A fresh run already carries its plan, and a second migration call replays
+            # to this same idempotent no-op rather than stacking another IPIPE event.
+            return {"ok": True, "reason_code": "PIPELINE_PLAN_PRESENT",
+                    "run_id": run_id, "state": current.get("state")}
+        entry_payload = ipipe_events[0].get("payload") or {}
+        pinned = self._runtime_profile(run_id)
+        if not pinned.get("ok"):
+            return pinned
+        profile = pinned["profile"]
+        from pipeline_plan import create_plan
+        try:
+            plan = create_plan(self, run_id, profile)
+        except ValueError as error:
+            return {"ok": False, "reason_code": str(error), "run_id": run_id}
+        repos = profile.get("business_repos") or []
+        primary_module = repos[0].get("module") if repos and isinstance(repos[0], dict) else None
+        primary_target = plan["modules"].get(primary_module) or plan["modules"][plan["required_modules"][0]]
+        intake = events[0]["payload"]
+        result_key = f"recover-legacy-pipeline-plan:{run_id}:{ipipe_events[0]['event_id']}"
+        payload = _ipipe_entry_payload(
+            intake, plan, primary_target,
+            entry_payload.get("approval_id"), entry_payload.get("approval_input_hash"),
+            previous_state="IPIPE", extra={"reason_code": "LEGACY_PIPELINE_PLAN_MIGRATED"},
+        )
+        result = {"ok": True, "reason_code": "LEGACY_PIPELINE_PLAN_MIGRATED",
+                  "run_id": run_id, "state": "IPIPE",
+                  "pipeline_plan_hash": plan["plan_hash"],
+                  "submission_artifact_id": primary_target["artifact_id"]}
+        committed = self.state.commit_transition_result(
+            run_id, events[-1]["event_id"], "IPIPE", payload, result_key, result
+        )
+        if committed.get("status") in {"COMMITTED", "REPLAY"}:
+            return committed["result"]
+        if committed.get("status") == "RESULT_CONFLICT":
+            return {"ok": False, "reason_code": "RECOVERY_CONFLICT", "run_id": run_id}
+        return {"ok": False, "reason_code": "STALE_ACTION", "run_id": run_id}
+
     @guard_execution
     def complete_phase(
         self,
@@ -1523,25 +1582,10 @@ class Orchestrator:
         primary_target = plan["modules"].get(primary["controller_binding"]["module"])
         if primary_target is None:
             primary_target = plan["modules"][plan["required_modules"][0]]
-        payload = {
-            "previous_state": "SUBMIT",
-            "requirement_id": intake["requirement_id"],
-            "project": intake["project"],
-            "profile_path": intake["profile_path"],
-            "profile_hash": intake["profile_hash"],
-            # The single-pipeline IPIPE checks still read these, so they name the
-            # primary business repository rather than whichever submission happened to
-            # be last; `submissions` carries the rest for the per-module checks.
-            **{key: primary_target[key] for key in (
-                "pipeline_id", "module", "release_rule", "source_revisions", "environment_fingerprint")},
-            "submission_artifact_id": primary_target["artifact_id"],
-            "submission_hash": primary_target["sha256"],
-            "submissions": submissions,
-            "pipeline_plan": plan,
-            "approval_id": approval_id,
-            "approval_input_hash": input_hash,
-            "policy_decision": transition,
-        }
+        payload = _ipipe_entry_payload(
+            intake, plan, primary_target, approval_id, input_hash,
+            extra={"policy_decision": transition},
+        )
         committed = self.state.commit_transition_result(
             run_id,
             events[-1]["event_id"],
@@ -2444,6 +2488,46 @@ def _live_submit_key(state: Any, base_key: str) -> str:
     return key
 
 
+def _ipipe_entry_payload(
+    intake: dict[str, Any],
+    plan: dict[str, Any],
+    primary_target: dict[str, Any],
+    approval_id: Any,
+    input_hash: Any,
+    *,
+    previous_state: str = "SUBMIT",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The IPIPE-entry payload, shared by SUBMIT->IPIPE and the legacy-plan migration.
+
+    Keeping one builder guarantees every reader that scans the latest IPIPE event
+    (frozen_plan, the single-pipeline binding checks, the IPIPE controller binding)
+    sees the same shape whether the plan was frozen at submit time or backfilled for
+    an in-flight run created before pipeline plans existed.
+    """
+    payload = {
+        "previous_state": previous_state,
+        "requirement_id": intake["requirement_id"],
+        "project": intake["project"],
+        "profile_path": intake["profile_path"],
+        "profile_hash": intake["profile_hash"],
+        # The single-pipeline IPIPE checks still read these, so they name the
+        # primary business repository rather than whichever submission happened to
+        # be last; `submissions` carries the rest for the per-module checks.
+        **{key: primary_target[key] for key in (
+            "pipeline_id", "module", "release_rule", "source_revisions", "environment_fingerprint")},
+        "submission_artifact_id": primary_target["artifact_id"],
+        "submission_hash": primary_target["sha256"],
+        "submissions": plan["submissions"],
+        "pipeline_plan": plan,
+        "approval_id": approval_id,
+        "approval_input_hash": input_hash,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def _primary_submission(
     profile: dict[str, Any],
     submissions: list[dict[str, Any]],
@@ -2617,6 +2701,12 @@ def main(argv: list[str] | None = None) -> int:
     recover_rebuilt_plan.add_argument("--business-revision", required=True)
     recover_rebuilt_plan.add_argument("--tests-revision", required=True)
 
+    recover_legacy_plan = subparsers.add_parser(
+        "recover-legacy-pipeline-plan",
+        help="为升级前已进入 IPIPE、缺少 pipeline_plan 的历史 run 回填冻结计划",
+    )
+    recover_legacy_plan.add_argument("run_id")
+
     optimize = subparsers.add_parser("optimize")
     optimize.add_argument("run_id")
     optimize.add_argument("operation", choices=("build", "propose", "apply"))
@@ -2788,6 +2878,8 @@ def main(argv: list[str] | None = None) -> int:
             args.run_id, args.task_id, args.expected_state, args.source_plan_artifact_id,
             {"business": args.business_revision, "tests": args.tests_revision},
         )
+    elif args.command == "recover-legacy-pipeline-plan":
+        result = orchestrator.recover_legacy_pipeline_plan(args.run_id)
     elif args.command == "complete-phase":
         envelope = _json_file(args.envelope)
         result = (
@@ -3042,7 +3134,7 @@ def _cli_exit_code(result: Any) -> int:
     reason = result.get("reason_code")
     return 0 if reason in {
         None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
-        "SUBMISSION_RECORDED",
+        "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT",
     } else 1
 
 

@@ -1338,6 +1338,20 @@ class PhaseProtocolPredecessorBindingTests(PhaseProtocolFrontierAndControllerTes
         self.assertEqual(review_result["reason_code"], "REVIEW_PREDECESSOR_MISMATCH")
         self.assertEqual(diagnosis_result["reason_code"], "SOURCE_REVISION_MISMATCH")
 
+    def test_diagnosis_naming_the_wrong_task_is_a_content_error_before_any_lock(self):
+        # DIAGNOSE carries a resolved task_id; a diagnosis naming a different task is
+        # rejected as content-invalid by the shared validator (the same rule the
+        # producer pre-check runs), so it can never lock the draft as FULFILLED.
+        diagnose_action = self.action_for(
+            "run-diagnose-task", "DIAGNOSE", "IMPLEMENT", specialized_examples()["change-set"],
+            task_id="T-1", revisions={"business": "r2", "tests": "t2"},
+        )
+        wrong_task = specialized_examples()["diagnosis"]
+        wrong_task["task_id"] = "T-2"
+        result = self.validate_draft(diagnose_action, wrong_task)
+        self.assertEqual(result["reason_code"], "TASK_ID_MISMATCH")
+        self.assertTrue(result.get("content_invalid"))
+
 
 if __name__ == "__main__":
     unittest.main()

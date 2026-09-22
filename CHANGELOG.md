@@ -4,6 +4,16 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-22
+
+Round-5 复核后的三项残留修复（复核判定四项 finding 均已闭环，以下处理其残留边界）：
+
+- R5-M2 残留（故障签名路径窄化）：`_normalize_error` 的构建根识别不再只认 `/work|/workspace|/build|/tmp|/var/tmp`，扩展为常见 Linux CI 根（`/home`、`/opt`、`/data`、`/srv`、`/mnt`、`/ssd*`、`/nvme*`、`/jenkins`、`/ci`、`/runner`、`/agent` 等，并支持站点扩展；baidu BGW checkout 位于 `/home` 与 `/ssd*`）。易变构建目录不再局限于根下第一段，任何携带数字/uuid/时间戳的目录段都归一为 `<build-id>`，文件名与非易变源目录保留——同一根因不再因 CI 根或嵌套构建目录不同而跨 run 分裂签名，`api/` 与 `dns/` 等不同测试仍分签。
+- R5-H1 残留（在途 run 迁移）：新增 `Orchestrator.recover_legacy_pipeline_plan(run_id)` 及 CLI `recover-legacy-pipeline-plan`，为升级前已进入 IPIPE、payload 无 `pipeline_plan` 的历史 run 从其不可变的、获审的提交与固定 profile 确定性重建并回填冻结计划（与全新 SUBMIT→IPIPE 冻结结果一致）。不提交、不发布、不审批、不调用任何 runtime；在途旧 build 因证据不带计划 binding_hash 会被逐模块重跑，只解 RELEASE 死锁，绝不放行旧 build。幂等（重复调用回放同一结果，不叠加 IPIPE 事件）。IPIPE-entry payload 构建抽为共享 `_ipipe_entry_payload`，保证 SUBMIT→IPIPE 与迁移写出的事件形状一致。
+- R5-H2 残留（测试补齐）：新增 DIAGNOSE 阶段错 task_id 的直接回归，断言共享校验在锁定草案前即以 `TASK_ID_MISMATCH`/`content_invalid` 拒绝。
+- 文档同步：README 错误码表与升级说明补充 `recover-legacy-pipeline-plan` 的适用场景与语义，`docs/OPERATIONS.md` 恢复命令清单与说明补该命令，`references/failure-signatures.md` 更新已知构建根清单与易变目录段归一规则。
+- 验证：控制面 `902` 项通过（本轮新增 `5` 项：CI 根与嵌套构建目录归一 2 项、在途 run 迁移+幂等 1 项、DIAGNOSE task_id 预检 1 项、迁移 CLI 入口 1 项）。未触发真实内网业务构建或发布。
+
 ## 2026-09-21
 
 Codex round-5 修复（当前控制策略升级为 `workflow-spec-v2`）：

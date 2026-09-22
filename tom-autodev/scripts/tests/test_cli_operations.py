@@ -221,6 +221,21 @@ class CliOperationTests(unittest.TestCase):
             {"business": "008f38ba", "tests": "8696dccb13487a1920c4efd468bbdff9ae8df495"},
         )
 
+    def test_recover_legacy_pipeline_plan_cli_takes_only_the_run(self):
+        output = io.StringIO()
+        with (
+            patch("orchestrator.Orchestrator", return_value=self.orchestrator),
+            patch.object(
+                self.orchestrator, "recover_legacy_pipeline_plan",
+                return_value={"ok": True, "reason_code": "LEGACY_PIPELINE_PLAN_MIGRATED"},
+            ) as recover,
+            contextlib.redirect_stdout(output),
+        ):
+            code = main(["--config-root", str(self.root), "recover-legacy-pipeline-plan", "run-9"])
+
+        self.assertEqual((code, json.loads(output.getvalue())["reason_code"]), (0, "LEGACY_PIPELINE_PLAN_MIGRATED"))
+        recover.assert_called_once_with("run-9")
+
     def test_ipipe_rerun_has_an_explicit_cli_path_and_passes_the_bound_g8_fields(self):
         class Runtime:
             def __init__(self):

@@ -221,6 +221,46 @@ class PipelinePlanTests(unittest.TestCase):
         result = self._release()
         self.assertEqual(result.get('state'), 'RELEASE_SUCCESS', result)
 
+    def test_legacy_ipipe_run_without_plan_is_migrated_then_releases(self):
+        import sqlite3
+        from pipeline_plan import frozen_plan
+        # A run that entered IPIPE before pipeline plans existed has no plan in its
+        # IPIPE event; strip it to reproduce that persisted state.
+        self._start_plan()
+        original = frozen_plan(self.orch.state.events(self.run))
+        self.assertIsNotNone(original)
+        ipipe = [e for e in self.orch.state.events(self.run) if e['state'] == 'IPIPE'][-1]
+        stripped = {k: v for k, v in ipipe['payload'].items() if k != 'pipeline_plan'}
+        with sqlite3.connect(self.orch.state.database_path) as conn:
+            conn.execute("UPDATE events SET payload_json=? WHERE event_id=?",
+                         (json.dumps(stripped), ipipe['event_id']))
+        # Fail-closed: without a frozen plan RELEASE cannot write success.
+        self.assertIsNone(frozen_plan(self.orch.state.events(self.run)))
+
+        with patch('orchestrator.load_profile', return_value={'ready': True, 'profile': self.profile}):
+            migrated = self.orch.recover_legacy_pipeline_plan(self.run)
+        self.assertEqual(migrated['reason_code'], 'LEGACY_PIPELINE_PLAN_MIGRATED', migrated)
+        restored = frozen_plan(self.orch.state.events(self.run))
+        self.assertIsNotNone(restored)
+        # The backfilled plan is exactly what a fresh SUBMIT->IPIPE would have frozen.
+        self.assertEqual(restored['plan_hash'], original['plan_hash'])
+
+        # Idempotent: a second migration replays without stacking another IPIPE event.
+        before = sum(1 for e in self.orch.state.events(self.run) if e['state'] == 'IPIPE')
+        with patch('orchestrator.load_profile', return_value={'ready': True, 'profile': self.profile}):
+            again = self.orch.recover_legacy_pipeline_plan(self.run)
+        self.assertEqual(again['reason_code'], 'PIPELINE_PLAN_PRESENT', again)
+        after = sum(1 for e in self.orch.state.events(self.run) if e['state'] == 'IPIPE')
+        self.assertEqual(before, after)
+
+        # The migrated run drives a normal per-module release to success.
+        self._build('A', 'a1')
+        self._publish('a1')
+        self._build('B', 'b1')
+        self._publish('b1')
+        result = self._release()
+        self.assertEqual(result.get('state'), 'RELEASE_SUCCESS', result)
+
     def test_test_change_and_undeclared_dependency_each_invalidate_a(self):
         self._start_plan()
         self._build('A', 'a-old')

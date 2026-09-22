@@ -2,7 +2,7 @@
 
 新故障 occurrence 使用 `ipipe-failure:v2:<sha256>`。签名区分完整的错误码、测试 case ID、异常类型及其大小写，不再按数字或 hex 长度删词，也不在 200 字处截掉可能用于区分根因的消息后缀。运行时原始 job message 仍有既存的 1024 字上限。
 
-消噪限定为带明确 `build`、`build_id`、`request`、`request_id`、`req`、`rev`、`revision`、`commit`、`hash`、`sha` 等标签的标识值，以及 UUID、ISO 时间和已知构建根目录中的路径。裸错误码、case ID 和异常名称不因“看起来像 hash”而被吞掉。构建路径保留源码相对目录、文件名和 pytest `::case` 后缀；普通路径不全量抹除。
+消噪限定为带明确 `build`、`build_id`、`request`、`request_id`、`req`、`rev`、`revision`、`commit`、`hash`、`sha` 等标签的标识值，以及 UUID、ISO 时间和已知构建根目录中的路径。裸错误码、case ID 和异常名称不因“看起来像 hash”而被吞掉。已知构建根覆盖常见 Linux CI 根（`/work`、`/workspace`、`/build`、`/tmp`、`/var/tmp`、`/var/lib`、`/home`、`/opt`、`/data`、`/srv`、`/mnt`、`/ssd*`、`/nvme*`、`/jenkins`、`/ci`、`/runner`、`/agent` 等；baidu BGW checkout 在 `/home` 与 `/ssd*`），站点新增根可扩展 `_BUILD_ROOT`。构建路径保留源码相对目录、文件名和 pytest `::case` 后缀，但任何携带数字、UUID 或时间戳的目录段（易变的 checkout/构建目录，不限于根下第一段）都归一为 `<build-id>`，使同一根因不因 CI 根或嵌套构建目录不同而分裂签名；普通路径不全量抹除。
 
 ## 已冻结的故障
 
