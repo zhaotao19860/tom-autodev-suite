@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from approval_ledger import gate_of
+
 # What each phase asks for, in the words a person would use.
 _WORK: dict[str, str] = {
     "INTAKE": "建立需求快照与协作绑定",
@@ -52,7 +54,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     for row in approvals:
         if row.get("effective_decision") != "APPROVE":
             continue
-        action_name = row.get("action")
+        action_name = gate_of(row.get("action") or "")
         resolved = row.get("resolved_at") or ""
         if action_name and resolved >= latest_approve_at.get(action_name, ""):
             latest_approve_at[action_name] = resolved
@@ -60,7 +62,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     for row in approvals:
         if row.get("effective_decision"):
             continue
-        action_name = row.get("action")
+        action_name = gate_of(row.get("action") or "")
         if current_gate is not None and action_name != current_gate:
             continue
         created = row.get("created_at") or row.get("deadline_at") or ""
@@ -68,7 +70,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
             continue
         open_gates.append(
             {
-                "action": action_name,
+                "action": row.get("action"),
                 "approval_id": row.get("approval_id"),
                 "input_hash": row.get("input_hash"),
                 "deadline_at": row.get("deadline_at"),
@@ -83,7 +85,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     # validator still checks the exact candidate hash against the ledger.
     approved = next((
         row for row in reversed(approvals)
-        if current_gate and row.get("action") == current_gate
+        if current_gate and gate_of(row.get("action")) == current_gate
         and row.get("effective_decision") == "APPROVE"
         and row.get("created_at") and current.get("created_at")
         and row["created_at"] >= current["created_at"]
@@ -132,7 +134,7 @@ def _next_step(
     if blocked:
         return {"owner": "你", "text": _BLOCKED_HINT.get(blocked, f"处理 {blocked}")}
     if approved:
-        gate = approved.get("action") or action.get("required_human_gate")
+        gate = gate_of(approved.get("action") or action.get("required_human_gate"))
         if gate == "G7" or state == "SUBMIT":
             return {
                 "owner": "Comate",

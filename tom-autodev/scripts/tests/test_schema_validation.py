@@ -541,7 +541,8 @@ class NamedSchemaValidationTests(unittest.TestCase):
 
     def test_amendment_route_diagnosis_carries_no_repair_diff(self):
         # A Spec amendment is decided before any code is written, so requiring a diff hash
-        # there would make the route unrepresentable; a REPAIR route still owes one.
+        # there would make the route unrepresentable. REPAIR also permits a proposal
+        # before a patch exists; IMPLEMENT/G5 binds the later candidate.
         amendment = specialized_examples()["diagnosis"]
         amendment.update({
             "route": "SPEC", "repair_scope": "SPEC_AMENDMENT", "repair_diff_hash": None,
@@ -556,10 +557,7 @@ class NamedSchemaValidationTests(unittest.TestCase):
             ("repair_diff_hash", "inconsistent"),
             [(issue.path, issue.kind) for issue in validate_named_schema(stale, "diagnosis")],
         )
-        self.assertIn(
-            ("repair_diff_hash", "missing"),
-            [(issue.path, issue.kind) for issue in validate_named_schema(repair_without_diff, "diagnosis")],
-        )
+        self.assertEqual(validate_named_schema(repair_without_diff, "diagnosis"), [])
 
     def test_ipipe_rejects_noncanonical_or_secret_nested_evidence_references(self):
         cases = (

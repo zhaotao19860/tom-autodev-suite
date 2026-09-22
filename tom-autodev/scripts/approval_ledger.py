@@ -267,7 +267,7 @@ def _row(row:sqlite3.Row)->dict[str,Any]:
     # Why the card never landed, for `reissue-approval` and for the operator reading
     # the ledger. Absent once a retry delivers, so it never outlives the attempt.
     "delivery_failed_at":undelivered,"delivery_failure":json.loads(row["delivery_failure_json"]) if undelivered and row["delivery_failure_json"] else None,
-    # When the decision landed. A reader has to be able to tell a decision that
-    # answers the current phase from one left over from an earlier attempt at it.
-    "resolved_at":row["resolved_at"]}
+    # When the card opened and the decision landed. Readers must distinguish the
+    # current phase's approval from one left over from an earlier attempt at it.
+    "created_at":row["created_at"],"resolved_at":row["resolved_at"]}
 def _now()->str:return datetime.now(timezone.utc).isoformat()

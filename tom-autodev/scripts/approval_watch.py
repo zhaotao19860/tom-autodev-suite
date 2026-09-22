@@ -8,6 +8,7 @@ from typing import Any
 
 from approval_contract import STRICT_APPROVAL_TIMEOUT_SECONDS
 from approval_delivery import deliver_markdown, mention_line
+from approval_ledger import gate_of
 
 
 _ACK_KEY = "approval.ack"
@@ -237,7 +238,7 @@ class ApprovalWatcher:
         if not isinstance(gate, str) or not gate:
             return None
         for row in reversed(self.orchestrator.approvals.for_run(run_id)):
-            if row.get("action") != gate or row.get("effective_decision") != "APPROVE":
+            if gate_of(row.get("action")) != gate or row.get("effective_decision") != "APPROVE":
                 continue
             if _later(row.get("resolved_at"), since):
                 return row
@@ -486,7 +487,7 @@ class ApprovalWatcher:
         try:
             result = self.orchestrator.reissue_infoflow_approval(
                 approval["run_id"],
-                str(approval.get("action") or ""),
+                gate_of(approval.get("action") or ""),
                 approval["input_hash"],
                 member_policy=approval.get("member_policy") or {},
                 evidence=payload.get("evidence") or {},

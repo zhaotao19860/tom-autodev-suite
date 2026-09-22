@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import workflow_spec
+from approval_ledger import gate_of
 from phase_protocol import _canonical_hash
 
 _log = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ def _gate_settled(orchestrator: Any, run_id: str, gate: str, input_hash: str | N
     for record in orchestrator.approvals.for_run(run_id):
         if (
             isinstance(record, dict)
-            and record.get("action") == gate
+            and gate_of(record.get("action")) == gate
             and record.get("effective_decision") == "APPROVE"
             and record.get("input_hash") == input_hash
         ):
@@ -154,7 +155,7 @@ def _settled_approval_id(orchestrator: Any, run_id: str, gate: str, input_hash: 
     for record in orchestrator.approvals.for_run(run_id):
         if (
             isinstance(record, dict)
-            and record.get("action") == gate
+            and gate_of(record.get("action")) == gate
             and record.get("effective_decision") == "APPROVE"
             and record.get("input_hash") == input_hash
         ):

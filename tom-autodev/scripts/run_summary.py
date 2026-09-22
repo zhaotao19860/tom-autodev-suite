@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from approval_ledger import ApprovalLedger
+from approval_ledger import ApprovalLedger, gate_of
 from artifact_store import ArtifactStore
 from persistence_policy import ensure_persistable
 from schema_validator import validate_named_schema
@@ -192,7 +192,7 @@ class RunSummary:
         if stored.get("status") == "ARCHIVE_FAILED": return result
         proposal, error = self._verified_proposal(stored, stored["proposal_id"])
         approval = self.approvals.get(approval_id)
-        reject_replay = stored.get("status") == "REJECTED" and isinstance(approval, dict) and approval.get("run_id") == proposal.get("run_id") and approval.get("action") == "G10" and approval.get("input_hash") == proposal.get("candidate_hash") and approval.get("effective_decision") == "REJECT"
+        reject_replay = stored.get("status") == "REJECTED" and isinstance(approval, dict) and approval.get("run_id") == proposal.get("run_id") and gate_of(approval.get("action")) == "G10" and approval.get("input_hash") == proposal.get("candidate_hash") and approval.get("effective_decision") == "REJECT"
         if error or stored.get("approval_id") != approval_id or (not reject_replay and self._approval_error(approval, proposal)): return {"ok": False, "reason_code": "G10_REPLAY_AUTH_REQUIRED", "proposal_id": stored["proposal_id"]}
         return result
 
@@ -359,7 +359,7 @@ class RunSummary:
         except Exception: return False
 
     def _approval_error(self,approval:Any,p:dict[str,Any])->str|None:
-        if not isinstance(approval,dict) or approval.get("run_id")!=p["run_id"] or approval.get("action")!="G10": return "G10_APPROVAL_REQUIRED"
+        if not isinstance(approval,dict) or approval.get("run_id")!=p["run_id"] or gate_of(approval.get("action"))!="G10": return "G10_APPROVAL_REQUIRED"
         if approval.get("input_hash")!=p["candidate_hash"]: return "G10_APPROVAL_HASH_MISMATCH"
         return "G10_REJECTED" if approval.get("effective_decision")=="REJECT" else (None if approval.get("effective_decision")=="APPROVE" else "G10_APPROVAL_REQUIRED")
 

@@ -6,6 +6,18 @@ suite had no version control before then.
 
 ## 2026-09-22
 
+按 `TAD-REVIEW-EXIT 1.0` 首次有界工程评审修复（初审基线 `273d2507bcfb600d1a1ab9e5e6d8f61b72d41565`）：
+
+- 关闭通用 `advance` 绕过发布证据进入 `RELEASE_SUCCESS` 的路径，返回 `RELEASE_INGEST_REQUIRED`；成功终态只能由完整冻结计划、全部模块及平台核验回执的摄取路径写入。
+- 补齐 `Gx#retry-N` 在 worker、EvidenceGate、G0/G10、watcher 与运行摘要中的消费；重发次数保持有界，run/gate/hash/成员与内容版本校验保留。审批台账返回真实 `created_at`，使重发状态与批准后的续跑提示一致。
+- 允许 `DIAGNOSE` 提交 `repair_diff_hash=null` 的 REPAIR 提案；G6 只授权诊断与方向，实际候选仍经 PLAN/IMPLEMENT 和新的 G5。源码 Review 诊断使用 null 流水线身份，iPipe 诊断严格绑定真实 build、环境、失败签名及 stage/job。
+- iPipe runtime 保存独立 profile 副本，并在新操作/证据写入前核对磁盘文件与最新批准 pin；缓存旧对象、原字典突变和轮询期间漂移均不能继续写入。已完成 trigger/rerun 的准确回执仍可只读重放，合法 re-pin 后须重建 runtime。
+- 第二轮沿用 A-05 修复 iCode 相邻路径：factory 必须加载批准的 profile 和提交策略，controller 在调用提交 adapter 前检查配置；runtime 在预检、远端查询、推送及写回执边界再次检查。旧对象在 re-pin 后失效；推送后出现漂移保留 pending intent，不生成成功回执或盲目重发。
+- 同步 Diagnose 合同、README、操作参考与整合报告；固定行为场景提升为 v2，撤销已经解决的无 diff 阻断预期。控制面回归不等于 v2 模型资格或真实内网平台验收。
+- 第一轮验证：控制面 `961` 项通过（相比初审基线新增 `50` 项），Review `6` 项通过，Diagnose 隔离 shell 回归通过；修改文档的 `33` 个本地链接/锚点、v2 场景 JSON 与 `git diff --check` 通过。新增回归已对原始基线验证能暴露发布、诊断、审批和缓存配置漂移问题；并发补证使用真实 worker、临时 Git/SQLite，验证同 run 租约和两 run 共享源仓的所有权隔离。
+- 第二轮验证：控制面 `976` 项通过（新增 iCode profile 回归 `15` 项），Review `6` 项和 Diagnose 隔离 shell 回归再次通过。两轮预算用尽后按标准记录修复及证据缺口，测试全绿不提升为完整 C/M/P 资格。
+- 本批次已确认的五类缺陷触发修复并通过定向复核；全量 C 结论仍为 `INCOMPLETE`，缺少 WF-08 其余可写入口的 profile 等价守卫与只读回放证据。M/P 均未验证；两轮后停止开放式评审，剩余入口矩阵转为明确取证任务。
+
 套件评审收敛规则：
 
 - 新增唯一标准 `docs/WORKFLOW_EXIT_CRITERIA.md`：固定版本/代码基线、十项行为矩阵、缺陷证据与分级、分层验收、风险台账、报告模板，以及有界修复复核和停止/重开条件。

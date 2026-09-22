@@ -620,8 +620,14 @@ class PhaseProtocol:
             ):
                 return _failure("REVIEW_PREDECESSOR_MISMATCH", content_invalid=True)
 
-        if phase == "DIAGNOSE" and content.get("frozen_revisions") != action.get("source_revisions"):
-            return _failure("SOURCE_REVISION_MISMATCH", content_invalid=True)
+        if phase == "DIAGNOSE":
+            if content.get("frozen_revisions") != action.get("source_revisions"):
+                return _failure("SOURCE_REVISION_MISMATCH", content_invalid=True)
+            failure = self._predecessor(run_id, definition.get("predecessor"), task_id)
+            if failure is None:
+                return _failure("PREDECESSOR_REQUIRED")
+            if not _diagnosis_source_matches(content, failure["envelope"]):
+                return _failure("DIAGNOSIS_SOURCE_MISMATCH", content_invalid=True)
         return {"ok": True, "reason_code": "OK"}
 
     def _workflow_spec_drift(self, run_id: str) -> dict[str, Any] | None:
@@ -2362,6 +2368,26 @@ def _passing_review(content: Any) -> bool:
         and (finding.get("blocking") is True or finding.get("classification") == "NEEDS_CLARIFICATION")
         for finding in findings
     )
+
+
+def _diagnosis_source_matches(content: dict[str, Any], failure: dict[str, Any]) -> bool:
+    """Source review has no execution identity; pipeline diagnosis keeps its real IDs."""
+    identity_fields = ("build_id", "stage_id", "job_id", "environment_fingerprint")
+    if failure.get("phase") != "IPIPE":
+        return all(content.get(field) is None for field in identity_fields)
+    source = failure.get("content") or {}
+    if any(content.get(field) != source.get(field)
+           for field in ("build_id", "environment_fingerprint", "failure_signature")):
+        return False
+    stages = source.get("stages") or []
+    stage = next((item for item in stages if item.get("stage_id") == content.get("stage_id")), None)
+    if stage is None:
+        return not stages and content.get("stage_id") is None and content.get("job_id") is None
+    job_ids = stage.get("job_ids") or []
+    if content.get("job_id") is None:
+        return not job_ids
+    return content["job_id"] in job_ids and any(
+        item.get("job_id") == content["job_id"] for item in source.get("jobs", []))
 
 
 def _phase_title(action: dict[str, Any], attempt: int = 1) -> str:

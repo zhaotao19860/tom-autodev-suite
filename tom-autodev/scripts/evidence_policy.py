@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import workflow_spec
+from approval_ledger import gate_of
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ def _approval_matches(context: dict[str, Any], gate: str, input_hash: str) -> bo
         approval.get("approval_id") == approval_id
         and approval.get("run_id") == context.get("run_id")
         and approval.get("run_id") != "legacy"
-        and approval.get("action") == gate
+        and gate_of(approval.get("action")) == gate
         and approval.get("effective_decision") == "APPROVE"
         and approval.get("input_hash") == input_hash
     )

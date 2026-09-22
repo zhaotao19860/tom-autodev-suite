@@ -13,8 +13,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
+import yaml
+
 from approval_ledger import ApprovalLedger, gate_of
 from artifact_store import ArtifactStore
+from profile_repin import pinned_hash, record_for
 from state_store import StateStore
 from workspace_manager import WorkspaceManager
 
@@ -41,6 +44,7 @@ class IcodeRuntime:
         executable_resolver: Callable[[str], str | None] | None = None,
         owner: str = "",
         submission_policy: str | None = None,
+        profile_hash: str | None = None,
     ):
         self.state = state_store
         self.approvals = approval_ledger
@@ -56,7 +60,42 @@ class IcodeRuntime:
         # `one_cr_per_repo` means a requirement keeps a single open CR per repository, so
         # a second change set for the same card folds into it instead of opening another.
         self.submission_policy = submission_policy or "one_cr_per_change_set"
+        self._bound_submission_policy = self.submission_policy
+        self._bound_profile_hash = profile_hash or pinned_hash(
+            self.state.events(run_id), record_for(self.state, run_id))
         self._cli_by_repo: dict[str, str] = {}
+
+    def _profile_error(self) -> dict[str, Any] | None:
+        """Refuse fresh effects when the disk profile or this client's pin changed."""
+        events = self.state.events(self.run_id)
+        intake = events[0].get("payload") if events else None
+        # Legacy standalone adapters have no disk profile contract. The controller
+        # factory always requires one, including when reconstructing a cached client.
+        if not isinstance(intake, dict) or "profile_path" not in intake:
+            return None
+        path = intake.get("profile_path")
+        expected = pinned_hash(events, record_for(self.state, self.run_id))
+        if not _nonempty(path) or not _nonempty(expected):
+            return _failure("PROJECT_NOT_READY")
+        if (expected != self._bound_profile_hash
+                or self.submission_policy != self._bound_submission_policy):
+            return _failure("PROFILE_CONFLICT")
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            return _failure("PROJECT_NOT_READY")
+        if hashlib.sha256(raw).hexdigest() != expected:
+            return _failure("PROFILE_CONFLICT")
+        try:
+            profile = yaml.safe_load(raw)
+        except (UnicodeDecodeError, yaml.YAMLError):
+            return _failure("PROJECT_NOT_READY")
+        if not isinstance(profile, dict):
+            return _failure("PROJECT_NOT_READY")
+        policy = profile.get("submission_policy") or "one_cr_per_change_set"
+        if policy != self.submission_policy:
+            return _failure("PROFILE_CONFLICT")
+        return None
 
     def preflight(self, repo_path: Path) -> dict[str, Any]:
         path = Path(repo_path).expanduser().resolve()
@@ -120,6 +159,9 @@ class IcodeRuntime:
 
     @guard_execution
     def submit(self, change_set: dict[str, Any], approval: dict[str, Any]) -> dict[str, Any]:
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         invalid = self._validate_change_set(change_set)
         if invalid is not None:
             return invalid
@@ -130,6 +172,9 @@ class IcodeRuntime:
             return approval_result
         repo_path = Path(change_set["repo_path"]).expanduser().resolve()
         preflight = self.preflight(repo_path)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         if preflight.get("reason_code") != "OK":
             return preflight
         if preflight["module"] != change_set["module"] or preflight["target_branch"] != change_set["target_branch"]:
@@ -140,6 +185,9 @@ class IcodeRuntime:
         if unpushable is not None:
             return unpushable
         drift = self._remote_drift(repo_path, change_set)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         if drift is not None:
             return drift
 
@@ -184,6 +232,9 @@ class IcodeRuntime:
         intent = claim["intent"]
         cli = preflight["cli"]
         reconciliation = self._reconcile(cli, repo_path, change_set)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         if reconciliation.get("reason_code") == "OK":
             return self._receipt(intent["intent_id"], change_set, reconciliation["change"], key)
         if reconciliation.get("reason_code") == "CR_IDENTITY_CONFLICT":
@@ -198,6 +249,9 @@ class IcodeRuntime:
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
         if self.submission_policy == "one_cr_per_repo":
             sibling = self._open_card_cr(cli, repo_path, change_set)
+            blocked = self._profile_error()
+            if blocked is not None:
+                return blocked
             if isinstance(sibling, dict) and sibling.get("reason_code") == "CR_IDENTITY_CONFLICT":
                 return {**sibling, "intent_id": intent["intent_id"], "retry_allowed": False}
             if isinstance(sibling, dict) and sibling.get("reason_code") == "CR_BASELINE_DRIFT":
@@ -218,6 +272,9 @@ class IcodeRuntime:
         mirror = None
         try:
             submit_repo, mirror = self._materialize_cli_repository(repo_path, change_set)
+            blocked = self._profile_error()
+            if blocked is not None:
+                return blocked
             pushed = _run(
                 self.transport,
                 [
@@ -233,6 +290,9 @@ class IcodeRuntime:
         finally:
             if mirror is not None:
                 shutil.rmtree(str(mirror), ignore_errors=True)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         if pushed["returncode"] != 0:
             failure = _failure(
                 "SUBMIT_REJECTED",
@@ -533,6 +593,9 @@ class IcodeRuntime:
         change: dict[str, Any],
         submit_key: str,
     ) -> dict[str, Any]:
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         number = str(change.get("_number") or change.get("number") or "")
         patchset = str(change.get("current_revision") or "")
         url = change.get("url") or change.get("change_url") or _cr_url(number)

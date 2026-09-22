@@ -454,16 +454,10 @@ def _validate_diagnosis(instance: dict[str, Any]) -> list[SchemaIssue]:
     required = ("hypothesis", "repair_direction")
     if any(not isinstance(instance.get(field), str) or not instance[field] for field in required):
         return [SchemaIssue("evidence_state", "inconsistent")]
-    # A diff hash is the receipt that a code repair has already been written, so it is
-    # required exactly when the diagnosis routes to REPAIR. The other routes decide a
-    # document first -- a Spec amendment, an architecture review, a stop -- and no diff
-    # exists yet at that moment. Demanding one there made every amendment-route diagnosis
-    # unrepresentable, which is why the field is nullable in the schema itself.
-    if instance.get("route") == "REPAIR":
-        diff_hash = instance.get("repair_diff_hash")
-        if not isinstance(diff_hash, str) or not diff_hash:
-            return [SchemaIssue("repair_diff_hash", "missing")]
-    elif instance.get("repair_diff_hash") is not None:
+    # G6 approves the diagnosis and repair direction, before PLAN/IMPLEMENT creates
+    # the patch. An optional existing diff is evidence, never repair authorization;
+    # the actual candidate remains hash-bound by IMPLEMENT and its fresh G5.
+    if instance.get("route") != "REPAIR" and instance.get("repair_diff_hash") is not None:
         return [SchemaIssue("repair_diff_hash", "inconsistent")]
     if not instance.get("repair_plan"):
         return [SchemaIssue("repair_plan", "missing")]

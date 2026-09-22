@@ -12,7 +12,7 @@
 | Python `worker_driver.advance(...)` | 推进已满足条件的确定性工作，返回草案、审批、平台等待或阻断原因 |
 | Python `worker_driver.resume(...)` | 消费该 run 已结算的审批 handoff，再调用 worker 推进 |
 | Python `worker_driver.submit_draft(...)` | 提交一个 ProducerJob 的内容，由 worker 校验、封装、保存并按策略完成阶段 |
-| `cli.py advance RUN STATE ...` | 维护用的单次状态迁移入口，**不是** worker 循环 |
+| `cli.py advance RUN STATE ...` | 维护用的单次状态迁移入口；不能直接写入 `RELEASE_SUCCESS`，发布成功必须经过证据摄取 |
 | `cli.py complete-phase RUN ENVELOPE` | 维护用的产物摄取入口，**不是**子 skill 的草案接口 |
 
 当前 CLI 没有 `worker` 或 `submit-draft` 子命令。不要把 Python 函数名直接拼成终端命令，也不要让模型自行补写状态库来替代缺失的宿主接入。
@@ -48,6 +48,10 @@ IPIPE/RELEASE 需要真实 `ipipe_api`，缺少 adapter 时会返回等待/阻�
 
 同一 run 的审批输入绑定到当时的 workflow/profile/代码版本。`WORKFLOW_SPEC_DRIFT` 说明当前代码中的 workflow 定义已变化，需还原兼容版本或做显式迁移；不要删除保存的指纹绕过检查。
 
+`IpipeRuntime` 即使由宿主缓存，也会在新增操作或证据写入前核对当前 profile 文件与最新批准的 pin。发生 `PROFILE_CONFLICT` 后先核对配置；合法 re-pin 后通过 `Orchestrator.ipipe_runtime` 重新构造 runtime。已完成 trigger/rerun 的匹配回执仍可只读回放，结果不明的 intent 不能借回放名义继续产生写入。
+
+`Orchestrator.icode_runtime` 同样要求完整的项目 profile，提交策略从批准的配置读取。`submit_to_ipipe` 在调用提交 adapter 前检查配置；缓存的 `IcodeRuntime.submit` 在预检、远端查询和提交/回执边界再次核对。配置重新批准后应重建对象；若推送已发出才发现漂移，保留 pending intent，先恢复兼容配置并查询已有 CR，不能直接重发。已经完成的 controller 提交回执可只读重放；runtime 的 submit 会执行预检，不属于纯回放入口。
+
 ## 审批编号
 
 编号表示审批种类，不是一笔批准覆盖整个运行。以当前 action 的具体内容与输入指纹为准。
@@ -60,7 +64,7 @@ IPIPE/RELEASE 需要真实 `ipipe_api`，缺少 adapter 时会返回等待/阻�
 | G3 | 独立 TASKS 阶段的 DAG；merged 模式免去这道门 |
 | G4 | 工作区绑定，以及需要审批的单任务计划；两者是不同动作 |
 | G5 | 实际业务与产品测试候选改动 |
-| G6 | 诊断和修复方向；当前无 diff 提案的限制见整合报告 |
+| G6 | 诊断和修复方向；无补丁提案可用 `repair_diff_hash=null`，后续真实候选仍需 G5 |
 | G7 | iCode 提交及初始 iPipe 触发，各自绑定准确的动作输入 |
 | G8 | 失败阶段重跑或人工阶段继续 |
 | G9 | 发布相关动作和版本证据；worker 校验已发布的锁定 build |

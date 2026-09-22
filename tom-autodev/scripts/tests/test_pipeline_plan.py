@@ -150,6 +150,29 @@ class PipelinePlanTests(unittest.TestCase):
         self.assertEqual(len(a), 1)
         self.assertEqual(a[0]['revision_set_id'], latest['revision_set_id'])
 
+    def test_generic_advance_cannot_claim_release_success_without_platform_proofs(self):
+        self._start_plan()
+        self._build('A', 'a-built')
+        self._build('B', 'b-built')
+        action = self.protocol.next(self.run)
+        approval = approved(self.orch.approvals, 'G9', action['input_hash'], self.run)
+        before = self.orch.state.events(self.run)
+        result = self.orch.advance(self.run, 'RELEASE_SUCCESS', {
+            'input_hash': action['input_hash'], 'approval_id': approval['approval_id'],
+            'artifacts': ['release-evidence'],
+            'repo_revisions': action['source_revisions'],
+            'evidence_revisions': action['source_revisions'],
+            'evidence_environment_fingerprint': digest(self.profile['environment_profile']),
+        })
+        self.assertEqual(result['reason_code'], 'RELEASE_INGEST_REQUIRED', result)
+        self.assertEqual(self.orch.state.events(self.run), before)
+        self.assertEqual(self.api.releases, [])
+        self.assertEqual(self.orch.artifacts.phase_artifacts(self.run, 'RELEASE'), [])
+        # The authorized release path remains usable once real platform proofs exist.
+        self._publish('a-built')
+        self._publish('b-built')
+        self.assertEqual(self._release().get('state'), 'RELEASE_SUCCESS')
+
     def test_same_change_id_new_revision_must_not_reuse_old_submission(self):
         self._start_plan()
         changed = self._descriptor('A', 'a2', 'A-1')

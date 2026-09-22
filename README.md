@@ -204,6 +204,7 @@ G5 改动审批、G7 提交/初始流水线触发、G9 发布相关审批仍保�
 | `PIPELINE_PLAN_REQUIRED` / `PIPELINE_PLAN_PROFILE_MISMATCH` / `REVISION_UNRESOLVED` / `REVISION_AMBIGUOUS` | 计划缺失、配置不匹配或仓库版本不完整；补齐当前评审和提交证据，再生成匹配计划。升级前已进入 IPIPE、仅缺 `pipeline_plan` 的历史 run 用 `recover-legacy-pipeline-plan` 从其获审提交回填冻结计划 |
 | `WORKER_LEASE_HELD` | 当前 run 已有 worker 驱动，避免并发启动第二个 |
 | iPipe 未结束 / `RELEASE_WAITING` | 等平台结果或指定发布流程；轮询超时不等于业务测试失败 |
+| `RELEASE_INGEST_REQUIRED` | 通用 `advance` 不能认定发布成功；由 worker 或发布证据摄取入口核验完整计划与平台回执 |
 | 外部操作结果不明 | 先核对平台和回执，不能直接重发提交或重跑 |
 
 本次控制策略版本为 `workflow-spec-v2`。升级前已开始的 v1 run 会被漂移守卫阻断；可在原版本完成旧 run，或在新版本重新启动并审批。没有版本 pin 的历史 run 仍可查询、停止和读取已完成回执，但没有冻结计划时不能新增发布成功记录。若旧 run 只是缺少 `pipeline_plan`（升级前已进入 IPIPE），可用 `recover-legacy-pipeline-plan` 从它自己获审的提交确定性回填冻结计划——该恢复不重新审批、不产生外部副作用，在途旧构建按模块重跑。除此之外没有自动迁移旧审批的工具；不要直接修改数据库里的版本 hash。
@@ -215,7 +216,7 @@ G5 改动审批、G7 提交/初始流水线触发、G9 发布相关审批仍保�
 - 当前入口支持 Comate，生产运行依赖配置好的内网平台；仓库没有可直接启动的独立后台 LLM 服务。
 - 每个任务绑定一个业务仓和一个独立产品测试仓。多业务仓需求需拆成可独立验证的兼容步骤；不可拆分的跨仓原子任务仍需扩展运行时。
 - 发布阶段校验指定 build 的发布结果。worker 不会在 `RELEASE_WAITING` 时自行绕过平台发布流程。
-- 当前诊断合同仍存在“修复前要求已有 diff 哈希”的冲突。单 run 的修复预算已接入 DIAGNOSE 路由，从持久化历史计算；诊断合同的剩余问题与历史接线问题的更新见 [整合报告](SKILL_CONSOLIDATION.md#交给控制器维护者的两个问题)。
+- 诊断可在无补丁时提交修复提案，经 G6 后进入 PLAN/IMPLEMENT；实际改动仍需独立 G5。源码 Review 失败使用空的流水线身份，iPipe 失败必须匹配真实失败证据。单 run 修复预算从持久化历史计算，达到上限停止或升级；历史合同问题的处理见 [整合报告](SKILL_CONSOLIDATION.md#控制器问题的后续处理)。
 
 ## 目录与 skill 分工
 

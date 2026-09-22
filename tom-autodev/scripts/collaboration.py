@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from approval_ledger import ApprovalLedger
+from approval_ledger import ApprovalLedger, gate_of
 from state_store import StateStore
 
 
@@ -245,7 +245,7 @@ class CollaborationSession:
             return prepared
         if self.approvals is None:
             binding = members.get("g0_approval") if isinstance(members, dict) else None
-            if not isinstance(binding, dict) or binding.get("action") != "G0" or binding.get("effective_decision") != "APPROVE" or binding.get("group_name") != prepared["request"]["group_name"] or binding.get("owner") != prepared["request"]["owner"] or binding.get("member_snapshot") != prepared["request"]["member_snapshot"]:
+            if not isinstance(binding, dict) or gate_of(binding.get("action")) != "G0" or binding.get("effective_decision") != "APPROVE" or binding.get("group_name") != prepared["request"]["group_name"] or binding.get("owner") != prepared["request"]["owner"] or binding.get("member_snapshot") != prepared["request"]["member_snapshot"]:
                 return {"run_id": run_id, "reason_code": "G0_BINDING_REQUIRED"}
         elif not self._approved_g0(approval_id, run_id, prepared["input_hash"], input_hash):
             return {"run_id": run_id, "reason_code": "G0_BINDING_MISMATCH"}
@@ -377,7 +377,7 @@ class CollaborationSession:
         if not isinstance(approval_id, str) or supplied_hash != canonical_hash or self.approvals is None:
             return False
         approval = self.approvals.get(approval_id)
-        return bool(approval and approval.get("run_id") == run_id and approval.get("action") == "G0" and approval.get("input_hash") == canonical_hash and approval.get("effective_decision") == "APPROVE")
+        return bool(approval and approval.get("run_id") == run_id and gate_of(approval.get("action")) == "G0" and approval.get("input_hash") == canonical_hash and approval.get("effective_decision") == "APPROVE")
 
     def _session(self, run_id: str) -> dict[str, Any] | None:
         cached = self._sessions.get(run_id)

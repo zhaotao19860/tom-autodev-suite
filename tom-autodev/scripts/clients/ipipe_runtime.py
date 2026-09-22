@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from execution_guard import guard_execution
 
+import copy
 import hashlib
 import json
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
+
+import yaml
 
 from approval_ledger import ApprovalLedger, gate_of
 from clients.ipipe_client import IpipeTransportError
 from phase_protocol import _registered_pipeline
+from profile_repin import pinned_hash, record_for
 from project_registry import validate_profile
 from state_store import StateStore
 
@@ -56,8 +61,11 @@ class IpipeRuntime:
         self.poll_interval = poll_interval
         self.max_polls = max_polls
         self.log_limit = log_limit
-        self.validated_profile = validated_profile
+        # Keep the factory's binding independent of a caller's mutable dictionary.
+        self.validated_profile = copy.deepcopy(validated_profile)
         self.profile_hash = profile_hash
+        self._bound_profile_hash = profile_hash
+        self._profile_content_hash = _canonical_hash(self.validated_profile)
         # A job's status is its script's exit code. A stage that runs product cases without
         # checking their result reports success over a run where every case failed, and the
         # only place those numbers exist is the log, so the log is read before a build is
@@ -70,6 +78,9 @@ class IpipeRuntime:
     def discover(
         self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None
     ) -> dict[str, Any]:
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         context = self._context(profile, revision_set, module)
         if context.get("reason_code") != "OK":
             return context
@@ -95,6 +106,9 @@ class IpipeRuntime:
         if len(unique) != 1:
             return _failure("BUILD_AMBIGUOUS", retry_allowed=False)
         build_id, candidate = next(iter(unique.items()))
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         self._bind_build(build_id, context, candidate)
         return {
             "ok": True,
@@ -160,6 +174,15 @@ class IpipeRuntime:
             return approval_failure
         payload = {**binding, "input_hash": input_hash, "approval_id": approval["approval_id"]}
         key = f"ipipe.trigger:{self.run_id}:{context['pipeline_id']}:{context['revision_set_id']}"
+        # A saved receipt is a read-only replay. Claiming/reconciling an intent is not.
+        completed = self.state.result_by_idempotency_key(key)
+        if completed is not None:
+            if completed["intent"]["payload"] != payload:
+                return _failure("TRIGGER_CONFLICT")
+            return dict(completed["receipt"]["response"])
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         claim = self.state.claim_intent(self.run_id, "ipipe.trigger", key, payload)
         if claim["status"] == "CONFLICT":
             return _failure("TRIGGER_CONFLICT")
@@ -184,6 +207,9 @@ class IpipeRuntime:
         if claim["status"] == "EXISTING":
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
 
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         try:
             result = self.api.trigger_by_revision(
                 context["pipeline_id"], context["revision_map"][context["module"]], context["parameters"]
@@ -219,6 +245,9 @@ class IpipeRuntime:
 
     @guard_execution
     def monitor(self, build_id: str, deadline: str) -> dict[str, Any]:
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         binding = self._load_build_binding(build_id)
         if binding is None:
             return _failure("BUILD_OWNERSHIP_UNVERIFIED")
@@ -226,6 +255,9 @@ class IpipeRuntime:
         if parsed_deadline is None:
             return _failure("DEADLINE_INVALID")
         for poll in range(self.max_polls):
+            blocked = self._profile_error()
+            if blocked is not None:
+                return blocked
             try:
                 build = self.api.build_by_id(build_id, **self._build_key(binding))
                 stages = self._build_stages(build_id, build)
@@ -239,6 +271,9 @@ class IpipeRuntime:
             stage_identity_failure = _stage_identity_failure(normalized_stages)
             if stage_identity_failure is not None:
                 return _failure(stage_identity_failure, status="INVALID")
+            blocked = self._profile_error()
+            if blocked is not None:
+                return blocked
             for stage in normalized_stages:
                 self._bind_stage(build_id, binding, stage)
             failed = [stage for stage in normalized_stages if stage["status"] in _FAILURE]
@@ -508,6 +543,9 @@ class IpipeRuntime:
             ):
                 return _failure("RERUN_CONFLICT")
             return dict(response)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         existing = self.state.intent_by_idempotency_key(key)
         if existing is not None:
             if not _valid_replay_approval(
@@ -536,10 +574,16 @@ class IpipeRuntime:
             "input_hash": input_hash,
             "approval_id": approval["approval_id"],
         }
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         claim = self.state.claim_intent(self.run_id, "ipipe.rerun", key, payload)
         if claim["status"] != "CLAIMED":
             return _failure("RERUN_CONFLICT" if claim["status"] == "CONFLICT" else "QUERY_REQUIRED", retry_allowed=False)
         intent = claim["intent"]
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         try:
             response = self.api.manual_execute_stage(stage_build_id, dict(parameters or {}))
         except Exception as error:
@@ -588,6 +632,9 @@ class IpipeRuntime:
             stage_bound["stage"], started
         ):
             return _failure("RERUN_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         if started["stage_build_id"] != stage_build_id:
             self._bind_stage(build_id, context, started)
         return self._save_rerun_receipt(
@@ -601,6 +648,9 @@ class IpipeRuntime:
         *,
         started_stage_build_id: str | None = None,
     ) -> dict[str, Any]:
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         context = {
             "module": payload.get("module"),
             "revision_map": {
@@ -692,6 +742,9 @@ class IpipeRuntime:
         )
         if successor is None:
             return None
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         binding = self._load_build_binding(payload["build_id"])
         if binding is not None:
             self._bind_stage(payload["build_id"], binding, successor)
@@ -796,12 +849,18 @@ class IpipeRuntime:
             return _failure("PIPELINE_PLAN_MISMATCH")
         if plan.get("profile_content_hash") != canonical_hash(self.validated_profile):
             return _failure("PIPELINE_PLAN_PROFILE_MISMATCH")
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         binding = self._load_build_binding(build_id)
         if not build_matches(binding, target):
             return _failure("BUILD_BINDING_MISMATCH")
         verified = self.verify_release_of_build(build_id)
         if not verified.get("ok"):
             return verified
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         proof = {
             "pipeline_id": target["pipeline_id"], "module": target["module"],
             "build_id": build_id, "release_id": verified["release_id"],
@@ -816,6 +875,9 @@ class IpipeRuntime:
         return {**verified, "proof": proof}
 
     def _trigger_receipt(self, intent_id: str, context: dict[str, Any], build: dict[str, Any]) -> dict[str, Any]:
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         if not _matches_build(build, context):
             return _failure("REVISION_MISMATCH", intent_id=intent_id, retry_allowed=False)
         build_id = str(build.get("id") or build.get("pipelineBuildId") or "")
@@ -842,7 +904,9 @@ class IpipeRuntime:
     ) -> dict[str, Any]:
         if not isinstance(self.validated_profile, dict) or not _nonempty(self.profile_hash):
             return _failure("PROFILE_BINDING_REQUIRED")
-        if profile != self.validated_profile:
+        if (profile != self.validated_profile
+                or self.profile_hash != self._bound_profile_hash
+                or _canonical_hash(self.validated_profile) != self._profile_content_hash):
             return _failure("PROFILE_CONFLICT")
         validation = validate_profile(profile, check_paths=False)
         if not validation.get("ready"):
@@ -851,6 +915,42 @@ class IpipeRuntime:
         if context.get("reason_code") == "OK":
             context["profile_hash"] = self.profile_hash
         return context
+
+    def _profile_error(self) -> dict[str, Any] | None:
+        """Validate the current pin before fresh effects by a cached runtime.
+
+        An approved re-pin invalidates old instances; the factory must construct a
+        new one. Legacy, directly constructed clients without a recorded profile
+        path retain their in-memory binding checks, but cannot claim disk coverage.
+        """
+        if not isinstance(self.validated_profile, dict) or not _nonempty(self.profile_hash):
+            return _failure("PROFILE_BINDING_REQUIRED")
+        if (self.profile_hash != self._bound_profile_hash
+                or _canonical_hash(self.validated_profile) != self._profile_content_hash):
+            return _failure("PROFILE_CONFLICT")
+        events = self.state.events(self.run_id)
+        intake = events[0].get("payload") if events else None
+        if not isinstance(intake, dict) or "profile_path" not in intake:
+            return None
+        path = intake.get("profile_path")
+        expected = pinned_hash(events, record_for(self.state, self.run_id))
+        if not _nonempty(path) or not _nonempty(expected):
+            return _failure("PROJECT_NOT_READY")
+        if expected != self._bound_profile_hash:
+            return _failure("PROFILE_CONFLICT")
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            return _failure("PROJECT_NOT_READY")
+        if hashlib.sha256(raw).hexdigest() != expected:
+            return _failure("PROFILE_CONFLICT")
+        try:
+            current = yaml.safe_load(raw)
+        except (UnicodeDecodeError, yaml.YAMLError):
+            return _failure("PROJECT_NOT_READY")
+        if current != self.validated_profile:
+            return _failure("PROFILE_CONFLICT")
+        return None
 
     def _build_stages(self, build_id: str, build: dict[str, Any]) -> list[dict[str, Any]]:
         """The build's stages, preferring the stage endpoint and falling back to the
@@ -1008,6 +1108,9 @@ class IpipeRuntime:
         # must preserve that identity (including a partial checkpoint across stages), not
         # overwrite an immutable key or silently attach its history to a newly split cause.
         candidate = _failure_signature(binding.get("pipeline_id"), binding.get("module"), failed_stages, jobs)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
         try:
             signature = _freeze_stage_failure_signature(
                 self.state, self.run_id, [stage["stage_build_id"] for stage in failed_stages], candidate

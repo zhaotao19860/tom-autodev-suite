@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clients.icode_client import IcodeClient
 from clients.ipipe_client import IpipeClient
 from orchestrator import Orchestrator
+from test_orchestrator import PROFILE, _start, _write_profile
 
 
 class FakeRuntime:
@@ -148,10 +149,11 @@ class RuntimeOrchestratorTests(unittest.TestCase):
 
     def test_runtime_factories_reuse_run_state_ledger_and_validate_run(self):
         with tempfile.TemporaryDirectory() as directory:
+            _write_profile(Path(directory), PROFILE)
             orchestrator = Orchestrator(Path(directory))
-            orchestrator.state.transition("run-1", "REVIEW", {"test_setup": True})
+            run_id = _start(orchestrator)["run_id"]
             icode = orchestrator.icode_runtime(
-                "run-1",
+                run_id,
                 worktree_bindings={},
                 system_skill_path=Path(directory),
                 argv_transport=object(),

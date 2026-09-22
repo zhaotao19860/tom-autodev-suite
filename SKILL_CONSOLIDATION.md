@@ -36,12 +36,12 @@ Review 收集器只做 Git 对象/范围读取，包含删除、模式、二进�
 
 原来的 Diagnose 主要负责流程失败分类，并没有完整拥有 AutoDebug 远程能力；BGW 拓扑文档另外指向 AutoDebug。现在脚本、进程检查模板、用法和回归都在 Diagnose 内，来源名称仅用于溯源/兼容。`ipipe_runtime.py` 中尚有旧名称的注释，不是运行时调用；本轮为避免干扰 Claude 的控制器工作未改该代码文件。
 
-## 交给控制器维护者的两个问题
+## 控制器问题的后续处理
 
-1. **DIAGNOSE 在修复前被要求已有修复 diff。** `schemas/diagnosis.schema.json` 允许 `repair_diff_hash: null`，但 `scripts/schema_validator.py::_validate_diagnosis` 在 `route=REPAIR` 时拒绝空值；诊断阶段又禁止写修复。已验证根因、尚未生成补丁的正常路径因此不能提交。应区分“修复提案”和“后续候选 diff”，在 PLAN/IMPLEMENT 产出后再绑定真实 hash；不能要求模型造 hash 或改 route。需增加从真实失败→无 diff 诊断→修复计划/候选的完整回归。
+1. **DIAGNOSE 在修复前被要求已有修复 diff（2026-09-22 已修复）。** JSON Schema 与语义校验现在都允许 `route=REPAIR` 且 `repair_diff_hash=null`。G6 绑定诊断和修复提案，PLAN/IMPLEMENT 生成实际候选并取得新的 G5。`test_diagnosis_contract.py` 覆盖流水线失败和源码 Review 失败提交无 diff 提案、等待 G6、重启后进入 PLAN；提案通过不等于补丁或业务测试已经完成。
 2. **单次运行修复预算没有生产调用者（历史问题，2026-09-22 已接线）。** 原先 `scripts/repair_policy.py::next_action` 只有策略定义；提交 `5973301` 已在 `phase_protocol.py` 的 DIAGNOSE 修复路由中，用持久化历史调用该策略。该提交的回归结果见 [更新记录](CHANGELOG.md)；本段不再作为“未接线”的当前缺陷证据，完整验收仍需验证实际路由和重启场景。
 
-另有边界：Review 源码失败不一定有 pipeline build/stage/job ID，当前 diagnosis schema 必填这些字段；需要控制器提供真实的非流水线失败身份映射或明确联合类型。子 skill 已要求报告身份合同缺口，禁止编造流水线 ID。不可拆分的多业务仓 task 仍超出当前单 `business_module` 模型，本轮没有扩大 runtime 能力。
+源码 Review 诊断身份合同也已在 2026-09-22 修复：build/stage/job 和环境字段可为 null，控制器绑定真实前驱、task 和冻结 revisions；iPipe 诊断继续核对真实 build、环境、失败签名及所属 stage/job，不能借空值或其他流水线身份绕过。不可拆分的多业务仓 task 仍超出当前单 `business_module` 模型，本轮没有扩大 runtime 能力。
 
 ## 验证与后续复用
 

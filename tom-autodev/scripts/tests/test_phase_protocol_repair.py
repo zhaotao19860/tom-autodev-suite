@@ -1094,6 +1094,8 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
             "evidence_state": "INSUFFICIENT", "route": "DIAGNOSIS_INCOMPLETE",
             "hypothesis": None, "repair_direction": None, "repair_plan": [],
             "repair_diff_hash": None,
+            "build_id": None, "stage_id": None, "job_id": None,
+            "environment_fingerprint": None,
         })
         draft = self.draft(action, content, approval_id="approval-diagnosis-incomplete")
         self.approvals.approve(

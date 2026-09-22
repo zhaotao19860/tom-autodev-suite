@@ -1112,6 +1112,13 @@ class Orchestrator:
         if not transition["allowed"]:
             return {"run_id": run_id, "state": current_state, **transition}
 
+        if next_state == "RELEASE_SUCCESS":
+            # Artifact names and matching caller-provided fingerprints cannot prove
+            # publication. Only release ingestion validates every frozen module's
+            # owned platform receipt and atomically records success with that evidence.
+            return {"run_id": run_id, "state": current_state,
+                    "reason_code": "RELEASE_INGEST_REQUIRED"}
+
         gate_context = self._ledger_backed_evidence(run_id, current_state, next_state, effective_evidence)
         gate = self.evidence_gate.check(next_state, gate_context, current_state)
         if not gate["passed"]:
@@ -1360,8 +1367,15 @@ class Orchestrator:
     def icode_runtime(self, run_id: str, **options: Any) -> Any:
         if self.status(run_id)["state"] == "RUN_NOT_FOUND":
             return {"ok": False, "reason_code": "RUN_NOT_FOUND", "run_id": run_id}
-        if set(options) & {"state_store", "approval_ledger", "artifact_store", "workspace_manager", "run_id"}:
+        if set(options) & {"state_store", "approval_ledger", "artifact_store", "workspace_manager", "run_id", "profile_hash"}:
             return {"ok": False, "reason_code": "RUNTIME_OPTION_FORBIDDEN", "run_id": run_id}
+        pinned = self._runtime_profile(run_id)
+        if not pinned.get("ok"):
+            return pinned
+        policy = pinned["profile"].get("submission_policy") or "one_cr_per_change_set"
+        if options.get("submission_policy") not in (None, policy):
+            return {"ok": False, "reason_code": "PROFILE_CONFLICT", "run_id": run_id}
+        options["submission_policy"] = policy
         from clients.icode_runtime import IcodeRuntime
 
         return IcodeRuntime(
@@ -1370,6 +1384,7 @@ class Orchestrator:
             artifact_store=self.artifacts,
             workspace_manager=self.workspaces,
             run_id=run_id,
+            profile_hash=pinned["profile_hash"],
             **options,
         )
 
@@ -1452,6 +1467,9 @@ class Orchestrator:
         ):
             return {"ok": False, "reason_code": "ICODE_RUNTIME_MISMATCH", "run_id": run_id}
 
+        pinned = self._runtime_profile(run_id)
+        if not pinned.get("ok"):
+            return pinned
         submitted = icode_runtime.submit(change_set, approval)
         if not isinstance(submitted, dict) or submitted.get("reason_code") != "OK" or not submitted.get("ok"):
             return submitted if isinstance(submitted, dict) else {
