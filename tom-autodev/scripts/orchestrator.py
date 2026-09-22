@@ -17,7 +17,7 @@ from approval_contract import (
     is_clean_initial_pending_result,
     parse_gateway_result,
 )
-from approval_ledger import ApprovalLedger
+from approval_ledger import ApprovalLedger, gate_of, MAX_APPROVAL_RETRIES, _RETRY_MARKER
 from artifact_store import ArtifactStore
 from collaboration import (
     CollaborationSession,
@@ -1250,6 +1250,21 @@ class Orchestrator:
             context["approval_record"] = approval
             if approval is not None:
                 context["approved_input_hash"] = approval["input_hash"]
+        if requirement.requires_environment:
+            # The gate only compares the two fingerprints for equality, so a caller could
+            # pass two identical-but-stale values and pass a mandatory-environment gate
+            # (e.g. RELEASE) on the generic advance path, which does not go through the
+            # frozen plan's environment binding. Pin the expected side to the run's
+            # profile so the evidence must match the actual pinned environment, not merely
+            # itself. A profile that cannot be loaded leaves it unset -> fails closed as
+            # MISSING_ENVIRONMENT_EVIDENCE rather than passing.
+            from pipeline_plan import canonical_hash
+            pinned = self._runtime_profile(run_id)
+            profile = pinned.get("profile") if pinned.get("ok") else None
+            environment_profile = profile.get("environment_profile") if isinstance(profile, dict) else None
+            context["environment_fingerprint"] = (
+                canonical_hash(environment_profile) if environment_profile is not None else None
+            )
         return context
 
     def _recovery_block(self, run_id: str, current_state: str) -> dict[str, Any] | None:
@@ -1483,7 +1498,7 @@ class Orchestrator:
             return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id}
         if approval_record.get("run_id") != run_id or approval_record.get("run_id") == "legacy":
             return {"ok": False, "reason_code": "APPROVAL_RUN_MISMATCH", "run_id": run_id}
-        if approval_record.get("action") != "G7":
+        if gate_of(approval_record.get("action")) != "G7":
             return {"ok": False, "reason_code": "APPROVAL_GATE_MISMATCH", "run_id": run_id}
         if approval_input_hash != input_hash or approval_record.get("input_hash") != input_hash:
             return {"ok": False, "reason_code": "APPROVAL_INPUT_MISMATCH", "run_id": run_id}
@@ -1934,7 +1949,7 @@ class Orchestrator:
             approval
             for approval in self.approvals.for_run(run_id)
             if approval["input_hash"] == input_hash
-            and str(approval["action"]).split("#retry-")[0] == action
+            and gate_of(approval["action"]) == action
         ]
         if not attempts:
             return {"run_id": run_id, "reason_code": "APPROVAL_NOT_FOUND"}
@@ -1953,7 +1968,14 @@ class Orchestrator:
                 "reason_code": "APPROVAL_DELIVERY_RETRYABLE",
                 "delivery_failure": latest.get("delivery_failure"),
             }
-        retry = sum(1 for approval in attempts if "#retry-" in str(approval["action"])) + 1
+        retry = sum(1 for approval in attempts if _RETRY_MARKER in str(approval["action"])) + 1
+        if retry > MAX_APPROVAL_RETRIES:
+            return {
+                "run_id": run_id,
+                "approval_id": latest["approval_id"],
+                "reason_code": "APPROVAL_RETRY_EXHAUSTED",
+                "retries": retry - 1,
+            }
         return self.request_infoflow_approval(
             run_id,
             f"{action}#retry-{retry}",
@@ -3053,7 +3075,7 @@ def _submit(
                 "state": current.get("state")}
     if not any(
         isinstance(record, dict)
-        and record.get("action") == "G7"
+        and gate_of(record.get("action")) == "G7"
         and record.get("effective_decision") == "APPROVE"
         for record in orchestrator.approvals.for_run(run_id)
     ):
@@ -3116,7 +3138,7 @@ def _g7_approval(
         return record if isinstance(record, dict) else None
     for record in reversed(orchestrator.approvals.for_run(run_id)):
         if (
-            record.get("action") == "G7"
+            gate_of(record.get("action")) == "G7"
             and record.get("effective_decision") == "APPROVE"
             and record.get("input_hash") == input_hash
         ):
@@ -3480,7 +3502,7 @@ def _advance(
     if gate is not None and not (approval_id or evidence.get("approval_id")):
         approved = [
             row for row in orchestrator.approvals.for_run(run_id)
-            if row["action"] == gate and row["effective_decision"] == "APPROVE"
+            if gate_of(row["action"]) == gate and row["effective_decision"] == "APPROVE"
         ]
         if not approved:
             return {

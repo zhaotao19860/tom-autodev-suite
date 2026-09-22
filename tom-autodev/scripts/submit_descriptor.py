@@ -28,6 +28,22 @@ def _git(root: Any, *args: str) -> str:
     ).stdout.strip()
 
 
+def _has_change_id_trailer(body: str) -> bool:
+    """A Change-Id trailer is a whole line, not the words appearing in prose.
+
+    The authoritative push-time reader (`icode_runtime._commit_change_id`) matches only a
+    line whose stripped form starts with ``Change-Id:`` and has a non-empty value. A plain
+    substring test would treat a body that merely mentions ``Change-Id:`` in prose as
+    already trailered, disagreeing with that reader and letting an un-trailered commit
+    surface late at push instead of here. Match the reader's line-anchored semantics.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Change-Id:") and stripped.split(":", 1)[1].strip():
+            return True
+    return False
+
+
 def _matching_clean_worktree(preferred: str, revision: str) -> str | None:
     """Use the owned worktree, or a sibling owned checkout at the exact revision.
 
@@ -89,7 +105,7 @@ def _commit_if_dirty(root: Any, message: str) -> str:
             ["git", "-C", str(root), "commit", "-q", "-m", message],
             check=True,
         )
-        if "Change-Id:" not in _git(root, "log", "-1", "--format=%B"):
+        if not _has_change_id_trailer(_git(root, "log", "-1", "--format=%B")):
             change_id = "I" + hashlib.sha1(
                 _git(root, "rev-parse", "HEAD").encode("utf-8")
             ).hexdigest()
@@ -110,7 +126,7 @@ def _require_pushable_head(root: Any) -> str:
     """
     revision = _git(root, "rev-parse", "HEAD")
     body = _git(root, "log", "-1", "--format=%B")
-    if "Change-Id:" not in body:
+    if not _has_change_id_trailer(body):
         raise ValueError("CHANGE_ID_MISSING")
     email = _git(root, "log", "-1", "--format=%ce")
     configured = _git(root, "config", "--get", "user.email")

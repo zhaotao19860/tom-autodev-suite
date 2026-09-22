@@ -1398,6 +1398,33 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
         self.assertEqual(amended, ("SPEC", None, "OK"))
         self.assertEqual(silent, ("SPEC", None, "OK"))
 
+    def _seed_round(self, run_id, signature):
+        content = self._diagnosis("CODE_ONLY")
+        content["failure_signature"] = signature
+        self.protocol.artifacts.put_envelope(
+            final_envelope(run_id, "DIAGNOSE", "T-1", content))
+
+    def test_second_confirmed_repair_round_still_repairs(self):
+        run_id = "run-budget-2"
+        self._seed_round(run_id, "SIG-A")
+        current = self._diagnosis("CODE_ONLY")
+        current["failure_signature"] = "SIG-B"
+        target = self.protocol._completion_target(
+            {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id}, {"content": current})
+        self.assertEqual(target, ("PLAN", "T-1", "OK"))
+
+    def test_third_unresolved_repair_round_escalates_to_architecture_review(self):
+        # The per-run budget must bound a loop the cross-run guard cannot see (all rounds
+        # share one run_id). Three confirmed, unresolved DIAGNOSE rounds stop blind repair.
+        run_id = "run-budget-3"
+        self._seed_round(run_id, "SIG-A")
+        self._seed_round(run_id, "SIG-B")
+        current = self._diagnosis("CODE_ONLY")
+        current["failure_signature"] = "SIG-C"
+        target = self.protocol._completion_target(
+            {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id}, {"content": current})
+        self.assertEqual(target, ("ARCHITECTURE_REVIEW", None, "THREE_FAILED_FIXES"))
+
     def test_recurring_cross_run_failure_escalates_to_architecture_review(self):
         # MEDIUM-004: the same root cause seen unresolved across >= 2 runs is escalated
         # deterministically, even though the diagnosis still proposes REPAIR.

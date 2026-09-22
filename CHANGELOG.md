@@ -6,6 +6,16 @@ suite had no version control before then.
 
 ## 2026-09-22
 
+外部第二轮(Grok)复核的七项经逐条独立核验后,修复其中四项确认为真且可控的问题(其余三项:工作区基线无环境要求为良性、KU 发布顺序为误报、worker 租约未接生产且被幂等层兜底,均未改):
+
+- 审批重发门卡死:超时/不可投递的审批以 `G7#retry-N` 重发保持台账 `(run_id, action, input_hash)` 唯一,但所有门消费方按裸门号精确比较,重发获批后 `!= "G7"` 永久 `APPROVAL_GATE_MISMATCH`。新增共享 `approval_ledger.gate_of()`,在 icode/ipipe `_approved_record`、`phase_protocol` 两处控制器审批检查、`orchestrator` 的 G7 提交与恢复扫描共 6 处统一按裸门号比较;自动重发加 `MAX_APPROVAL_RETRIES` 上限,超限返回 `APPROVAL_RETRY_EXHAUSTED` 而非无限 `#retry-N`。
+- 单 run 修复预算未接:生产 DIAGNOSE 路由只用跨 run 的 `known_failure_verdict`(单 run `distinct_runs` 恒为 1,永不触发),`repair_policy.next_action` 的每-run 上限从未接线,模型每轮 `route=REPAIR` 可无限循环(含环境类不可修复失败)。`_completion_target` 接受 REPAIR 前,用从持久化 DIAGNOSE 制品重建的本-run 修复历史(证据充分性、失败签名、无进展、未解决,均由控制器判定,不信模型 attempt 计数)喂 `next_action`,STOP→STOPPED、三次未解决→ARCHITECTURE_REVIEW。
+- EvidenceGate 指纹只查存在不查一致:通用 `advance` 路径不经冻结计划绑定,持 G9 权者可传两个相同但过期的环境指纹通过 RELEASE。`_ledger_backed_evidence` 对必填环境的 action 用当前 pinned profile 的规范环境指纹覆盖调用方的"期望"侧,证据须匹配真实固定环境;profile 读不到则留空、fail-closed 为缺证据。
+- Change-Id 子串检测与推送前权威检查不一致:`submit_descriptor` 用 `"Change-Id:" not in body` 子串判定,正文散文里的同名文字会被当作已带 trailer,与 `icode_runtime._commit_change_id` 的行首锚定不一致,使无 trailer 提交延迟到 push 才非可重试地失败。改用共享 `_has_change_id_trailer` 行首锚定,与权威读者对齐。
+- 验证:控制面 `911` 项通过(本轮新增 `9` 项:门号归一+重发上限、发布环境指纹钉定、单 run 修复预算)。未触发真实内网业务构建或发布。
+
+## 2026-09-22
+
 Round-5 复核后的三项残留修复（复核判定四项 finding 均已闭环，以下处理其残留边界）：
 
 - R5-M2 残留（故障签名路径窄化）：`_normalize_error` 的构建根识别不再只认 `/work|/workspace|/build|/tmp|/var/tmp`，扩展为常见 Linux CI 根（`/home`、`/opt`、`/data`、`/srv`、`/mnt`、`/ssd*`、`/nvme*`、`/jenkins`、`/ci`、`/runner`、`/agent` 等，并支持站点扩展；baidu BGW checkout 位于 `/home` 与 `/ssd*`）。易变构建目录不再局限于根下第一段，任何携带数字/uuid/时间戳的目录段都归一为 `<build-id>`，文件名与非易变源目录保留——同一根因不再因 CI 根或嵌套构建目录不同而跨 run 分裂签名，`api/` 与 `dns/` 等不同测试仍分签。

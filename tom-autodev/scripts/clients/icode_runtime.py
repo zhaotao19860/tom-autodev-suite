@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
-from approval_ledger import ApprovalLedger
+from approval_ledger import ApprovalLedger, gate_of
 from artifact_store import ArtifactStore
 from state_store import StateStore
 from workspace_manager import WorkspaceManager
@@ -642,7 +642,7 @@ def _approved_record(
         return _failure("APPROVAL_REQUIRED")
     if record.get("run_id") != run_id or record.get("run_id") == "legacy":
         return _failure("APPROVAL_RUN_MISMATCH")
-    if record.get("action") != action:
+    if gate_of(record.get("action")) != action:
         return _failure("APPROVAL_GATE_MISMATCH")
     if supplied.get("input_hash") != input_hash or record.get("input_hash") != input_hash:
         return _failure("APPROVAL_INPUT_MISMATCH")

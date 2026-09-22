@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from approval_ledger import ApprovalLedger
+from approval_ledger import ApprovalLedger, gate_of
 from clients.ipipe_client import IpipeTransportError
 from phase_protocol import _registered_pipeline
 from project_registry import validate_profile
@@ -1630,7 +1630,7 @@ def _approved_record(
         return _failure("APPROVAL_REQUIRED")
     if record.get("run_id") != run_id or record.get("run_id") == "legacy":
         return _failure("APPROVAL_RUN_MISMATCH")
-    if record.get("action") != action:
+    if gate_of(record.get("action")) != action:
         return _failure("APPROVAL_GATE_MISMATCH")
     if supplied.get("input_hash") != input_hash or record.get("input_hash") != input_hash:
         return _failure("APPROVAL_INPUT_MISMATCH")

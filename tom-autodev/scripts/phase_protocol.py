@@ -19,6 +19,7 @@ from persistence_policy import ensure_persistable, validate_evidence_refs
 from phase_document import render_phase_markdown
 from project_registry import load_profile
 import repair_policy
+from approval_ledger import gate_of
 from requirement_snapshot import AcceptanceValueError, normalized_acceptance_ids
 from schema_validator import validate_named_schema
 
@@ -1131,7 +1132,7 @@ class PhaseProtocol:
             return "APPROVAL_REQUIRED"
         if approval.get("run_id") != action.get("run_id") or approval.get("run_id") == "legacy":
             return "APPROVAL_RUN_MISMATCH"
-        if approval.get("action") != gate:
+        if gate_of(approval.get("action")) != gate:
             return "APPROVAL_GATE_MISMATCH"
         approval_input_hash = result.get("approval_input_hash")
         if approval.get("input_hash") != approval_input_hash:
@@ -1232,6 +1233,17 @@ class PhaseProtocol:
             escalation = self._cross_run_escalation(signature)
             if escalation is not None:
                 return escalation
+            # Per-run repair budget (previously only defined in repair_policy, never wired):
+            # the cross-run guard above cannot bound a single run (its distinct_runs stays 1
+            # while a run re-enters PLAN), so a model emitting route=REPAIR every round could
+            # loop unbounded — including on a failure that re-planning code can never fix.
+            # Enforce the budget from the run's own persisted DIAGNOSE history, so the bound
+            # is controller-decided rather than trusted from the diagnosis draft.
+            budget = repair_policy.next_action(self._repair_history(action["run_id"], envelope))
+            if budget["action"] == "STOP":
+                return "STOPPED", None, budget["reason_code"]
+            if budget["action"] == "ARCHITECTURE_REVIEW":
+                return "ARCHITECTURE_REVIEW", None, budget["reason_code"]
             # A code-only repair leaves the Spec and the DAG standing, so it re-enters
             # at PLAN and wins a fresh G4 there. Anything that amends the Spec or moves
             # task scope re-enters at SPEC, which is also the default when the diagnosis
@@ -1243,6 +1255,45 @@ class PhaseProtocol:
         if not isinstance(target, str):
             raise ValueError("COMPLETION_TARGET_REQUIRED")
         return target, None, "OK"
+
+    def _repair_history(self, run_id: str, current_envelope: dict[str, Any]) -> list[dict[str, Any]]:
+        """The run's own DIAGNOSE rounds, oldest first, as repair_policy.next_action reads them.
+
+        Built from the persisted DIAGNOSE artifacts so the repair budget is decided from
+        controller state, not the model's self-reported attempt counter. The current round's
+        envelope is included whether or not it has been archived yet (it is archived before the
+        target is chosen in the normal completion path, but a direct caller may not have stored
+        it), de-duplicated by content hash. A round with insufficient evidence is not a
+        confirmed repair attempt; a signature unchanged from the previous round is no progress.
+        Resolution is not asserted: a run still diagnosing has not had its prior repairs hold,
+        so each recorded round counts as an unresolved attempt.
+        """
+        history: list[dict[str, Any]] = []
+        previous_signature: Any = None
+        current_hash = current_envelope.get("content_hash")
+        seen_current = False
+        for artifact in self.artifacts.phase_artifacts(run_id, "DIAGNOSE"):
+            if not artifact.get("valid"):
+                continue
+            envelope = artifact.get("envelope") or {}
+            if envelope.get("content_hash") == current_hash:
+                seen_current = True
+            history.append(self._repair_round(envelope.get("content") or {}, previous_signature))
+            previous_signature = history[-1]["failure_signature"]
+        if not seen_current:
+            history.append(self._repair_round(current_envelope.get("content") or {}, previous_signature))
+        return history
+
+    @staticmethod
+    def _repair_round(content: dict[str, Any], previous_signature: Any) -> dict[str, Any]:
+        signature = content.get("failure_signature")
+        return {
+            "failure_class": content.get("classification"),
+            "diagnosis_confirmed": content.get("evidence_state") == "SUFFICIENT",
+            "failure_signature": signature,
+            "progress": previous_signature is None or signature != previous_signature,
+            "resolved": False,
+        }
 
     def _authoritative_failure_signature(self, run_id: str) -> str | None:
         """The failure signature of the runtime failure that drove this run into its CURRENT
@@ -1758,7 +1809,7 @@ class PhaseProtocol:
             return "APPROVAL_REQUIRED"
         if approval.get("run_id") != run_id or approval.get("run_id") == "legacy":
             return "APPROVAL_RUN_MISMATCH"
-        if approval.get("action") != gate:
+        if gate_of(approval.get("action")) != gate:
             return "APPROVAL_GATE_MISMATCH"
         if approval.get("input_hash") != approval_hash:
             return "APPROVAL_INPUT_MISMATCH"

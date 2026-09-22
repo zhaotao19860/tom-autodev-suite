@@ -15,6 +15,19 @@ from persistence_policy import ensure_persistable
 APPROVAL_CHANNELS = frozenset({"comate", "infoflow"})
 APPROVAL_DECISIONS = frozenset({"APPROVE", "REJECT"})
 
+# A timed-out/undeliverable approval is re-issued under a suffixed action
+# (e.g. "G7#retry-1") so the ledger's (run_id, action, input_hash) identity stays
+# unique per attempt. Gate consumers must match on the bare gate, so a re-issued and
+# then approved card still satisfies its gate. Automatic re-issue is bounded so a
+# perpetually-timing-out gate stops rather than spinning "#retry-N" forever.
+_RETRY_MARKER = "#retry-"
+MAX_APPROVAL_RETRIES = 3
+
+
+def gate_of(action: Any) -> str:
+    """The bare gate an approval action belongs to, dropping any ``#retry-N`` suffix."""
+    return str(action).split(_RETRY_MARKER, 1)[0]
+
 
 class ApprovalLedger:
     def __init__(self, database_path: Path | str):
