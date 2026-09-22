@@ -5,6 +5,15 @@ description: Use when a fixed-baseline Change Set needs independent Standards an
 
 # Tom Review
 
+## Suite Maintenance Review
+
+When the user is reviewing **tom-autodev-suite itself**, first read
+[`../docs/WORKFLOW_EXIT_CRITERIA.md`](../docs/WORKFLOW_EXIT_CRITERIA.md) from the real
+suite directory (resolve an installed skill symlink if needed). Use its fixed scope,
+evidence requirements, report template and stop/reopen rules. This mode produces a
+suite maintenance report, not a business `review` DraftContent, and does not start a run.
+The remaining sections apply to business Change Set review; keep that runtime contract unchanged.
+
 ## Inputs
 
 Read the approved Spec/Task Plan, Change Set, Review Baseline, pinned business/test revisions, language/project rules, and impact evidence. Review the exact diff against matching inputs.

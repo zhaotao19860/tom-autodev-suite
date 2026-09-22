@@ -6,6 +6,13 @@ suite had no version control before then.
 
 ## 2026-09-22
 
+套件评审收敛规则：
+
+- 新增唯一标准 `docs/WORKFLOW_EXIT_CRITERIA.md`：固定版本/代码基线、十项行为矩阵、缺陷证据与分级、分层验收、风险台账、报告模板，以及有界修复复核和停止/重开条件。
+- 新增仓库 `AGENTS.md` 与 Claude/Gemini 入口指针；`tom-autodev`、`tom-review` 仅在评审套件自身时读取该标准，业务 Review JSON 与控制面运行合同不变。
+- README 增加统一评审用法，明确文档规则尚非 CI 强制门禁；同步修复预算已接线的历史状态。此变更不声明当前套件已通过控制面、跨模型或真实平台验收。
+- 验证：涉及文件的 69 个本地链接/锚点、两个修改 skill 的 frontmatter 与安装链接路径检查通过；本次仅改文档与入口指针，未重跑控制面回归或执行真实平台操作。
+
 外部第二轮(Grok)复核的七项经逐条独立核验后,修复其中四项确认为真且可控的问题(其余三项:工作区基线无环境要求为良性、KU 发布顺序为误报、worker 租约未接生产且被幂等层兜底,均未改):
 
 - 审批重发门卡死:超时/不可投递的审批以 `G7#retry-N` 重发保持台账 `(run_id, action, input_hash)` 唯一,但所有门消费方按裸门号精确比较,重发获批后 `!= "G7"` 永久 `APPROVAL_GATE_MISMATCH`。新增共享 `approval_ledger.gate_of()`,在 icode/ipipe `_approved_record`、`phase_protocol` 两处控制器审批检查、`orchestrator` 的 G7 提交与恢复扫描共 6 处统一按裸门号比较;自动重发加 `MAX_APPROVAL_RETRIES` 上限,超限返回 `APPROVAL_RETRY_EXHAUSTED` 而非无限 `#retry-N`。

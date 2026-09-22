@@ -5,6 +5,14 @@ description: Use when a user wants to drive an iCafe requirement through Spec, e
 
 # Tom Autodev
 
+## Suite Maintenance Review
+
+When asked to review, re-review or judge completion of **tom-autodev-suite itself**,
+read [`../docs/WORKFLOW_EXIT_CRITERIA.md`](../docs/WORKFLOW_EXIT_CRITERIA.md) from the
+real suite directory (resolve an installed skill symlink if needed). Use its baseline,
+evidence and exit rules; do not start an iCafe run for a suite audit. This maintenance
+mode does not replace the business workflow, approvals or phase contracts below.
+
 ## Overview
 
 Use this skill as the control-plane entry for a run. Keep project/language knowledge in child skills, put side effects behind approvals, and accept only iPipe execution evidence.

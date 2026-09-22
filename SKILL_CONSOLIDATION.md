@@ -39,7 +39,7 @@ Review 收集器只做 Git 对象/范围读取，包含删除、模式、二进�
 ## 交给控制器维护者的两个问题
 
 1. **DIAGNOSE 在修复前被要求已有修复 diff。** `schemas/diagnosis.schema.json` 允许 `repair_diff_hash: null`，但 `scripts/schema_validator.py::_validate_diagnosis` 在 `route=REPAIR` 时拒绝空值；诊断阶段又禁止写修复。已验证根因、尚未生成补丁的正常路径因此不能提交。应区分“修复提案”和“后续候选 diff”，在 PLAN/IMPLEMENT 产出后再绑定真实 hash；不能要求模型造 hash 或改 route。需增加从真实失败→无 diff 诊断→修复计划/候选的完整回归。
-2. **单次运行修复预算没有生产调用者。** `scripts/repair_policy.py::next_action` 定义两次无进展、三次失败、五轮上限，但生产代码没有调用；`phase_protocol.py` 目前只调用跨 run 的 `known_failure_verdict`。应从持久化历史计算并在 controller 修复路由前强制执行，同时验证重启不重置计数。文档承诺不能替代这条接线。
+2. **单次运行修复预算没有生产调用者（历史问题，2026-09-22 已接线）。** 原先 `scripts/repair_policy.py::next_action` 只有策略定义；提交 `5973301` 已在 `phase_protocol.py` 的 DIAGNOSE 修复路由中，用持久化历史调用该策略。该提交的回归结果见 [更新记录](CHANGELOG.md)；本段不再作为“未接线”的当前缺陷证据，完整验收仍需验证实际路由和重启场景。
 
 另有边界：Review 源码失败不一定有 pipeline build/stage/job ID，当前 diagnosis schema 必填这些字段；需要控制器提供真实的非流水线失败身份映射或明确联合类型。子 skill 已要求报告身份合同缺口，禁止编造流水线 ID。不可拆分的多业务仓 task 仍超出当前单 `business_module` 模型，本轮没有扩大 runtime 能力。
 
