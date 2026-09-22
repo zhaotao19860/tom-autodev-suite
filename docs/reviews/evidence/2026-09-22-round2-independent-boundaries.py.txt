@@ -1,0 +1,112 @@
+"""Bounded A-05 round-2 checks; local fixture objects and mock CLI only."""
+import copy
+import json
+import sys
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(sys.argv[1])
+sys.path[:0] = [str(ROOT / 'tom-autodev/scripts/tests'), str(ROOT / 'tom-autodev/scripts')]
+from test_icode_profile_guard import IcodeProfileGuardTests
+from test_icode_runtime import approved
+import profile_repin
+
+
+def exercise(name, operation):
+    case = IcodeProfileGuardTests()
+    case.setUp()
+    try:
+        result = operation(case)
+        print(json.dumps({'case': name, **result}, sort_keys=True))
+    finally:
+        case.doCleanups()
+
+
+def count_push(case):
+    return sum('push_cr' in call[0] for call in case.fixture.transport.calls)
+
+
+def controller_success_replay(case):
+    # The standalone runtime fixture omits task metadata. Add a normal reviewed
+    # descriptor metadata record through ArtifactStore for full controller planning.
+    original = case.orch.artifacts.get(case.change['reviewed_artifact_id'])
+    stored = case.orch.artifacts.put(case.run, 'change-set', original['content'], {
+        **original['metadata'], 'task_id': 'task-1'})
+    case.change['reviewed_artifact_id'] = stored['artifact_id']
+    submitted = case.orch.submit_to_ipipe(case.run, case.change, case.approval,
+                                        icode_runtime=case.runtime)
+    assert submitted.get('ok') and submitted['state'] == 'IPIPE', submitted
+    assert count_push(case) == 1
+    case.drift()
+    before, calls = case.snapshot(), list(case.fixture.transport.calls)
+    replay = case.orch.submit_to_ipipe(case.run, case.change, case.approval,
+                                     icode_runtime=case.runtime)
+    assert replay == submitted and case.snapshot() == before
+    assert case.fixture.transport.calls == calls
+    # The lower-level submit does preflight/reconciliation and is deliberately
+    # blocked; it is not the controller's proven read-only receipt return.
+    direct = case.submit()
+    assert direct['reason_code'] == 'PROFILE_CONFLICT', direct
+    assert case.snapshot() == before and case.fixture.transport.calls == calls
+    return {'normal_state': submitted['state'], 'normal_pushes': 1,
+            'controller_replay_exact': True, 'replay_db_and_calls_unchanged': True,
+            'direct_runtime_after_drift': direct['reason_code']}
+
+
+def unknown_restore(case):
+    raw = case.path.read_bytes()
+    case.fixture.transport.on_push = None
+    case.fixture.transport.push_result = TimeoutError('unknown')
+    pending = case.submit()
+    assert pending['reason_code'] == 'SUBMIT_RESULT_UNKNOWN', pending
+    case.published()
+    case.drift()
+    before, calls = case.snapshot(), list(case.fixture.transport.calls)
+    blocked = case.submit()
+    assert blocked['reason_code'] == 'PROFILE_CONFLICT', blocked
+    assert case.snapshot() == before and case.fixture.transport.calls == calls
+    case.path.write_bytes(raw)
+    case.runtime = case.factory()
+    reconciled = case.submit()
+    assert reconciled['reason_code'] == 'OK', reconciled
+    assert count_push(case) == 1
+    assert not case.orch.state.pending_intents(case.run)
+    return {'first': pending['reason_code'], 'during_drift': blocked['reason_code'],
+            'restored_pin_result': reconciled['reason_code'], 'total_pushes': 1,
+            'pending_after_reconciliation': 0}
+
+
+def successive_repins(case):
+    clients = [case.runtime]
+    policies = ['one_cr_per_repo', 'one_cr_per_change_set']
+    for number, policy in enumerate(policies):
+        previous = case.fixture.root / ('previous-' + str(number) + '.yaml')
+        previous.write_bytes(case.path.read_bytes())
+        profile = yaml.safe_load(case.path.read_text())
+        profile['submission_policy'] = policy
+        case.path.write_text(yaml.safe_dump(profile))
+        plan = profile_repin.plan(case.orch, case.run, previous)
+        assert plan.get('ok'), plan
+        decision = approved(case.orch.approvals, case.run, profile_repin.ACTION, plan['input_hash'])
+        result = profile_repin.apply(case.orch, case.run, decision['approval_id'], previous)
+        assert result.get('ok'), result
+        before, calls = case.snapshot(), list(case.fixture.transport.calls)
+        for stale in clients:
+            rejected = stale.submit(case.change, case.approval)
+            assert rejected['reason_code'] == 'PROFILE_CONFLICT', rejected
+        assert case.snapshot() == before and case.fixture.transport.calls == calls
+        case.runtime = case.factory()
+        assert case.runtime.submission_policy == policy
+        clients.append(case.runtime)
+    completed = case.submit()
+    assert completed['reason_code'] == 'OK' and count_push(case) == 1, completed
+    return {'approved_repins': 2, 'stale_clients_blocked_without_effects': True,
+            'fresh_policy': case.runtime.submission_policy, 'fresh_result': 'OK',
+            'total_pushes': 1}
+
+
+if __name__ == '__main__':
+    exercise('normal_controller_and_real_receipt_replay', controller_success_replay)
+    exercise('unknown_submission_drift_and_restore', unknown_restore)
+    exercise('two_approved_repins', successive_repins)

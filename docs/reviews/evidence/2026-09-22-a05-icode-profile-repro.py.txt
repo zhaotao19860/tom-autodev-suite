@@ -1,0 +1,87 @@
+"""A-05 adjacent iCode trigger; only temporary Git/SQLite and fake CLI writes."""
+import copy
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else '/Users/tom/Desktop/skills/tom-autodev-suite')
+sys.path[:0] = [str(ROOT / 'tom-autodev/scripts/tests'), str(ROOT / 'tom-autodev/scripts')]
+from test_icode_runtime import IcodeRuntimeTests, approved
+from test_ipipe_runtime import PROFILE
+from test_orchestrator import _write_profile
+from orchestrator import Orchestrator
+import workflow_spec
+
+
+def reproduce(use_controller):
+    fixture = IcodeRuntimeTests()
+    fixture.setUp()
+    try:
+        subprocess.run(['git', '-C', str(fixture.source_repo), 'branch', '-M', 'main'], check=True)
+        remote = fixture.root / 'local-remote.git'
+        subprocess.run(['git', 'clone', '--bare', '-q', str(fixture.source_repo), str(remote)], check=True)
+        subprocess.run(['git', '-C', str(fixture.repo), 'remote', 'add', 'origin', str(remote)], check=True)
+        profile = copy.deepcopy(PROFILE)
+        profile['project_id'] = 'bgw'
+        _write_profile(fixture.root, profile)
+        profile_path = fixture.root / 'config/projects/bgw.yaml'
+        profile = yaml.safe_load(profile_path.read_text())
+        profile['business_repos'][0].update(path=str(fixture.source_repo), module='baidu/team/repo')
+        profile['test_repo']['module'] = 'baidu/team/repo-tests'
+        profile_path.write_text(yaml.safe_dump(profile))
+        orch = Orchestrator(fixture.root)
+        orch.state.transition('run-1', 'INTAKE', {
+            'project': 'bgw', 'requirement_id': 'CARD-1', 'profile_path': str(profile_path),
+            'profile_hash': hashlib.sha256(profile_path.read_bytes()).hexdigest(),
+            'workflow_spec_hash': workflow_spec.canonical_hash(),
+        })
+        orch.state.transition('run-1', 'SUBMIT', {'previous_state': 'REVIEW'})
+        assert orch._runtime_profile('run-1')['reason_code'] == 'OK'
+        change = fixture.child_change_set()
+        approval = approved(orch.approvals, 'run-1', 'G7', change['input_hash'])
+        bindings = fixture.runtime().worktree_bindings
+        runtime = orch.icode_runtime('run-1', worktree_bindings=bindings,
+            system_skill_path=fixture.skill, argv_transport=fixture.transport,
+            binary_candidates=['/fake/icode'], executable_resolver=lambda value: value, owner='dev')
+        assert not isinstance(runtime, dict), runtime
+
+        def pushed():
+            fixture.transport.changes = [{
+                '_number': 42, 'current_revision': change['commit_revision'], 'branch': 'main',
+                'owner': {'username': 'dev'}, 'subject': 'CARD-1 exact',
+                'url': 'https://icode.example/cr/42', 'module': 'baidu/team/repo',
+            }]
+        fixture.transport.on_push = pushed
+        profile['environment_profile']['image_digest'] = 'sha256:changed-after-g7'
+        profile_path.write_text(yaml.safe_dump(profile))
+        guard = orch._runtime_profile('run-1')
+        assert guard['reason_code'] == 'PROFILE_CONFLICT', guard
+        before_events = orch.state.events('run-1')
+        if use_controller:
+            result = orch.submit_to_ipipe('run-1', change, approval, icode_runtime=runtime)
+        else:
+            result = runtime.submit(change, approval)
+        key = 'icode.submit:run-1:change-1:revisions-1'
+        receipt = orch.state.result_by_idempotency_key(key)
+        return {
+            'entry': 'Orchestrator.submit_to_ipipe' if use_controller else 'IcodeRuntime.submit (factory-built)',
+            'profile_guard_before_call': guard['reason_code'],
+            'result_reason': result['reason_code'], 'result_ok': result.get('ok'),
+            'mock_push_cr_count': sum('push_cr' in call[0] for call in fixture.transport.calls),
+            'persisted_icode_receipt': receipt is not None,
+            'persisted_receipt_reason': receipt['receipt']['response']['reason_code'] if receipt else None,
+            'run_events_unchanged': before_events == orch.state.events('run-1'),
+            'run_state': orch.status('run-1')['state'],
+            'network': 'none: local Git remote; FakeArgvTransport only',
+        }
+    finally:
+        fixture.tearDown()
+
+
+if __name__ == '__main__':
+    for controller in (True, False):
+        print(json.dumps(reproduce(controller), sort_keys=True))

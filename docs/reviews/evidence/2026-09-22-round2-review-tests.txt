@@ -1,0 +1,56 @@
+test_approved_repin_invalidates_old_client_and_new_factory_uses_new_policy (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_cached_factory_and_compatibility_runtime_refuse_drift_before_preflight (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_cached_policy_mutation_cannot_change_the_pinned_submission_action (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_controller_refuses_drift_before_entering_any_runtime (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_drift_after_push_preserves_unknown_intent_without_claiming_success (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_drift_after_repository_materialization_stops_before_push (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_drift_during_cr_query_prevents_push_and_receipt (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_drift_during_preflight_prevents_fetch_intent_and_push (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_drift_during_query_of_matching_cr_does_not_write_success_receipt (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_factory_cannot_override_pinned_policy_or_profile_identity (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_factory_refuses_a_currently_drifted_profile (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_matching_controller_receipt_is_read_only_after_profile_drift (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_missing_profile_refuses_cached_runtime (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_unchanged_pinned_runtime_submits_and_records_exact_revision (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_unknown_submission_cannot_reconcile_or_push_after_drift (test_icode_profile_guard.IcodeProfileGuardTests) ... ok
+test_a_base_the_branch_has_left_behind_is_refused_before_any_push (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_a_sibling_cr_for_the_same_card_does_not_block_this_submission (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_an_abandoned_attempt_can_be_superseded_once_the_cr_is_known_absent (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_exact_existing_cr_is_receipted_without_push_and_raw_push_is_never_used (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_missing_change_id_is_refused_before_push (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_one_cr_per_repo_appends_the_sibling_cr_instead_of_refusing (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_one_cr_per_repo_create_new_cr_skips_baseline_drift (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_one_cr_per_repo_refuses_non_ancestor_existing_cr_revision_before_push (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_preflight_accepts_a_worktree_carrying_the_change_set_commit (test_icode_runtime.IcodeRuntimeTests)
+A change set sits on top of its baseline, so HEAD moving ahead is normal. ... ok
+test_preflight_active_ownership_is_query_only_and_never_calls_reconcile (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_preflight_cleaning_ownership_fails_closed_without_mutation (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_preflight_failed_ownership_fails_closed_without_mutation (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_preflight_is_read_only_and_rejects_stale_or_foreign_worktree (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_preflight_rejects_missing_system_skill_binary_subcommand_and_login (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_preflight_rejects_primary_checkout_even_with_caller_asserted_run_binding (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_preflight_reserved_ownership_fails_closed_without_mutation (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_receipt_contains_complete_reviewed_revisions_and_strong_cr_identity (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_receipt_rejects_cr_url_for_a_different_change_number (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_related_existing_cr_with_conflicting_identity_fails_closed (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_secret_bearing_cr_url_is_not_receipted (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_submit_materializes_worktree_for_icode_cli_and_cleans_it_after_push (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_submit_recomputes_hash_from_persisted_reviewed_change_set (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_submit_rejected_receipts_bounded_stderr (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_submit_rejected_without_cr_can_be_retried_after_skill_fix (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_submit_requires_reviewed_exact_revision_set_and_run_bound_g7 (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_the_default_policy_still_opens_a_cr_per_change_set (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_unknown_submit_is_pending_and_restart_only_queries (test_icode_runtime.IcodeRuntimeTests) ... ok
+test_callable_backends_cannot_bypass_runtime_write_gates (test_runtime_contracts.RuntimeAdapterTests) ... ok
+test_icode_client_exposes_preflight_and_approval_bound_submit (test_runtime_contracts.RuntimeAdapterTests) ... ok
+test_ipipe_client_exposes_complete_runtime_contract (test_runtime_contracts.RuntimeAdapterTests) ... ok
+test_actual_runtime_reason_families_all_route_to_diagnose (test_runtime_contracts.RuntimeOrchestratorTests) ... ok
+test_login_permission_revision_interface_and_release_map_to_expected_owners (test_runtime_contracts.RuntimeOrchestratorTests) ... ok
+test_pipeline_failure_classification_selects_task5_collaboration_role (test_runtime_contracts.RuntimeOrchestratorTests) ... ok
+test_runtime_factories_reuse_run_state_ledger_and_validate_run (test_runtime_contracts.RuntimeOrchestratorTests) ... ok
+test_runtime_failure_enriches_diagnose_evidence_with_collaboration_route (test_runtime_contracts.RuntimeOrchestratorTests) ... ok
+
+----------------------------------------------------------------------
+Ran 50 tests in 14.744s
+
+OK

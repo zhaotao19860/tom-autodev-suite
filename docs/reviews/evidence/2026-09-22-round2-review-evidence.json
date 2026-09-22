@@ -1,0 +1,40 @@
+{
+  "scope": "A-05 final round-2 independent targeted review evidence",
+  "base_commit": "273d2507bcfb600d1a1ab9e5e6d8f61b72d41565",
+  "target_commit": "daa76f6fee3f8d609943666d3e2b9f456026b2fa",
+  "target_kind": "committed content matched to frozen round2 and final suite manifests",
+  "snapshot": "/var/folders/y8/t5r8bw1d4f79vn_9f4hzl_tw0000gn/T/tad-targeted-b-round2-ar0mbgqf",
+  "round2_code_manifest_sha256": "f6ac581f90baee7112697857a7947c1d210a078de8371c5f5e1ca4046b2bceb6",
+  "final_tested_manifest_sha256": "247f229f9daeda8dd8b2eb6ab85cd1a3a17fd5f56dd34f0d852609ffc86217bb",
+  "reviewer": "Codex independent context B; exact model unknown",
+  "entries": [
+    {
+      "path": "docs/reviews/evidence/2026-09-22-round2-review-tests.txt",
+      "sha256": "c38fd9efaa272d8b4e73c1e6f26aea4decd67e26e4736829d02cc5fde0682c27"
+    },
+    {
+      "path": "docs/reviews/evidence/2026-09-22-round2-original-repro-output.txt",
+      "sha256": "0ba9c718ccacb813d7b87ebae7415127e83b2e5121c0fe210f9d168dd57f4a27"
+    },
+    {
+      "path": "docs/reviews/evidence/2026-09-22-round2-independent-boundaries.py.txt",
+      "sha256": "f14c67c7526fbc3af310263f96216a877607f366a50c6e88a3a323fd528ecc99"
+    },
+    {
+      "path": "docs/reviews/evidence/2026-09-22-round2-independent-output.txt",
+      "sha256": "0f2ccc03f7e494e25dcf7a80abae5d0b79ce50befaacc18932264fc169a9a5dc"
+    }
+  ],
+  "commit_binding_checks": [
+    {
+      "manifest": "2026-09-22-round2-code-manifest.json",
+      "checked_git_blobs": 4,
+      "errors": []
+    },
+    {
+      "manifest": "2026-09-22-final-tested-manifest.json",
+      "checked_git_blobs": 304,
+      "errors": []
+    }
+  ]
+}

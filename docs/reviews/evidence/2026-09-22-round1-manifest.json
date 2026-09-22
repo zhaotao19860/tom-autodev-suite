@@ -1,0 +1,143 @@
+{
+  "base_commit": "273d2507bcfb600d1a1ab9e5e6d8f61b72d41565",
+  "branch": "phase1-workflowspec",
+  "standard_sha256": "5937af637dbaf681f0c3046a1a3643de2dd0a3be6ee55ae9b4421aacff9e0393",
+  "files": [
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "95c7cbb37109380ce8a0c416b155da30669571b08cbff6010b54956263fc78e6"
+    },
+    {
+      "path": "README.md",
+      "sha256": "84d5e64ec3fab482425c47946c7d31b65374ab2081bfb574e8c89934e146f672"
+    },
+    {
+      "path": "SKILL_CONSOLIDATION.md",
+      "sha256": "b420386648f98c22ac200a31f68755e14f0b2faba2bc7acc1e3f5a6665024b40"
+    },
+    {
+      "path": "docs/OPERATIONS.md",
+      "sha256": "e4adc06b54d424ab3ddf0e9a63bf44d77a45f13e96995dd493abe2ec00803edf"
+    },
+    {
+      "path": "evals/README.md",
+      "sha256": "7a89a7801d54987617357b724aad59fd7220785ae3d8065dc724ee269f8011c6"
+    },
+    {
+      "path": "evals/skill-scenarios.json",
+      "sha256": "6c81ea0de6f616e0b20863a0c23b33f61ef0cc640e2faf582220a535993d4d15"
+    },
+    {
+      "path": "tom-autodev/schemas/diagnosis.schema.json",
+      "sha256": "f3ac22d8cbefff906537f541825d744450b9e0d3316a89146a54961021874027"
+    },
+    {
+      "path": "tom-autodev/scripts/approval_ledger.py",
+      "sha256": "6f242ea0dc4a89078914317fc6cfb31bcf8cd524c2ce6c1e14b2b26f62765ddf"
+    },
+    {
+      "path": "tom-autodev/scripts/approval_watch.py",
+      "sha256": "b6d9f066d6fbdc9463ce60a43dd3c708a768b4bc3688df92246858a4da0efa45"
+    },
+    {
+      "path": "tom-autodev/scripts/clients/ipipe_runtime.py",
+      "sha256": "7b4fc2ce447d46a88c8281185470459d203ce760d18f83380d9cc4fb87bbee74"
+    },
+    {
+      "path": "tom-autodev/scripts/collaboration.py",
+      "sha256": "3f7b904b6d87be63bf48bccb78636d2387cf65f40ae385ed891d0f3665bf8c84"
+    },
+    {
+      "path": "tom-autodev/scripts/evidence_policy.py",
+      "sha256": "61ec8683d5bc76fae1600dd2d261fb142a544d71e84557ee359aab656388b8ab"
+    },
+    {
+      "path": "tom-autodev/scripts/orchestrator.py",
+      "sha256": "13e860c0ad829b0b4c4735114bbaaeaf199072080b71e3d0268197db3eb6549a"
+    },
+    {
+      "path": "tom-autodev/scripts/phase_protocol.py",
+      "sha256": "58f5ea1569c54e3522919013e1504506f18d85a5da41a422ec875acf2a0046cf"
+    },
+    {
+      "path": "tom-autodev/scripts/run_brief.py",
+      "sha256": "bf245f1c2b07395b84e704e312b240d4f802c40391ecaa394340a71d0db06ed4"
+    },
+    {
+      "path": "tom-autodev/scripts/run_summary.py",
+      "sha256": "e3387e40446bee4c5d83c8c14a62562cfea3a931a9827c8bf7e325002941440e"
+    },
+    {
+      "path": "tom-autodev/scripts/schema_validator.py",
+      "sha256": "fa538a4a5918e295c5fcdda72a121164a8547734e38da773729cdf12c41b3533"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_approval_gate_retry.py",
+      "sha256": "cfb7c80c7573fa10e8ac19885c0b3c22b9f18341c6ff724afb6215fdabf23614"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_diagnosis_contract.py",
+      "sha256": "ded673c9e26780af3ae64eee3949733fa04260f9da4f87049016f151e234a5f4"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_phase_protocol_repair.py",
+      "sha256": "375418d6b0f98def95b85b0675ece3f1a6aca9d4e4002ff13f3f1cf3ca9631a0"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_pipeline_plan.py",
+      "sha256": "7fa043251e504a5c55797ff96640a6c1b8d33820c0e928af24bdac1a6e6bb723"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_runtime_profile_guard.py",
+      "sha256": "df1ff84e702f8c3735696ffc427855fafb68258ffad019254c825d3b207fae3d"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_schema_validation.py",
+      "sha256": "264542dcd0cd48b266a4d848373bf254cd1b29d4e9de3042f97298b1ef416683"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_worker_concurrency_contract.py",
+      "sha256": "507472c6f86c014fa26f9e61fc8f72719e5b81f45ec4b5f7ecb5a0ab4c245715"
+    },
+    {
+      "path": "tom-autodev/scripts/worker_driver.py",
+      "sha256": "723001e6b68faf840d9decacf5b0aea18d644de9a91aab795e0b405c8a0e3ee2"
+    },
+    {
+      "path": "tom-diagnose/CHANGELOG.md",
+      "sha256": "999078dc1c9e6ad1d3de151041863a49f85722ce73f35e8709a3c3f32468ce72"
+    },
+    {
+      "path": "tom-diagnose/references/phase-contract.md",
+      "sha256": "f1234b6e54d69dd69bb00bec7e643b587520477a921f1736b6a0596406c3a79b"
+    }
+  ],
+  "content_manifest_sha256": "e6635bace347994af1de62b09da5a57d16f6c2512d833c1c5a7918d877c28142",
+  "anchor_commit": "273d2507bcfb600d1a1ab9e5e6d8f61b72d41565",
+  "target_commit": null,
+  "target_kind": "round-1 frozen uncommitted worktree",
+  "snapshot": "/var/folders/y8/t5r8bw1d4f79vn_9f4hzl_tw0000gn/T/tad-targeted-b-round1-qajiqk_1",
+  "content_manifest_algorithm": "sha256 of concatenated sorted entries: sha256(file) + two spaces + relative path + LF",
+  "adjacent_callers_and_reproduction_fixtures": [
+    {
+      "path": "tom-autodev/scripts/clients/icode_runtime.py",
+      "sha256": "d810a29efb1112b59f08ec3ca5c6dc952e615b2b45559d52ab79c1557b18d138"
+    },
+    {
+      "path": "tom-autodev/scripts/execution_guard.py",
+      "sha256": "dcb33e9c8dd27d5e9a89843584a2125e263affa17ac118bf2e6586578c2a15c3"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_icode_runtime.py",
+      "sha256": "da716ebbaf8a6dc9b5c5be700674c57bed4253fb73921d6aab65e6795071340d"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_orchestrator.py",
+      "sha256": "56f094c181d07c89bb9e5b163db8ccc2171dea39845494e5eda90121cec989db"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_ipipe_runtime.py",
+      "sha256": "10eeb23fd34182ad9d2d342b158b2da1560617f08898570d2bfad5605ce94d79"
+    }
+  ]
+}

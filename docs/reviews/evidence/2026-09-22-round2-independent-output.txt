@@ -1,0 +1,3 @@
+{"case": "normal_controller_and_real_receipt_replay", "controller_replay_exact": true, "direct_runtime_after_drift": "PROFILE_CONFLICT", "normal_pushes": 1, "normal_state": "IPIPE", "replay_db_and_calls_unchanged": true}
+{"case": "unknown_submission_drift_and_restore", "during_drift": "PROFILE_CONFLICT", "first": "SUBMIT_RESULT_UNKNOWN", "pending_after_reconciliation": 0, "restored_pin_result": "OK", "total_pushes": 1}
+{"approved_repins": 2, "case": "two_approved_repins", "fresh_policy": "one_cr_per_change_set", "fresh_result": "OK", "stale_clients_blocked_without_effects": true, "total_pushes": 1}

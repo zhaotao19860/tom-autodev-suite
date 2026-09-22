@@ -1,0 +1,24 @@
+{
+  "base_commit": "273d2507bcfb600d1a1ab9e5e6d8f61b72d41565",
+  "round": 2,
+  "scope": "A-05 iCode targeted repair",
+  "manifest_sha256": "f6ac581f90baee7112697857a7947c1d210a078de8371c5f5e1ca4046b2bceb6",
+  "entries": [
+    {
+      "path": "tom-autodev/scripts/clients/icode_runtime.py",
+      "sha256": "a20cd69adbb6153cbc0e472b353a89b11e975141b79fd0c6175d2f2c81a9bf33"
+    },
+    {
+      "path": "tom-autodev/scripts/orchestrator.py",
+      "sha256": "28e5376d2975ac858d77715e9e4944e8d6964afa34a521cd4428582944eb401a"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_icode_profile_guard.py",
+      "sha256": "5e383468c2c2a2f6b98de59d514c0007ca40556e85c4d7b348a5e7bd46064e7a"
+    },
+    {
+      "path": "tom-autodev/scripts/tests/test_runtime_contracts.py",
+      "sha256": "25c5b673e95ead69949ef69bb9989f6dea3be7da71bb0bf3e4d84daf2b09988b"
+    }
+  ]
+}

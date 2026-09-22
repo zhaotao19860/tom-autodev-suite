@@ -1,0 +1,128 @@
+{
+  "standard_id": "TAD-REVIEW-EXIT",
+  "standard_version": "1.0",
+  "standard_sha256": "5937af637dbaf681f0c3046a1a3643de2dd0a3be6ee55ae9b4421aacff9e0393",
+  "workflow_hash": "71f51bcabcd042cf3870e78e57568b0940e0288734c4be4b14a6398aaffb71c6",
+  "schema_skill_manifest_sha256": "441cdc30089dd033651d4b2b9dda5adc8145bc977ed5b3699d7544910865c30c",
+  "eval_version": 2,
+  "eval_sha256": "6c81ea0de6f616e0b20863a0c23b33f61ef0cc640e2faf582220a535993d4d15",
+  "environment": {
+    "python": "3.9.6",
+    "os": "macOS-26.6.2-arm64-arm-64bit",
+    "arch": "arm64"
+  },
+  "entries": [
+    {
+      "path": "tom-autodev/SKILL.md",
+      "sha256": "88b05a478277ffeebff89f36133b9ea7a2addc86245e2c86b19c7e6a78d0d705"
+    },
+    {
+      "path": "tom-autodev/schemas/artifacts.schema.json",
+      "sha256": "20ffda0ce098b65278259db2dd49f62f0a1649e2232fc8815325629f22dd6a18"
+    },
+    {
+      "path": "tom-autodev/schemas/change-set.schema.json",
+      "sha256": "3e8248d2ee30ea0290450cefbaf7a3f25f83269132bdec8dc769636a87f18ec6"
+    },
+    {
+      "path": "tom-autodev/schemas/decision-log.schema.json",
+      "sha256": "4e78fb05662516c6a911fbf42bccc36bab392ff3f05fc28caa6e6397674d9a12"
+    },
+    {
+      "path": "tom-autodev/schemas/diagnosis.schema.json",
+      "sha256": "f3ac22d8cbefff906537f541825d744450b9e0d3316a89146a54961021874027"
+    },
+    {
+      "path": "tom-autodev/schemas/events.schema.json",
+      "sha256": "98211a1f758ceb5ce641673412769320f95423ffb3901017ca88b21e3b3a5e12"
+    },
+    {
+      "path": "tom-autodev/schemas/ipipe-evidence.schema.json",
+      "sha256": "6be319bffa373d7a5c10ab2c9587a40d512e112b0b24342c312cd2c290acf2d3"
+    },
+    {
+      "path": "tom-autodev/schemas/optimization-proposal.schema.json",
+      "sha256": "ba4bc6902e0d10271afdd55f468941e626fac463f36688ee4a69e32b84f10b5a"
+    },
+    {
+      "path": "tom-autodev/schemas/project-profile.schema.json",
+      "sha256": "22245aaa3f0050c3e2f52f8253c62cb3cacff112808bf2eee6fe7609c1778ad0"
+    },
+    {
+      "path": "tom-autodev/schemas/release-evidence.schema.json",
+      "sha256": "25942fd04644867cdd13bd275357ca1c754033c348800cc13c429bc2ca8a0133"
+    },
+    {
+      "path": "tom-autodev/schemas/requirement-snapshot.schema.json",
+      "sha256": "5628965f704e2e1cd51fdf6d2fe37ef3ddb8e73f7ac050e28a206f4abdde7877"
+    },
+    {
+      "path": "tom-autodev/schemas/review.schema.json",
+      "sha256": "7e942febbf93ebd7f7f37141c307a75afdd925c0f444a23fdf6805eb913c51f5"
+    },
+    {
+      "path": "tom-autodev/schemas/run-summary.schema.json",
+      "sha256": "81dd5be60d0f02ec075af51021319da04b523754feb76bd4bc6c4147e3fd4cf2"
+    },
+    {
+      "path": "tom-autodev/schemas/spec.schema.json",
+      "sha256": "d7c73394f8c0fd73738a5dcd1106cc89fdada9920dd1a26cc8e49e15f5b1342a"
+    },
+    {
+      "path": "tom-autodev/schemas/submit-descriptor.schema.json",
+      "sha256": "09396ae3feac6fce6461114ab119154387a2f6316d723856478e8601df200de1"
+    },
+    {
+      "path": "tom-autodev/schemas/task-dag.schema.json",
+      "sha256": "cabd10936cc8531aa6fd4ac6dd29c48149d6213d05466add57598df0d05c7d17"
+    },
+    {
+      "path": "tom-autodev/schemas/task-plan.schema.json",
+      "sha256": "82a22918b6cad05e41c20d527b8dfb139b72177e2e72d48e37c21e93a81b960c"
+    },
+    {
+      "path": "tom-diagnose/SKILL.md",
+      "sha256": "81a82529591c1558777e7d61b61be7e5a2bdd5dd9af2982b723cd332daf80847"
+    },
+    {
+      "path": "tom-grill/SKILL.md",
+      "sha256": "a67860cc0d9657b68f6d4f6ae8273135fb6538f6519514d16d460701874bc2d4"
+    },
+    {
+      "path": "tom-implement/SKILL.md",
+      "sha256": "7dea54ad8a29fc4f0361d0fc865ffb28f9269878b1786698c49bb2fd6af19423"
+    },
+    {
+      "path": "tom-lang-c-cpp/SKILL.md",
+      "sha256": "8b97d5abc23caa9bdada406e26eadcad8a095cc9f5277389c4c5fe4f2f440f71"
+    },
+    {
+      "path": "tom-lang-npl/SKILL.md",
+      "sha256": "0b0518a862b79896dc78692f16f6c5e1c98aaeef3125e82ca944c986b55216f0"
+    },
+    {
+      "path": "tom-plan/SKILL.md",
+      "sha256": "67238f2a2e533fdebe7a41410a8f5eb235889bb302f4b8daad8cf1a7640b9c22"
+    },
+    {
+      "path": "tom-project-bgw/SKILL.md",
+      "sha256": "16d96ece4e63f13563701f20dca27b97813ceac70723c41a058b3dbf1747d4b2"
+    },
+    {
+      "path": "tom-project-xflow/SKILL.md",
+      "sha256": "690a930664df49786185e24f5ca910141f7ef29c72f6ecd1de1f5dfbbac18030"
+    },
+    {
+      "path": "tom-review/SKILL.md",
+      "sha256": "9267f5f16b8495d963d82d60d04f41d37cdee3ecdb49d1808370267d9c50c0a9"
+    },
+    {
+      "path": "tom-spec/SKILL.md",
+      "sha256": "56102113063a8d02e8deebb70de557f96d8cc5291cac7375989dcf776f67e80c"
+    },
+    {
+      "path": "tom-tasks/SKILL.md",
+      "sha256": "e3329e58a8fe913fc33afa2dedfd8d1c230110753f01018db1cde7860b230784"
+    }
+  ]
+}

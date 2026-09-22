@@ -1,0 +1,7 @@
+$ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tom-autodev/scripts/tests -p test_*.py -q
+----------------------------------------------------------------------
+Ran 976 tests in 126.720s
+
+OK
+
+exit_code=0

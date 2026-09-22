@@ -1,0 +1,19 @@
+$ /Applications/Xcode.app/Contents/Developer/usr/bin/python3 -m unittest discover -s tom-review/tests -p test_*.py -v
+test_disables_external_diff_and_textconv (test_collect_scope.ScopeTests) ... ok
+test_does_not_execute_clean_filter_when_worktree_differs (test_collect_scope.ScopeTests) ... ok
+test_empty_diff_and_mode_only_changes_remain_visible (test_collect_scope.ScopeTests) ... ok
+test_rejects_moving_refs_and_missing_objects (test_collect_scope.ScopeTests) ... ok
+test_special_paths_binary_deletions_and_renames_are_not_lost (test_collect_scope.ScopeTests) ... ok
+test_uses_pinned_commits_and_preserves_dirty_workspace (test_collect_scope.ScopeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 1.041s
+
+OK
+
+exit_code=0
+
+$ bash tom-diagnose/tests/test_autodebug.sh
+PASS: tom-autodebug regression tests
+
+exit_code=0
