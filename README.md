@@ -1,185 +1,147 @@
 # Tom Autodev
 
-**用脚本推进研发流程，用模型完成需要判断的工作，用人工审批控制关键动作。**
+**用一句命令启动需求，用模型完成判断，用控制器校验和推进，用人工审批关键动作。**
 
-输入一张 iCafe 需求卡，Tom Autodev 组织需求澄清、设计、业务代码与独立产品测试、源码评审、iCode 提交、iPipe 验证和发布结果确认。每一步保存输入、产物和证据，便于中断后继续，也便于后续需求复用同一套规则。
+Tom Autodev 把一张 iCafe 需求卡推进到代码、独立产品测试、Review、iCode、iPipe 和发布确认。每个需求都有一个持久化 `run`，输入、产物、审批、锁、外部回执和恢复信息都会保存下来。
 
-一次需求运行称为一个 `run`；同一项目配置可以用于多个 run。
+适用环境：**Comate + iCafe / iCode / iPipe / KU / 如流**。Mac 负责源码、流程控制和 Review；编译、模拟器和业务测试在配置好的 iPipe runner 执行。
 
-当前面向 **Comate + iCafe / iCode / iPipe / KU / 如流** 环境。Mac 负责读写源码、评审和流程控制；业务编译、模拟器和测试在配置好的 iPipe runner 执行。首次使用需要注册项目和配置平台访问。
+## 先看这一页
 
-[工作原理](#工作原理) · [首次使用](#首次使用) · [日常使用](#日常使用) · [停下来时怎么办](#停下来时怎么办) · [维护与验证](#维护与验证)
+### 你只需要记住 4 个动作
 
-## 工作原理
+```bash
+# 1. 创建或继续一张需求卡，并推进到下一个待办
+python3 tom-autodev/scripts/cli.py process CARD PROJECT
 
-### 谁负责什么
+# 2. 查看进度
+python3 tom-autodev/scripts/cli.py status CARD_OR_RUN
 
-| 角色 | 负责的工作 | 交付物 |
-|---|---|---|
-| 人 | 确认需求、验收标准，审批设计、改动、提交及发布相关动作 | 绑定具体版本的决定和审批 |
-| 模型 + skill | 澄清、设计、拆任务、写代码、评审、分析根因 | 当前阶段的结构化内容 `DraftContent` |
-| Python 控制器 + worker | 决定下一步、校验输入输出、保存状态、执行已获批的平台操作 | 产物、审批记录、执行回执 |
-| iPipe | 在指定环境编译、测试并提供发布相关证据 | 与代码版本、环境绑定的执行结果 |
+# 3. 查看模型当前要填什么
+python3 tom-autodev/scripts/cli.py context CARD_OR_RUN
 
-`skill` 保存某一类工作的知识和产出要求。`worker` 是推进流程的 Python 代码：它读取当前状态，执行能确定完成的步骤；需要模型、人工决定或外部结果时，返回等待原因。
-
-```mermaid
-flowchart TD
-    A[需求卡 + 项目配置] --> W[Worker 读取状态和当前输入]
-    W --> D{下一步需要什么}
-    D -->|内容判断| M[模型按 skill 生成草案或代码]
-    M --> V[Schema 和上下文校验]
-    V --> W
-    D -->|人工批准| H[展示具体内容和版本，等待审批]
-    H --> W
-    D -->|条件已满足| C[控制器执行动作并保存回执]
-    C --> W
-    D -->|证据不足或外部未完成| B[保留进度，返回具体原因]
-    D -->|交付条件全部满足| F[记录完成]
+# 4. 审批后继续
+python3 tom-autodev/scripts/cli.py continue CARD_OR_RUN
 ```
 
-模型只交回内容。worker 负责封装产物身份、绑定审批、保存回执和推进阶段；模型无需重复拼装平台调用、状态迁移或恢复逻辑。详见 [Producer 合同](tom-autodev/references/producer-contract.md)。
+模型需要提交草案时，再执行：
 
-### 参与者与协作（进程视角）
-
-把上面的角色落到实际运行，是下面这些进程/服务在协作。日常入口是 **在 IDE 用 `/tom-autodev` 处理需求、在如流审批、查看 iPipe 结果**。自动轮询依赖运行中的 watcher，自动续跑还依赖仍存活的 Comate 会话和已注册的 Stop-hook；会话结束后用 `continue` 继续。
-
-| 参与者 | 是什么 | 位置 / 进程 | 负责 |
-|---|---|---|---|
-| 人 | 需求方 / 评审 / 操作者 | —（角色） | 建卡、审批、必要时在 IDE 说“继续” |
-| Comate | 一次 agent turn 内的 模型 producer + worker 控制面 | 本地 Mac，同一进程 | 产出草案/代码、推状态机、执行已获批动作 |
-| Stop-hook | `ide_turn_hook.py` | 本地，会话停止时短命进程 | 消费 resume handoff，自动把已批准的 run 续跑一段 |
-| ApprovalWatcher | `watch-approvals` | 本地，常驻或定时 `--once` | 轮询如流回应、提醒/重发、落 resume handoff（不完成阶段） |
-| IpipeWatcher | `watch-ipipe` | 本地，常驻或定时 `--once` | 轮询构建，把成功/失败/人工卡住报到如流（不推进、不摄取） |
-| 如流网关 | Node.js 服务 | 远端 | 程序侧投递审批卡、收回回应 |
-| 如流 | IM 客户端 | 人的界面 | 人看到卡片并批准/拒绝 |
-| iCafe / iCode / KU | 远端平台 | 远端 | 需求卡 / CR 提交 / 知识库文档 |
-| iPipe runner | 远端 CI | 远端 | 真正编译、测试、发布 |
-
-> worker 不是独立常驻进程，而是运行在 Comate turn / CLI 里的控制面代码；Stop-hook 只向宿主交回续跑上下文；两个 watcher 才是可常驻的后台。真正推进 run 的永远是 worker，watcher 只把外部事件变成“可续跑状态或通知”。
-
-```mermaid
-flowchart TD
-    U["人：需求方 / 评审 / 操作者"]
-    subgraph LOCAL["本地 Mac（宿主驾驶位）"]
-        IDE["Comate turn：模型 producer + worker 控制面"]
-        HK["Stop-hook 续跑"]
-        AW["ApprovalWatcher（watch-approvals）"]
-        IW["IpipeWatcher（watch-ipipe）"]
-    end
-    subgraph REMOTE["远端平台"]
-        GW["如流网关 Node.js"]
-        RL["如流 App"]
-        PF["iCafe / iCode / KU"]
-        CI["iPipe runner"]
-    end
-    U -->|"① /tom-autodev：项目 + 已确认卡"| IDE
-    IDE -->|"读需求快照 / 提交 CR / 发知识"| PF
-    IDE -->|"② 到审批关口 → 停(PARK)"| AW
-    AW -->|"推审批卡"| GW
-    GW --> RL
-    RL -->|"③ 人点【批准】"| U
-    AW -->|"更新台账 + 落 handoff"| HK
-    HK -->|"④ 续跑"| IDE
-    IDE -->|"⑤ IPIPE 触发构建"| CI
-    IW -->|"轮询"| CI
-    IW -->|"⑥ 成功/失败/人工卡住 → 报到"| GW
-    IDE -->|"⑦ 全模块通过 → G9 发布确认"| DONE["RELEASE_SUCCESS ✅"]
+```bash
+python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
 ```
 
-一句话看懂：**Comate 往前推 → 到关口停 → 人在如流批 / iPipe 跑构建 → watcher 把结果变成可续跑状态或通知 → Stop-hook 或 agent 再往前推**，如此循环到发布；失败则回 DIAGNOSE→PLAN→IMPLEMENT 重跑。
+`submit-draft` 只接收当前 schema 要求的 `DraftContent`，不接收 `ArtifactEnvelope`。需要审批时，CLI 会自动发起绑定当前草案和 `approval_input_hash` 的审批；成功返回 `PARKED / APPROVAL_WAIT`，不会自动批准。
 
-### 一张需求卡如何走完
-
-默认 `standard` 路径如下。Spec 是行为与验收约定；DAG 是带依赖关系的任务清单。
+### 一张卡的完整路径
 
 ```text
-确认需求卡与项目
-  → 澄清验收标准
-  → 一次生成 Spec + 任务 DAG
-  → 为当前任务准备工作区
-  → 计划 → 业务代码 + 产品测试 → 双轴 Review → 提交 iCode
-  → 继续下一个就绪任务，直到全部任务完成提交
-  → iPipe 验证所有必需模块 → 确认发布结果
+确认需求和项目
+  → Intake / Grill
+  → Spec + 任务 DAG
+  → 工作区
+  → 计划
+  → 业务代码 + 独立产品测试
+  → Review
+  → iCode 提交
+  → iPipe 编译、测试、回归
+  → 发布确认
 ```
 
-Review 同时检查“是否满足代码/项目规则”和“是否实现批准的行为”。源码 Review 通过后才可申请提交审批；业务测试是否通过由 iPipe 的实际结果决定。
+有代码或测试问题时进入 `Diagnose`，再回到 Spec、Plan 或 Implement。iPipe 失败必须按真实平台证据处理；控制器不会把本地结果当成 iPipe 结果。
 
-有确认的代码或测试问题时进入 Diagnose，再提出修复方向；环境、版本和流水线问题按各自类别处理。当前自动修复仍有接口限制，见[当前边界](#当前边界)。
+## 原理：谁做什么
 
-### 为什么能够复用和恢复
+| 角色 | 负责什么 | 不能做什么 |
+|---|---|---|
+| 人 | 确认需求和验收标准；审批设计、改动、提交、重跑和发布 | 不能用聊天内容替代绑定具体版本的审批 |
+| Comate + skill | 澄清、设计、拆任务、生成代码和测试、Review、诊断 | 不能直接改状态、伪造 envelope、提交 iCode 或触发 iPipe |
+| Python 控制器 + WorkerDriver | 计算下一步、校验 schema/hash/版本/前驱、保存状态、执行已批准动作 | 不猜测缺失输入，不重复外部副作用 |
+| iPipe | 在固定版本和环境中编译、测试、回归并返回证据 | 不接受本地模拟结果冒充平台证据 |
 
-- **规则有唯一来源。** [workflow_spec.py](tom-autodev/scripts/workflow_spec.py) 定义阶段、迁移、审批和运行模式；项目差异放在 profile，语言与领域知识放在 skill。
-- **审批对应具体内容。** 待执行动作先算出输入指纹 `input_hash`；内容或版本变化后，旧审批不能继续使用。
-- **恢复依据持久化记录。** 同一动作复用已保存的草案和已确认回执。外部结果不明时先核对结果，再决定是否重试。
-- **输出可以检查。** Schema 校验字段，语义校验检查验收覆盖、版本和前驱绑定；固定场景用于观察不同模型的决策差异。
+模型只返回内容。WorkerDriver 负责把内容封装成产物、绑定审批、校验并推进状态。需要模型时返回 `ProducerJob`；需要人工时返回 `ApprovalJob`；需要外部结果时保存检查点并等待。
 
-### 如何避免修复后仍发布旧版本
-
-全部当前任务提交完成后，控制器生成并保存一份 `pipeline_plan`：明确每个必需模块的代码、产品测试、依赖仓版本、流水线和环境。调度、构建证据和发布验证都读取这份计划；运行期间查询到的新 CR patchset 不会自动替换已批准的版本。不同任务携带同一仓库的不同版本时，必须能在本地 Git 中证明继承关系；分叉或对象缺失返回 `REVISION_AMBIGUOUS`，先整合并重新评审提交。
-
-计划必须能从当前提交证据解析出所有配置仓库的版本；缺失时返回 `REVISION_UNRESOLVED`，不会猜测远端 HEAD。计划生成后再变更或重新绑定项目配置，需要重新生成与该配置匹配的计划。
-
-默认情况下，一个模块依赖本次计划的所有仓库，因此任一仓版本改变都会要求重新验证。只有项目负责人确认流水线能独立验证、发布时，才在项目 profile 的相应 `pipelines` 条目中明确声明 `depends_on`：
-
-```yaml
-pipeline_profile:
-  # 保留已有 pipeline_id、stage_classes、release_rule 等字段
-  pipelines:
-    - module: baidu/team/service-a
-      pipeline_id: "pipeline-a"
-      stage_classes: [unit]
-      required_for_release: true
-      depends_on: []  # 只依赖自身与共享产品测试仓
+```mermaid
+flowchart LR
+    A[需求卡 + 项目 profile] --> B[Worker 读取当前 frontier]
+    B --> C{下一步类型}
+    C -->|需要判断| D[Comate 按 skill 生成 DraftContent]
+    D --> E[Schema / 上下文 / hash 校验]
+    E --> B
+    C -->|需要审批| F[如流审批]
+    F --> B
+    C -->|可确定执行| G[控制器执行并保存回执]
+    G --> B
+    C -->|等待外部结果| H[iPipe / watcher]
+    H --> B
+    C -->|全部完成| I[RELEASE_SUCCESS]
 ```
 
-`depends_on: [baidu/team/service-b]` 会增加 B 及其传递依赖；自身和产品测试仓始终不可排除。省略该字段表示依赖全部仓库。共享测试版本变化时，所有相关模块均需重新验证。配置变更遵循已有 profile 审批和版本绑定。
+## 工作流怎么走
 
-G9 审批绑定整份计划和所有必需模块的成功证据。控制器逐一向平台核验实际发布结果，将全部模块的回执保存为一个发布产物；任何模块未发布、版本不符或缺少平台证明，run 都不能进入 `RELEASE_SUCCESS`。
+### 默认路径和变体
 
-这能减少模型参与机械步骤，但不能保证不同模型生成的代码同样好。更换模型仍应运行 [skill 行为评测](evals/README.md)。
+| 路径 | 用途 | 已减少的步骤 |
+|---|---|---|
+| `standard` | 普通需求 | Spec 和任务 DAG 合并为一次 ProducerJob |
+| `express` | 已有明确验收点的缺陷或小改动 | Grill 可自动生成，部分设计审批合并 |
+| `hotfix` | 紧急修复 | 计划仍生成，但独立 G4 审批可省略 |
+| `full` | 大型、跨仓或高风险需求 | 保留完整 Spec、Tasks 和审批路径 |
+
+路径由运行开始时固定，并写入 run。复杂需求可显式选择 `full`；不能在中途静默降低风险等级。
+
+项目和语言知识按需加载：BGW 使用 `tom-lang-c-cpp` + `tom-project-bgw`，XFlow 使用 `tom-lang-npl` + `tom-project-xflow`。流程职责由 `tom-autodev`、`tom-grill`、`tom-spec`、`tom-tasks`、`tom-plan`、`tom-implement`、`tom-review` 和 `tom-diagnose` 分担；standard 路径会合并可合并的模型工作，不要求每个 skill 都单独启动一次 agent。
+
+### 阶段职责
+
+| 阶段 | 产物或动作 | 关键控制 |
+|---|---|---|
+| Intake / Grill | 需求快照、协作绑定、澄清决策和验收点 | 空验收点会阻断；原始快照不被模型改写 |
+| Spec / Tasks | 行为 Spec、测试接口、环境要求、任务 DAG | 验收覆盖、依赖和任务边界可追溯 |
+| Workspace | 为当前任务绑定仓库、分支、基线和工作区 | 检查脏工作区、版本和所有权 |
+| Plan | 当前任务的实现计划 | 计划和工作区绑定到同一任务与版本 |
+| Implement | 业务改动和独立产品测试改动 | 真实 diff、仓库 revision、Change-Id 可核验 |
+| Review | 标准和 Spec 双轴 Review | 未通过或需澄清时不能提交 |
+| Submit | 提交 iCode、绑定 CR/revision、准备 iPipe | G7 绑定精确版本和输入 hash |
+| iPipe | 编译、单测、回归、集成和人工阶段 | 只接受冻结计划对应的真实平台证据 |
+| Release | 核验所有必需模块的发布结果 | 缺模块、错版本或缺平台证明都不能成功 |
+| Diagnose | 记录根因、失败证据和修复方向 | 修复预算由持久化历史计算，不能无限循环 |
 
 ## 首次使用
 
-### 1. 安装套件
+所有命令从仓库根目录执行。
 
-下面所有命令均从**仓库根目录**执行。当前开发版本在 `phase1-workflowspec` 分支；已有仓库可直接使用当前检出目录。
+### 1. 获取代码并安装 skill
+
+已有工作区可跳过 clone：
 
 ```bash
-# 首次获取
 git clone --branch phase1-workflowspec https://github.com/zhaotao19860/tom-autodev-suite.git
 cd tom-autodev-suite
 
-# 确认 Python 环境包含 PyYAML
 python3 -c 'import yaml; print(yaml.__version__)'
 
-# 先查看安装计划，再创建 Comate skill 链接
 python3 tom-autodev/scripts/install_links.py \
   --root "$PWD" --destination "$HOME/.comate/skills" --dry-run
 python3 tom-autodev/scripts/install_links.py \
   --root "$PWD" --destination "$HOME/.comate/skills"
 ```
 
-缺少 PyYAML 时，在所用 Python 环境安装 `PyYAML`。安装脚本遇到已有同名目录或不同链接会报告 `CONFLICT`，不会覆盖；链接安装后需保留源码目录。
+缺少 PyYAML 时，在当前 Python 环境安装 `PyYAML`。安装脚本遇到同名目录或不同链接会报告 `CONFLICT`，不会覆盖已有内容。
 
-套件包含 12 个 tom skill，运行时按阶段加载相关内容。NPL、Review 和 Diagnose 所需的参考能力已经内置，无需再安装 `npl-coder`、`code-review-qa` 或 `tom-autodebug`。独立远程排障模式还需要本机可用的 relay 和 tmux。
+### 2. 注册项目
 
-### 2. 注册一次项目
+在 Comate 中调用 `/tom-autodev`：
 
-在 Comate 中调用 `/tom-autodev`，例如：
+> 注册 BGW 项目。核对业务仓、独立产品测试仓、iPipe 环境和审批渠道，列出缺失项；确认后保存项目 profile。
 
-> 注册 BGW 项目。先核对业务仓、独立产品测试仓、iPipe 环境和审批渠道，列出缺失项；确认配置后保存项目 profile。
+需要准备：
 
-准备以下信息：
+- 业务仓、iCode 模块、目标分支、独立产品测试仓。
+- 测试接口、夹具、iPipe 模板、允许参数和 runner 要求。
+- 项目 skill、语言 skill、源码和可核对版本的知识文档。
+- Review 方式、KU 位置、Comate/如流审批人、发布规则。
 
-| 配置 | 需要说明 |
-|---|---|
-| 仓库 | 业务仓、iCode 模块、目标分支，以及独立产品测试仓 |
-| 测试与环境 | 外部测试接口、夹具来源、稳定 iPipe 模板、允许参数、runner/工具/硬件要求 |
-| 项目知识 | 语言 skill、项目 skill、可核对版本的源码和知识文档 |
-| 协作与交付 | Review 方式、KU 位置、Comate/如流审批人和渠道、发布规则 |
-
-配置保存在 `~/.tom-autodev/config/projects/<project>.yaml`。注册只保存和验证配置，不启动需求；后续新需求复用它。密钥使用既有认证渠道，不能写入项目 profile。详细字段见 [项目注册说明](tom-autodev/references/setup.md) 和 [profile schema](tom-autodev/schemas/project-profile.schema.json)。
+profile 保存在 `~/.tom-autodev/config/projects/<project>.yaml`。注册只保存和验证配置，不启动需求、不生成代码、不提交 iCode、不触发 iPipe。字段说明见 [项目注册说明](tom-autodev/references/setup.md) 和 [profile schema](tom-autodev/schemas/project-profile.schema.json)。
 
 ### 3. 做只读预检
 
@@ -187,133 +149,230 @@ python3 tom-autodev/scripts/install_links.py \
 python3 tom-autodev/scripts/cli.py preflight bgw
 ```
 
-预检核对配置和平台访问能力，并在 `automation` 字段报告本机 Stop-hook 注册情况以及两个 watcher 的命令可用性。cron、launchd 或其他外部调度器没有统一的心跳接口，watcher 的调度配置、当前运行状态和最近成功时间会明确显示为 `unknown`，不能据此推断后台正在值班。若返回 `PROJECT_NOT_READY`，先补齐结果中列出的缺失项；不从目录名称猜测仓库、流水线或环境。
+预检检查项目 profile、平台访问和本机自动化配置。返回结果中的 `automation` 会说明：
 
-### 4. 注册续跑 hook 与后台值班
+- Stop-hook 是否引用 `ide_turn_hook.py`。
+- watcher 命令文件是否存在。
+- watcher 的调度配置、运行状态、最近成功时间。
 
-审批和构建发生在 IDE 之外，需要两处“值班”把结果接回来，否则 run 会一直停在关口等待（对照上面的[协作图](#参与者与协作进程视角) ②–⑥）：
+cron、launchd 或其他外部调度器没有统一心跳接口，所以 watcher 的后三项可能是 `unknown`。`preflight` 不会安装、启动或唤醒任何进程。返回 `PROJECT_NOT_READY` 时，先按 `missing` 修复配置。
 
-- **Stop-hook**：把 [ide_turn_hook.py](tom-autodev/scripts/ide_turn_hook.py) 注册到 `~/.comate/hooks.json` 的 `Stop` 事件；仍存活的会话停止时它可消费已批准的 handoff。它依赖宿主会话继续存在，不能唤醒已经结束的会话。
-- **两个 watcher**：常驻运行，或用 cron/launchd 定时跑 `--once`。如流网关需要 Node.js、配置好的机器人和审批成员。
+### 4. 配置审批续跑和 watcher
+
+这一步用于自动接收如流和 iPipe 结果；手动执行 `continue` 时仍可继续运行。
+
+- 将 [ide_turn_hook.py](tom-autodev/scripts/ide_turn_hook.py) 注册到 `~/.comate/hooks.json` 或 `~/.comate/hooks.local.json` 的 `Stop` 事件。
+- 运行审批 watcher，消费如流回应、落 resume handoff：
+
+  ```bash
+  python3 tom-autodev/scripts/cli.py watch-approvals --interval 10
+  ```
+
+- 运行 iPipe watcher，轮询构建并发送状态通知：
+
+  ```bash
+  python3 tom-autodev/scripts/cli.py watch-ipipe --interval 60
+  ```
+
+watcher 也可以交给 cron/launchd，使用 `--once` 单次执行。Stop-hook 只能把已批准的 handoff 交回仍存活的 Comate 会话，不能唤醒已经结束的会话。
+
+审批卡投递时，控制器会按需启动本地 Infoflow gateway；凭据从环境变量或 `~/.infoflow_config` 读取。gateway 和 watcher 都不是系统服务，重启或关机后需要由宿主重新拉起。由于如流没有补拉历史消息的统一接口，watcher 停止期间收到的回复可能需要人工用下面的绑定命令落账：
 
 ```bash
-# 消费如流审批回应，落续跑 handoff（不完成模型阶段）
-python3 tom-autodev/scripts/cli.py watch-approvals --interval 10
-# 轮询 iPipe 构建，把成功/失败/人工卡住报到如流
-python3 tom-autodev/scripts/cli.py watch-ipipe --interval 60
+python3 tom-autodev/scripts/cli.py approve APPROVAL_ID APPROVE INPUT_HASH infoflow RUN_ID RESPONDER
 ```
 
-只想跑单次（交给外部调度器）时加 `--once`。hook、worker API 和运维命令见 [操作参考](docs/OPERATIONS.md)。
+## 日常操作
 
-## 日常使用
-
-在 Comate 中调用 `/tom-autodev`，给出明确项目和已确认卡号：
-
-> 使用 BGW 项目处理 iCafe 卡 BGW-1234。核对卡片和验收标准，按 standard 流程推进；需要我审批或决策时暂停并说明对象。
-
-普通流程也可以用同一组 CLI 动作：
+### 启动或继续一张卡
 
 ```bash
-# 一步创建或复用活动 run，驱动到下一个待办
 python3 tom-autodev/scripts/cli.py process BGW-1234 bgw
-
-# 后续可直接使用卡号；有多个活动 run 时会返回候选，不会静默选择。
-# status 在没有活动 run 时显示唯一的终态 run；多个终态历史仍会返回候选
-python3 tom-autodev/scripts/cli.py status BGW-1234
-python3 tom-autodev/scripts/cli.py continue BGW-1234
-python3 tom-autodev/scripts/cli.py stop RUN_ID
 ```
 
-`process` 会复用唯一活动 run；项目不匹配返回 `PROJECT_MISMATCH`，多个候选返回 `AMBIGUOUS_RUN`。只有唯一终态历史时返回 `RUN_ALREADY_TERMINAL`，附 run ID 与终态，不自动重启。`start` + `drive` 仍可分步调用。
+`process` 的行为：
 
-`process`、`drive` 和 `continue` 由 WorkerDriver 推进，遇到 ProducerJob、审批、iPipe 等待、终态或阻塞就返回。ProducerJob 只提交内容 JSON：
+- 没有历史 run：读取 iCafe 快照，创建 run，然后驱动一次。
+- 只有一个活动 run：复用它并继续，不创建新 run。
+- 有多个活动 run，或没有活动 run 却有多个终态历史：返回 `AMBIGUOUS_RUN`，要求明确 run ID。
+- 项目与已有 run 不一致：返回 `PROJECT_MISMATCH`。
+- 只有唯一终态 run：返回 `RUN_ALREADY_TERMINAL`，不自动重启。
+
+需要分步控制时使用：
 
 ```bash
-python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
+python3 tom-autodev/scripts/cli.py start CARD PROJECT
+python3 tom-autodev/scripts/cli.py drive CARD_OR_RUN
 ```
 
-`draft.json` 只包含当前 schema 要求的 DraftContent。worker 负责封装产物、校验、审批绑定和状态迁移。需要审批时，`submit-draft` 自动用保存草案的 gate 和精确输入指纹发起审批，成功返回 `PARKED / APPROVAL_WAIT` 与 `draft_saved: true`；不会自动批准。投递失败会返回错误，已保存草案仍保留，用 `continue` 重试。审批后再次 `continue`，复用已保存草案。
-
-`status` 默认输出阶段、待办、责任方、当前模型任务的 job ID / schema / 草案状态和下一步；终态明确显示“已完成”或“已停止”，不再显示历史审批为当前待办。`status TARGET --json` 输出完整事件流，供维护和恢复使用。查看当前固定输入和任务合同用只读查询：
+### 查看进度和当前任务
 
 ```bash
-python3 tom-autodev/scripts/cli.py context BGW-1234
+python3 tom-autodev/scripts/cli.py status CARD_OR_RUN
+python3 tom-autodev/scripts/cli.py context CARD_OR_RUN
 ```
 
-`context` 返回当前 action 的输入产物引用、版本、schema、任务模式和 ProducerJob 状态（含已保存草案标记）；不输出草案正文、不执行阶段、不创建任务或审批。输入产物正文用 `artifact show ARTIFACT_ID` 读取，mode 为 `merged` 的 SPEC 需交 `{spec, dag}`。
+`status` 显示阶段、状态、等待对象、责任方、ProducerJob 的 job/schema/草案状态和下一步。终态会显示“已完成”或“已停止”，不会把历史审批当成当前待办。
 
-`resume RUN_ID` 只读取检查点和未确认的外部操作，不驱动运行。高级恢复、watcher 和维护命令见 [操作参考](docs/OPERATIONS.md)。
+`context` 是只读查询，显示当前 action 的固定输入、前驱产物引用、版本、schema、任务模式和 ProducerJob 状态。它不会执行阶段、恢复 SUBMIT、写 action 缓存、创建任务或输出草案正文。读取产物正文时使用：
 
-## 停下来时怎么办
-
-| 看到的状态或原因 | 含义与下一步 |
-|---|---|
-| `PRODUCER_WAIT` | 等模型草案。回到 Comate 处理该 job；不重复创建 run |
-| `DRAFT_SCHEMA_INVALID` / `TASK_ID_MISMATCH` | 草案在锁定前被拒绝，可对同一 job 提交修正版；历史无效草案会先归档拒绝原因，再重开 job，修正版重新绑定审批 |
-| `APPROVAL_WAIT` / `APPROVAL_REQUIRED` | 等具体内容获批。确认仓库、版本、动作和指纹后审批 |
-| `REVIEW_INCOMPLETE` / `REVIEW_NEEDS_CLARIFICATION` | 补全审查范围，或请需求负责人回答明确的问题 |
-| `PROJECT_NOT_READY` / `BASELINE_UNVERIFIED` | 补配置或匹配的基线证据，不跳过检查 |
-| `WORKFLOW_SPEC_DRIFT` / `PROFILE_CONFLICT` | 运行中使用的规则或配置改变；核对版本，走相应恢复/重绑定流程 |
-| `PIPELINE_PLAN_REQUIRED` / `PIPELINE_PLAN_PROFILE_MISMATCH` / `REVISION_UNRESOLVED` / `REVISION_AMBIGUOUS` | 计划缺失、配置不匹配或仓库版本不完整；补齐当前评审和提交证据，再生成匹配计划。升级前已进入 IPIPE、仅缺 `pipeline_plan` 的历史 run 用 `recover-legacy-pipeline-plan` 从其获审提交回填冻结计划 |
-| `WORKER_LEASE_HELD` | 当前 run 已有 worker 驱动，避免并发启动第二个 |
-| iPipe 未结束 / `RELEASE_WAITING` | 等平台结果或指定发布流程；轮询超时不等于业务测试失败 |
-| `RELEASE_INGEST_REQUIRED` | 通用 `advance` 不能认定发布成功；由 worker 或发布证据摄取入口核验完整计划与平台回执 |
-| 外部操作结果不明 | 先核对平台和回执，不能直接重发提交或重跑 |
-
-本次控制策略版本为 `workflow-spec-v2`。升级前已开始的 v1 run 会被漂移守卫阻断；可在原版本完成旧 run，或在新版本重新启动并审批。没有版本 pin 的历史 run 仍可查询、停止和读取已完成回执，但没有冻结计划时不能新增发布成功记录。若旧 run 只是缺少 `pipeline_plan`（升级前已进入 IPIPE），可用 `recover-legacy-pipeline-plan` 从它自己获审的提交确定性回填冻结计划——该恢复不重新审批、不产生外部副作用，在途旧构建按模块重跑。除此之外没有自动迁移旧审批的工具；不要直接修改数据库里的版本 hash。
-
-故障签名也带版本：新的 v2 保留错误码和测试 case 身份，仅去除有明确含义的构建噪声。旧记录原样保留，不自动与 v2 合并；历史清点命令和兼容边界见[故障签名说明](tom-autodev/references/failure-signatures.md)。
-
-### 当前边界
-
-- 当前入口支持 Comate，生产运行依赖配置好的内网平台；仓库没有可直接启动的独立后台 LLM 服务。
-- 每个任务绑定一个业务仓和一个独立产品测试仓。多业务仓需求需拆成可独立验证的兼容步骤；不可拆分的跨仓原子任务仍需扩展运行时。
-- 发布阶段校验指定 build 的发布结果。worker 不会在 `RELEASE_WAITING` 时自行绕过平台发布流程。
-- 诊断可在无补丁时提交修复提案，经 G6 后进入 PLAN/IMPLEMENT；实际改动仍需独立 G5。源码 Review 失败使用空的流水线身份，iPipe 失败必须匹配真实失败证据。单 run 修复预算从持久化历史计算，达到上限停止或升级；历史合同问题的处理见 [整合报告](SKILL_CONSOLIDATION.md#控制器问题的后续处理)。
-
-## 目录与 skill 分工
-
-```text
-tom-autodev-suite/
-├── README.md / CHANGELOG.md      # 使用入口与变更记录
-├── docs/OPERATIONS.md            # worker 接入、审批、恢复与运维
-├── evals/                       # 可重复的 skill 行为场景
-├── tom-autodev/                  # 控制面、schema、平台 adapter
-│   ├── SKILL.md
-│   ├── scripts/                 # workflow_spec、worker、状态存储与测试
-│   ├── schemas/
-│   └── references/
-└── tom-*/                       # 同级的阶段、语言和项目 skill
+```bash
+python3 tom-autodev/scripts/cli.py artifact show ARTIFACT_ID
 ```
 
-| 分工 | Skill |
-|---|---|
-| 流程入口、项目注册 | `tom-autodev` |
-| 澄清、行为设计、任务拆解 | `tom-grill`、`tom-spec`、`tom-tasks` |
-| 计划、实现、双轴评审 | `tom-plan`、`tom-implement`、`tom-review` |
-| 失败诊断、独立远程排障 | `tom-diagnose` |
-| 语言规则 | `tom-lang-c-cpp`、`tom-lang-npl` |
-| 仓库、环境与项目合同 | `tom-project-bgw`、`tom-project-xflow` |
+### 填写 ProducerJob
 
-多个 skill 不意味着每个都要单独调用模型：standard 的 Spec/DAG 共用一轮，Review 两个轴也可在同一轮完成。保留职责边界能按需加载知识；合并和退役决定见 [整合报告](SKILL_CONSOLIDATION.md)。
+当 `process`、`drive` 或 `continue` 返回 `PRODUCER_WAIT`：
+
+1. 从返回结果或 `context` 读取 `job_id`、skill、schema、模式和固定输入。
+2. 按对应 child skill 生成一个 `DraftContent` JSON 文件。
+3. 提交内容：
+
+   ```bash
+   python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
+   ```
+
+4. 如果需要审批，CLI 会自动发起精确绑定的审批，返回 `PARKED / APPROVAL_WAIT`。
+5. 人工批准后执行 `continue CARD_OR_RUN`；worker 会复用已保存草案，不重新生成。
+
+merged 模式的 SPEC 草案必须是：
+
+```json
+{"spec": {"...": "..."}, "dag": {"...": "..."}}
+```
+
+提交错误时，先按错误码修正同一个 job。输入漂移、外部结果不明或项目配置冲突时，先处理阻断原因。
+
+### 继续、停止和只读检查
+
+```bash
+python3 tom-autodev/scripts/cli.py continue CARD_OR_RUN
+python3 tom-autodev/scripts/cli.py stop CARD_OR_RUN
+python3 tom-autodev/scripts/cli.py resume RUN_ID
+```
+
+- `continue`：消费有效审批 handoff，或从持久化检查点继续驱动。
+- `stop`：记录停止事件，保留产物、审批、工作区和回执。
+- `resume`：只读检查点和未确认的外部操作，不执行阶段。
+- `status TARGET --json`：查看完整事件 JSON，供维护和恢复使用。
+
+## 审批、iPipe 和恢复
+
+### 审批原则
+
+审批不是一句“同意”，而是对某个 `run`、动作、版本和 `input_hash` 的授权。内容、revision、参数或配置改变后，旧审批不能复用。
+
+| Gate | 审批对象 |
+|---|---|
+| G0 | 需求卡、项目、变更类别和协作绑定 |
+| G1/G2/G3 | 澄清、Spec、测试接口、环境要求和任务 DAG |
+| G4/G5 | 当前任务计划、业务与产品测试候选改动 |
+| G6 | 诊断结论和修复方向 |
+| G7/G8 | iCode 提交、iPipe 初次触发、失败阶段重跑 |
+| G9 | 发布动作和版本证据 |
+| G10 | 终态后对控制面自身的优化提案 |
+
+普通使用者直接在如流审批即可。维护人员可查看参数：
+
+```bash
+python3 tom-autodev/scripts/cli.py request-approval --help
+python3 tom-autodev/scripts/cli.py approve --help
+python3 tom-autodev/scripts/cli.py await-approval --help
+python3 tom-autodev/scripts/cli.py reissue-approval --help
+```
+
+### iPipe 结果
+
+iPipe 是编译、测试和发布证据的来源。运行失败或进入人工阶段时：
+
+1. 先读取项目 skill 中的流水线和参数映射。
+2. 使用 `ipipe-rerun` 或 `ipipe-adopt` 的显式入口。
+3. 核对 build、job、revision、模块、环境和失败签名。
+4. 通过匹配的 G8 审批后再重跑或继续。
+
+```bash
+python3 tom-autodev/scripts/cli.py ipipe-rerun --help
+python3 tom-autodev/scripts/cli.py ipipe-adopt --help
+python3 tom-autodev/scripts/cli.py ai-review --help
+```
+
+`ipipe-rerun` 的 `--parameter` 接受参数名，值由本次运行的产品和提交证据推导；不是任意 `NAME=VALUE`。平台 AI Review 的建议仍需逐条核对，不能直接作为修改指令。
+
+### 中断、失败和配置变化
+
+先查看状态，再选择动作：
+
+| 状态或错误 | 处理方式 |
+|---|---|
+| `PRODUCER_WAIT` | 回到 Comate 填当前 job，不创建新 run |
+| `APPROVAL_WAIT` / `APPROVAL_REQUIRED` | 等如流审批；审批后 `continue` |
+| `DRAFT_SCHEMA_INVALID` / `TASK_ID_MISMATCH` | 修正同一 job 的草案 |
+| `REVIEW_INCOMPLETE` / `REVIEW_NEEDS_CLARIFICATION` | 补齐 Review 范围或回答问题 |
+| `PROJECT_NOT_READY` / `BASELINE_UNVERIFIED` | 补配置或基线证据 |
+| `WORKFLOW_SPEC_DRIFT` / `PROFILE_CONFLICT` | 恢复兼容版本或执行显式 re-pin |
+| `PIPELINE_PLAN_REQUIRED` / `PIPELINE_PLAN_PROFILE_MISMATCH` / `REVISION_UNRESOLVED` / `REVISION_AMBIGUOUS` | 补齐冻结计划、仓库 revision 或匹配的配置；控制器不会猜远端 HEAD |
+| `WORKER_LEASE_HELD` | 等当前 worker 完成，不并发驱动同一 run |
+| iPipe 未结束 / `RELEASE_WAITING` | 等平台结果，不把超时当成失败 |
+| `RELEASE_INGEST_REQUIRED` | 使用发布证据摄取入口核验完整计划和平台回执，不能用通用迁移命令认定发布成功 |
+| 外部操作结果不明 | 先查平台和持久化 intent，不要直接重发 |
+
+只在对应场景使用恢复命令：
+
+```bash
+python3 tom-autodev/scripts/cli.py recover-rebuilt-change-set --help
+python3 tom-autodev/scripts/cli.py recover-stale-submit --help
+python3 tom-autodev/scripts/cli.py recover-stale-rebuilt-plan --help
+python3 tom-autodev/scripts/cli.py recover-legacy-pipeline-plan --help
+python3 tom-autodev/scripts/cli.py repin-profile --help
+python3 tom-autodev/scripts/cli.py abandon-intent --help
+```
+
+`recover-legacy-pipeline-plan` 只用于升级前已进入 IPIPE、但缺少冻结 `pipeline_plan` 的历史 run。它从该 run 自己获审的提交和固定 profile 重建计划，不提交、不发布、不审批、不调用 runtime；旧 build 会按模块重新核验。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录解除阻断。
+
+### 终态后优化
+
+G10 只针对 Tom Autodev 自己的控制面，属于终态后的可选动作，不参与业务交付主路径：
+
+```bash
+python3 tom-autodev/scripts/cli.py optimize RUN_ID build
+python3 tom-autodev/scripts/cli.py optimize RUN_ID propose --summary SUMMARY.json --allowed-root /path/to/tom-autodev
+python3 tom-autodev/scripts/cli.py optimize RUN_ID apply --proposal-id PROPOSAL_ID --approval-id APPROVAL_ID
+```
+
+候选必须来自已归档的 `RunSummary`，目标只能在批准的 tom-autodev 控制面目录内。G10 审批绑定候选 hash；校验失败会回滚。它不能修改业务仓、项目 profile、iPipe pipeline、发布规则或外部 skill。
+
+默认状态库是 `~/.tom-autodev/state.sqlite`。使用自定义目录时，把 `--config-root` 放在子命令前，并在后续命令保持一致；Stop-hook 默认读取 `~/.tom-autodev`，自定义目录还要同步配置宿主集成：
+
+```bash
+python3 tom-autodev/scripts/cli.py --config-root /path/to/autodev-state status RUN_ID
+```
+
+## 产物、知识和版本保证
+
+本地归档产物是恢复和校验依据；KU/iCafe 用于协作和知识检索。当前协作写入范围：
+
+| 阶段 | 写入 |
+|---|---|
+| INTAKE、RELEASE | KU 与 iCafe |
+| SPEC | KU |
+| IPIPE | iCafe 里程碑 |
+| GRILL、TASKS、PLAN、IMPLEMENT、REVIEW、DIAGNOSE | 本地产物，不逐阶段写 KU/iCafe |
+
+所有动作都绑定来源事件、输入 hash、前驱产物和版本。完成所有任务后，控制器生成冻结的 `pipeline_plan`，明确模块、仓库 revision、依赖、流水线和环境；iPipe 与发布校验只认这份计划。配置、workflow 或代码规则漂移会阻断新的写操作，不能删除 hash 绕过。
+
+## 当前边界
+
+- 当前入口支持 Comate，没有独立常驻的后台 LLM 服务。
+- 生产运行依赖内网 iCafe、iCode、KU、如流和 iPipe 配置。
+- 一个任务绑定一个业务仓和一个独立产品测试仓；复杂跨仓需求要拆成可独立验证的任务。
+- `STOPPED` 表示运行被停止，不表示交付成功。
+- 控制面测试使用临时仓库、隔离状态和模拟平台，不等于 BGW/XFlow 已完成真实平台验收。
 
 ## 维护与验证
 
-**评审这套工作流本身时，先用 [套件评审与退出标准](docs/WORKFLOW_EXIT_CRITERIA.md) 固定范围和结束条件。** 它定义必要场景、缺陷分级、证据要求、最多两轮修复复核的默认预算，以及何时停止、何时重开；预算用尽但阻断未解决时必须报告未完成。控制面验收、模型资格和真实平台资格分别记录，不能互相替代。
+评审套件本身时，先读取 [套件评审与退出标准](docs/WORKFLOW_EXIT_CRITERIA.md)，固定范围、代码基线和证据要求。控制面验收、模型资格和真实平台资格分别记录，不能互相替代。
 
-仓库 `AGENTS.md`、`CLAUDE.md`、`GEMINI.md` 和两个相关 skill 入口都指向同一份标准。支持这些约定的工具可自动发现；其他工具需提供标准全文。以后可以直接说：
-
-> 按 `docs/WORKFLOW_EXIT_CRITERIA.md` 评审本套件，先固定本轮完整 commit 和范围，按模板报告证据与未覆盖项；修复后仅复核影响面，满足退出条件就停止。
-
-缺少标准版本/hash、代码基线或证据的报告不计为验收通过。目前这是仓库指令和报告验收约定，尚未接入 CI/分支保护；不会强制任意模型读取或遵守。
-
-评审记录：
-- [2026-09-22 有界评审与修复](docs/reviews/2026-09-22-exit-review.md)。五类已确认缺陷触发已修复，控制面 976 项回归通过；完整 C 判为 `INCOMPLETE`，尚需补齐 WF-08 其余可写入口的配置漂移证据。M/P 均未验证。
-- [2026-09-23 独立复审（GAP-WF08 定向取证）](docs/reviews/2026-09-23-independent-c-review.md)。第二份独立评审，逐入口核对 GAP-WF08 所列可写入口后未发现新的确认 P0/P1/P2，其 C 必要证据已具备（仅一项 P3 一致性观察 IR-01）；是否据此将 C 收为 `PASS` 并关闭 `GAP-WF08` 属负责人决定，M/P 仍未验证。所审代码与首次评审 target 逐字节一致。
-
-后续按报告中的具体任务继续，不重复开展开放式全仓评审。
-
-从仓库根目录运行套件自身测试：
+从仓库根目录运行套件自身检查：
 
 ```bash
 python3 -m unittest discover -s tom-autodev/scripts/tests -p 'test_*.py' -q
@@ -322,6 +381,10 @@ bash tom-diagnose/tests/test_autodebug.sh
 git diff --check
 ```
 
-这些测试使用临时仓库、隔离状态或模拟平台，不等于 BGW/XFlow 已通过真实业务测试。模型/提示词变更还需运行 [8 个行为场景](evals/README.md)，比较决定、输出合同与误报，而非文字相似度。
+模型或 skill 变更还需运行 [行为场景](evals/README.md)。进一步阅读：
 
-进一步阅读：[更新记录](CHANGELOG.md) · [操作参考](docs/OPERATIONS.md) · [Producer 合同](tom-autodev/references/producer-contract.md) · [skill 整合与遗留问题](SKILL_CONSOLIDATION.md)
+- [操作参考](docs/OPERATIONS.md)
+- [Producer 合同](tom-autodev/references/producer-contract.md)
+- [项目注册说明](tom-autodev/references/setup.md)
+- [更新记录](CHANGELOG.md)
+- [套件评审与退出标准](docs/WORKFLOW_EXIT_CRITERIA.md)
