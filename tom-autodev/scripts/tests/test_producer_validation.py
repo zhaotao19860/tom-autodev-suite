@@ -332,3 +332,19 @@ class ProducerValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BridgeDocumentationContractTests(unittest.TestCase):
+    def test_skill_normal_path_uses_bridge_commands(self):
+        skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text(encoding="utf-8")
+        section = skill.split("## Start and Continue", 1)[1].split("## Workflow", 1)[0]
+        for command in ("start", "drive", "status", "continue", "stop"):
+            self.assertIn(command, section)
+        self.assertNotIn("call `complete-phase`", section)
+        self.assertNotIn("call `next`", section)
+
+    def test_producer_contract_is_content_only_and_names_submit_draft(self):
+        contract = (Path(__file__).resolve().parents[2] / "references" / "producer-contract.md").read_text(encoding="utf-8")
+        self.assertIn("submit-draft", contract)
+        self.assertIn("DraftContent", contract)
+        self.assertIn("does not call `advance`", contract)
+        self.assertIn("does not call `advance`, `complete-phase`", contract)

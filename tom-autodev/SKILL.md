@@ -23,12 +23,22 @@ This is a Comate-only entrypoint. There is no alternate host or entrypoint. The 
 
 Register a new project or language once before this skill can process its requirements. Setup is a one-time, human-supervised operation that produces a validated profile at `~/.tom-autodev/config/projects/<project>.yaml`; it never starts a run, generates code, submits iCode, or triggers iPipe. Only a `READY` profile allows `start`. See [`references/setup.md`](references/setup.md).
 
-## Start and Resume
+## Start and Continue
 
-1. Require an explicit project and human-confirmed iCafe card.
-2. Load project/language skills and profile.
-3. Read the iCafe snapshot through the iCafe boundary, then call `start(requirement_id, project, requirement_snapshot=...)`; use `status`, `approve`, `resume`, or `stop` for an existing run. `resume` only returns a checkpoint and lists uncertain external intents to reconcile; it never executes or completes a phase.
-4. Return `PROJECT_NOT_READY` when the profile, independent test repo, Review provider, stable iPipe profile, environment profile, or approval channel is missing.
+Use this as the ordinary command path; run commands from the suite root (or use its installed `cli.py` path):
+
+| User intent | Action |
+|---|---|
+| Start a confirmed requirement | `python3 tom-autodev/scripts/cli.py start CARD PROJECT`, then `drive CARD` |
+| See progress | `status CARD_OR_RUN` |
+| Continue after approval or a pause | `continue CARD_OR_RUN` |
+| Stop a run | `stop RUN_ID` |
+
+Confirm the project and iCafe card with the user before starting. If the card maps to multiple runs, show the candidates and ask which run to use; never pick one from recency or chat context. `start` reads the iCafe snapshot and reuses the registered project profile. A `PROJECT_NOT_READY` response means setup is required; see [`references/setup.md`](references/setup.md).
+
+`drive` and `continue` let WorkerDriver own sequencing and stop at a ProducerJob, approval, remote wait, terminal state, or actionable block. When it returns a ProducerJob, load that job's pinned inputs, result schema, and applicable child skill, produce only its DraftContent, and submit it with `submit-draft CARD_OR_RUN JOB_ID DRAFT.json`. For `APPROVAL_REQUIRED`, request the returned gate and exact `approval_input_hash` through `request-approval`; do not change or regenerate the saved candidate. After approval, call `continue` so the worker consumes the handoff and saved draft.
+
+`resume RUN_ID` remains a read-only checkpoint and uncertain-intent inspection command. It does not drive a run. Do not use `next` or `complete-phase` to sequence normal work; advanced recovery and manual controls are in [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md). Keep iCafe/project confirmation, human approvals, and final delivery confirmation with the user.
 
 Do not infer projects from directories or bind iCafe cards without confirmation.
 
