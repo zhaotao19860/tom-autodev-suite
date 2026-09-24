@@ -94,6 +94,14 @@ class CliOperationTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["worker_reason_code"], "PARKED")
 
+
+    def test_stop_accepts_card_target_and_resolves_unique_run(self):
+        from test_orchestrator import _start
+        card_run = _start(self.orchestrator, "BGW-STOP-1")
+        code, result = self._run("stop", "BGW-STOP-1")
+        self.assertEqual((code, result["state"]), (0, "STOPPED"))
+        self.assertEqual(result["run_id"], card_run["run_id"])
+
     def test_resume_remains_read_only_and_does_not_construct_bridge(self):
         with patch("agent_bridge.AgentBridge") as bridge:
             code, result = self._run("resume", self.run_id)

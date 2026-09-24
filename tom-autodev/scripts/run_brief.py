@@ -11,6 +11,28 @@ from typing import Any
 
 from approval_ledger import gate_of
 
+_TERMINAL_SUCCESS = {"RELEASE_SUCCESS", "STOPPED"}
+
+
+def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str, Any]], pending: list[dict[str, Any]], blocked: str | None) -> str:
+    if state == "RELEASE_SUCCESS":
+        return "已完成"
+    if state == "STOPPED":
+        return "已停止"
+    if open_gates:
+        return "待审批"
+    if action.get("child_skill") is not None:
+        return "待生成"
+    if action.get("required_human_gate"):
+        return "待审批"
+    if pending or blocked == "RECOVERY_REQUIRED":
+        return "待恢复"
+    if blocked:
+        return "已阻塞"
+    if state == "IPIPE":
+        return "等待 iPipe"
+    return "待处理"
+
 # What each phase asks for, in the words a person would use.
 _WORK: dict[str, str] = {
     "INTAKE": "建立需求快照与协作绑定",
@@ -91,9 +113,11 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         and row["created_at"] >= current["created_at"]
         and row.get("resolved_at")
     ), None)
+    status_label = _status_label(current["state"], action, open_gates, pending, blocked)
     return {
         "run_id": run_id,
         "state": current["state"],
+        "status_label": status_label,
         "since": current.get("created_at"),
         "phases_done": sum(1 for event in events[1:]),
         "waiting_on": open_gates,
@@ -119,14 +143,13 @@ def _next_step(
     An open gate outranks everything else: the phase cannot land until it is
     answered, so telling the operator to keep working would be wrong.
     """
+    if state in {"RELEASE_SUCCESS", "STOPPED"}:
+        return {"owner": "-", "text": "运行已结束，无后续动作"}
     if open_gates:
         gate = open_gates[0]
         return {
             "owner": "你",
-            "text": (
-                f"在如流回复 APPROVE {gate['approval_id']} 或 REJECT {gate['approval_id']}"
-                f"（{gate['action']} 门，截止 {gate['deadline_at']}）"
-            ),
+            "text": f"在如流审批卡中批准或驳回（{gate['action']} 门，截止 {gate['deadline_at']}）",
         }
     if blocked == "RECOVERY_REQUIRED" or pending:
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
@@ -147,12 +170,7 @@ def _next_step(
             }
         return {
             "owner": "Comate",
-            "text": (
-                f"{approved['action']} 已批准待提交：读取已保存的真实产物，核验审批 "
-                f"{approved['approval_id']} 与候选 approval_input_hash 完全一致后 "
-                "complete-phase（不是 iCode 提交）；缺失或不匹配则阻塞，"
-                "不要重复 resume、生成产物或开同一审批"
-            ),
+            "text": f"{approved['action']} 已批准；调用 continue，由 worker 复用已保存内容并执行下一步",
         }
     work = _WORK.get(state, state)
     gate = action.get("required_human_gate")
@@ -167,12 +185,12 @@ def render(brief: dict[str, Any]) -> str:
     if brief.get("state") == "RUN_NOT_FOUND":
         return f"运行 {brief['run_id']} 不存在。"
     lines = [
-        f"运行 {brief['run_id'][:12]}… 当前阶段 {brief['state']}",
+        f"运行 {brief['run_id'][:12]}… 当前阶段 {brief['state']}（{brief.get('status_label', '待处理')}）",
         f"最近一次状态变更 {brief.get('since') or '-'}",
     ]
     if brief["waiting_on"]:
         lines.append("等待审批：" + "、".join(
-            f"{gate['action']}（{gate['approval_id'][:8]}…，截止 {gate['deadline_at']}）"
+            f"{gate['action']}（截止 {gate['deadline_at']}）"
             for gate in brief["waiting_on"]
         ))
     else:

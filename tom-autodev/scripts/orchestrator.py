@@ -2718,7 +2718,7 @@ def main(argv: list[str] | None = None) -> int:
     submit_draft.add_argument("draft_json")
 
     stop = subparsers.add_parser("stop")
-    stop.add_argument("run_id")
+    stop.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
 
     next_action = subparsers.add_parser("next")
     next_action.add_argument("run_id")
@@ -2903,12 +2903,16 @@ def main(argv: list[str] | None = None) -> int:
                 args.requirement_id, args.project, requirement_snapshot=snapshot
             )
     elif args.command == "status":
-        if args.json:
-            result = orchestrator.status(args.run_id)
+        from agent_bridge import resolve_run_target
+        resolved = resolve_run_target(orchestrator, args.run_id)
+        if not resolved.get("ok"):
+            result = resolved
+        elif args.json:
+            result = orchestrator.status(resolved["run_id"])
         else:
             from run_brief import build, render
 
-            print(render(build(orchestrator, args.run_id)))
+            print(render(build(orchestrator, resolved["run_id"])))
             return 0
     elif args.command == "approve":
         result = orchestrator.approve(args.approval_id, args.decision, args.input_hash, args.channel, args.run_id, args.responder)
@@ -2938,7 +2942,9 @@ def main(argv: list[str] | None = None) -> int:
                 resolved["run_id"], args.job_id, draft
             )
     elif args.command == "stop":
-        result = orchestrator.stop(args.run_id)
+        from agent_bridge import resolve_run_target
+        resolved = resolve_run_target(orchestrator, args.target)
+        result = orchestrator.stop(resolved["run_id"]) if resolved.get("ok") else resolved
     elif args.command == "next":
         result = orchestrator.next(args.run_id)
     elif args.command == "recover-rebuilt-change-set":

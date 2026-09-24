@@ -207,54 +207,32 @@ python3 tom-autodev/scripts/cli.py watch-ipipe --interval 60
 
 ## 日常使用
 
-### 开始一个新需求
+在 Comate 中调用 `/tom-autodev`，给出明确项目和已确认卡号：
 
-在 Comate 中调用 `/tom-autodev`，给出明确项目和卡号：
+> 使用 BGW 项目处理 iCafe 卡 BGW-1234。核对卡片和验收标准，按 standard 流程推进；需要我审批或决策时暂停并说明对象。
 
-> 使用 BGW 项目处理 iCafe 卡 BGW-1234。核对卡片和验收标准，按 standard 流程推进，在需要我决策或审批时给出具体内容。
-
-上面的卡号是示例。没有验收标准时由 Grill 澄清；已有标准直接作为输入，不重新登记项目。
-
-也可以通过 CLI 启动；它会通过 iCafe 客户端读取卡片快照：
+普通流程也可以用同一组 CLI 动作：
 
 ```bash
-# 替换为已确认的实际卡号；返回值中包含 run_id
+# start 会读取 iCafe 快照并创建本次 run
 python3 tom-autodev/scripts/cli.py start BGW-1234 bgw
+
+# 后续可直接使用卡号；有多个活动 run 时会返回候选，不会静默选择
+python3 tom-autodev/scripts/cli.py drive BGW-1234
+python3 tom-autodev/scripts/cli.py status BGW-1234
+python3 tom-autodev/scripts/cli.py continue BGW-1234
+python3 tom-autodev/scripts/cli.py stop RUN_ID
 ```
 
-**`start` 只创建本次运行，不会启动一个后台模型进程。** 后续由 Comate 中的 Agent 与 worker 协同：模型填写草案，worker 校验并推进；需要审批时，你在 Comate 或如流对展示的内容作出决定。
-
-### 查询或继续已有需求
+`drive` 和 `continue` 由 WorkerDriver 推进，遇到 ProducerJob、审批、iPipe 等待、终态或阻塞就返回。ProducerJob 只提交内容 JSON：
 
 ```bash
-RUN_ID='替换为本次运行的 run_id'
-python3 tom-autodev/scripts/cli.py status "$RUN_ID"
-python3 tom-autodev/scripts/cli.py next "$RUN_ID"
-python3 tom-autodev/scripts/cli.py resume "$RUN_ID"
+python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
 ```
 
-- `status`：查看当前阶段和等待事项；加 `--json` 可看完整事件数据。
-- `next`：查询下一步要求，不执行该动作。
-- CLI `resume`：读取检查点和结果不明的外部操作，供恢复判断；实际继续由 worker 完成。
+`draft.json` 只包含当前 schema 要求的 DraftContent。worker 负责封装产物、校验、审批绑定和状态迁移。`APPROVAL_REQUIRED` 返回的 gate 与 `approval_input_hash` 必须原样交给现有审批路径；审批后再次 `continue`，不会重新生成已保存草案。
 
-在 Comate 中可以直接说：
-
-> 继续 run `<run_id>`。先核对已保存的草案、审批和实际工作区，只完成尚未完成的工作。
-
-已配置 Stop hook 且 Comate 会话仍存活时，审批可触发续跑；会话结束后仍需要重新进入宿主。hook、worker API 和运维命令见 [操作参考](docs/OPERATIONS.md)。
-
-### 选择流程复杂度
-
-变更类别在启动时确定，并纳入 G0 的内容绑定。
-
-| 类别 | 适用情况 | 与默认流程的差别 |
-|---|---|---|
-| `standard` | 常规需求，默认 | Spec 与 DAG 一次生成、一起审批 |
-| `full` | 设计或依赖复杂，需要分开确认 | Spec 与 DAG 分别生成、分别审批 |
-| `express` | 验收条件已明确的小修复 | 自动生成澄清结果，保留 Spec/DAG、计划和后续检查 |
-| `hotfix` | 紧急修复 | 在 express 基础上免去计划自身的 G4；仍产计划，保留工作区 G4 |
-
-G5 改动审批、G7 提交/初始流水线触发、G9 发布相关审批仍保留。审批次数由实际动作及模块决定；同一个 G7 标签不表示所有后续动作共享一笔审批。完整 gate 表见 [操作参考](docs/OPERATIONS.md#审批编号)。
+`status` 默认输出阶段、待办、责任方和下一步；`status TARGET --json` 输出完整事件流，供维护和恢复使用。`resume RUN_ID` 只读取检查点和未确认的外部操作，不驱动运行。高级恢复、watcher 和维护命令见 [操作参考](docs/OPERATIONS.md)。
 
 ## 停下来时怎么办
 

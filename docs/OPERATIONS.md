@@ -2,20 +2,23 @@
 
 日常入口见 [README](../README.md)。本页面向配置宿主、维护控制器或恢复已有 run 的使用者。除标明的 Python 接入示意外，所有终端命令都从**仓库根目录**执行。
 
-## 三组容易混淆的接口
+## 日常接口与维护接口
 
-| 接口 | 实际作用 |
+| 命令 | 作用 |
 |---|---|
-| `cli.py start REQUIREMENT PROJECT` | 读取 iCafe 快照，创建 run；不启动后台 worker/模型 |
-| `cli.py next RUN` | 查询当前动作和输入要求 |
-| `cli.py resume RUN` | 返回恢复检查点、结果不明的外部 intent；不执行阶段 |
-| Python `worker_driver.advance(...)` | 推进已满足条件的确定性工作，返回草案、审批、平台等待或阻断原因 |
-| Python `worker_driver.resume(...)` | 消费该 run 已结算的审批 handoff，再调用 worker 推进 |
-| Python `worker_driver.submit_draft(...)` | 提交一个 ProducerJob 的内容，由 worker 校验、封装、保存并按策略完成阶段 |
-| `cli.py advance RUN STATE ...` | 维护用的单次状态迁移入口；不能直接写入 `RELEASE_SUCCESS`，发布成功必须经过证据摄取 |
-| `cli.py complete-phase RUN ENVELOPE` | 维护用的产物摄取入口，**不是**子 skill 的草案接口 |
+| `cli.py start CARD PROJECT` | 读取 iCafe 快照并创建 run；不启动后台模型 |
+| `cli.py drive TARGET` | 由 WorkerDriver 驱动到 ProducerJob、审批、远端等待、终态或阻塞；TARGET 可为 run id 或唯一卡号 |
+| `cli.py status TARGET` | 输出紧凑进度摘要；TARGET 可为 run id 或唯一卡号 |
+| `cli.py status TARGET --json` | 输出完整事件 JSON；多 run 卡号会返回候选，不静默选择 |
+| `cli.py continue TARGET` | 消费有效审批 handoff，或从持久化检查点继续驱动 |
+| `cli.py submit-draft TARGET JOB_ID DRAFT_JSON` | 提交当前 ProducerJob 的 DraftContent；文件不能包含 ArtifactEnvelope |
+| `cli.py stop TARGET` | 记录停止请求，保留事件、产物、审批和工作区 |
+| `cli.py resume RUN` | 只读检查点和未确认外部 intent；不执行阶段 |
+| `cli.py next RUN` | 维护/诊断用的只读动作查询；日常流程不要手动按它编排 |
+| `cli.py advance RUN STATE ...` | 维护用的单次状态迁移入口；不能替代 worker |
+| `cli.py complete-phase RUN ENVELOPE` | 维护用的产物摄取入口；不是 ProducerJob 提交接口 |
 
-当前 CLI 没有 `worker` 或 `submit-draft` 子命令。不要把 Python 函数名直接拼成终端命令，也不要让模型自行补写状态库来替代缺失的宿主接入。
+普通流程只需要 `start`、`drive`、`status`、`continue`、`submit-draft` 和 `stop`。`resume` 仍保留原来的只读语义；真实续跑用 `continue`。Producer 只返回 DraftContent，worker 负责 envelope、schema/hash 校验、审批绑定、证据门和外部副作用。审批未送达或输入不一致时，命令返回明确错误，不报告成功。
 
 ## Worker 接入
 
@@ -120,8 +123,8 @@ python3 tom-autodev/scripts/cli.py ai-review --help
 ```bash
 RUN_ID='替换为已有 run_id'
 python3 tom-autodev/scripts/cli.py status "$RUN_ID"
-python3 tom-autodev/scripts/cli.py resume "$RUN_ID"
-python3 tom-autodev/scripts/cli.py next "$RUN_ID"
+python3 tom-autodev/scripts/cli.py resume "$RUN_ID"       # 只读检查点
+python3 tom-autodev/scripts/cli.py continue "$RUN_ID"    # worker 续跑
 ```
 
 外部操作状态不明时，先查询平台并与持久化 intent/回执核对；不要用再次提交“试一下”。IMPLEMENT 恢复时检查实际文件与候选 diff，空 checklist 不意味着之前的编辑没发生。
