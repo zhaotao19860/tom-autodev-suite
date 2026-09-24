@@ -131,6 +131,25 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertTrue(all("state" in item for item in result["candidates"]))
         json.dumps(result)
 
+
+    def test_card_target_ignores_terminal_history_and_resolves_the_single_active_run(self):
+        historical = "11111111111111111111111111111111"
+        active = "22222222222222222222222222222222"
+        card_id = "BGW-ACTIVE"
+        self.orch.state.transition(historical, "INTAKE", {"requirement_id": card_id, "project": "bgw"})
+        self.orch.state.transition(historical, "STOPPED", {"previous_state": "INTAKE"})
+        self.orch.state.transition(active, "INTAKE", {"requirement_id": card_id, "project": "bgw"})
+        from agent_bridge import resolve_run_target
+        result = resolve_run_target(self.orch, card_id)
+        self.assertEqual(result["reason_code"], "OK")
+        self.assertEqual(result["run_id"], active)
+
+    def test_card_target_with_only_terminal_history_returns_not_found(self):
+        self.orch.state.transition(self.run_id, "STOPPED", {"previous_state": "INTAKE"})
+        from agent_bridge import resolve_run_target
+        result = resolve_run_target(self.orch, self.card_id)
+        self.assertEqual(result["reason_code"], "RUN_NOT_FOUND")
+
     def test_run_id_target_is_resolved_directly(self):
         from agent_bridge import resolve_run_target
         result = resolve_run_target(self.orch, self.run_id)

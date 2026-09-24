@@ -54,6 +54,26 @@ class RunBriefTests(unittest.TestCase):
         self.assertNotIn("approval-123456", rendered)
         self.assertNotIn("a" * 64, rendered)
 
+
+    def test_required_gate_without_open_approval_is_not_misreported_as_waiting(self):
+        orch = BriefFixture("INTAKE", {"ok": True, "phase": "INTAKE", "required_human_gate": "G0"})
+        brief = run_brief.build(orch, "run-1")
+        self.assertEqual(brief["status_label"], "待处理")
+        self.assertEqual(brief["next"]["owner"], "Comate")
+
+    def test_approved_candidate_is_ready_for_worker_continue_without_ids_or_hashes(self):
+        approved = {"action": "G2", "approval_id": "approval-secret", "input_hash": "b" * 64,
+                    "effective_decision": "APPROVE", "created_at": "2026-09-24T00:01:00+00:00",
+                    "resolved_at": "2026-09-24T00:02:00+00:00"}
+        orch = BriefFixture("SPEC", {"ok": True, "phase": "SPEC", "required_human_gate": "G2"},
+                            approvals=[approved])
+        brief = run_brief.build(orch, "run-1")
+        self.assertEqual(brief["status_label"], "已批准待提交")
+        rendered = run_brief.render(brief)
+        self.assertIn("continue", rendered)
+        self.assertNotIn("approval-secret", rendered)
+        self.assertNotIn("b" * 64, rendered)
+
     def test_external_intent_recovery_is_actionable(self):
         orch = BriefFixture("SUBMIT", {"ok": False, "reason_code": "RECOVERY_REQUIRED"},
                             pending=[{"operation": "icode.submit", "intent_id": "intent-1"}])

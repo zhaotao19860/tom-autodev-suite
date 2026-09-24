@@ -14,17 +14,17 @@ from approval_ledger import gate_of
 _TERMINAL_SUCCESS = {"RELEASE_SUCCESS", "STOPPED"}
 
 
-def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str, Any]], pending: list[dict[str, Any]], blocked: str | None) -> str:
+def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str, Any]], pending: list[dict[str, Any]], blocked: str | None, approved: dict[str, Any] | None = None) -> str:
     if state == "RELEASE_SUCCESS":
         return "已完成"
     if state == "STOPPED":
         return "已停止"
     if open_gates:
         return "待审批"
+    if approved:
+        return "已批准待提交"
     if action.get("child_skill") is not None:
         return "待生成"
-    if action.get("required_human_gate"):
-        return "待审批"
     if pending or blocked == "RECOVERY_REQUIRED":
         return "待恢复"
     if blocked:
@@ -65,6 +65,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     if not events:
         return {"run_id": run_id, "state": "RUN_NOT_FOUND", "waiting_on": [], "blocked": None}
     current = events[-1]
+    intake = events[0].get("payload") or {}
     action = orchestrator.next(run_id)
     current_gate = action.get("required_human_gate") if action.get("ok") else None
     approvals = orchestrator.approvals.for_run(run_id)
@@ -113,9 +114,11 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         and row["created_at"] >= current["created_at"]
         and row.get("resolved_at")
     ), None)
-    status_label = _status_label(current["state"], action, open_gates, pending, blocked)
+    status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved)
     return {
         "run_id": run_id,
+        "requirement_id": intake.get("requirement_id"),
+        "project": intake.get("project"),
         "state": current["state"],
         "status_label": status_label,
         "since": current.get("created_at"),
@@ -149,7 +152,10 @@ def _next_step(
         gate = open_gates[0]
         return {
             "owner": "你",
-            "text": f"在如流审批卡中批准或驳回（{gate['action']} 门，截止 {gate['deadline_at']}）",
+            "text": (
+                f"在如流回复 APPROVE {gate['approval_id']} 或 REJECT {gate['approval_id']}"
+                f"（{gate['action']} 门，截止 {gate['deadline_at']}）"
+            ),
         }
     if blocked == "RECOVERY_REQUIRED" or pending:
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
@@ -161,16 +167,13 @@ def _next_step(
         if gate == "G7" or state == "SUBMIT":
             return {
                 "owner": "Comate",
-                "text": (
-                    f"{approved['action']} 已批准待提交：核验审批 "
-                    f"{approved['approval_id']} 与 submit descriptor 的 input_hash 完全一致后 "
-                    "执行 cli.py submit（iCode 提交，不是 complete-phase）；"
-                    "缺失或不匹配则阻塞，不要重复 resume 或开同一审批"
-                ),
+                "text": f"{approved['action']} 已批准待提交；调用 continue，由 worker 执行提交并继续",
             }
         return {
             "owner": "Comate",
-            "text": f"{approved['action']} 已批准；调用 continue，由 worker 复用已保存内容并执行下一步",
+            "text": (
+                f"{approved['action']} 已批准待提交；调用 continue，由 worker 复用已保存内容并执行下一步"
+            ),
         }
     work = _WORK.get(state, state)
     gate = action.get("required_human_gate")
@@ -184,10 +187,13 @@ def _next_step(
 def render(brief: dict[str, Any]) -> str:
     if brief.get("state") == "RUN_NOT_FOUND":
         return f"运行 {brief['run_id']} 不存在。"
-    lines = [
+    lines = []
+    if brief.get("requirement_id") or brief.get("project"):
+        lines.append(f"需求 {brief.get('requirement_id') or '-'} · 项目 {brief.get('project') or '-'}")
+    lines.extend([
         f"运行 {brief['run_id'][:12]}… 当前阶段 {brief['state']}（{brief.get('status_label', '待处理')}）",
         f"最近一次状态变更 {brief.get('since') or '-'}",
-    ]
+    ])
     if brief["waiting_on"]:
         lines.append("等待审批：" + "、".join(
             f"{gate['action']}（截止 {gate['deadline_at']}）"
@@ -202,5 +208,12 @@ def render(brief: dict[str, Any]) -> str:
     if brief.get("blocked"):
         lines.append(f"阻塞原因 {brief['blocked']}")
     step = brief["next"]
-    lines.append(f"下一步（{step['owner']}）：{step['text']}")
+    if brief["waiting_on"]:
+        gates = "、".join(sorted({str(item.get("action") or "审批") for item in brief["waiting_on"]}))
+        next_text = f"打开如流审批卡处理 {gates}"
+    elif brief.get("status_label") == "已完成":
+        next_text = "运行已结束，无后续动作"
+    else:
+        next_text = step["text"]
+    lines.append(f"下一步（{step['owner']}）：{next_text}")
     return "\n".join(lines)

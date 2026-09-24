@@ -351,8 +351,9 @@ class RetryConsumerTests(unittest.TestCase):
             responder="owner@example.test", state_store=self.orch.state)
         approved = build_brief(self.orch, self.run_id)
         self.assertEqual(approved["waiting_on"], [])
-        self.assertIn(record["approval_id"], approved["next"]["text"])
+        self.assertNotIn(record["approval_id"], approved["next"]["text"])
         self.assertIn("已批准待提交", approved["next"]["text"])
+        self.assertIn("continue", approved["next"]["text"])
 
     def test_watcher_creates_retry_handoff_that_worker_can_resume(self):
         _, _, input_hash = self._plan_draft()

@@ -252,6 +252,54 @@ class FakeE2ETests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_agent_bridge_drives_card_to_producer_submits_draft_and_consumes_handoff_once(self):
+        # Real WorkerDriver + bridge, with the existing fake iCafe/KU boundaries and
+        # a temporary profile/worktree. Only the approval transport signal is injected.
+        from agent_bridge import AgentBridge, resolve_run_target
+
+        run_id, knowledge, requirement = self._run_to_grill_action(
+            "BGW-BRIDGE-1", "I15ClP2KW4ZGAK", "standard"
+        )
+        bridge = AgentBridge(self.orchestrator, locks=self.orchestrator.recovery.locks)
+        resolved = resolve_run_target(self.orchestrator, "BGW-BRIDGE-1")
+        self.assertEqual(resolved["run_id"], run_id)
+
+        with patch.object(self.orchestrator, "knowledge_sync", return_value=knowledge):
+            first = bridge.drive(run_id)
+            self.assertEqual(first["reason_code"], "PARKED", first)
+            self.assertEqual(first["parked"], worker_driver.PRODUCER_WAIT)
+            producer_job = first["producer_job"]
+            action = self.orchestrator.next(run_id)
+            draft = self._phase_content(action, requirement)
+
+            submitted = bridge.submit_draft(run_id, producer_job["job_id"], draft)
+            self.assertEqual(submitted["reason_code"], "APPROVAL_REQUIRED", submitted)
+            self.assertEqual(submitted["gate"], "G1")
+            self.assertEqual(self.orchestrator.state.producer_job(producer_job["job_id"])["status"], "FULFILLED")
+            self.assertEqual(self.orchestrator.status(run_id)["state"], "GRILL")
+
+            approval = self._approval(run_id, "G1", submitted["approval_input_hash"])
+            handoff_id = f"bridge-resume-{approval['approval_id']}"
+            self.orchestrator.state.record_handoff(run_id, handoff_id, {
+                "kind": "APPROVAL_RESUME", "approval_id": approval["approval_id"],
+                "input_hash": submitted["approval_input_hash"],
+            })
+
+            continued = bridge.continue_run(run_id)
+            self.assertEqual(continued["reason_code"], "PARKED", continued)
+            self.assertEqual(continued["parked"], worker_driver.PRODUCER_WAIT)
+            self.assertEqual(self.orchestrator.status(run_id)["state"], "SPEC")
+            self.assertEqual(len(self.orchestrator.artifacts.phase_artifacts(run_id, "GRILL")), 1)
+            stored_calls = len(knowledge.ku.calls)
+            stored_events = self.orchestrator.state.events(run_id)
+
+            replayed = bridge.continue_run(run_id)
+
+        self.assertEqual(replayed["producer_job"]["job_id"], continued["producer_job"]["job_id"])
+        self.assertEqual(len(knowledge.ku.calls), stored_calls)
+        self.assertEqual(self.orchestrator.state.events(run_id), stored_events)
+        self.assertEqual(len(self.orchestrator.artifacts.phase_artifacts(run_id, "GRILL")), 1)
+
     def test_intake_pins_change_class_and_workflow_spec_version(self):
         # MEDIUM-001: start() freezes the run's control policy into the INTAKE event and
         # binds it into the G0 input hash.

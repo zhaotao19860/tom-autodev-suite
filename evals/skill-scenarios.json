@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "purpose": "Repeat the same decision scenarios when skills, prompts or models change. These are synthetic source-only exercises, not remote execution evidence.",
   "cases": [
     {
@@ -57,6 +57,13 @@
       "request": "BGW project profile and repository bindings are valid; no GitNexus graph exists. Explain what work can proceed and how to record impact evidence.",
       "expected_decisions": ["Proceed with precise source/caller/configuration searches", "Record actual revision/path/symbol and scope limitations", "Do not invent graph queries or KU receipts", "Execution evidence still requires the pinned iPipe environment"],
       "fail_if": ["Returns PROJECT_NOT_READY solely for absent graph", "Requires installing another skill", "Guesses workspaces from a personal absolute path"]
+    },
+    {
+      "id": "bridge-card-start-and-continue",
+      "skills": ["tom-autodev"],
+      "request": "用户明确确认项目 bgw 和 iCafe 卡 BGW-1234。请通过 /tom-autodev 启动并驱动到下一个可执行位置；如果返回 ProducerJob，只提交 DraftContent；如果返回审批，展示准确 gate 和 input_hash 后停止。用户稍后说“继续 BGW-1234”。说明如何查看状态、继续和停止，不要手工编排 next/complete-phase，也不要猜 run 或事件 ID。",
+      "expected_decisions": ["要求显式确认项目和卡片后调用 start", "使用 drive/status/continue/stop 的 card-or-run 目标", "多 run 卡片返回候选并要求选择", "ProducerJob 只通过 submit-draft 提交内容 JSON", "APPROVAL_REQUIRED 原样保留 gate 和 input_hash 并等待审批", "continue 复用持久化 handoff 和已保存草案，不重复外部副作用"],
+      "fail_if": ["从目录或最近会话猜项目/run", "静默选择多个活动 run", "模型自行构造 ArtifactEnvelope 或 approval_id", "手动调用 complete-phase 或 next 编排阶段", "跳过人工审批或声称 iPipe 已成功"]
     }
   ]
 }

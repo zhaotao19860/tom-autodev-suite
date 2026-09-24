@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import worker_driver
 import run_brief
+import workflow_spec
 
 _RUN_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 
@@ -53,7 +54,10 @@ def resolve_run_target(orchestrator: Any, target: str) -> dict[str, Any]:
         if not events:
             continue
         intake = events[0].get("payload") or {}
-        if intake.get("requirement_id") == target:
+        if (
+            intake.get("requirement_id") == target
+            and events[-1].get("state") not in workflow_spec.terminal_states()
+        ):
             matches.append({
                 "run_id": run_id,
                 "state": events[-1].get("state"),
