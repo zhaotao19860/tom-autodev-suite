@@ -19,11 +19,12 @@ import run_brief
 
 
 class BriefFixture:
-    def __init__(self, state, action, *, pending=None, approvals=None, card_id="BGW-1"):
+    def __init__(self, state, action, *, pending=None, approvals=None, card_id="BGW-1", producer_jobs=None):
         self.state = SimpleNamespace(events=lambda run_id: [
             {"run_id": run_id, "state": state, "created_at": "2026-09-24T00:00:00+00:00",
              "payload": {"requirement_id": card_id, "project": "bgw"}},
-        ], pending_intents=lambda run_id: pending or [])
+        ], pending_intents=lambda run_id: pending or [],
+            producer_job=lambda job_id: (producer_jobs or {}).get(job_id))
         self.approvals = SimpleNamespace(for_run=lambda run_id: approvals or [])
         self._action = action
 
@@ -83,11 +84,49 @@ class RunBriefTests(unittest.TestCase):
         self.assertIn("icode.submit", brief["next"]["text"])
 
     def test_terminal_state_is_reported_as_complete(self):
-        orch = BriefFixture("RELEASE_SUCCESS", {"ok": True, "state": "RELEASE_SUCCESS"})
+        old_approval = {"action": "G2", "approval_id": "old-approval", "input_hash": "a" * 64,
+                        "deadline_at": "2026-09-25", "created_at": "2026-09-24"}
+        orch = BriefFixture("RELEASE_SUCCESS", {"ok": False, "reason_code": "TERMINAL_STATE"},
+                            approvals=[old_approval], pending=[{"operation": "old", "intent_id": "i"}])
         brief = run_brief.build(orch, "run-1")
         self.assertEqual(brief["status_label"], "已完成")
+        self.assertIsNone(brief["blocked"])
+        self.assertEqual(brief["waiting_on"], [])
+        self.assertEqual(brief["in_flight"], [])
         self.assertEqual(brief["next"]["owner"], "-")
-        self.assertIn("已完成", run_brief.render(brief))
+        rendered = run_brief.render(brief)
+        self.assertIn("已完成", rendered)
+        self.assertNotIn("等待审批：G2", rendered)
+        self.assertNotIn("TERMINAL_STATE", rendered)
+
+    def test_stopped_state_is_reported_as_ended_without_stale_approval(self):
+        approval = {"action": "G2", "approval_id": "stale", "input_hash": "x",
+                    "deadline_at": "tomorrow", "created_at": "yesterday"}
+        orch = BriefFixture("STOPPED", {"ok": False, "reason_code": "TERMINAL_STATE"}, approvals=[approval])
+        brief = run_brief.build(orch, "run-1")
+        rendered = run_brief.render(brief)
+        self.assertEqual(brief["status_label"], "已停止")
+        self.assertIsNone(brief["blocked"])
+        self.assertEqual(brief["waiting_on"], [])
+        self.assertIn("运行已结束，无后续动作", rendered)
+        self.assertNotIn("如流审批卡", rendered)
+
+    def test_status_exposes_pending_producer_job_context_and_saved_draft(self):
+        action = {"ok": True, "phase": "SPEC", "child_skill": "tom-spec",
+                  "action_id": "action-1", "required_human_gate": "G2",
+                  "result_schema": "spec.v1"}
+        job = {"job_id": "producer:action-1", "status": "FULFILLED",
+               "payload": {"phase": "SPEC", "result_schema": "spec.v1"},
+               "draft": {"private": "draft body"}}
+        orch = BriefFixture("SPEC", action, producer_jobs={job["job_id"]: job})
+        brief = run_brief.build(orch, "run-1")
+        self.assertEqual(brief["producer_job"], {
+            "job_id": "producer:action-1", "phase": "SPEC", "schema": "spec.v1",
+            "status": "FULFILLED", "draft_state": "已保存待审批",
+        })
+        rendered = run_brief.render(brief)
+        self.assertIn("草案已保存待审批", rendered)
+        self.assertNotIn("private", rendered)
 
     def test_card_id_status_cli_resolves_target_and_json_keeps_full_events(self):
         root = Path(tempfile.mkdtemp())

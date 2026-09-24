@@ -14,7 +14,7 @@ from approval_ledger import gate_of
 _TERMINAL_SUCCESS = {"RELEASE_SUCCESS", "STOPPED"}
 
 
-def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str, Any]], pending: list[dict[str, Any]], blocked: str | None, approved: dict[str, Any] | None = None) -> str:
+def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str, Any]], pending: list[dict[str, Any]], blocked: str | None, approved: dict[str, Any] | None = None, producer_job: dict[str, Any] | None = None) -> str:
     if state == "RELEASE_SUCCESS":
         return "已完成"
     if state == "STOPPED":
@@ -23,6 +23,8 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
         return "待审批"
     if approved:
         return "已批准待提交"
+    if producer_job and producer_job.get("status") == "FULFILLED":
+        return "草案已保存待审批"
     if action.get("child_skill") is not None:
         return "待生成"
     if pending or blocked == "RECOVERY_REQUIRED":
@@ -65,10 +67,11 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     if not events:
         return {"run_id": run_id, "state": "RUN_NOT_FOUND", "waiting_on": [], "blocked": None}
     current = events[-1]
+    terminal = current.get("state") in _TERMINAL_SUCCESS
     intake = events[0].get("payload") or {}
     action = orchestrator.next(run_id)
     current_gate = action.get("required_human_gate") if action.get("ok") else None
-    approvals = orchestrator.approvals.for_run(run_id)
+    approvals = [] if terminal else orchestrator.approvals.for_run(run_id)
     # A PENDING card is superseded only when a *later* APPROVE of the same action
     # already exists. Counting any historical APPROVE hid the live G4 after
     # BGW-1956 re-entered PLAN, while still leaving the dead G2 e133d87e visible
@@ -99,14 +102,14 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
                 "deadline_at": row.get("deadline_at"),
             }
         )
-    pending = [
+    pending = [] if terminal else [
         {"operation": item.get("operation"), "intent_id": item.get("intent_id")}
         for item in orchestrator.state.pending_intents(run_id)
     ]
-    blocked = None if action.get("ok") else action.get("reason_code")
+    blocked = None if terminal or action.get("ok") else action.get("reason_code")
     # This is a presentation hint, not approval authorization. The completion
     # validator still checks the exact candidate hash against the ledger.
-    approved = next((
+    approved = None if terminal else next((
         row for row in reversed(approvals)
         if current_gate and gate_of(row.get("action")) == current_gate
         and row.get("effective_decision") == "APPROVE"
@@ -114,7 +117,8 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         and row["created_at"] >= current["created_at"]
         and row.get("resolved_at")
     ), None)
-    status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved)
+    producer_job = _producer_context(orchestrator, run_id, action, terminal)
+    status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved, producer_job)
     return {
         "run_id": run_id,
         "requirement_id": intake.get("requirement_id"),
@@ -126,10 +130,33 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         "waiting_on": open_gates,
         "in_flight": pending,
         "blocked": blocked,
+        "producer_job": producer_job,
         # The gate this phase will have to pass, so a caller can tell an unanswered
         # gate from one that is already approved while the phase has not landed.
         "gate": action.get("required_human_gate"),
-        "next": _next_step(action, current["state"], open_gates, pending, blocked, approved),
+        "next": _next_step(action, current["state"], open_gates, pending, blocked, approved, producer_job),
+    }
+
+
+def _producer_context(orchestrator: Any, run_id: str, action: dict[str, Any], terminal: bool) -> dict[str, Any] | None:
+    """Expose the current model task without leaking its draft or internal hashes."""
+    if terminal or not action.get("action_id") or not action.get("child_skill"):
+        return None
+    state = getattr(orchestrator, "state", None)
+    getter = getattr(state, "producer_job", None)
+    if not callable(getter):
+        return None
+    job = getter(f"producer:{action['action_id']}")
+    payload = job.get("payload") if isinstance(job, dict) else None
+    payload = payload if isinstance(payload, dict) else {}
+    status = job.get("status") if isinstance(job, dict) else "PENDING"
+    draft_state = "已保存待审批" if status == "FULFILLED" else "待生成"
+    return {
+        "job_id": job.get("job_id") if isinstance(job, dict) else f"producer:{action['action_id']}",
+        "phase": payload.get("phase") or action.get("phase"),
+        "schema": action.get("result_schema") or payload.get("result_schema"),
+        "status": status,
+        "draft_state": draft_state,
     }
 
 
@@ -140,6 +167,7 @@ def _next_step(
     pending: list[dict[str, Any]],
     blocked: str | None,
     approved: dict[str, Any] | None = None,
+    producer_job: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Who acts next, and what exactly they do.
 
@@ -157,6 +185,8 @@ def _next_step(
                 f"（{gate['action']} 门，截止 {gate['deadline_at']}）"
             ),
         }
+    if producer_job and producer_job.get("status") == "FULFILLED":
+        return {"owner": "你", "text": "草案已保存；申请对应审批并等待审批结果"}
     if blocked == "RECOVERY_REQUIRED" or pending:
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
         return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
@@ -207,6 +237,12 @@ def render(brief: dict[str, Any]) -> str:
         ))
     if brief.get("blocked"):
         lines.append(f"阻塞原因 {brief['blocked']}")
+    producer = brief.get("producer_job")
+    if producer:
+        lines.append(
+            f"模型任务：{producer.get('job_id')} · {producer.get('phase') or '-'} · "
+            f"Schema {producer.get('schema') or '-'} · 草案{producer.get('draft_state') or '-'}"
+        )
     step = brief["next"]
     if brief["waiting_on"]:
         gates = "、".join(sorted({str(item.get("action") or "审批") for item in brief["waiting_on"]}))
