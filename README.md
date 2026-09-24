@@ -187,13 +187,13 @@ python3 tom-autodev/scripts/install_links.py \
 python3 tom-autodev/scripts/cli.py preflight bgw
 ```
 
-预检核对配置和平台访问能力。若返回 `PROJECT_NOT_READY`，先补齐结果中列出的缺失项；不从目录名称猜测仓库、流水线或环境。
+预检核对配置和平台访问能力，并在 `automation` 字段报告本机 Stop-hook 注册情况以及两个 watcher 的命令可用性。cron、launchd 或其他外部调度器没有统一的心跳接口，watcher 的调度配置、当前运行状态和最近成功时间会明确显示为 `unknown`，不能据此推断后台正在值班。若返回 `PROJECT_NOT_READY`，先补齐结果中列出的缺失项；不从目录名称猜测仓库、流水线或环境。
 
 ### 4. 注册续跑 hook 与后台值班
 
 审批和构建发生在 IDE 之外，需要两处“值班”把结果接回来，否则 run 会一直停在关口等待（对照上面的[协作图](#参与者与协作进程视角) ②–⑥）：
 
-- **Stop-hook**：把 [ide_turn_hook.py](tom-autodev/scripts/ide_turn_hook.py) 注册到 `~/.comate/hooks.json` 的 `Stop` 事件；会话停止时它自动续跑已批准的 run。
+- **Stop-hook**：把 [ide_turn_hook.py](tom-autodev/scripts/ide_turn_hook.py) 注册到 `~/.comate/hooks.json` 的 `Stop` 事件；仍存活的会话停止时它可消费已批准的 handoff。它依赖宿主会话继续存在，不能唤醒已经结束的会话。
 - **两个 watcher**：常驻运行，或用 cron/launchd 定时跑 `--once`。如流网关需要 Node.js、配置好的机器人和审批成员。
 
 ```bash

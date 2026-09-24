@@ -2,6 +2,16 @@
 
 日常入口见 [README](../README.md)。本页面向配置宿主、维护控制器或恢复已有 run 的使用者。除标明的 Python 接入示意外，所有终端命令都从**仓库根目录**执行。
 
+## 只读预检与后台值班
+
+```bash
+python3 tom-autodev/scripts/cli.py preflight bgw
+```
+
+预检结果的 `automation` 字段会检查 `~/.comate/hooks.json` 和
+`~/.comate/hooks.local.json` 中是否引用 `ide_turn_hook.py`，并确认 watcher 命令文件存在。
+cron、launchd 或其他外部调度器没有统一的心跳接口，因此审批 watcher 和 iPipe watcher 的调度配置、运行状态和最近成功时间会显示为 `unknown`；预检只读，不会安装、启动或唤醒它们。Stop-hook 依赖仍存活的 Comate 会话，不能唤醒已经结束的会话。
+
 ## 日常接口与维护接口
 
 | 命令 | 作用 |

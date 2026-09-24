@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -80,7 +81,103 @@ def run_preflight(
         "project": project,
         "profile_hash": profile_hash,
         "components": results,
+        # Platform probes establish that APIs are reachable. Host integrations are
+        # reported separately because their presence does not affect project access,
+        # and this command must never install or start them.
+        "automation": local_automation_status(),
     }
+
+
+def local_automation_status(
+    *,
+    home: Path | str | None = None,
+    scripts_dir: Path | str | None = None,
+) -> dict[str, Any]:
+    """Read local hook registration and report watcher evidence without side effects.
+
+    There is no shared heartbeat contract for launchd/cron/external schedulers, so
+    watcher process and last-success state are deliberately reported as unknown.
+    """
+    home_path = Path(home).expanduser() if home is not None else Path.home()
+    scripts = Path(scripts_dir) if scripts_dir is not None else Path(__file__).resolve().parent
+    hook_paths = [
+        home_path / ".comate" / "hooks.json",
+        home_path / ".comate" / "hooks.local.json",
+    ]
+    present = [path for path in hook_paths if path.is_file()]
+    malformed: list[str] = []
+    registered = False
+    for path in present:
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            malformed.append(path.name)
+            continue
+        stop_config = _event_values(config, "Stop")
+        if stop_config and any(_contains_hook_reference(item) for item in stop_config):
+            registered = True
+    if registered:
+        hook_state = "registered"
+        hook_detail = "Stop hook configuration references ide_turn_hook.py"
+    elif malformed and len(malformed) == len(present):
+        hook_state = "unknown"
+        hook_detail = "hook configuration exists but could not be parsed"
+    else:
+        hook_state = "not_registered"
+        hook_detail = "no Stop hook reference found in hooks.json or hooks.local.json"
+
+    approval_script = scripts / "orchestrator.py"
+    ipipe_script = scripts / "orchestrator.py"
+    return {
+        "stop_hook": {
+            "configuration": hook_state,
+            "checked_files": [str(path) for path in hook_paths],
+            "detail": hook_detail,
+            "runs_automatically": "unknown",
+        },
+        "approval_watcher": {
+            "command_available": approval_script.is_file(),
+            "scheduler_configuration": "unknown",
+            "running": "unknown",
+            "last_success": "unknown",
+        },
+        "ipipe_watcher": {
+            "command_available": ipipe_script.is_file(),
+            "scheduler_configuration": "unknown",
+            "running": "unknown",
+            "last_success": "unknown",
+        },
+        "watcher_status_note": (
+            "Preflight has no shared heartbeat contract for cron, launchd, or external "
+            "schedulers; watcher configuration, running state, and last success are unknown."
+        ),
+    }
+
+
+def _event_values(value: Any, key: str) -> list[Any]:
+    if isinstance(value, dict):
+        found: list[Any] = []
+        for candidate, child in value.items():
+            if str(candidate).casefold() == key.casefold():
+                found.append(child)
+            found.extend(_event_values(child, key))
+        return found
+    if isinstance(value, list):
+        found = []
+        for child in value:
+            found.extend(_event_values(child, key))
+        return found
+    return []
+
+
+def _contains_hook_reference(value: Any) -> bool:
+    if isinstance(value, str):
+        return "ide_turn_hook.py" in value
+    if isinstance(value, dict):
+        return any(_contains_hook_reference(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_hook_reference(child) for child in value)
+    return False
 
 
 def live_probes() -> dict[str, Any]:

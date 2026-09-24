@@ -1,4 +1,5 @@
 import copy
+import json
 import subprocess
 import sys
 import tempfile
@@ -207,6 +208,51 @@ class LivePreflightTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(probe, "query", None)))
                 for method in ("create", "update", "comment", "submit", "trigger", "release", "rerun"):
                     self.assertFalse(callable(getattr(probe, method, None)))
+
+    def test_local_automation_status_reports_hook_registration_and_unknown_watchers(self):
+        from preflight import local_automation_status
+
+        comate = self.root / ".comate"
+        comate.mkdir()
+        hooks = comate / "hooks.json"
+        hooks.write_text(
+            json.dumps({"hooks": {"Stop": [{"command": "python3 /opt/ide_turn_hook.py"}]}}),
+            encoding="utf-8",
+        )
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        (scripts / "orchestrator.py").write_text("# CLI entry", encoding="utf-8")
+
+        result = local_automation_status(home=self.root, scripts_dir=scripts)
+
+        self.assertEqual(result["stop_hook"]["configuration"], "registered")
+        self.assertEqual(result["stop_hook"]["runs_automatically"], "unknown")
+        self.assertTrue(result["approval_watcher"]["command_available"])
+        self.assertEqual(result["approval_watcher"]["running"], "unknown")
+        self.assertEqual(result["approval_watcher"]["last_success"], "unknown")
+        self.assertEqual(result["ipipe_watcher"]["scheduler_configuration"], "unknown")
+
+    def test_local_automation_status_does_not_confuse_non_stop_hook_with_stop_hook(self):
+        from preflight import local_automation_status
+
+        comate = self.root / ".comate"
+        comate.mkdir()
+        (comate / "hooks.local.json").write_text(
+            json.dumps({"hooks": {"SessionEnd": [{"command": "python3 ide_turn_hook.py"}]}}),
+            encoding="utf-8",
+        )
+
+        result = local_automation_status(home=self.root, scripts_dir=self.root / "missing")
+
+        self.assertEqual(result["stop_hook"]["configuration"], "not_registered")
+        self.assertFalse(result["approval_watcher"]["command_available"])
+
+    def test_preflight_includes_local_automation_observability(self):
+        result = self.orchestrator.preflight("bgw", probes=self.probes())
+
+        self.assertEqual(result["status"], "READY")
+        self.assertIn("automation", result)
+        self.assertEqual(result["automation"]["approval_watcher"]["running"], "unknown")
 
     def test_ku_live_probe_uses_documented_read_only_pagination_flags(self):
         from preflight import _KuProbe
