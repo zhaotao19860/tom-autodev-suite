@@ -7,12 +7,12 @@
 | 命令 | 作用 |
 |---|---|
 | `cli.py start CARD PROJECT` | 读取 iCafe 快照并创建 run；不启动后台模型 |
-| `cli.py drive TARGET` | 由 WorkerDriver 驱动到 ProducerJob、审批、远端等待、终态或阻塞；TARGET 可为 run id 或唯一卡号 |
-| `cli.py status TARGET` | 输出紧凑进度摘要；TARGET 可为 run id 或唯一卡号 |
-| `cli.py status TARGET --json` | 输出完整事件 JSON；多 run 卡号会返回候选，不静默选择 |
-| `cli.py continue TARGET` | 消费有效审批 handoff，或从持久化检查点继续驱动 |
-| `cli.py submit-draft TARGET JOB_ID DRAFT_JSON` | 提交当前 ProducerJob 的 DraftContent；文件不能包含 ArtifactEnvelope |
-| `cli.py stop TARGET` | 记录停止请求，保留事件、产物、审批和工作区 |
+| `cli.py drive TARGET` | 由 WorkerDriver 驱动到 ProducerJob、审批、远端等待、终态或阻塞；TARGET 可为 run id 或唯一活动 run 的卡号 |
+| `cli.py status TARGET` | 输出紧凑进度摘要；按卡号优先选唯一活动 run，无活动 run 时回落到唯一终态 run |
+| `cli.py status TARGET --json` | 输出完整事件 JSON；多个活动 run，或无活动 run 时存在多个终态历史，会返回候选 |
+| `cli.py continue TARGET` | 消费有效审批 handoff，或从持久化检查点继续驱动；卡号只匹配活动 run |
+| `cli.py submit-draft TARGET JOB_ID DRAFT_JSON` | 提交当前活动 ProducerJob 的 DraftContent；文件不能包含 ArtifactEnvelope |
+| `cli.py stop TARGET` | 对唯一活动 run 记录停止请求，保留事件、产物、审批和工作区 |
 | `cli.py resume RUN` | 只读检查点和未确认外部 intent；不执行阶段 |
 | `cli.py next RUN` | 维护/诊断用的只读动作查询；日常流程不要手动按它编排 |
 | `cli.py advance RUN STATE ...` | 维护用的单次状态迁移入口；不能替代 worker |
@@ -47,7 +47,7 @@ result = worker_driver.advance(
 4. 已保存、已获批的草案由 worker 继续消费，不再唤醒模型重写。`DRAFT_SCHEMA_INVALID` 等可重试错误按返回信息修正草案；输入漂移、外部结果不明或能力缺失先处理阻断原因。
 5. 非终态的 iPipe/发布等待应按平台状态安排下一次查询；看到 `TERMINAL` 仍需读取具体状态，`STOPPED` 不代表交付成功。
 
-IPIPE/RELEASE 需要真实 `ipipe_api`，缺少 adapter 时会返回等待/阻断；不会凭空运行。并发驱动必须注入 `LockManager`：`locks=None` 的调用不启用 run 级租约。不同 run 仍可能竞争同一个仓库资源，应保留项目定义的 workspace 锁和所有权检查。
+IPIPE/RELEASE 需要真实 `ipipe_api`，缺少 adapter 时会返回等待/阻断；不会凭空运行。并发驱动必须注入 `LockManager`：run 级租约串行化 WorkerDriver 的 `advance` 调用；`locks=None` 不启用该租约。`submit_draft` 不持有这把租约，依靠 ProducerJob 的事务/幂等校验及阶段、副作用的幂等键处理重复提交；这不构成覆盖所有 run 写操作的全局单写者保证。不同 run 仍可能竞争同一个仓库资源，应保留项目定义的 workspace 锁和所有权检查。
 
 同一 run 的审批输入绑定到当时的 workflow/profile/代码版本。`WORKFLOW_SPEC_DRIFT` 说明当前代码中的 workflow 定义已变化，需还原兼容版本或做显式迁移；不要删除保存的指纹绕过检查。
 

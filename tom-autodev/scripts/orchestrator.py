@@ -2903,8 +2903,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.requirement_id, args.project, requirement_snapshot=snapshot
             )
     elif args.command == "status":
-        from agent_bridge import resolve_run_target
-        resolved = resolve_run_target(orchestrator, args.run_id)
+        from agent_bridge import resolve_status_target
+        resolved = resolve_status_target(orchestrator, args.run_id)
         if not resolved.get("ok"):
             result = resolved
         elif args.json:

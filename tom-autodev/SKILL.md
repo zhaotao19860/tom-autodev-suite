@@ -38,6 +38,8 @@ Confirm the project and iCafe card with the user before starting. If the card ma
 
 `drive` and `continue` let WorkerDriver own sequencing and stop at a ProducerJob, approval, remote wait, terminal state, or actionable block. When it returns a ProducerJob, load that job's pinned inputs, result schema, and applicable child skill, produce only its DraftContent, and submit it with `submit-draft CARD_OR_RUN JOB_ID DRAFT.json`. For `APPROVAL_REQUIRED`, request the returned gate and exact `approval_input_hash` through `request-approval`; do not change or regenerate the saved candidate. After approval, call `continue` so the worker consumes the handoff and saved draft.
 
+When `status` receives a card ID, it prefers the unique active run and falls back to the unique terminal run when no active run exists. If several candidates remain, choose by run ID. `drive`, `continue`, and `stop` resolve card IDs only to active runs.
+
 `resume RUN_ID` remains a read-only checkpoint and uncertain-intent inspection command. It does not drive a run. Do not use `next` or `complete-phase` to sequence normal work; advanced recovery and manual controls are in [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md). Keep iCafe/project confirmation, human approvals, and final delivery confirmation with the user.
 
 Do not infer projects from directories or bind iCafe cards without confirmation.

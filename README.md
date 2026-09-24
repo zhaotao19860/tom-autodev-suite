@@ -217,7 +217,8 @@ python3 tom-autodev/scripts/cli.py watch-ipipe --interval 60
 # start 会读取 iCafe 快照并创建本次 run
 python3 tom-autodev/scripts/cli.py start BGW-1234 bgw
 
-# 后续可直接使用卡号；有多个活动 run 时会返回候选，不会静默选择
+# 后续可直接使用卡号；有多个活动 run 时会返回候选，不会静默选择。
+# status 在没有活动 run 时显示唯一的终态 run；多个终态历史仍会返回候选
 python3 tom-autodev/scripts/cli.py drive BGW-1234
 python3 tom-autodev/scripts/cli.py status BGW-1234
 python3 tom-autodev/scripts/cli.py continue BGW-1234
