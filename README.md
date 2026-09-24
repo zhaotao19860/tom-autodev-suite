@@ -42,7 +42,7 @@ flowchart TD
 
 ### 参与者与协作（进程视角）
 
-把上面的角色落到实际运行，是下面这些进程/服务在协作。你日常只做三件事——**在 IDE 用 `/tom-autodev` 起卡、在如流批准关口、盯 iPipe 结果**——其余推进、投递、轮询、续跑都自动完成。
+把上面的角色落到实际运行，是下面这些进程/服务在协作。日常入口是 **在 IDE 用 `/tom-autodev` 处理需求、在如流审批、查看 iPipe 结果**。自动轮询依赖运行中的 watcher，自动续跑还依赖仍存活的 Comate 会话和已注册的 Stop-hook；会话结束后用 `continue` 继续。
 
 | 参与者 | 是什么 | 位置 / 进程 | 负责 |
 |---|---|---|---|
@@ -56,7 +56,7 @@ flowchart TD
 | iCafe / iCode / KU | 远端平台 | 远端 | 需求卡 / CR 提交 / 知识库文档 |
 | iPipe runner | 远端 CI | 远端 | 真正编译、测试、发布 |
 
-> worker 不是独立常驻进程，而是运行在 Comate turn / Stop-hook / CLI 里的控制面代码；两个 watcher 才是可常驻的后台。真正推进 run 的永远是 worker，watcher 只把外部事件变成“可续跑状态或通知”。
+> worker 不是独立常驻进程，而是运行在 Comate turn / CLI 里的控制面代码；Stop-hook 只向宿主交回续跑上下文；两个 watcher 才是可常驻的后台。真正推进 run 的永远是 worker，watcher 只把外部事件变成“可续跑状态或通知”。
 
 ```mermaid
 flowchart TD
@@ -214,26 +214,35 @@ python3 tom-autodev/scripts/cli.py watch-ipipe --interval 60
 普通流程也可以用同一组 CLI 动作：
 
 ```bash
-# start 会读取 iCafe 快照并创建本次 run
-python3 tom-autodev/scripts/cli.py start BGW-1234 bgw
+# 一步创建或复用活动 run，驱动到下一个待办
+python3 tom-autodev/scripts/cli.py process BGW-1234 bgw
 
 # 后续可直接使用卡号；有多个活动 run 时会返回候选，不会静默选择。
 # status 在没有活动 run 时显示唯一的终态 run；多个终态历史仍会返回候选
-python3 tom-autodev/scripts/cli.py drive BGW-1234
 python3 tom-autodev/scripts/cli.py status BGW-1234
 python3 tom-autodev/scripts/cli.py continue BGW-1234
 python3 tom-autodev/scripts/cli.py stop RUN_ID
 ```
 
-`drive` 和 `continue` 由 WorkerDriver 推进，遇到 ProducerJob、审批、iPipe 等待、终态或阻塞就返回。ProducerJob 只提交内容 JSON：
+`process` 会复用唯一活动 run；项目不匹配返回 `PROJECT_MISMATCH`，多个候选返回 `AMBIGUOUS_RUN`。只有唯一终态历史时返回 `RUN_ALREADY_TERMINAL`，附 run ID 与终态，不自动重启。`start` + `drive` 仍可分步调用。
+
+`process`、`drive` 和 `continue` 由 WorkerDriver 推进，遇到 ProducerJob、审批、iPipe 等待、终态或阻塞就返回。ProducerJob 只提交内容 JSON：
 
 ```bash
 python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
 ```
 
-`draft.json` 只包含当前 schema 要求的 DraftContent。worker 负责封装产物、校验、审批绑定和状态迁移。`APPROVAL_REQUIRED` 返回的 gate 与 `approval_input_hash` 必须原样交给现有审批路径；审批后再次 `continue`，不会重新生成已保存草案。
+`draft.json` 只包含当前 schema 要求的 DraftContent。worker 负责封装产物、校验、审批绑定和状态迁移。需要审批时，`submit-draft` 自动用保存草案的 gate 和精确输入指纹发起审批，成功返回 `PARKED / APPROVAL_WAIT` 与 `draft_saved: true`；不会自动批准。投递失败会返回错误，已保存草案仍保留，用 `continue` 重试。审批后再次 `continue`，复用已保存草案。
 
-`status` 默认输出阶段、待办、责任方和下一步；`status TARGET --json` 输出完整事件流，供维护和恢复使用。`resume RUN_ID` 只读取检查点和未确认的外部操作，不驱动运行。高级恢复、watcher 和维护命令见 [操作参考](docs/OPERATIONS.md)。
+`status` 默认输出阶段、待办、责任方、当前模型任务的 job ID / schema / 草案状态和下一步；终态明确显示“已完成”或“已停止”，不再显示历史审批为当前待办。`status TARGET --json` 输出完整事件流，供维护和恢复使用。查看当前固定输入和任务合同用只读查询：
+
+```bash
+python3 tom-autodev/scripts/cli.py context BGW-1234
+```
+
+`context` 返回当前 action 的输入产物引用、版本、schema、任务模式和 ProducerJob 状态（含已保存草案标记）；不输出草案正文、不执行阶段、不创建任务或审批。输入产物正文用 `artifact show ARTIFACT_ID` 读取，mode 为 `merged` 的 SPEC 需交 `{spec, dag}`。
+
+`resume RUN_ID` 只读取检查点和未确认的外部操作，不驱动运行。高级恢复、watcher 和维护命令见 [操作参考](docs/OPERATIONS.md)。
 
 ## 停下来时怎么办
 

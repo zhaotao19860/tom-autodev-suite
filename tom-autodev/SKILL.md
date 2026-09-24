@@ -29,16 +29,19 @@ Use this as the ordinary command path; run commands from the suite root (or use 
 
 | User intent | Action |
 |---|---|
-| Start a confirmed requirement | `python3 tom-autodev/scripts/cli.py start CARD PROJECT`, then `drive CARD` |
+| Start a confirmed requirement | `python3 tom-autodev/scripts/cli.py process CARD PROJECT` |
 | See progress | `status CARD_OR_RUN` |
+| Inspect pinned inputs and current model job | `context CARD_OR_RUN` |
 | Continue after approval or a pause | `continue CARD_OR_RUN` |
 | Stop a run | `stop RUN_ID` |
 
-Confirm the project and iCafe card with the user before starting. If the card maps to multiple runs, show the candidates and ask which run to use; never pick one from recency or chat context. `start` reads the iCafe snapshot and reuses the registered project profile. A `PROJECT_NOT_READY` response means setup is required; see [`references/setup.md`](references/setup.md).
+Confirm the project and iCafe card with the user before starting. If the card maps to multiple runs, show the candidates and ask which run to use; never pick one from recency or chat context. `process` reads the iCafe snapshot and starts/drives a new run only when no history exists; otherwise it continues the unique active run for the specified project. A terminal run returns `RUN_ALREADY_TERMINAL` without restarting; `PROJECT_MISMATCH` requires correcting the project. `start` + `drive` remains available for separate steps. A `PROJECT_NOT_READY` response means setup is required; see [`references/setup.md`](references/setup.md).
 
-`drive` and `continue` let WorkerDriver own sequencing and stop at a ProducerJob, approval, remote wait, terminal state, or actionable block. When it returns a ProducerJob, load that job's pinned inputs, result schema, and applicable child skill, produce only its DraftContent, and submit it with `submit-draft CARD_OR_RUN JOB_ID DRAFT.json`. For `APPROVAL_REQUIRED`, request the returned gate and exact `approval_input_hash` through `request-approval`; do not change or regenerate the saved candidate. After approval, call `continue` so the worker consumes the handoff and saved draft.
+`process`, `drive` and `continue` let WorkerDriver own sequencing and stop at a ProducerJob, approval, remote wait, terminal state, or actionable block. When it returns a ProducerJob, load that job's pinned inputs, result schema, and applicable child skill, produce only its DraftContent, and submit it with `submit-draft CARD_OR_RUN JOB_ID DRAFT.json`. The CLI automatically requests the returned gate and exact `approval_input_hash`, returning `PARKED / APPROVAL_WAIT` after delivery; it never approves it. If delivery fails, use `continue` to retry with the saved candidate; do not change or regenerate it. Direct Python worker/bridge callers still handle `APPROVAL_REQUIRED` through the host approval adapter. After approval, call `continue` so the worker consumes the handoff and saved draft.
 
-When `status` receives a card ID, it prefers the unique active run and falls back to the unique terminal run when no active run exists. If several candidates remain, choose by run ID. `drive`, `continue`, and `stop` resolve card IDs only to active runs.
+When `status` receives a card ID, it prefers the unique active run and falls back to the unique terminal run when no active run exists. If several candidates remain, show them and ask the user for an explicit run ID; never select a candidate silently. `drive`, `continue`, and `stop` resolve card IDs only to active runs.
+
+`context CARD_OR_RUN` reads pinned action inputs, schema and the current ProducerJob (including saved draft state), without executing a phase, recovering SUBMIT or creating a job. Load referenced artifact content with `artifact show ARTIFACT_ID`; honor the job mode, including `{spec, dag}` for merged SPEC.
 
 `resume RUN_ID` remains a read-only checkpoint and uncertain-intent inspection command. It does not drive a run. Do not use `next` or `complete-phase` to sequence normal work; advanced recovery and manual controls are in [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md). Keep iCafe/project confirmation, human approvals, and final delivery confirmation with the user.
 

@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -576,6 +576,44 @@ class FakeE2ETests(unittest.TestCase):
         spec_decision = worker_driver.classify_next(self.orchestrator, run_id)
         self.assertEqual(spec_decision["kind"], worker_driver.PRODUCER_WAIT)
         self.assertEqual(spec_decision["skill"], "tom-spec")
+
+    def test_worker_classify_next_reports_terminal_runs_as_terminal(self):
+        # `next` uses ok=False for the normal terminal refusal. That must not be
+        # surfaced as a recoverable BLOCKED state to callers.
+        orchestrator = Mock()
+        orchestrator.next.return_value = {
+            "ok": False, "reason_code": "TERMINAL_STATE", "state": "STOPPED",
+        }
+        decision = worker_driver.classify_next(orchestrator, "run-terminal")
+        self.assertEqual(decision["kind"], worker_driver.TERMINAL)
+        self.assertEqual(decision["state"], "STOPPED")
+
+    def test_context_is_read_only_before_and_after_producer_job_is_saved(self):
+        from agent_bridge import AgentBridge
+        run_id, knowledge, requirement = self._run_to_grill_action("BGW-CONTEXT", "I15ClP2KW4ZGAK", "standard")
+        bridge = AgentBridge(self.orchestrator, locks=self.orchestrator.recovery.locks)
+        before = self.orchestrator.state.events(run_id)
+        with patch.object(self.orchestrator, "_recover_skipped_submit") as recover, \
+                patch.object(self.orchestrator.state, "save_idempotency_result") as save:
+            context = bridge.context(run_id)
+        recover.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(context["action"]["phase"], "GRILL")
+        self.assertEqual(context["producer_jobs"], [])
+        self.assertEqual(self.orchestrator.state.events(run_id), before)
+        self.assertEqual(self.orchestrator.state.pending_producer_jobs(run_id), [])
+
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+        action = self.orchestrator.next(run_id)
+        draft = self._phase_content(action, requirement)
+        waiting = worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertEqual(waiting["reason_code"], "APPROVAL_REQUIRED")
+        saved = bridge.context(run_id)
+        self.assertEqual(saved["producer_jobs"][0]["job_id"], job_id)
+        self.assertTrue(saved["producer_jobs"][0]["draft_present"])
+        self.assertEqual(saved["producer_jobs"][0]["status"], "FULFILLED")
+        self.assertNotIn("draft", saved["producer_jobs"][0])
 
     def test_worker_executes_auto_grill_without_an_agent_turn(self):
         # The worker builds the envelope itself and completes express auto-GRILL — no

@@ -162,19 +162,21 @@ class Orchestrator:
         latest = events[-1]
         return {"run_id": run_id, "state": latest["state"], "events": events}
 
-    def next(self, run_id: str) -> dict[str, Any]:
+    def next(self, run_id: str, *, read_only: bool = False) -> dict[str, Any]:
         """Return the next Comate-owned phase/controller action without remote writes."""
         drift = self._workflow_spec_drift(run_id)
         if drift is not None:
             return drift
         was_submit = self.status(run_id).get("state") == "SUBMIT"
-        recovered = self._recover_skipped_submit(run_id)
+        recovered = None if read_only else self._recover_skipped_submit(run_id)
         if isinstance(recovered, dict) and not recovered.get("ok"):
             return recovered
         if was_submit:
-            stale = self._stale_submit_evidence(run_id)
+            stale = self._stale_submit_evidence(run_id, read_only=read_only)
             if stale is not None:
                 return stale
+        if read_only:
+            return self.phase_protocol().next(run_id, read_only=True)
         return self.phase_protocol().next(run_id)
 
     def _workflow_spec_drift(self, run_id: str) -> dict[str, Any] | None:
@@ -189,12 +191,12 @@ class Orchestrator:
         pure check gates the protocol's completion/ingestion entries (R4-M2)."""
         return execution_guard(self.state, run_id)
 
-    def _stale_submit_evidence(self, run_id: str) -> dict[str, Any] | None:
+    def _stale_submit_evidence(self, run_id: str, *, read_only: bool = False) -> dict[str, Any] | None:
         """Refuse a SUBMIT action whose Review no longer covers its Change Set."""
         current = self.status(run_id)
         if current.get("state") != "SUBMIT":
             return None
-        action = self.phase_protocol().next(run_id)
+        action = self.phase_protocol().next(run_id, read_only=read_only)
         if not action.get("ok") or action.get("phase") != "SUBMIT":
             return None
         review = action.get("input_artifacts") or []
@@ -2693,6 +2695,16 @@ def main(argv: list[str] | None = None) -> int:
         "--json", action="store_true", help="输出完整事件流 JSON，默认输出人可读的进度摘要"
     )
 
+    context = subparsers.add_parser("context", help="读取当前 run 的固定任务上下文，不执行阶段")
+    context.add_argument("target", help="run id 或唯一活动的 iCafe 卡片 id")
+
+    process = subparsers.add_parser(
+        "process", help="创建或定位需求 run，并驱动到下一个需要处理的位置"
+    )
+    process.add_argument("requirement_id")
+    process.add_argument("project")
+    process.add_argument("--icode-skill", default=None)
+
     approve = subparsers.add_parser("approve")
     approve.add_argument("approval_id")
     approve.add_argument("decision")
@@ -2902,6 +2914,59 @@ def main(argv: list[str] | None = None) -> int:
             result = orchestrator.start(
                 args.requirement_id, args.project, requirement_snapshot=snapshot
             )
+    elif args.command == "process":
+        from agent_bridge import AgentBridge, resolve_status_target
+
+        bridge = AgentBridge(
+            orchestrator,
+            locks=orchestrator.recovery.locks,
+            ipipe_api_factory=lambda run_id: _cli_ipipe_transport(orchestrator, run_id),
+            icode_skill=args.icode_skill,
+        )
+        resolved = resolve_status_target(orchestrator, args.requirement_id)
+        if resolved.get("reason_code") == "AMBIGUOUS_RUN":
+            result = resolved
+        elif resolved.get("ok"):
+            if resolved.get("project") != args.project:
+                result = {
+                    "ok": False, "reason_code": "PROJECT_MISMATCH",
+                    "run_id": resolved["run_id"], "project": resolved.get("project"),
+                    "requested_project": args.project,
+                }
+            elif resolved.get("state") in workflow_spec.terminal_states():
+                result = {
+                    **resolved, "ok": False, "reason_code": "RUN_ALREADY_TERMINAL",
+                    "detail": "运行已结束；使用 status 查看结果，不自动重启",
+                }
+            else:
+                result = bridge.continue_run(resolved["run_id"])
+                result = _deliver_worker_approval(orchestrator, result)
+        else:
+            from clients.icafe_client import CafeClient
+
+            snapshot = CafeClient().snapshot(args.requirement_id)
+            if isinstance(snapshot, dict) and snapshot.get("ok") is False:
+                result = {
+                    **snapshot,
+                    "ready": False,
+                    "project": args.project,
+                    "requirement_id": args.requirement_id,
+                }
+            else:
+                started = orchestrator.start(
+                    args.requirement_id, args.project, requirement_snapshot=snapshot
+                )
+                if not isinstance(started, dict) or started.get("ok") is False or not started.get("run_id"):
+                    result = started
+                elif started.get("state") in workflow_spec.terminal_states():
+                    result = {
+                        **started,
+                        "ok": False,
+                        "reason_code": "RUN_ALREADY_TERMINAL",
+                    }
+                else:
+                    result = bridge.drive(started["run_id"])
+                    result = _deliver_worker_approval(orchestrator, result)
     elif args.command == "status":
         from agent_bridge import resolve_status_target
         resolved = resolve_status_target(orchestrator, args.run_id)
@@ -2914,6 +2979,15 @@ def main(argv: list[str] | None = None) -> int:
 
             print(render(build(orchestrator, resolved["run_id"])))
             return 0
+    elif args.command == "context":
+        from agent_bridge import AgentBridge
+
+        bridge = AgentBridge(
+            orchestrator,
+            locks=orchestrator.recovery.locks,
+            ipipe_api_factory=lambda run_id: _cli_ipipe_transport(orchestrator, run_id),
+        )
+        result = bridge.context(args.target)
     elif args.command == "approve":
         result = orchestrator.approve(args.approval_id, args.decision, args.input_hash, args.channel, args.run_id, args.responder)
     elif args.command == "resume":
@@ -2941,6 +3015,7 @@ def main(argv: list[str] | None = None) -> int:
             result = draft if draft.get("ok") is False else bridge.submit_draft(
                 resolved["run_id"], args.job_id, draft
             )
+            result = _deliver_worker_approval(orchestrator, {**result, "run_id": resolved["run_id"]})
     elif args.command == "stop":
         from agent_bridge import resolve_run_target
         resolved = resolve_run_target(orchestrator, args.target)
@@ -3442,7 +3517,9 @@ def _draft_content_file(path: str) -> dict[str, Any]:
 def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
         return result
-    if result.get("reason_code") != "PARKED" or result.get("parked") != "APPROVAL_WAIT":
+    approval_required = result.get("reason_code") == "APPROVAL_REQUIRED"
+    parked_approval = result.get("reason_code") == "PARKED" and result.get("parked") == "APPROVAL_WAIT"
+    if not approval_required and not parked_approval:
         return result
     gate = result.get("gate")
     input_hash = result.get("approval_input_hash")
@@ -3453,9 +3530,15 @@ def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any])
         return {
             **result,
             **approval,
+            **({"draft_saved": True} if approval_required else {}),
             "worker_reason_code": result.get("reason_code"),
             "worker_result": result,
             "approval": approval,
+        }
+    if approval_required:
+        return {
+            **result, "ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT",
+            "draft_saved": True, "approval": approval,
         }
     return {**result, "approval": approval}
 

@@ -16,19 +16,25 @@ cron、launchd 或其他外部调度器没有统一的心跳接口，因此审�
 
 | 命令 | 作用 |
 |---|---|
+| `cli.py process CARD PROJECT` | 推荐入口：无历史时 start + drive，唯一活动 run 用 continue；多候选拒绝选择，项目不匹配拒绝推进，终态返回 RUN_ALREADY_TERMINAL |
 | `cli.py start CARD PROJECT` | 读取 iCafe 快照并创建 run；不启动后台模型 |
 | `cli.py drive TARGET` | 由 WorkerDriver 驱动到 ProducerJob、审批、远端等待、终态或阻塞；TARGET 可为 run id 或唯一活动 run 的卡号 |
 | `cli.py status TARGET` | 输出紧凑进度摘要；按卡号优先选唯一活动 run，无活动 run 时回落到唯一终态 run |
 | `cli.py status TARGET --json` | 输出完整事件 JSON；多个活动 run，或无活动 run 时存在多个终态历史，会返回候选 |
 | `cli.py continue TARGET` | 消费有效审批 handoff，或从持久化检查点继续驱动；卡号只匹配活动 run |
-| `cli.py submit-draft TARGET JOB_ID DRAFT_JSON` | 提交当前活动 ProducerJob 的 DraftContent；文件不能包含 ArtifactEnvelope |
+| `cli.py submit-draft TARGET JOB_ID DRAFT_JSON` | 提交当前 ProducerJob 的 DraftContent 并自动发起所需审批；文件不能包含 ArtifactEnvelope |
+| `cli.py context TARGET` | 只读查询当前 action 的固定输入引用、版本、schema 和当前 ProducerJob（含已保存草案状态）；不执行阶段 |
 | `cli.py stop TARGET` | 对唯一活动 run 记录停止请求，保留事件、产物、审批和工作区 |
 | `cli.py resume RUN` | 只读检查点和未确认外部 intent；不执行阶段 |
 | `cli.py next RUN` | 维护/诊断用的只读动作查询；日常流程不要手动按它编排 |
 | `cli.py advance RUN STATE ...` | 维护用的单次状态迁移入口；不能替代 worker |
 | `cli.py complete-phase RUN ENVELOPE` | 维护用的产物摄取入口；不是 ProducerJob 提交接口 |
 
-普通流程只需要 `start`、`drive`、`status`、`continue`、`submit-draft` 和 `stop`。`resume` 仍保留原来的只读语义；真实续跑用 `continue`。Producer 只返回 DraftContent，worker 负责 envelope、schema/hash 校验、审批绑定、证据门和外部副作用。审批未送达或输入不一致时，命令返回明确错误，不报告成功。
+普通流程使用 `process`、`status`、`context`、`continue`、`submit-draft` 和 `stop`。需要分步创建时仍可用 `start` + `drive`。`resume` 仍保留原来的只读语义；真实续跑用 `continue`。Producer 只返回 DraftContent，worker 负责 envelope、schema/hash 校验、审批绑定、证据门和外部副作用。审批未送达或输入不一致时，命令返回明确错误，不报告成功。
+
+`submit-draft` 自动将 worker 返回的 gate 与精确 `approval_input_hash` 交给审批投递路径；投递成功返回 `PARKED / APPROVAL_WAIT`、`draft_saved: true` 和审批记录，等待人工决定。投递失败返回非零退出码并保留草案；用 `continue TARGET` 复用草案重试，勿重新生成内容。Python worker/bridge API 仍将 `APPROVAL_REQUIRED` 交给宿主处理。
+
+`context` 不推进阶段、恢复 SUBMIT、写 action 缓存或创建 ProducerJob，只显示当前 action 对应的任务，不列历史任务或草案正文。输入产物的正文通过 `artifact show ARTIFACT_ID` 校验读取。任务的 `mode: merged` 表示 SPEC 草案需同时包含 `{spec, dag}`。`status` 在终态隐藏旧的待审批和未确认操作提示；历史原始事件仍可通过 `status TARGET --json` 查询。
 
 ## Worker 接入
 

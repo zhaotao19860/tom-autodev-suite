@@ -103,9 +103,9 @@ class PhaseProtocol:
         self.transitions = transition_policy
 
     @guard_execution
-    def next(self, run_id: str) -> dict[str, Any]:
+    def next(self, run_id: str, *, read_only: bool = False) -> dict[str, Any]:
         try:
-            return self._next(run_id)
+            return self._next(run_id, read_only=read_only)
         except Exception as error:
             return _failure(_exception_reason(error, "PHASE_PROTOCOL_INVALID"), run_id=run_id)
 
@@ -163,7 +163,7 @@ class PhaseProtocol:
                 return pending
         return None
 
-    def _next(self, run_id: str) -> dict[str, Any]:
+    def _next(self, run_id: str, *, read_only: bool = False) -> dict[str, Any]:
         if not isinstance(run_id, str) or not run_id:
             return _failure("INVALID_INPUT")
         events = self.state.events(run_id)
@@ -302,7 +302,8 @@ class PhaseProtocol:
         existing = self.state.idempotency_result(key)
         if existing is not None:
             return existing if existing == action else _failure("ACTION_CONFLICT", run_id=run_id, state=state)
-        self.state.save_idempotency_result(key, action)
+        if not read_only:
+            self.state.save_idempotency_result(key, action)
         return action
 
     def validate_result(self, action: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:

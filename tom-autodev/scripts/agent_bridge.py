@@ -194,6 +194,53 @@ class AgentBridge:
             return _json_safe(resolved)
         return _json_safe(run_brief.build(self.orchestrator, resolved["run_id"]))
 
+    def context(self, target: str) -> dict[str, Any]:
+        """Return the pinned, read-only context needed to fill the current job."""
+        resolved = resolve_run_target(self.orchestrator, target)
+        if not resolved.get("ok"):
+            return _json_safe(resolved)
+        run_id = resolved["run_id"]
+        decision = worker_driver.classify_next(self.orchestrator, run_id, read_only=True)
+        action = decision.get("action") if isinstance(decision, dict) else None
+        action_view = None
+        if isinstance(action, dict):
+            action_view = {
+                key: action.get(key)
+                for key in (
+                    "action_id", "source_event_id", "state", "phase", "task_id", "child_skill",
+                    "controller", "result_schema", "required_human_gate", "input_hash",
+                    "parent_artifact_hash", "source_revisions", "input_artifacts",
+                )
+                if action.get(key) is not None
+            }
+        jobs = []
+        if isinstance(action, dict) and action.get("action_id") and action.get("child_skill"):
+            job = self.orchestrator.state.producer_job(f"producer:{action['action_id']}")
+            if isinstance(job, dict):
+                payload = job.get("payload") or {}
+                jobs.append({
+                    "job_id": job.get("job_id"),
+                    "status": job.get("status"),
+                    "phase": payload.get("phase"),
+                    "skill": payload.get("skill"),
+                    "result_schema": payload.get("result_schema"),
+                    "task_id": payload.get("task_id"),
+                    "mode": payload.get("mode"),
+                    "draft_present": isinstance(job.get("draft"), dict),
+                    "updated_at": job.get("updated_at"),
+                })
+        result = {
+            "ok": True,
+            "reason_code": "OK",
+            "run_id": run_id,
+            "state": resolved.get("state"),
+            "decision_kind": decision.get("kind") if isinstance(decision, dict) else None,
+            "decision_reason_code": decision.get("reason_code") if isinstance(decision, dict) else None,
+            "action": action_view,
+            "producer_jobs": jobs,
+        }
+        return _json_safe(result)
+
     def stop(self, target: str) -> dict[str, Any]:
         resolved = resolve_run_target(self.orchestrator, target)
         if not resolved.get("ok"):

@@ -60,6 +60,7 @@ def run_preflight(
             "project": project,
             "missing": missing,
             "components": {},
+            "automation": local_automation_status(),
         }
     contexts = _contexts(profile)
     results: dict[str, dict[str, Any]] = {}
@@ -119,7 +120,7 @@ def local_automation_status(
     if registered:
         hook_state = "registered"
         hook_detail = "Stop hook configuration references ide_turn_hook.py"
-    elif malformed and len(malformed) == len(present):
+    elif malformed:
         hook_state = "unknown"
         hook_detail = "hook configuration exists but could not be parsed"
     else:

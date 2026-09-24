@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -96,6 +96,53 @@ class AgentBridgeTests(unittest.TestCase):
             got = self.bridge().status(self.card_id)
         self.assertEqual(got, expected)
         build.assert_called_once_with(self.orch, self.run_id)
+
+    def test_context_exposes_only_current_job_including_saved_draft_state(self):
+        action = {
+            "action_id": "current", "child_skill": "tom-spec", "phase": "SPEC",
+            "result_schema": "spec", "input_hash": "a" * 64,
+            "input_artifacts": [{"artifact_id": "upstream"}],
+        }
+        payload = {"phase": "SPEC", "result_schema": "spec", "mode": "merged"}
+        self.orch.state.record_producer_job(self.run_id, "producer:old", payload)
+        self.orch.state.record_producer_job(self.run_id, "producer:current", payload)
+        before = self.orch.state.events(self.run_id)
+        for saved in (False, True):
+            with self.subTest(saved=saved):
+                if saved:
+                    self.orch.state.fulfill_producer_job("producer:current", {"private_draft": "hidden"})
+                with patch("worker_driver.classify_next", return_value={"kind": "PRODUCER_WAIT", "action": action}), \
+                        patch("worker_driver.advance") as advance:
+                    got = self.bridge().context(self.card_id)
+                self.assertEqual(got["action"], action)
+                self.assertEqual(len(got["producer_jobs"]), 1)
+                self.assertEqual(got["producer_jobs"][0]["job_id"], "producer:current")
+                self.assertEqual(got["producer_jobs"][0]["draft_present"], saved)
+                self.assertEqual(got["producer_jobs"][0]["mode"], "merged")
+                self.assertNotIn("private_draft", json.dumps(got))
+                self.assertEqual(self.orch.state.events(self.run_id), before)
+                advance.assert_not_called()
+
+    def test_context_does_not_create_a_job_and_preserves_block_reason(self):
+        with patch("worker_driver.classify_next", return_value={"kind": "BLOCKED", "reason_code": "RECOVERY_REQUIRED"}):
+            got = self.bridge().context(self.card_id)
+        self.assertEqual(got["decision_kind"], "BLOCKED")
+        self.assertEqual(got["decision_reason_code"], "RECOVERY_REQUIRED")
+        self.assertEqual(got["producer_jobs"], [])
+        self.assertEqual(self.orch.state.pending_producer_jobs(self.run_id), [])
+
+    def test_context_submit_propagates_read_only_to_review_freshness_check(self):
+        self.orch.state.transition(self.run_id, "SUBMIT", {})
+        protocol = Mock()
+        protocol.next.return_value = {
+            "ok": True, "state": "SUBMIT", "phase": "SUBMIT", "controller": "submit",
+        }
+        with patch.object(self.orch, "phase_protocol", return_value=protocol):
+            got = self.bridge().context(self.run_id)
+        self.assertEqual(got["state"], "SUBMIT")
+        self.assertEqual(protocol.next.call_args_list, [
+            call(self.run_id, read_only=True), call(self.run_id, read_only=True),
+        ])
 
     def test_stop_resolves_card_target_before_delegating(self):
         expected = {"run_id": self.run_id, "state": "STOPPED"}

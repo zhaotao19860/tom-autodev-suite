@@ -4,6 +4,15 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-24 · 日常入口第二轮优化
+
+- `process CARD PROJECT` 合并创建和驱动，复用唯一活动 run；项目不匹配、多候选和终态历史均给出明确结果，不静默切换或重启。
+- `submit-draft` 自动发起绑定保存草案的审批，成功返回 `PARKED / APPROVAL_WAIT`；投递失败保留草案和错误，`continue` 可重试。人工审批与 hash 校验保留。
+- `context TARGET` 只读展示当前任务的固定输入引用、版本、schema 和 ProducerJob 状态，包含已保存草案标记；跳过恢复动作和动作缓存写入，不输出草案正文。
+- `status` 区分“已完成”和“已停止”，终态不再展示历史审批为当前待办；worker 将正常终态识别为 `TERMINAL`。摘要补充 job/schema/草案状态，已批准草案提示继续推进。
+- `preflight` 补充 Stop-hook 注册与 watcher 命令文件检查；缺少统一心跳时，调度、运行状态、最近成功时间明确为 `unknown`。说明 Stop-hook 无法唤醒已经结束的会话。
+- 同步 README、操作参考、父 skill 和 Producer 合同。本轮只复核以上控制面变更；未进行真实内网平台交付或模型资格验收。
+
 ## 2026-09-24
 
 - 精简 KU/iCafe 协作写入范围（控制策略变更，改变 `workflow_spec.canonical_hash()`）：`SPEC` 由 `both` 降为 `ku_only`（去掉 iCafe 里程碑评论，保留 KU 文档），`REVIEW` 与 `DIAGNOSE` 由 `ku_only` 降为 `skip`（KU、iCafe 都不写）。`INTAKE`（KU 根锚点）、`RELEASE`、`IPIPE` 及其余阶段不变。阶段产物一律仍存本地 `artifact_store`，正确性与恢复不读 KU，故本次仅减少人可见的协作写入。同步更新 `workflow_spec` 内注释与 `docs/OPERATIONS.md` 的发布范围表。

@@ -66,12 +66,16 @@ class RunBriefTests(unittest.TestCase):
         approved = {"action": "G2", "approval_id": "approval-secret", "input_hash": "b" * 64,
                     "effective_decision": "APPROVE", "created_at": "2026-09-24T00:01:00+00:00",
                     "resolved_at": "2026-09-24T00:02:00+00:00"}
-        orch = BriefFixture("SPEC", {"ok": True, "phase": "SPEC", "required_human_gate": "G2"},
-                            approvals=[approved])
+        orch = BriefFixture("SPEC", {"ok": True, "phase": "SPEC", "required_human_gate": "G2",
+                                    "action_id": "a1", "child_skill": "tom-spec"},
+                            approvals=[approved], producer_jobs={"producer:a1": {
+                                "job_id": "producer:a1", "status": "FULFILLED", "payload": {},
+                            }})
         brief = run_brief.build(orch, "run-1")
         self.assertEqual(brief["status_label"], "已批准待提交")
         rendered = run_brief.render(brief)
         self.assertIn("continue", rendered)
+        self.assertNotIn("补发", rendered)
         self.assertNotIn("approval-secret", rendered)
         self.assertNotIn("b" * 64, rendered)
 

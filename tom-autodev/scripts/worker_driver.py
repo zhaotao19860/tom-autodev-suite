@@ -79,15 +79,17 @@ def _gate_settled(orchestrator: Any, run_id: str, gate: str, input_hash: str | N
     return False
 
 
-def classify_next(orchestrator: Any, run_id: str) -> dict[str, Any]:
+def classify_next(orchestrator: Any, run_id: str, *, read_only: bool = False) -> dict[str, Any]:
     """Read-only: the single worker decision for the run's current frontier."""
-    action = orchestrator.next(run_id)
+    action = orchestrator.next(run_id, read_only=True) if read_only else orchestrator.next(run_id)
+    state = action.get("state")
+    # The read-only oracle reports terminal runs as ``ok=False`` with
+    # ``TERMINAL_STATE``. Terminal is a normal completed decision, not a
+    # recoverable block, so classify it before handling other refusals.
+    if state in workflow_spec.terminal_states():
+        return {"kind": TERMINAL, "state": state, "action": action}
     if not action.get("ok"):
         return {"kind": BLOCKED, "reason_code": action.get("reason_code"), "action": action}
-
-    state = action.get("state")
-    if state in workflow_spec.terminal_states():
-        return {"kind": TERMINAL, "state": state}
 
     gate = action.get("required_human_gate")
 

@@ -185,8 +185,6 @@ def _next_step(
                 f"（{gate['action']} 门，截止 {gate['deadline_at']}）"
             ),
         }
-    if producer_job and producer_job.get("status") == "FULFILLED":
-        return {"owner": "你", "text": "草案已保存；申请对应审批并等待审批结果"}
     if blocked == "RECOVERY_REQUIRED" or pending:
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
         return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
@@ -205,6 +203,8 @@ def _next_step(
                 f"{approved['action']} 已批准待提交；调用 continue，由 worker 复用已保存内容并执行下一步"
             ),
         }
+    if producer_job and producer_job.get("status") == "FULFILLED":
+        return {"owner": "Comate", "text": "草案已保存；调用 continue 补发对应审批并等待审批结果"}
     work = _WORK.get(state, state)
     gate = action.get("required_human_gate")
     if state == "IMPLEMENT":

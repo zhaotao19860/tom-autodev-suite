@@ -65,11 +65,106 @@ class CliOperationTests(unittest.TestCase):
         draft = {"spec": {"acceptance": ["AC-1"]}}
         draft_path.write_text(json.dumps(draft), encoding="utf-8")
         result = {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G2", "approval_input_hash": "a" * 64}
-        with patch("agent_bridge.AgentBridge", autospec=True) as bridge:
+        approval = {"ok": True, "approval_id": "approval-1"}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge, \
+                patch("orchestrator._request_approval", return_value=approval) as request:
             bridge.return_value.submit_draft.return_value = result
             code, got = self._run("submit-draft", self.run_id, "producer:a1", str(draft_path))
-        self.assertEqual((code, got), (1, result))
+        self.assertEqual((code, got["reason_code"], got["parked"]), (0, "PARKED", "APPROVAL_WAIT"))
+        self.assertTrue(got["draft_saved"])
+        self.assertEqual(got["approval"], approval)
+        request.assert_called_once_with(self.orchestrator, self.run_id, "G2", "a" * 64)
         bridge.return_value.submit_draft.assert_called_once_with(self.run_id, "producer:a1", draft)
+
+    def test_submit_draft_preserves_saved_state_when_approval_delivery_fails(self):
+        draft_path = self.root / "draft.json"
+        draft_path.write_text('{"spec": {}}', encoding="utf-8")
+        waiting = {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G2", "approval_input_hash": "a" * 64}
+        failure = {"ok": False, "reason_code": "APPROVAL_DELIVERY_FAILED"}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge, \
+                patch("orchestrator._request_approval", return_value=failure):
+            bridge.return_value.submit_draft.return_value = waiting
+            code, got = self._run("submit-draft", self.run_id, "producer:a1", str(draft_path))
+        self.assertEqual((code, got["reason_code"]), (1, "APPROVAL_DELIVERY_FAILED"))
+        self.assertEqual(got["worker_result"]["approval_input_hash"], "a" * 64)
+        self.assertTrue(got["draft_saved"])
+
+    def test_process_existing_run_continues_without_fetching_or_starting(self):
+        parked = {"ok": True, "reason_code": "PARKED", "parked": "PRODUCER_WAIT"}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge, \
+                patch("clients.icafe_client.CafeClient") as cafe, \
+                patch.object(self.orchestrator, "start") as start:
+            bridge.return_value.continue_run.return_value = parked
+            code, got = self._run("process", "BGW-1", "bgw")
+        self.assertEqual((code, got), (0, parked))
+        bridge.return_value.continue_run.assert_called_once_with(self.run_id)
+        cafe.assert_not_called()
+        start.assert_not_called()
+
+    def test_process_new_card_starts_then_drives_and_delivers_approval(self):
+        snapshot = {"card": "BGW-NEW"}
+        started = {"run_id": "new-run", "state": "INTAKE"}
+        waiting = {"ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT",
+                   "run_id": "new-run", "gate": "G0", "approval_input_hash": "b" * 64}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge, \
+                patch("clients.icafe_client.CafeClient") as cafe, \
+                patch.object(self.orchestrator, "start", return_value=started) as start, \
+                patch("orchestrator._request_approval", return_value={"ok": True}) as request:
+            cafe.return_value.snapshot.return_value = snapshot
+            bridge.return_value.drive.return_value = waiting
+            code, got = self._run("process", "BGW-NEW", "bgw")
+        self.assertEqual((code, got["parked"]), (0, "APPROVAL_WAIT"))
+        cafe.return_value.snapshot.assert_called_once_with("BGW-NEW")
+        start.assert_called_once_with("BGW-NEW", "bgw", requirement_snapshot=snapshot)
+        bridge.return_value.drive.assert_called_once_with("new-run")
+        request.assert_called_once_with(self.orchestrator, "new-run", "G0", "b" * 64)
+
+    def test_process_refuses_ambiguous_active_or_terminal_history(self):
+        self.orchestrator.state.transition("f" * 32, "INTAKE", {"requirement_id": "BGW-1", "project": "bgw"})
+        for terminal in (False, True):
+            with self.subTest(terminal=terminal):
+                if terminal:
+                    for run in (self.run_id, "f" * 32):
+                        self.orchestrator.state.transition(run, "STOPPED", {})
+                with patch("agent_bridge.AgentBridge", autospec=True) as bridge, \
+                        patch("clients.icafe_client.CafeClient") as cafe:
+                    code, got = self._run("process", "BGW-1", "bgw")
+                self.assertEqual((code, got["reason_code"]), (1, "AMBIGUOUS_RUN"))
+                bridge.return_value.drive.assert_not_called()
+                bridge.return_value.continue_run.assert_not_called()
+                cafe.assert_not_called()
+
+    def test_process_refuses_terminal_run_and_wrong_project(self):
+        for project, reason in (("xflow", "PROJECT_MISMATCH"), ("bgw", "RUN_ALREADY_TERMINAL")):
+            with self.subTest(project=project):
+                if project == "bgw":
+                    self.orchestrator.state.transition(self.run_id, "STOPPED", {})
+                with patch("agent_bridge.AgentBridge", autospec=True) as bridge, \
+                        patch("clients.icafe_client.CafeClient") as cafe:
+                    code, got = self._run("process", "BGW-1", project)
+                self.assertEqual((code, got["reason_code"]), (1, reason))
+                self.assertEqual(got["run_id"], self.run_id)
+                bridge.return_value.continue_run.assert_not_called()
+                cafe.assert_not_called()
+
+    def test_process_does_not_drive_a_failed_start(self):
+        failure = {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": "partial"}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge, \
+                patch("clients.icafe_client.CafeClient") as cafe, \
+                patch.object(self.orchestrator, "start", return_value=failure):
+            cafe.return_value.snapshot.return_value = {}
+            code, got = self._run("process", "BGW-NEW", "bgw")
+        self.assertEqual((code, got), (1, failure))
+        bridge.return_value.drive.assert_not_called()
+
+    def test_context_command_delegates_without_driving(self):
+        context = {"ok": True, "reason_code": "OK", "producer_jobs": []}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge:
+            bridge.return_value.context.return_value = context
+            code, got = self._run("context", "BGW-1")
+        self.assertEqual((code, got), (0, context))
+        bridge.return_value.context.assert_called_once_with("BGW-1")
+        bridge.return_value.drive.assert_not_called()
 
 
     def test_submit_draft_rejects_envelope_instead_of_treating_it_as_content(self):
