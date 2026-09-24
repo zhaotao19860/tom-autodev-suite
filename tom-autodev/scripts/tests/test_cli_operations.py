@@ -43,6 +43,71 @@ class CliOperationTests(unittest.TestCase):
             code = main(["--config-root", str(self.root), *arguments])
         return code, json.loads(output.getvalue())
 
+
+    def test_drive_command_delegates_to_agent_bridge_and_accepts_card_target(self):
+        result = {"ok": True, "reason_code": "PARKED", "parked": "PRODUCER_WAIT"}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge:
+            bridge.return_value.drive.return_value = result
+            code, got = self._run("drive", "BGW-1")
+        self.assertEqual((code, got), (0, result))
+        bridge.return_value.drive.assert_called_once()
+
+    def test_continue_command_delegates_to_agent_bridge(self):
+        result = {"ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT"}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge:
+            bridge.return_value.continue_run.return_value = result
+            code, got = self._run("continue", self.run_id)
+        self.assertEqual((code, got), (0, result))
+        bridge.return_value.continue_run.assert_called_once_with(self.run_id)
+
+    def test_submit_draft_loads_content_json_and_delegates_only_content(self):
+        draft_path = self.root / "draft.json"
+        draft = {"spec": {"acceptance": ["AC-1"]}}
+        draft_path.write_text(json.dumps(draft), encoding="utf-8")
+        result = {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G2", "approval_input_hash": "a" * 64}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge:
+            bridge.return_value.submit_draft.return_value = result
+            code, got = self._run("submit-draft", self.run_id, "producer:a1", str(draft_path))
+        self.assertEqual((code, got), (1, result))
+        bridge.return_value.submit_draft.assert_called_once_with(self.run_id, "producer:a1", draft)
+
+
+    def test_submit_draft_rejects_envelope_instead_of_treating_it_as_content(self):
+        envelope_path = self.root / "envelope.json"
+        envelope_path.write_text(json.dumps({"action_id": "a1", "content": {"spec": {}}}), encoding="utf-8")
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge:
+            code, result = self._run("submit-draft", self.run_id, "producer:a1", str(envelope_path))
+        self.assertEqual((code, result["reason_code"]), (1, "DRAFT_CONTENT_ONLY"))
+        bridge.return_value.submit_draft.assert_not_called()
+
+    def test_approval_delivery_failure_changes_top_level_result_to_failure(self):
+        from orchestrator import _deliver_worker_approval
+        parked = {
+            "ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT",
+            "run_id": self.run_id, "gate": "G0", "approval_input_hash": "a" * 64,
+        }
+        failure = {"ok": False, "reason_code": "APPROVAL_DELIVERY_FAILED", "delivery_failed_at": "now"}
+        with patch("orchestrator._request_approval", return_value=failure) as request:
+            result = _deliver_worker_approval(self.orchestrator, parked)
+        request.assert_called_once_with(self.orchestrator, self.run_id, "G0", "a" * 64)
+        self.assertEqual(result["reason_code"], "APPROVAL_DELIVERY_FAILED")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["worker_reason_code"], "PARKED")
+
+    def test_resume_remains_read_only_and_does_not_construct_bridge(self):
+        with patch("agent_bridge.AgentBridge") as bridge:
+            code, result = self._run("resume", self.run_id)
+        self.assertEqual(code, 0)
+        bridge.assert_not_called()
+
+    def test_drive_ambiguity_is_returned_without_selecting_a_run(self):
+        result = {"ok": False, "reason_code": "AMBIGUOUS_RUN", "candidates": [{"run_id": "a"}]}
+        with patch("agent_bridge.AgentBridge", autospec=True) as bridge:
+            bridge.return_value.drive.return_value = result
+            # resolver belongs to bridge; command must pass the target through unchanged
+            code, got = self._run("drive", "BGW-1")
+        self.assertEqual((code, got), (1, result))
+
     def test_advance_takes_the_gates_hash_from_the_ledger_instead_of_the_operator(self):
         approval = _approve_for_run(self.orchestrator, self.run_id, "G0", "grill-hash")
 

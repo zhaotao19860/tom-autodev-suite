@@ -2704,6 +2704,19 @@ def main(argv: list[str] | None = None) -> int:
     resume = subparsers.add_parser("resume")
     resume.add_argument("run_id")
 
+    drive = subparsers.add_parser("drive", help="由 WorkerDriver 驱动到下一个需要处理的位置")
+    drive.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
+    drive.add_argument("--icode-skill", default=None)
+
+    continue_run = subparsers.add_parser("continue", help="消费有效 handoff 或从检查点继续驱动")
+    continue_run.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
+    continue_run.add_argument("--icode-skill", default=None)
+
+    submit_draft = subparsers.add_parser("submit-draft", help="提交当前 ProducerJob 的 DraftContent JSON 文件")
+    submit_draft.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
+    submit_draft.add_argument("job_id")
+    submit_draft.add_argument("draft_json")
+
     stop = subparsers.add_parser("stop")
     stop.add_argument("run_id")
 
@@ -2901,6 +2914,29 @@ def main(argv: list[str] | None = None) -> int:
         result = orchestrator.approve(args.approval_id, args.decision, args.input_hash, args.channel, args.run_id, args.responder)
     elif args.command == "resume":
         result = orchestrator.resume(args.run_id)
+    elif args.command in {"drive", "continue", "submit-draft"}:
+        from agent_bridge import AgentBridge, resolve_run_target
+
+        bridge = AgentBridge(
+            orchestrator,
+            locks=orchestrator.recovery.locks,
+            ipipe_api_factory=lambda run_id: _cli_ipipe_transport(orchestrator, run_id),
+            icode_skill=getattr(args, "icode_skill", None),
+        )
+        resolved = resolve_run_target(orchestrator, args.target)
+        if not resolved.get("ok"):
+            result = resolved
+        elif args.command == "drive":
+            result = bridge.drive(resolved["run_id"])
+            result = _deliver_worker_approval(orchestrator, result)
+        elif args.command == "continue":
+            result = bridge.continue_run(resolved["run_id"])
+            result = _deliver_worker_approval(orchestrator, result)
+        else:
+            draft = _draft_content_file(args.draft_json)
+            result = draft if draft.get("ok") is False else bridge.submit_draft(
+                resolved["run_id"], args.job_id, draft
+            )
     elif args.command == "stop":
         result = orchestrator.stop(args.run_id)
     elif args.command == "next":
@@ -3175,6 +3211,7 @@ def _cli_exit_code(result: Any) -> int:
     return 0 if reason in {
         None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
         "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT",
+        "PARKED",
     } else 1
 
 
@@ -3383,6 +3420,53 @@ def _watch_ipipe(orchestrator: Orchestrator, interval: float, once: bool) -> dic
     )
     settled = watcher.run(interval, iterations=1 if once else None)
     return {"ok": True, "reason_code": "OK", "settled": settled}
+
+
+def _draft_content_file(path: str) -> dict[str, Any]:
+    """Load only producer DraftContent; reject an ArtifactEnvelope pasted by mistake."""
+    loaded = _json_file(path)
+    if loaded.get("ok") is False:
+        return loaded
+    envelope_fields = {"schema_version", "action_id", "source_event_id", "content_hash", "approval_id", "approval_input_hash"}
+    if envelope_fields.intersection(loaded):
+        return {"ok": False, "reason_code": "DRAFT_CONTENT_ONLY"}
+    return loaded
+
+
+def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return result
+    if result.get("reason_code") != "PARKED" or result.get("parked") != "APPROVAL_WAIT":
+        return result
+    gate = result.get("gate")
+    input_hash = result.get("approval_input_hash")
+    if not isinstance(gate, str) or not isinstance(input_hash, str):
+        return result
+    approval = _request_approval(orchestrator, result.get("run_id"), gate, input_hash)
+    if isinstance(approval, dict) and approval.get("ok") is False:
+        return {
+            **result,
+            **approval,
+            "worker_reason_code": result.get("reason_code"),
+            "worker_result": result,
+            "approval": approval,
+        }
+    return {**result, "approval": approval}
+
+
+def _cli_ipipe_transport(orchestrator: Orchestrator, run_id: str) -> Any:
+    """Build the run-bound iPipe transport, or return None so the worker parks safely."""
+    from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport
+    from clients.ku_client import resolve_username
+
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return None
+    repos = pinned["profile"].get("business_repos") or []
+    user = resolve_username([item["path"] for item in repos if item.get("path")])
+    if not user:
+        return None
+    return IpipeApiClient(IpipeHttpTransport(), current_user=user)
 
 
 def _cli_ipipe_runtime(orchestrator: Orchestrator, run_id: str) -> Any:
