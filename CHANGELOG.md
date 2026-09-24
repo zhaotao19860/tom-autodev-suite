@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-24
+
+- 精简 KU/iCafe 协作写入范围（控制策略变更，改变 `workflow_spec.canonical_hash()`）：`SPEC` 由 `both` 降为 `ku_only`（去掉 iCafe 里程碑评论，保留 KU 文档），`REVIEW` 与 `DIAGNOSE` 由 `ku_only` 降为 `skip`（KU、iCafe 都不写）。`INTAKE`（KU 根锚点）、`RELEASE`、`IPIPE` 及其余阶段不变。阶段产物一律仍存本地 `artifact_store`，正确性与恢复不读 KU，故本次仅减少人可见的协作写入。同步更新 `workflow_spec` 内注释与 `docs/OPERATIONS.md` 的发布范围表。
+- 影响：`knowledge_scope` 属于 `canonical_hash()` 的一部分，本次编辑改变工作流规则 hash——已 pin 旧 hash 的在途 run 会被 `WORKFLOW_SPEC_DRIFT` 阻断，需在旧版本跑完或在新版本重启并重新审批（`WORKFLOW_VERSION` 标签沿用 `workflow-spec-v2`，与既往策略微调惯例一致，精确身份以 hash 为准）。
+- 验证：`test_workflow_spec` 29 项、`test_fake_e2e` 71 项（其按 `knowledge_scope` 动态断言每阶段 KU/iCafe 写入）、`test_phase_protocol` 27 项、`test_knowledge_sync` 19 项通过；随后跑完整 C 命令。
+
 ## 2026-09-22
 
 按 `TAD-REVIEW-EXIT 1.0` 首次有界工程评审修复（初审基线 `273d2507bcfb600d1a1ab9e5e6d8f61b72d41565`）：

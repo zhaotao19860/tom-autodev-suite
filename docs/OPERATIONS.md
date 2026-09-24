@@ -151,10 +151,10 @@ python3 tom-autodev/scripts/cli.py --config-root /path/to/autodev-state status "
 
 | 阶段 | 协作侧写入 |
 |---|---|
-| INTAKE、SPEC、RELEASE | KU 与 iCafe |
-| REVIEW、DIAGNOSE | KU |
+| INTAKE、RELEASE | KU 与 iCafe |
+| SPEC | KU |
 | IPIPE | iCafe 里程碑 |
-| GRILL、TASKS、PLAN、IMPLEMENT | 保留本地产物，不逐阶段写 KU/iCafe |
+| GRILL、TASKS、PLAN、IMPLEMENT、REVIEW、DIAGNOSE | 保留本地产物，不逐阶段写 KU/iCafe |
 
 读取归档使用 `cli.py artifact show ARTIFACT_ID` 的完整性校验入口。需要查看全部事件可用 `status RUN --json`；CLI 没有 `trace` 子命令。
 

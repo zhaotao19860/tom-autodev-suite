@@ -368,22 +368,26 @@ def spec_drift(events: list[dict[str, Any]] | None) -> dict[str, str] | None:
 # artifact declares whether it publishes a human-readable KU doc and/or comments the iCafe
 # card. The artifact itself is ALWAYS stored in the artifact_store — correctness and
 # recovery read from there, never from KU — so this only trims the human-facing writes:
-#   both       — KU doc + iCafe comment            (SPEC, RELEASE)
-#   ku_only    — KU doc, no iCafe comment          (REVIEW, DIAGNOSE)
-#   icafe_only — iCafe milestone comment, no KU doc (INTAKE/G0, IPIPE)
-#   skip       — neither                           (GRILL, TASKS, PLAN, IMPLEMENT)
+#   both       — KU doc + iCafe comment            (INTAKE/G0, RELEASE)
+#   ku_only    — KU doc, no iCafe comment          (SPEC)
+#   icafe_only — iCafe milestone comment, no KU doc (IPIPE)
+#   skip       — neither                           (GRILL, TASKS, PLAN, IMPLEMENT, REVIEW, DIAGNOSE)
 # An unlisted phase defaults to "both" so nothing loses its writes by omission.
 _KNOWLEDGE_SCOPE: dict[str, str] = {
     # INTAKE stays "both": its requirement-snapshot anchors the run's KU root (the doc every
     # later phase indexes under) and is the G0 milestone, so it is not trimmed.
     "INTAKE": "both",
     "GRILL": "skip",
-    "SPEC": "both",
+    # SPEC keeps only the KU doc (the behaviour/acceptance the requirement owner reads);
+    # its iCafe comment is dropped as redundant milestone noise.
+    "SPEC": "ku_only",
     "TASKS": "skip",
     "PLAN": "skip",
     "IMPLEMENT": "skip",
-    "REVIEW": "ku_only",
-    "DIAGNOSE": "ku_only",
+    # REVIEW/DIAGNOSE are intermediate engineering records that people rarely re-read in KU;
+    # both are trimmed to neither write. The full artifact still lives in the artifact_store.
+    "REVIEW": "skip",
+    "DIAGNOSE": "skip",
     "IPIPE": "icafe_only",
     "RELEASE": "both",
 }

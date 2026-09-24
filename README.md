@@ -40,6 +40,55 @@ flowchart TD
 
 模型只交回内容。worker 负责封装产物身份、绑定审批、保存回执和推进阶段；模型无需重复拼装平台调用、状态迁移或恢复逻辑。详见 [Producer 合同](tom-autodev/references/producer-contract.md)。
 
+### 参与者与协作（进程视角）
+
+把上面的角色落到实际运行，是下面这些进程/服务在协作。你日常只做三件事——**在 IDE 用 `/tom-autodev` 起卡、在如流批准关口、盯 iPipe 结果**——其余推进、投递、轮询、续跑都自动完成。
+
+| 参与者 | 是什么 | 位置 / 进程 | 负责 |
+|---|---|---|---|
+| 人 | 需求方 / 评审 / 操作者 | —（角色） | 建卡、审批、必要时在 IDE 说“继续” |
+| Comate | 一次 agent turn 内的 模型 producer + worker 控制面 | 本地 Mac，同一进程 | 产出草案/代码、推状态机、执行已获批动作 |
+| Stop-hook | `ide_turn_hook.py` | 本地，会话停止时短命进程 | 消费 resume handoff，自动把已批准的 run 续跑一段 |
+| ApprovalWatcher | `watch-approvals` | 本地，常驻或定时 `--once` | 轮询如流回应、提醒/重发、落 resume handoff（不完成阶段） |
+| IpipeWatcher | `watch-ipipe` | 本地，常驻或定时 `--once` | 轮询构建，把成功/失败/人工卡住报到如流（不推进、不摄取） |
+| 如流网关 | Node.js 服务 | 远端 | 程序侧投递审批卡、收回回应 |
+| 如流 | IM 客户端 | 人的界面 | 人看到卡片并批准/拒绝 |
+| iCafe / iCode / KU | 远端平台 | 远端 | 需求卡 / CR 提交 / 知识库文档 |
+| iPipe runner | 远端 CI | 远端 | 真正编译、测试、发布 |
+
+> worker 不是独立常驻进程，而是运行在 Comate turn / Stop-hook / CLI 里的控制面代码；两个 watcher 才是可常驻的后台。真正推进 run 的永远是 worker，watcher 只把外部事件变成“可续跑状态或通知”。
+
+```mermaid
+flowchart TD
+    U["人：需求方 / 评审 / 操作者"]
+    subgraph LOCAL["本地 Mac（宿主驾驶位）"]
+        IDE["Comate turn：模型 producer + worker 控制面"]
+        HK["Stop-hook 续跑"]
+        AW["ApprovalWatcher（watch-approvals）"]
+        IW["IpipeWatcher（watch-ipipe）"]
+    end
+    subgraph REMOTE["远端平台"]
+        GW["如流网关 Node.js"]
+        RL["如流 App"]
+        PF["iCafe / iCode / KU"]
+        CI["iPipe runner"]
+    end
+    U -->|"① /tom-autodev：项目 + 已确认卡"| IDE
+    IDE -->|"读需求快照 / 提交 CR / 发知识"| PF
+    IDE -->|"② 到审批关口 → 停(PARK)"| AW
+    AW -->|"推审批卡"| GW
+    GW --> RL
+    RL -->|"③ 人点【批准】"| U
+    AW -->|"更新台账 + 落 handoff"| HK
+    HK -->|"④ 续跑"| IDE
+    IDE -->|"⑤ IPIPE 触发构建"| CI
+    IW -->|"轮询"| CI
+    IW -->|"⑥ 成功/失败/人工卡住 → 报到"| GW
+    IDE -->|"⑦ 全模块通过 → G9 发布确认"| DONE["RELEASE_SUCCESS ✅"]
+```
+
+一句话看懂：**Comate 往前推 → 到关口停 → 人在如流批 / iPipe 跑构建 → watcher 把结果变成可续跑状态或通知 → Stop-hook 或 agent 再往前推**，如此循环到发布；失败则回 DIAGNOSE→PLAN→IMPLEMENT 重跑。
+
 ### 一张需求卡如何走完
 
 默认 `standard` 路径如下。Spec 是行为与验收约定；DAG 是带依赖关系的任务清单。
@@ -139,6 +188,22 @@ python3 tom-autodev/scripts/cli.py preflight bgw
 ```
 
 预检核对配置和平台访问能力。若返回 `PROJECT_NOT_READY`，先补齐结果中列出的缺失项；不从目录名称猜测仓库、流水线或环境。
+
+### 4. 注册续跑 hook 与后台值班
+
+审批和构建发生在 IDE 之外，需要两处“值班”把结果接回来，否则 run 会一直停在关口等待（对照上面的[协作图](#参与者与协作进程视角) ②–⑥）：
+
+- **Stop-hook**：把 [ide_turn_hook.py](tom-autodev/scripts/ide_turn_hook.py) 注册到 `~/.comate/hooks.json` 的 `Stop` 事件；会话停止时它自动续跑已批准的 run。
+- **两个 watcher**：常驻运行，或用 cron/launchd 定时跑 `--once`。如流网关需要 Node.js、配置好的机器人和审批成员。
+
+```bash
+# 消费如流审批回应，落续跑 handoff（不完成模型阶段）
+python3 tom-autodev/scripts/cli.py watch-approvals --interval 10
+# 轮询 iPipe 构建，把成功/失败/人工卡住报到如流
+python3 tom-autodev/scripts/cli.py watch-ipipe --interval 60
+```
+
+只想跑单次（交给外部调度器）时加 `--once`。hook、worker API 和运维命令见 [操作参考](docs/OPERATIONS.md)。
 
 ## 日常使用
 
@@ -254,7 +319,11 @@ tom-autodev-suite/
 
 缺少标准版本/hash、代码基线或证据的报告不计为验收通过。目前这是仓库指令和报告验收约定，尚未接入 CI/分支保护；不会强制任意模型读取或遵守。
 
-最近一次记录：[2026-09-22 有界评审与修复](docs/reviews/2026-09-22-exit-review.md)。五类已确认缺陷触发已修复，控制面 976 项回归通过；完整 C 仍为 `INCOMPLETE`，尚需补齐 WF-08 其余可写入口的配置漂移证据。M/P 均未验证。后续按报告中的具体任务继续，不重复开展开放式全仓评审。
+评审记录：
+- [2026-09-22 有界评审与修复](docs/reviews/2026-09-22-exit-review.md)。五类已确认缺陷触发已修复，控制面 976 项回归通过；完整 C 判为 `INCOMPLETE`，尚需补齐 WF-08 其余可写入口的配置漂移证据。M/P 均未验证。
+- [2026-09-23 独立复审（GAP-WF08 定向取证）](docs/reviews/2026-09-23-independent-c-review.md)。第二份独立评审，逐入口核对 GAP-WF08 所列可写入口后未发现新的确认 P0/P1/P2，其 C 必要证据已具备（仅一项 P3 一致性观察 IR-01）；是否据此将 C 收为 `PASS` 并关闭 `GAP-WF08` 属负责人决定，M/P 仍未验证。所审代码与首次评审 target 逐字节一致。
+
+后续按报告中的具体任务继续，不重复开展开放式全仓评审。
 
 从仓库根目录运行套件自身测试：
 
