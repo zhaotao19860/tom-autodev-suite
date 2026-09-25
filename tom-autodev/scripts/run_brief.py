@@ -7,6 +7,7 @@ thing to say.
 """
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from approval_ledger import gate_of
@@ -62,6 +63,26 @@ _BLOCKED_HINT: dict[str, str] = {
 }
 
 
+def _read_only_next(orchestrator: Any, run_id: str) -> dict[str, Any]:
+    """Ask the next oracle without recovery side effects.
+
+    A few host integrations expose a minimal ``next(run_id)`` adapter rather than the
+    full Orchestrator signature. Keep those read-only projections compatible while
+    ensuring the real controller always receives ``read_only=True``.
+    """
+    next_fn = getattr(orchestrator, "next")
+    try:
+        parameters = inspect.signature(next_fn).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "read_only" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return next_fn(run_id, read_only=True)
+    return next_fn(run_id)
+
+
 def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     events = orchestrator.state.events(run_id)
     if not events:
@@ -69,7 +90,9 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     current = events[-1]
     terminal = current.get("state") in _TERMINAL_SUCCESS
     intake = events[0].get("payload") or {}
-    action = orchestrator.next(run_id)
+    # Status is observational. In particular, it must not recover a skipped SUBMIT
+    # checkpoint merely because somebody refreshed the dashboard.
+    action = _read_only_next(orchestrator, run_id)
     current_gate = action.get("required_human_gate") if action.get("ok") else None
     approvals = [] if terminal else orchestrator.approvals.for_run(run_id)
     # A PENDING card is superseded only when a *later* APPROVE of the same action
@@ -106,6 +129,8 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         {"operation": item.get("operation"), "intent_id": item.get("intent_id")}
         for item in orchestrator.state.pending_intents(run_id)
     ]
+    monitoring_reader = getattr(orchestrator.state, "ipipe_monitoring", None)
+    monitoring = monitoring_reader(run_id) if callable(monitoring_reader) else []
     blocked = None if terminal or action.get("ok") else action.get("reason_code")
     # This is a presentation hint, not approval authorization. The completion
     # validator still checks the exact candidate hash against the ledger.
@@ -129,6 +154,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         "phases_done": sum(1 for event in events[1:]),
         "waiting_on": open_gates,
         "in_flight": pending,
+        "ipipe_monitoring": monitoring,
         "blocked": blocked,
         "producer_job": producer_job,
         # The gate this phase will have to pass, so a caller can tell an unanswered
@@ -235,6 +261,25 @@ def render(brief: dict[str, Any]) -> str:
         lines.append("未确认的外部写入：" + "、".join(
             sorted({item["operation"] for item in brief["in_flight"]})
         ))
+    for item in brief.get("ipipe_monitoring") or []:
+        checkpoint = item.get("checkpoint") or {}
+        stages = checkpoint.get("stages") or []
+        active = next(
+            (
+                stage for stage in stages
+                if stage.get("status") not in {"SUCCESS", "SUCC", "PASSED", "PASS"}
+            ),
+            None,
+        )
+        location = (
+            f"{active.get('name') or active.get('stage_name') or active.get('stage_build_id')}"
+            if isinstance(active, dict) else "阶段状态未知"
+        )
+        lines.append(
+            f"iPipe 观察：build {item.get('build_id')} · "
+            f"{checkpoint.get('status') or 'UNKNOWN'} · {location} · "
+            f"最近检查 {item.get('updated_at') or '-'}"
+        )
     if brief.get("blocked"):
         lines.append(f"阻塞原因 {brief['blocked']}")
     producer = brief.get("producer_job")

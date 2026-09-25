@@ -64,7 +64,7 @@ class AgentBridgeTests(unittest.TestCase):
         with patch("worker_driver.submit_draft", return_value=result) as submit:
             got = self.bridge().submit_draft(self.run_id, job_id, draft)
         self.assertEqual(got, result)
-        submit.assert_called_once_with(self.orch, self.run_id, job_id, draft)
+        submit.assert_called_once_with(self.orch, self.run_id, job_id, draft, locks=self.locks)
         self.assertIs(submit.call_args.args[3], draft)
         json.dumps(got)
 

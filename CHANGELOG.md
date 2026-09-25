@@ -4,6 +4,15 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-25 · 增量前沿与 iPipe 观察优化
+
+- DAG amend 改为按 task scope 判断 Review 是否仍覆盖当前任务：节点语义和直接前驱未变化的 task 继续复用 Review，变化 task 才重新进入 frontier；缺少 Review 时刻 DAG 证据时 fail-closed。补充增量 amend、受影响 task 重开和 frontier 不清空回归。
+- `status` 使用只读 next oracle，不会因为刷新状态隐式恢复 SUBMIT 或推进 run；对旧版只实现 `next(run_id)` 的轻量 adapter 保留兼容。
+- `submit-draft` 接入 run 级 worker lease，与 `advance` 串行保护同一 run 的 frontier、ProducerJob 和 phase completion。
+- iPipe worker 和 watcher 改用 bounded `monitor_once()`；长时间运行的 build 不再让一次 drive 或 watcher tick 持续占用 lease。旧的连续 `monitor()` 接口保留兼容。
+- 新增 SQLite iPipe monitoring checkpoint，按 `(run_id, build_id)` 保存最近状态、stage、deadline、证据引用和更新时间；`status` 可展示活动 stage 与最近检查时间。checkpoint 只是观察事实，不替代 iPipe evidence ingest，也不自动推进 phase。
+- 验证：受影响回归 `183` 项通过；完整控制面回归 `1031` 项通过。测试输出仍有少量 ResourceWarning，未影响测试结果，列入后续清理项。
+
 ## 2026-09-24 · 日常入口第二轮优化
 
 - `process CARD PROJECT` 合并创建和驱动，复用唯一活动 run；项目不匹配、多候选和终态历史均给出明确结果，不静默切换或重启。

@@ -19,20 +19,44 @@ import run_brief
 
 
 class BriefFixture:
-    def __init__(self, state, action, *, pending=None, approvals=None, card_id="BGW-1", producer_jobs=None):
+    def __init__(self, state, action, *, pending=None, approvals=None, card_id="BGW-1",
+                 producer_jobs=None, monitoring=None):
         self.state = SimpleNamespace(events=lambda run_id: [
             {"run_id": run_id, "state": state, "created_at": "2026-09-24T00:00:00+00:00",
              "payload": {"requirement_id": card_id, "project": "bgw"}},
         ], pending_intents=lambda run_id: pending or [],
-            producer_job=lambda job_id: (producer_jobs or {}).get(job_id))
+            producer_job=lambda job_id: (producer_jobs or {}).get(job_id),
+            ipipe_monitoring=lambda run_id: monitoring or [])
         self.approvals = SimpleNamespace(for_run=lambda run_id: approvals or [])
         self._action = action
 
-    def next(self, run_id):
+    def next(self, run_id, *, read_only=False):
+        self.last_read_only = read_only
         return self._action
 
 
 class RunBriefTests(unittest.TestCase):
+    def test_status_exposes_latest_ipipe_monitoring_checkpoint(self):
+        orch = BriefFixture(
+            "IPIPE", {"ok": True, "phase": "IPIPE"},
+            monitoring=[{
+                "run_id": "run-1", "build_id": "build-1",
+                "updated_at": "2026-09-25T00:00:00+00:00",
+                "checkpoint": {
+                    "status": "MONITORING",
+                    "stages": [{"name": "P0新case回归", "status": "RUNNING"}],
+                },
+            }],
+        )
+        brief = run_brief.build(orch, "run-1")
+        self.assertEqual(brief["ipipe_monitoring"][0]["build_id"], "build-1")
+        self.assertIn("P0新case回归", run_brief.render(brief))
+
+    def test_status_evaluates_next_without_recovery_side_effects(self):
+        orch = BriefFixture("SUBMIT", {"ok": True, "phase": "SUBMIT"})
+        run_brief.build(orch, "run-1")
+        self.assertTrue(orch.last_read_only)
+
     def test_producer_wait_has_human_status_and_agent_next_step(self):
         orch = BriefFixture("SPEC", {"ok": True, "phase": "SPEC", "child_skill": "tom-spec"})
         brief = run_brief.build(orch, "run-1")

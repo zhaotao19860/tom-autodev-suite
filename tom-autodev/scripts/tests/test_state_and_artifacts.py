@@ -101,6 +101,23 @@ class StateAndArtifactTests(unittest.TestCase):
                     {"document_key": "different"},
                 )
 
+    def test_ipipe_monitoring_checkpoint_is_durable_and_replaced_per_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            store = StateStore(database)
+            first = store.save_ipipe_monitoring(
+                "run-1", "build-1", {"status": "MONITORING", "stages": [{"name": "P0"}]}
+            )
+            second = StateStore(database).save_ipipe_monitoring(
+                "run-1", "build-1", {"status": "SUCCESS", "stages": []}
+            )
+
+            self.assertEqual(first["build_id"], "build-1")
+            self.assertEqual(second["checkpoint"]["status"], "SUCCESS")
+            rows = StateStore(database).ipipe_monitoring("run-1")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["checkpoint"]["status"], "SUCCESS")
+
     def test_external_receipt_is_idempotent_and_conflicts_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "state.sqlite"

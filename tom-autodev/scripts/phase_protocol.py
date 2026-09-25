@@ -953,8 +953,8 @@ class PhaseProtocol:
         A Review is only evidence about the scope it was written against. An amendment
         that gives an already-reviewed task new scope -- Spec 1.1.3 adding NAT64 coverage
         to T3, say -- publishes a newer task DAG, and the old Review says nothing about
-        the added work. Treating it as "finished forever" emptied the frontier and parked
-        the run with no task to plan.
+        the added work. An amendment to a different node, however, must not throw away
+        unrelated Review evidence: the frontier is scope-aware rather than sequence-wide.
         """
         dag = self.artifacts.latest_phase(run_id, "TASKS", None)
         dag_sequence = dag.get("sequence") if dag.get("valid") else None
@@ -962,7 +962,20 @@ class PhaseProtocol:
         if reviewed is None:
             return False
         if dag_sequence is not None and reviewed <= dag_sequence:
-            return False
+            reviewed_dag = self._dag_before(run_id, reviewed)
+            current_scope = self._node_signature(
+                dag["envelope"].get("content", {}) if dag.get("valid") else {},
+                task_id,
+            )
+            reviewed_scope = self._node_signature(
+                reviewed_dag["envelope"].get("content", {})
+                if reviewed_dag is not None else {},
+                task_id,
+            )
+            # Fail closed for legacy fixtures/runs that cannot prove the DAG scope the
+            # Review consumed. New runs carry both DAGs in the immutable artifact ledger.
+            if current_scope is None or reviewed_scope is None or current_scope != reviewed_scope:
+                return False
         # Review is evidence about the IMPLEMENT candidate it consumed. Do not
         # consult a later submit descriptor here: that descriptor is created
         # after Review and would make the validity check circular (and would
@@ -994,6 +1007,49 @@ class PhaseProtocol:
             and review.get("parent_artifact_hash")
             == implement["envelope"].get("content_hash")
         )
+
+    def _dag_before(self, run_id: str, sequence: int) -> dict[str, Any] | None:
+        """Return the newest valid TASKS artifact strictly before ``sequence``."""
+        candidates = [
+            artifact
+            for artifact in self.artifacts.phase_artifacts(run_id, "TASKS")
+            if artifact.get("valid")
+            and isinstance(artifact.get("sequence"), int)
+            and artifact["sequence"] < sequence
+        ]
+        return max(candidates, key=lambda artifact: artifact["sequence"]) if candidates else None
+
+    def _node_signature(self, dag: dict[str, Any], task_id: str) -> str | None:
+        """Hash the semantic scope of one DAG node and its direct predecessors.
+
+        The full node payload is intentionally included (apart from task_id), so a new
+        task-level field cannot silently reuse an old Review until the scope contract is
+        updated. The predecessor set is added explicitly because edges are stored outside
+        nodes and changing one changes the task's required context.
+        """
+        if not isinstance(dag, dict) or not isinstance(task_id, str) or not task_id:
+            return None
+        node = next(
+            (
+                value for value in dag.get("nodes", [])
+                if isinstance(value, dict) and value.get("task_id") == task_id
+            ),
+            None,
+        )
+        if not isinstance(node, dict):
+            return None
+        predecessors = sorted({
+            edge.get("from")
+            for edge in dag.get("edges", [])
+            if isinstance(edge, dict)
+            and edge.get("to") == task_id
+            and isinstance(edge.get("from"), str)
+        })
+        semantic_node = {key: value for key, value in node.items() if key != "task_id"}
+        return _canonical_hash({
+            "node": semantic_node,
+            "direct_predecessors": predecessors,
+        })
 
     def _task_dependencies_met(self, run_id: str, task_id: str) -> bool:
         """True when every DAG predecessor of task_id already has a passing Review."""
@@ -1029,15 +1085,12 @@ class PhaseProtocol:
         nodes = content.get("nodes", [])
         edges = content.get("edges", [])
         reviews = self._passing_reviews(run_id)
-        dag_sequence = dag.get("sequence")
-        # Two different questions, and answering both with one set is what parked the run
-        # after an amendment. "Is this task still open?" is asked against the current DAG,
-        # so a Review older than the DAG does not close it. "Are its prerequisites done?"
-        # is asked about work that happened, so any passing Review counts there.
+        # Two different questions are intentionally kept separate. "Is this task still
+        # open?" is scope-aware against the current DAG; "Are its prerequisites done?"
+        # is about work that happened, so any passing Review counts there.
         passed_ever = set(reviews)
         finished = {
-            task_id for task_id, sequence in reviews.items()
-            if dag_sequence is None or sequence > dag_sequence
+            task_id for task_id in reviews if self._task_reviewed(run_id, task_id)
         }
         dependencies: dict[str, set[str]] = {
             node.get("task_id"): set() for node in nodes if isinstance(node, dict)
@@ -1382,11 +1435,9 @@ class PhaseProtocol:
         nodes = content.get("nodes", [])
         edges = content.get("edges", [])
         reviews = self._passing_reviews(run_id)
-        dag_sequence = dag.get("sequence")
         passed_ever = set(reviews)
         finished = {
-            task_id for task_id, sequence in reviews.items()
-            if dag_sequence is None or sequence > dag_sequence
+            task_id for task_id in reviews if self._task_reviewed(run_id, task_id)
         }
         if completing_task:
             passed_ever.add(completing_task)

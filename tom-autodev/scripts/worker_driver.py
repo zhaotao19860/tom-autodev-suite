@@ -238,6 +238,7 @@ def cached_draft_for(orchestrator: Any, action: dict[str, Any]) -> dict[str, Any
 def submit_draft(
     orchestrator: Any, run_id: str, job_id: str, draft: dict[str, Any],
     knowledge_sync: Any | None = None,
+    *, locks: Any | None = None, owner_token: str | None = None,
 ) -> dict[str, Any]:
     """Fulfil a ProducerJob with model-authored DraftContent and complete the phase.
 
@@ -251,6 +252,25 @@ def submit_draft(
     without re-invoking the producer (see `_drive`), so a post-approval `resume()` alone
     completes the phase.
     """
+    # Producer submission mutates the same run ledger as advance(). Serialize it with
+    # the run lease when the caller is using the durable worker boundary; direct legacy
+    # callers may omit locks and retain the historical single-process behavior.
+    if locks is not None:
+        token = owner_token or uuid.uuid4().hex
+        key = f"{_WORKER_LEASE_PREFIX}{run_id}"
+        lease = locks.acquire(key, token, _WORKER_LEASE_TTL_SECONDS)
+        if not lease.get("acquired"):
+            return {"ok": False, "reason_code": "WORKER_LEASE_HELD", "run_id": run_id,
+                    "owner_pid": lease.get("owner_pid")}
+        try:
+            return submit_draft(
+                orchestrator, run_id, job_id, draft, knowledge_sync=knowledge_sync,
+                locks=None,
+            )
+        finally:
+            released = locks.release(key, token)
+            if isinstance(released, dict) and not released.get("released"):
+                _log.warning("worker lease %s not released by producer %s", key, token)
     decision = classify_next(orchestrator, run_id)
     if decision["kind"] != PRODUCER_WAIT:
         return {"ok": False, "reason_code": "NOT_PRODUCER", "decision_kind": decision["kind"]}
@@ -675,8 +695,39 @@ def _execute_ipipe(
                 "run_id": run_id}
     build_id = triggered["build_id"]
     deadline = (datetime.now(timezone.utc) + _IPIPE_MONITOR_WINDOW).isoformat()
-    monitored = runtime.monitor(build_id, deadline)
+    # Observe one bounded poll only. A long-running build is represented as PARKED
+    # rather than holding the run lease and the Agent session for hours; continue/watch
+    # re-enters this controller and reuses the same build identity.
+    monitored = runtime.monitor_once(build_id, deadline)
     status = monitored.get("status")
+    if status == "MONITORING":
+        orchestrator.state.save_ipipe_monitoring(
+            run_id,
+            build_id,
+            {
+                "module": module,
+                "status": status,
+                "deadline": monitored.get("deadline"),
+                "next_poll_after_seconds": monitored.get("next_poll_after_seconds"),
+                "stages": monitored.get("stages") or [],
+                "evidence_refs": monitored.get("evidence_refs") or [],
+            },
+        )
+    else:
+        # A terminal/manual observation supersedes the running checkpoint. Keep the
+        # latest facts available to status, but make the terminal state explicit.
+        orchestrator.state.save_ipipe_monitoring(
+            run_id,
+            build_id,
+            {
+                "module": module,
+                "status": status,
+                "stages": monitored.get("stages") or [],
+                "stage_build_id": monitored.get("stage_build_id"),
+                "failure_signature": monitored.get("failure_signature"),
+                "evidence_refs": monitored.get("evidence_refs") or [],
+            },
+        )
     if status not in ("SUCCESS", "FAILURE"):
         # MANUAL_WAIT / TIMEOUT / TRANSIENT / INVALID: not the worker's call to make.
         return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "IPIPE_MONITOR",

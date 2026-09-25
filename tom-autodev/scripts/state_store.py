@@ -163,6 +163,15 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS producer_attempts_job
                     ON producer_job_attempts(job_id, sequence);
+                CREATE TABLE IF NOT EXISTS ipipe_monitoring (
+                    run_id TEXT NOT NULL,
+                    build_id TEXT NOT NULL,
+                    checkpoint_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (run_id, build_id)
+                );
+                CREATE INDEX IF NOT EXISTS ipipe_monitoring_run_updated
+                    ON ipipe_monitoring(run_id, updated_at);
                 CREATE TABLE IF NOT EXISTS model_execution_receipts (
                     receipt_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -722,6 +731,50 @@ class StateStore:
                     "evidence_refs": json.loads(row["evidence_refs_json"]),
                     "created_at": row["receipt_created_at"],
                 },
+            }
+            for row in rows
+        ]
+
+    def save_ipipe_monitoring(
+        self, run_id: str, build_id: str, checkpoint: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Persist the latest bounded observation for one run-owned build."""
+        encoded = _encode(checkpoint)
+        updated_at = _now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ipipe_monitoring(run_id, build_id, checkpoint_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(run_id, build_id) DO UPDATE SET
+                    checkpoint_json=excluded.checkpoint_json,
+                    updated_at=excluded.updated_at
+                """,
+                (run_id, build_id, encoded, updated_at),
+            )
+        return {
+            "run_id": run_id, "build_id": build_id,
+            "checkpoint": json.loads(encoded), "updated_at": updated_at,
+        }
+
+    def ipipe_monitoring(self, run_id: str) -> list[dict[str, Any]]:
+        """Return the latest observation for each build owned by a run."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT build_id, checkpoint_json, updated_at
+                FROM ipipe_monitoring
+                WHERE run_id = ?
+                ORDER BY updated_at DESC, build_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                "run_id": run_id,
+                "build_id": row["build_id"],
+                "checkpoint": json.loads(row["checkpoint_json"]),
+                "updated_at": row["updated_at"],
             }
             for row in rows
         ]

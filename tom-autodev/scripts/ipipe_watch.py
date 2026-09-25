@@ -96,12 +96,30 @@ class IpipeWatcher:
         for build_id in build_ids:
             deadline = (self.clock() + timedelta(seconds=self.window_seconds)).isoformat()
             try:
-                result = runtime.monitor(build_id, deadline)
+                observe = getattr(runtime, "monitor_once", None)
+                if not callable(observe):
+                    observe = runtime.monitor
+                result = observe(build_id, deadline)
             except Exception as error:  # noqa: BLE001 - a poll must not kill the watcher
                 outcomes.append({"ok": False, "reason_code": "MONITOR_CALL_FAILED", "run_id": run_id,
                                  "build_id": build_id, "detail": str(error)})
                 continue
             status = result.get("status")
+            save_checkpoint = getattr(self.orchestrator.state, "save_ipipe_monitoring", None)
+            if callable(save_checkpoint):
+                save_checkpoint(
+                    run_id,
+                    build_id,
+                    {
+                        "status": status,
+                        "deadline": result.get("deadline"),
+                        "next_poll_after_seconds": result.get("next_poll_after_seconds"),
+                        "stages": result.get("stages") or [],
+                        "stage_build_id": result.get("stage_build_id"),
+                        "failure_signature": result.get("failure_signature"),
+                        "evidence_refs": result.get("evidence_refs") or [],
+                    },
+                )
             if status == "SUCCESS":
                 outcomes.append(self._notice(run_id, f"success:{build_id}", _success_markdown, result))
             elif status == "FAILURE":

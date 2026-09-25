@@ -244,7 +244,10 @@ class IpipeRuntime:
         return self._trigger_receipt(intent["intent_id"], context, candidate)
 
     @guard_execution
-    def monitor(self, build_id: str, deadline: str) -> dict[str, Any]:
+    def monitor(
+        self, build_id: str, deadline: str, *, poll_budget: int | None = None,
+        park_on_budget: bool = False,
+    ) -> dict[str, Any]:
         blocked = self._profile_error()
         if blocked is not None:
             return blocked
@@ -254,7 +257,9 @@ class IpipeRuntime:
         parsed_deadline = _deadline(deadline)
         if parsed_deadline is None:
             return _failure("DEADLINE_INVALID")
-        for poll in range(self.max_polls):
+        budget = self.max_polls if poll_budget is None else max(1, int(poll_budget))
+        last_stages: list[dict[str, Any]] = []
+        for poll in range(budget):
             blocked = self._profile_error()
             if blocked is not None:
                 return blocked
@@ -268,6 +273,7 @@ class IpipeRuntime:
             if not _matches_build(build, binding):
                 return _failure("REVISION_MISMATCH", status="INVALID")
             normalized_stages = [_normalize_stage(stage) for stage in stages]
+            last_stages = normalized_stages
             stage_identity_failure = _stage_identity_failure(normalized_stages)
             if stage_identity_failure is not None:
                 return _failure(stage_identity_failure, status="INVALID")
@@ -330,9 +336,30 @@ class IpipeRuntime:
                     "environment_fingerprint": binding["environment_fingerprint"],
                     "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
                 }
-            if poll + 1 < self.max_polls:
+            if poll + 1 < budget:
                 self.sleeper(self.poll_interval)
+        if park_on_budget:
+            return {
+                "ok": True,
+                "reason_code": "MONITORING",
+                "status": "MONITORING",
+                "build_id": build_id,
+                "stages": last_stages,
+                "environment_fingerprint": binding["environment_fingerprint"],
+                "next_poll_after_seconds": self.poll_interval,
+                "deadline": parsed_deadline.isoformat(),
+                "evidence_refs": _build_evidence(build_id, binding, last_stages),
+            }
         return _failure("MONITOR_TIMEOUT", status="TIMEOUT", build_id=build_id)
+
+    def monitor_once(self, build_id: str, deadline: str) -> dict[str, Any]:
+        """Observe one iPipe poll and return a durable-worker-friendly checkpoint.
+
+        The legacy ``monitor`` method remains continuous for compatibility. Worker
+        orchestration should use this bounded form so one drive call never occupies a
+        lease for the lifetime of a long build.
+        """
+        return self.monitor(build_id, deadline, poll_budget=1, park_on_budget=True)
 
     def product_url(self, module: str, revision: str, pipeline_id: str) -> dict[str, Any]:
         """The build product a downstream stage has to download, for one module.

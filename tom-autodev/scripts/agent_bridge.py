@@ -184,7 +184,7 @@ class AgentBridge:
         global single-writer guarantee across every run mutation.
         """
         result = worker_driver.submit_draft(
-            self.orchestrator, run_id, job_id, draft_content
+            self.orchestrator, run_id, job_id, draft_content, locks=self.locks
         )
         return _json_safe(result)
 

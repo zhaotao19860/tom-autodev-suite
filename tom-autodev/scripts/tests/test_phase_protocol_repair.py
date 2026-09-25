@@ -885,7 +885,7 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
         # and with no pointer the frontier is the first reopened node in DAG order.
         self.assertEqual(reopened["task_id"], "T-2")
         self.state.transition(run_id, "WORKSPACE", {"profile_hash": "a" * 64})
-        self.assertEqual(self.protocol.next(run_id)["task_id"], "T-1")
+        self.assertEqual(self.protocol.next(run_id)["task_id"], "T-2")
 
     def test_completing_one_review_after_an_amendment_does_not_empty_the_frontier(self):
         # `_ready_task_excluding` used to count any historical pass as finished. After a
@@ -907,7 +907,25 @@ class PhaseProtocolFrontierAndControllerTests(PhaseProtocolRepairPublicationTest
         after_t2 = self.protocol._ready_task_excluding(run_id, "T-2")
 
         self.assertEqual(after_t1, "T-2")
-        self.assertEqual(after_t2, "T-1")
+        self.assertIsNone(after_t2)
+
+    def test_amendment_to_one_node_preserves_unrelated_review_frontier(self):
+        run_id = "run-frontier-scope-preserved"
+        original = two_node_dag()
+        self.seed(run_id, "TASKS", None, original)
+        for task_id in ("T-1", "T-2"):
+            self.seed(
+                run_id, "REVIEW", task_id, specialized_examples()["review"],
+                revisions={"business": "r2", "tests": "t2"},
+            )
+
+        amended = copy.deepcopy(original)
+        amended["nodes"][1]["capability_slice"] += " plus the amended scope"
+        self.seed(run_id, "TASKS", None, amended)
+
+        self.assertTrue(self.protocol._task_reviewed(run_id, "T-1"))
+        self.assertFalse(self.protocol._task_reviewed(run_id, "T-2"))
+        self.assertEqual(self.protocol._ready_task(run_id), "T-2")
 
     def review_run(self, run_id, task_id, review_content, *, prior_review=False):
         self.seed(run_id, "TASKS", None, two_node_dag())

@@ -423,6 +423,25 @@ class IpipeRuntimeTests(unittest.TestCase):
         mismatch = self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
         self.assertEqual(mismatch["reason_code"], "REVISION_MISMATCH")
 
+    def test_monitor_once_returns_checkpoint_for_running_build(self):
+        self.bind_build(
+            status="RUNNING",
+            stages=[{"id": "stage-1", "stageName": "unit", "status": "RUNNING"}],
+        )
+        self.api.stages["build-1"] = [
+            {"id": "stage-1", "stageName": "unit", "status": "RUNNING"}
+        ]
+
+        result = self.runtime.monitor_once(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason_code"], "MONITORING")
+        self.assertEqual(result["status"], "MONITORING")
+        self.assertEqual(result["build_id"], "build-1")
+        self.assertEqual(len([call for call in self.api.calls if call[0] == "build_by_id"]), 1)
+
     def test_monitor_rejects_wrong_build_identity_empty_stages_and_missing_stage_id(self):
         self.bind_build(status="SUCCESS")
         deadline = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
