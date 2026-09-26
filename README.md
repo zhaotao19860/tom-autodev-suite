@@ -212,9 +212,11 @@ python3 tom-autodev/scripts/cli.py status CARD_OR_RUN
 python3 tom-autodev/scripts/cli.py context CARD_OR_RUN
 ```
 
-`status` 是只读查询，不会因为刷新状态而隐式恢复 SUBMIT 或推进 run。它显示阶段、状态、等待对象、责任方、ProducerJob 的 job/schema/草案状态和下一步。终态会显示“已完成”或“已停止”，不会把历史审批当成当前待办。
+`status` 是只读查询，不会因为刷新状态而隐式恢复 SUBMIT 或推进 run。它显示阶段、状态、等待对象、责任方、ProducerJob 的 job/schema/草案状态和下一步，并复用统一的 `ProgressSnapshot` 展示整体阶段、任务、代码库/模块、流水线和发布进度。终态会显示“已完成”或“已停止”，不会把历史审批当成当前待办。
 
 在 `IPIPE` 阶段，`status` 还会显示每个 run-owned build 最近一次 bounded poll 的 checkpoint，包括 build、当前状态、活动 stage 和最近检查时间。`MONITORING` 只是观察事实，不代表流水线成功；成功、失败或人工等待仍必须经过正常的 iPipe evidence ingest。
+
+审批续跑、IDE 停靠和 iPipe watcher 通知也复用同一份进度快照，因此多仓 run 会在通知中同时显示当前阶段、各模块状态和发布等待项。快照只读，不新增审批或外部写入；动态工作卡更新仍不属于当前阶段。
 
 `context` 是只读查询，显示当前 action 的固定输入、前驱产物引用、版本、schema、任务模式和 ProducerJob 状态。它不会执行阶段、恢复 SUBMIT、写 action 缓存、创建任务或输出草案正文。读取产物正文时使用：
 

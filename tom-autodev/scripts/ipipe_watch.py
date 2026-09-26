@@ -111,6 +111,8 @@ class IpipeWatcher:
                     run_id,
                     build_id,
                     {
+                        "module": result.get("module"),
+                        "build_id": result.get("build_id") or build_id,
                         "status": status,
                         "deadline": result.get("deadline"),
                         "next_poll_after_seconds": result.get("next_poll_after_seconds"),
@@ -172,10 +174,16 @@ class IpipeWatcher:
             if claim.get("status") != "CLAIMED":
                 return {"ok": False, "reason_code": "IPIPE_NOTICE_CONFLICT", "run_id": run_id}
         at = self.clock().isoformat()
+        enriched = dict(result)
+        try:
+            from progress_snapshot import build as build_progress
+            enriched["_progress"] = build_progress(self.orchestrator, run_id)
+        except Exception:  # noqa: BLE001 - notification detail must not stop watching
+            enriched["_progress"] = None
         try:
             receipt = deliver_markdown(
                 self.notify_client, self.orchestrator.state, run_id, recipients,
-                lambda mention: render(run_id, result, recipients if mention else None),
+                lambda mention: render(run_id, enriched, recipients if mention else None),
             )
         except Exception as error:  # noqa: BLE001 - a missed notice must not stop the watch
             return {"ok": False, "reason_code": "IPIPE_NOTICE_FAILED", "run_id": run_id,
@@ -273,6 +281,10 @@ def _head(brief: dict[str, Any], run_id: str, mention: Any) -> list[str]:
 
         lines += [f"**待操作** {mention_line(list(mention))}", ""]
     lines += [f"**run_id** `{run_id[:12]}…`", f"**构建** {brief['build_id']}"]
+    progress = brief.get("_progress")
+    if progress:
+        from progress_snapshot import render as render_progress
+        lines += ["", "**整体进度**", render_progress(progress)]
     return lines
 
 

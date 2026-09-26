@@ -144,6 +144,8 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     ), None)
     producer_job = _producer_context(orchestrator, run_id, action, terminal)
     status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved, producer_job)
+    from progress_snapshot import build as build_progress
+    progress = build_progress(orchestrator, run_id)
     return {
         "run_id": run_id,
         "requirement_id": intake.get("requirement_id"),
@@ -157,6 +159,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         "ipipe_monitoring": monitoring,
         "blocked": blocked,
         "producer_job": producer_job,
+        "progress": progress,
         # The gate this phase will have to pass, so a caller can tell an unanswered
         # gate from one that is already approved while the phase has not landed.
         "gate": action.get("required_human_gate"),
@@ -282,6 +285,9 @@ def render(brief: dict[str, Any]) -> str:
         )
     if brief.get("blocked"):
         lines.append(f"阻塞原因 {brief['blocked']}")
+    if brief.get("progress"):
+        from progress_snapshot import render as render_progress
+        lines.append(render_progress(brief["progress"]))
     producer = brief.get("producer_job")
     if producer:
         lines.append(

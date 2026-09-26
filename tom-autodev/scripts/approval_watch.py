@@ -646,6 +646,10 @@ def _resume_markdown(
         "> 若会话已结束，请重新打开 Comate 后执行 `resume`。",
         f"> run_id `{brief['run_id'][:12]}…`",
     ]
+    progress = brief.get("progress")
+    if progress:
+        from progress_snapshot import render as render_progress
+        lines[4:4] = ["**整体进度**", render_progress(progress), ""]
     return "\n".join(lines)
 
 
@@ -745,6 +749,10 @@ def _ide_turn_markdown(brief: dict[str, Any], mention: Any = None) -> str:
         f"**当前阶段** {brief['state']}",
         f"**下一步** {brief['next']['text']}",
     ]
+    progress = brief.get("progress")
+    if progress:
+        from progress_snapshot import render as render_progress
+        lines += ["", "**整体进度**", render_progress(progress)]
     if brief.get("gate"):
         lines.append(f"**之后要批** {brief['gate']}（卡片会在阶段执行完之后发出）")
     lines += [

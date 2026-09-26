@@ -13,6 +13,13 @@ suite had no version control before then.
 - 新增 SQLite iPipe monitoring checkpoint，按 `(run_id, build_id)` 保存最近状态、stage、deadline、证据引用和更新时间；`status` 可展示活动 stage 与最近检查时间。checkpoint 只是观察事实，不替代 iPipe evidence ingest，也不自动推进 phase。
 - 验证：受影响回归 `183` 项通过；完整控制面回归 `1031` 项通过。测试输出仍有少量 ResourceWarning，未影响测试结果，列入后续清理项。
 
+## 2026-09-26 · 统一多仓进度快照
+
+- 新增只读 `ProgressSnapshot`，从既有 workflow、DAG、冻结 pipeline plan、iPipe checkpoint 和发布证据汇总阶段、任务、代码库/模块、流水线及 release 进度。
+- `status`、审批续跑/IDE 停靠通知和 iPipe 成功/失败/人工等待通知复用同一份快照；保留原有幂等、审批 hash、worker lease 和 evidence ingest 边界。
+- iPipe checkpoint 补充 module/build identity，避免多仓通知把不同模块合并成一个不确定状态。
+- 第一阶段不引入动态工作卡更新，也不改变多 worker 并行策略。
+
 ## 2026-09-24 · 日常入口第二轮优化
 
 - `process CARD PROJECT` 合并创建和驱动，复用唯一活动 run；项目不匹配、多候选和终态历史均给出明确结果，不静默切换或重启。
