@@ -20,6 +20,12 @@ suite had no version control before then.
 - iPipe checkpoint 补充 module/build identity，避免多仓通知把不同模块合并成一个不确定状态。
 - 第一阶段不引入动态工作卡更新，也不改变多 worker 并行策略。
 
+## 2026-09-26 · 收紧 Review 到提交的证据闭环
+
+- `pipeline_plan.current_descriptors()` 现在要求带 Review 绑定的 PASS change-set 同时具备有效的当前 Review，且 Review 的 `change_set_hash` 必须匹配 descriptor 的 `candidate_hash`。
+- Review 缺失、损坏、错绑 candidate 或 archive/index 中断时，descriptor 不再进入 submission 和 pipeline plan；未带 Review 绑定的历史 descriptor 继续保留兼容读取。
+- 新增缺失 Review 和 candidate hash 错配回归，验证提交前 fail-closed。
+
 ## 2026-09-24 · 日常入口第二轮优化
 
 - `process CARD PROJECT` 合并创建和驱动，复用唯一活动 run；项目不匹配、多候选和终态历史均给出明确结果，不静默切换或重启。

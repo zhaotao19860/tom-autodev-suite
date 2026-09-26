@@ -62,7 +62,8 @@ class PipelinePlanTests(unittest.TestCase):
     def _write_profile(self):
         self.path.write_text(json.dumps(self.profile))
 
-    def _descriptor(self, module, revision, change_id, tests='t1', task=None, tests_only=False):
+    def _descriptor(self, module, revision, change_id, tests='t1', task=None, tests_only=False,
+                    reviewed_artifact_id=None, change_set_hash=None):
         value = {'run_id': self.run, 'change_set_id': change_id,
                  'revision_set_id': digest([module, revision, tests]),
                  'repo_path': str(self.root/module), 'module': module, 'target_branch': 'main',
@@ -72,8 +73,16 @@ class PipelinePlanTests(unittest.TestCase):
         if tests_only:
             value.update(module='tests', commit_revision=tests, repo_path=str(self.root/'tests'))
         value['input_hash'] = digest(value)
-        self.orch.artifacts.put(self.run, 'change-set', json.dumps({k: v for k, v in value.items() if k != 'input_hash'}).encode(), {
-            'task_id': task or 'task-'+module, 'verdict': 'PASS'})
+        metadata = {'task_id': task or 'task-'+module, 'verdict': 'PASS'}
+        if reviewed_artifact_id is not None:
+            metadata['reviewed_artifact_id'] = reviewed_artifact_id
+        if change_set_hash is not None:
+            metadata['change_set_hash'] = change_set_hash
+        self.orch.artifacts.put(
+            self.run, 'change-set',
+            json.dumps({k: v for k, v in value.items() if k != 'input_hash'}).encode(),
+            metadata,
+        )
         return value
 
     def _submit(self, descriptor, expect_ok=True):
@@ -149,6 +158,31 @@ class PipelinePlanTests(unittest.TestCase):
              if s['controller_binding']['module'] == 'A']
         self.assertEqual(len(a), 1)
         self.assertEqual(a[0]['revision_set_id'], latest['revision_set_id'])
+
+    def test_change_set_without_current_review_is_not_a_submission_candidate(self):
+        self._descriptor('A', 'a1', 'A-1', reviewed_artifact_id='review-missing')
+        from pipeline_plan import current_descriptors, current_submissions
+
+        self.assertEqual(current_descriptors(self.orch, self.run), {})
+        self.assertEqual(current_submissions(self.orch, self.run), [])
+
+    def test_review_candidate_hash_must_match_change_set(self):
+        from test_schema_validation import specialized_examples
+        from test_phase_protocol_repair import final_envelope
+        from pipeline_plan import current_descriptors
+
+        review = copy.deepcopy(specialized_examples()['review'])
+        review['task_id'] = 'task-A'
+        review['change_set_hash'] = '0' * 64
+        self.orch.state.transition(self.run, 'REVIEW', {'task_id': 'task-A'})
+        review_id = self.orch.artifacts.put_envelope(
+            final_envelope(self.run, 'REVIEW', 'task-A', review)
+        )["artifact_id"]
+        self._descriptor(
+            'A', 'a1', 'A-1', reviewed_artifact_id=review_id,
+            change_set_hash='1' * 64,
+        )
+        self.assertEqual(current_descriptors(self.orch, self.run), {})
 
     def test_generic_advance_cannot_claim_release_success_without_platform_proofs(self):
         self._start_plan()

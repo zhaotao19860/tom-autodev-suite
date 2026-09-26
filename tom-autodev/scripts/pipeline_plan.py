@@ -45,11 +45,38 @@ def current_descriptors(orchestrator: Any, run_id: str) -> dict[str, dict[str, A
         if dag.get("valid") and not protocol._task_reviewed(run_id, task):
             continue
         review = orchestrator.artifacts.latest_phase(run_id, "REVIEW", task)
-        if review.get("valid") and metadata.get("reviewed_artifact_id") != review["artifact_id"]:
+        if not review.get("valid"):
+            if not metadata.get("reviewed_artifact_id"):
+                # Preserve descriptor-only legacy fixtures/runs that never
+                # entered the Review phase. Once the workflow has recorded a
+                # Review boundary, absence or corruption of its evidence is
+                # fail-closed.
+                descriptor = _decode(artifact)
+                current.pop(task, None)
+                current[task] = {"descriptor": descriptor, "artifact": artifact}
+                continue
+            # A PASS change-set without a readable current Review is not submit
+            # evidence.  Previously this branch fell through and let a damaged or
+            # missing Review look like a legacy descriptor, weakening the
+            # fail-closed boundary after an archive/index failure.
+            continue
+        reviewed_artifact_id = metadata.get("reviewed_artifact_id")
+        if reviewed_artifact_id is not None and reviewed_artifact_id != review["artifact_id"]:
             # A fresh PASS does not authorize the preceding descriptor after a crash
             # between committing Review and archiving its new submit descriptor.
             continue
         descriptor = _decode(artifact)
+        review_content = (review.get("envelope") or {}).get("content") or {}
+        if reviewed_artifact_id is None:
+            # A current Review without a descriptor link cannot authorize this
+            # change-set. Descriptor-only legacy reads are accepted only when
+            # there is no Review artifact at all.
+            continue
+        candidate_hash = metadata.get("change_set_hash") or descriptor.get("candidate_hash")
+        if candidate_hash is not None and review_content.get("change_set_hash") != candidate_hash:
+            # The metadata link alone is insufficient if a forged or partially
+            # archived Review points at a different candidate.
+            continue
         current.pop(task, None)
         current[task] = {"descriptor": descriptor, "artifact": artifact}
     return current
