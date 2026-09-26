@@ -188,10 +188,18 @@ def intake_prerequisites_valid(payload: Any, run_id: str) -> bool:
 
 
 class CollaborationSession:
-    def __init__(self, state_store: StateStore, group_client: Any, *, approvals: ApprovalLedger | None = None):
+    def __init__(
+        self,
+        state_store: StateStore,
+        group_client: Any,
+        *,
+        approvals: ApprovalLedger | None = None,
+        progress_provider: Any | None = None,
+    ):
         self.state = state_store
         self.group_client = group_client
         self.approvals = approvals
+        self.progress_provider = progress_provider
         self._sessions: dict[str, dict[str, Any]] = {}
 
     def resolve_members(self, members: dict[str, Any]) -> dict[str, Any]:
@@ -288,8 +296,18 @@ class CollaborationSession:
         else:
             roles = _ROUTE_ROLES.get(category, ("development", "test"))
             recipients = sorted({email for role in roles for email in session["roles"][role]})
-        content = _failure_markdown(failure_bundle, recipients)
-        return self.send_message(run_id, content, recipients, _hash({"content": content, "at_users": recipients}))
+        progress = None
+        if callable(self.progress_provider):
+            try:
+                progress = self.progress_provider(run_id)
+            except Exception:  # noqa: BLE001 - failure routing remains useful without detail
+                progress = None
+        stable_content = _failure_markdown(failure_bundle, recipients)
+        content = _failure_markdown(failure_bundle, recipients, progress=progress)
+        return self.send_message(
+            run_id, content, recipients,
+            _hash({"content": stable_content, "at_users": recipients}),
+        )
 
     @guard_execution
     def send_message(self, run_id: str, content: str, at_users: list[str], idempotency_key: str) -> dict[str, Any]:
@@ -446,10 +464,16 @@ def _group_topic(title: str, override: Any = None) -> str:
     return (cleaned or _short_title(str(title)))[:_GROUP_TOPIC_MAX]
 def _hash(value: dict[str, Any]) -> str: return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 def _safe(value: Any) -> str: return str(value).replace("@", "[at]")[:800]
-def _failure_markdown(failure: dict[str, Any], recipients: list[str]) -> str:
+def _failure_markdown(
+    failure: dict[str, Any], recipients: list[str], *, progress: dict[str, Any] | None = None,
+) -> str:
     evidence = failure.get("evidence") if isinstance(failure.get("evidence"), dict) else {}
     lines = ["## Failure routing", " ".join(f"@{email}" for email in recipients), "", "### Summary", _safe(failure.get("summary", ""))]
     for label, key in (("iCafe", "icafe"), ("KU", "ku"), ("Revision", "revision"), ("Pipeline", "pipeline"), ("Build", "build"), ("Stage", "stage"), ("Job", "job")):
         if isinstance(evidence.get(key), str) and evidence[key]: lines.append(f"- {label}: {_safe(evidence[key])}")
+    if progress:
+        from progress_snapshot import render as render_progress
+
+        lines += ["", "### 整体进度", render_progress(progress)]
     if failure.get("next_action"): lines.extend(["", "### Next action", _safe(failure["next_action"])[:300]])
     return "\n".join(lines)

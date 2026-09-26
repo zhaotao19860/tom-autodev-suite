@@ -98,6 +98,25 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertEqual(self.watcher.tick(), [])
         self.assertEqual(self.notify.sends, [])
 
+    def test_watcher_refreshes_one_read_only_card_for_a_group(self):
+        intent = self.orchestrator.state.intent(
+            "run-1", "infoflow.group.create", "infoflow.group.create:run-1", {}
+        )
+        self.orchestrator.state.receipt(intent["intent_id"], {"group_id": "123"}, [])
+        cards = []
+
+        def send_work_card(**payload):
+            cards.append(payload)
+            return {"card_id": f"work-{payload['run_id']}", "created": len(cards) == 1}
+
+        self.notify.send_work_card = send_work_card
+        first = self.watcher.tick()
+        second = self.watcher.tick()
+        self.assertIn("WORK_CARD_UPDATED", [item.get("reason_code") for item in first])
+        self.assertIn("WORK_CARD_UNCHANGED", [item.get("reason_code") for item in second])
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["target_id"], "123")
+
     def test_the_acknowledgement_goes_to_the_group_when_the_run_has_one(self):
         intent = self.orchestrator.state.intent(
             "run-1",

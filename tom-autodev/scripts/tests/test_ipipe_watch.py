@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "clients"))
 
 from ipipe_watch import IpipeWatcher
+from pipeline_plan import canonical_hash
 
 _NOW = datetime(2026, 9, 4, 12, 0, tzinfo=timezone.utc)
 
@@ -44,6 +45,71 @@ class _State:
         return None
 
 
+class _ReleaseState(_State):
+    def __init__(self, target, *, build_id="b-release"):
+        super().__init__(state="RELEASE", build_id=build_id)
+        self.target = target
+        self.release_plan = {
+            "version": 1,
+            "run_id": "run-1",
+            "modules": {"bgwagent": target},
+            "required_modules": ["bgwagent"],
+            "profile_content_hash": "profile",
+        }
+        self.release_plan["plan_hash"] = canonical_hash({
+            key: value for key, value in self.release_plan.items() if key != "plan_hash"
+        })
+
+    def events(self, run_id):
+        return [
+            {"run_id": run_id, "state": "IPIPE", "payload": {"pipeline_plan": self.release_plan}},
+            {"run_id": run_id, "state": "RELEASE", "payload": {}},
+        ]
+
+    def idempotency_result(self, key):
+        if key.startswith("ipipe.build-binding:"):
+            return {
+                "run_id": "run-1",
+                "build_id": self.build_id,
+                "binding": {
+                    "module": "bgwagent",
+                    "pipeline_id": "pipe-1",
+                    "release_rule": "publish",
+                    "environment_fingerprint": "env-1",
+                    "target_branch": "master",
+                    "stage_classes": ["compile"],
+                    "revision_map": {"bgwagent": "r-1"},
+                    "repositories": [{"module": "bgwagent", "branch": "master"}],
+                },
+            }
+        return super().idempotency_result(key)
+
+
+class _Artifacts:
+    def __init__(self, state, target):
+        self.state = state
+        self.target = target
+
+    def phase_artifacts(self, run_id, phase):
+        if phase != "IPIPE":
+            return []
+        return [{
+            "valid": True,
+            "envelope": {
+                "parent_artifact_hash": self.target["binding_hash"],
+                "content": {
+                    "status": "SUCCESS",
+                    "module": "bgwagent",
+                    "build_id": self.state.build_id,
+                    "pipeline_id": "pipe-1",
+                    "revisions": {"bgwagent": "r-1"},
+                    "release_rule": "publish",
+                    "environment_fingerprint": "env-1",
+                },
+            },
+        }]
+
+
 class _ClaimingState(_State):
     """StateStore's intent/receipt surface, kept tiny for watcher concurrency tests."""
 
@@ -78,8 +144,9 @@ class _ClaimingState(_State):
 
 
 class _Orchestrator:
-    def __init__(self, state):
+    def __init__(self, state, artifacts=None):
         self.state = state
+        self.artifacts = artifacts
 
     def _runtime_profile(self, _run_id):
         return {
@@ -105,6 +172,17 @@ class _Runtime:
     def monitor(self, build_id, deadline):
         self.calls.append((build_id, deadline))
         return self.result
+
+
+class _ReleaseRuntime:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def verify_planned_release(self, build_id, target):
+        self.calls.append((build_id, target))
+        result = self.results[min(len(self.calls) - 1, len(self.results) - 1)]
+        return dict(result)
 
 
 class IpipeWatcherTests(unittest.TestCase):
@@ -266,6 +344,65 @@ class IpipeWatcherTests(unittest.TestCase):
         self.assertEqual(len(outcomes), 2)
         self.assertEqual({outcome["reason_code"] for outcome in outcomes}, {"OK"})
         self.assertEqual(len(notify.sent), 2)
+
+    def test_release_waiting_notifies_once_without_reasking_g9(self):
+        target = {
+            "module": "bgwagent", "pipeline_id": "pipe-1", "release_rule": "publish",
+            "environment_fingerprint": "env-1", "target_branch": "master",
+            "stage_classes": ["compile"], "expected_revisions": {"bgwagent": "r-1"},
+            "expected_branches": {"bgwagent": "master"}, "source_revisions": {"bgwagent": "r-1"},
+            "binding_hash": "binding-1",
+        }
+        state = _ReleaseState(target)
+        artifacts = _Artifacts(state, target)
+        notify = _Notify()
+        runtime = _ReleaseRuntime([{
+            "ok": False, "status": "RELEASE_WAITING", "reason_code": "RELEASE_WAITING",
+            "release_rule": "publish", "evidence_refs": ["ipipe:build/b-release"],
+        }])
+        watcher = IpipeWatcher(
+            _Orchestrator(state, artifacts), lambda _run_id: runtime, notify,
+            clock=lambda: _NOW, sleeper=lambda _seconds: None,
+        )
+
+        first = watcher.tick()
+        second = watcher.tick()
+
+        self.assertEqual(first[0]["reason_code"], "OK")
+        self.assertEqual(second[0]["reason_code"], "ALREADY_NOTIFIED")
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(len(notify.sent), 1)
+        self.assertIn("RELEASE_WAITING", notify.sent[0][1])
+        self.assertIn("无需重新申请 G9", notify.sent[0][1])
+
+    def test_release_publication_is_reported_after_waiting(self):
+        target = {
+            "module": "bgwagent", "pipeline_id": "pipe-1", "release_rule": "publish",
+            "environment_fingerprint": "env-1", "target_branch": "master",
+            "stage_classes": ["compile"], "expected_revisions": {"bgwagent": "r-1"},
+            "expected_branches": {"bgwagent": "master"}, "source_revisions": {"bgwagent": "r-1"},
+            "binding_hash": "binding-1",
+        }
+        state = _ReleaseState(target)
+        artifacts = _Artifacts(state, target)
+        notify = _Notify()
+        runtime = _ReleaseRuntime([
+            {"ok": False, "status": "RELEASE_WAITING", "reason_code": "RELEASE_WAITING"},
+            {"ok": True, "status": "SUCCESS", "reason_code": "OK", "release_id": "rel-1"},
+        ])
+        watcher = IpipeWatcher(
+            _Orchestrator(state, artifacts), lambda _run_id: runtime, notify,
+            clock=lambda: _NOW, sleeper=lambda _seconds: None,
+        )
+
+        waiting = watcher.tick()
+        published = watcher.tick()
+
+        self.assertEqual(waiting[0]["reason_code"], "OK")
+        self.assertEqual(published[0]["reason_code"], "OK")
+        self.assertEqual(len(notify.sent), 2)
+        self.assertIn("发布还未完成", notify.sent[0][1])
+        self.assertIn("发布已具备证据", notify.sent[1][1])
 
 
 if __name__ == "__main__":

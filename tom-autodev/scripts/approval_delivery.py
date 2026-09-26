@@ -86,7 +86,7 @@ class ComateApprovalClient:
         approval = payload.get("approval") if isinstance(payload, dict) else None
         if not isinstance(approval, dict):
             raise ValueError("APPROVAL_REQUEST_INVALID")
-        return {
+        receipt = {
             "channel": "comate",
             "approval_id": approval.get("approval_id"),
             "run_id": approval.get("run_id"),
@@ -94,6 +94,13 @@ class ComateApprovalClient:
             "deadline_at": approval.get("deadline_at"),
             "surface": "comate-cli",
         }
+        progress = payload.get("progress")
+        if isinstance(progress, dict):
+            from progress_snapshot import render as render_progress
+
+            receipt["progress"] = progress
+            receipt["progress_text"] = render_progress(progress)
+        return receipt
 
 
 class InfoflowApprovalTransport:
@@ -121,11 +128,13 @@ class InfoflowApprovalTransport:
         *,
         clock: Any | None = None,
         reply_consumer: Any | None = None,
+        progress_provider: Any | None = None,
     ):
         self.state = state_store
         self.notify_client = notify_client
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.reply_consumer = reply_consumer
+        self.progress_provider = progress_provider
 
     def request(self, gateway_request: dict[str, Any]) -> dict[str, Any]:
         blocked = execution_guard(self.state, gateway_request.get("run_id") if isinstance(gateway_request, dict) else None)
@@ -148,8 +157,17 @@ class InfoflowApprovalTransport:
             return self._resolved(stored["record"])
         delivered_content: list[str] = []
 
+        progress = None
+        if callable(self.progress_provider):
+            try:
+                progress = self.progress_provider(gateway_request["run_id"])
+            except Exception:  # noqa: BLE001 - approval delivery remains best effort
+                progress = None
+
         def render(mention: bool) -> str:
-            card = _approval_markdown(gateway_request, sorted(recipients), mention=mention)
+            card = _approval_markdown(
+                gateway_request, sorted(recipients), mention=mention, progress=progress
+            )
             delivered_content.append(card)
             return card
 
@@ -302,7 +320,8 @@ def _deadline(value: Any) -> datetime:
 
 
 def _approval_markdown(
-    gateway_request: dict[str, Any], recipients: list[str], *, mention: bool = False
+    gateway_request: dict[str, Any], recipients: list[str], *, mention: bool = False,
+    progress: dict[str, Any] | None = None,
 ) -> str:
     """Render the gate as something a person can act on from a phone.
 
@@ -343,6 +362,10 @@ def _approval_markdown(
     documents = _documents(_evidence(evidence, "documents"))
     if documents:
         lines += ["", "**需求文档**", *(f"- {document}" for document in documents)]
+    if progress:
+        from progress_snapshot import render as render_progress
+
+        lines += ["", "**整体进度**", render_progress(progress)]
     lines += [
         "",
         "**同意请回复**",

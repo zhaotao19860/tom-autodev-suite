@@ -20,6 +20,22 @@ _PHASE_TITLES = {
     for state, spec in workflow_spec.STATES.items()
     if spec.title or state
 }
+_PHASE_SHORT_TITLES = {
+    "INTAKE": "需求",
+    "GRILL": "研判",
+    "SPEC": "规格",
+    "TASKS": "任务",
+    "WORKSPACE": "工作区",
+    "PLAN": "计划",
+    "IMPLEMENT": "实现",
+    "REVIEW": "评审",
+    "SUBMIT": "提交",
+    "IPIPE": "流水线",
+    "DIAGNOSE": "诊断",
+    "RELEASE": "发布",
+    "RELEASE_SUCCESS": "已完成",
+    "STOPPED": "已停止",
+}
 
 
 def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
@@ -42,16 +58,16 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     state = str(events[-1].get("state") or "UNKNOWN")
     action = _next(orchestrator, run_id)
     brief = _safe_brief(orchestrator, run_id)
-    phases = _phases(state)
+    phases = _phases_for_events(state, events)
     phase_index = next((index for index, item in enumerate(phases) if item["state"] == state), 0)
     phase_done = sum(item["status"] == "DONE" for item in phases)
-    if state in _TERMINAL:
+    if state == "RELEASE_SUCCESS":
         phase_done = len(phases)
     tasks = _tasks(orchestrator, run_id, events, action)
     plan = _frozen_plan(orchestrator, run_id, events)
     monitoring = _monitoring(orchestrator, run_id)
     pipelines = _pipelines(orchestrator, run_id, plan, monitoring, events)
-    release = _release(orchestrator, run_id, plan, pipelines, state)
+    release = _release(orchestrator, run_id, plan, pipelines, state, monitoring)
     next_action = brief.get("next") if isinstance(brief, dict) else None
     next_action = next_action if isinstance(next_action, dict) else _next_action(action, state)
     owner = {
@@ -89,6 +105,7 @@ def render(snapshot: dict[str, Any]) -> str:
         f"整体进度：{overall.get('done', 0)}/{overall.get('total', 0)} 阶段"
         f"（{overall.get('percent', 0)}%）",
         f"当前阶段：{snapshot.get('current_phase') or '-'}",
+        f"流程：{phase_route(snapshot)}",
     ]
     tasks = snapshot.get("tasks") or {}
     if tasks.get("total"):
@@ -117,6 +134,31 @@ def render(snapshot: dict[str, Any]) -> str:
     next_action = snapshot.get("next_action") or {}
     lines.append(f"下一步（{next_action.get('owner') or '-'}）：{next_action.get('text') or '-'}")
     return "\n".join(lines)
+
+
+def phase_route(snapshot: dict[str, Any], *, max_chars: int = 220) -> str:
+    """Render the actual visited phase path in a compact, user-facing form.
+
+    The workflow is a graph and may revisit an earlier phase after diagnosis.  The
+    route therefore uses the statuses computed from durable events instead of treating
+    the declaration order as a linear completion bar.
+    """
+    phases = snapshot.get("phases") if isinstance(snapshot, dict) else None
+    if not isinstance(phases, list):
+        return "-"
+    parts = []
+    for item in phases:
+        if not isinstance(item, dict):
+            continue
+        state = str(item.get("state") or "-")
+        label = _PHASE_SHORT_TITLES.get(state, str(item.get("title") or state))
+        status = item.get("status")
+        marker = "✓" if status == "DONE" else ("●" if status == "CURRENT" else "○")
+        parts.append(f"{label}{marker}")
+    route = "→".join(parts) or "-"
+    if len(route) <= max_chars:
+        return route
+    return route[: max_chars - 1].rstrip("→") + "…"
 
 
 def _events(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
@@ -148,19 +190,31 @@ def _next_action(action: dict[str, Any], state: str) -> dict[str, str]:
 
 
 def _phases(current: str) -> list[dict[str, Any]]:
+    # A static declaration order cannot describe the legal REVIEW -> DIAGNOSE path:
+    # IPIPE appears earlier in the registry but has not been visited in that path.
+    # Use durable events for DONE/PENDING and reserve CURRENT for the latest state.
+    # This keeps the progress percentage honest when a run loops through diagnosis.
+    # The caller supplies the current state only, so the event-aware override is
+    # applied in build() below through _phases_for_events().
+    return _phases_for_events(current, [])
+
+
+def _phases_for_events(current: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visited = _active_path_states(events, current)
+    completed_terminal = current == "RELEASE_SUCCESS"
     phases = []
-    current_seen = False
     for state in _PHASE_ORDER:
         spec = workflow_spec.STATES[state]
         if spec.terminal:
             continue
-        if state == current:
-            status = "CURRENT"
-            current_seen = True
-        elif current in _TERMINAL or current_seen:
-            status = "PENDING"
-        else:
+        if completed_terminal:
             status = "DONE"
+        elif state == current:
+            status = "CURRENT"
+        elif state in visited:
+            status = "DONE"
+        else:
+            status = "PENDING"
         phases.append({
             "state": state,
             "title": _PHASE_TITLES.get(state, state),
@@ -171,6 +225,49 @@ def _phases(current: str) -> list[dict[str, Any]]:
     elif current not in _PHASE_ORDER and current != "RUN_NOT_FOUND":
         phases.append({"state": current, "title": current, "status": "CURRENT"})
     return phases
+
+
+def _active_path_states(events: list[dict[str, Any]], current: str) -> set[str]:
+    """Return the states on the latest predecessor chain.
+
+    A run can go from IPIPE or RELEASE to DIAGNOSE and then back to PLAN.  A plain
+    set of every historically visited state would leave the failed downstream
+    branch marked complete after that rollback.  Transition payloads carry the
+    predecessor, so follow that chain backwards and mark only the active route.
+    Older hand-built records may omit the predecessor; for those, the event order is
+    the safest compatibility fallback.
+    """
+    if not isinstance(events, list) or not events:
+        return set()
+    index = len(events) - 1
+    states: set[str] = set()
+    while index >= 0:
+        event = events[index]
+        state = event.get("state") if isinstance(event, dict) else None
+        if state in _PHASE_ORDER:
+            states.add(str(state))
+        payload = event.get("payload") if isinstance(event, dict) else None
+        previous = payload.get("previous_state") if isinstance(payload, dict) else None
+        if previous in _PHASE_ORDER:
+            prior_index = next(
+                (
+                    candidate
+                    for candidate in range(index - 1, -1, -1)
+                    if isinstance(events[candidate], dict)
+                    and events[candidate].get("state") == previous
+                ),
+                None,
+            )
+            if prior_index is None:
+                break
+            index = prior_index
+            continue
+        # Compatibility for legacy/synthetic events that did not persist
+        # previous_state.  Production transitions use the branch-aware path above.
+        index -= 1
+    if current in _PHASE_ORDER:
+        states.add(current)
+    return states
 
 
 def _empty_tasks() -> dict[str, Any]:
@@ -247,8 +344,9 @@ def _pipelines(orchestrator: Any, run_id: str, plan: dict[str, Any] | None,
     entries = []
     for module in modules:
         checkpoint = next(
-            (item.get("checkpoint") or {} for item in reversed(monitoring)
-             if (item.get("checkpoint") or {}).get("module") == module),
+            (item.get("checkpoint") or {} for item in monitoring
+             if (item.get("checkpoint") or {}).get("module") == module
+             and (item.get("checkpoint") or {}).get("kind") != "release"),
             {},
         )
         status = checkpoint.get("status") or "PENDING"
@@ -257,6 +355,7 @@ def _pipelines(orchestrator: Any, run_id: str, plan: dict[str, Any] | None,
             "status": status,
             "build_id": checkpoint.get("build_id"),
             "stage_build_id": checkpoint.get("stage_build_id"),
+            "binding_hash": checkpoint.get("binding_hash"),
         })
     done = sum(item["status"] in _SUCCESS for item in entries)
     failed = any(item["status"] in {"FAILURE", "FAILED"} for item in entries)
@@ -265,9 +364,18 @@ def _pipelines(orchestrator: Any, run_id: str, plan: dict[str, Any] | None,
 
 
 def _release(orchestrator: Any, run_id: str, plan: dict[str, Any] | None,
-             pipelines: dict[str, Any], state: str) -> dict[str, Any]:
+             pipelines: dict[str, Any], state: str,
+             monitoring: list[dict[str, Any]]) -> dict[str, Any]:
     required = list((plan or {}).get("required_modules") or [])
-    done = sum(item.get("status") in _SUCCESS for item in pipelines.get("modules") or [])
+    current = _current_release_identities(orchestrator, run_id, plan, pipelines)
+    published = {
+        (item.get("checkpoint") or {}).get("module")
+        for item in monitoring
+        if (item.get("checkpoint") or {}).get("kind") == "release"
+        and (item.get("checkpoint") or {}).get("status") in _SUCCESS
+        and _release_checkpoint_matches(item.get("checkpoint") or {}, current)
+    }
+    done = len(published.intersection(required))
     if state == "RELEASE_SUCCESS":
         status = "SUCCESS"
         done = len(required) or done
@@ -281,10 +389,55 @@ def _release(orchestrator: Any, run_id: str, plan: dict[str, Any] | None,
         "status": status,
         "done": done,
         "total": len(required),
-        "waiting_for": [module for module in required
-                        if module not in {item.get("module") for item in pipelines.get("modules") or []
-                                          if item.get("status") in _SUCCESS}],
+        "waiting_for": [] if state == "RELEASE_SUCCESS" else [
+            module for module in required if module not in published
+        ],
     }
+
+
+def _current_release_identities(
+    orchestrator: Any, run_id: str, plan: dict[str, Any] | None,
+    pipelines: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return the build/binding pair that the current plan is allowed to publish."""
+    identities: dict[str, dict[str, Any]] = {}
+    if isinstance(plan, dict):
+        try:
+            from pipeline_plan import release_builds
+
+            selected = release_builds(orchestrator.artifacts, orchestrator.state, run_id, plan)
+            for module, artifact in selected.items():
+                content = (artifact.get("envelope") or {}).get("content") or {}
+                target = (plan.get("modules") or {}).get(module) or {}
+                if isinstance(content.get("build_id"), str):
+                    identities[module] = {
+                        "build_id": content["build_id"],
+                        "binding_hash": target.get("binding_hash"),
+                    }
+        except Exception:  # noqa: BLE001 - an incomplete plan means nothing is published yet
+            return identities
+    for item in pipelines.get("modules") or []:
+        if not isinstance(item, dict) or item.get("module") in identities:
+            continue
+        if isinstance(item.get("build_id"), str):
+            identities[item["module"]] = {
+                "build_id": item["build_id"],
+                "binding_hash": item.get("binding_hash"),
+            }
+    return identities
+
+
+def _release_checkpoint_matches(
+    checkpoint: dict[str, Any], identities: dict[str, dict[str, Any]],
+) -> bool:
+    module = checkpoint.get("module")
+    identity = identities.get(module)
+    if not isinstance(identity, dict):
+        return False
+    if checkpoint.get("build_id") != identity.get("build_id"):
+        return False
+    expected_binding = identity.get("binding_hash")
+    return not expected_binding or checkpoint.get("binding_hash") == expected_binding
 
 
 def _repositories(orchestrator: Any, run_id: str, plan: dict[str, Any] | None,

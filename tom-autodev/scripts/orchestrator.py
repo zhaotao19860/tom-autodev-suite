@@ -1364,7 +1364,15 @@ class Orchestrator:
 
     def collaboration_session(self, group_client: Any) -> CollaborationSession:
         """Create the per-run collaboration adapter with an explicitly supplied boundary."""
-        return CollaborationSession(self.state, group_client, approvals=self.approvals)
+        def progress_provider(run_id: str) -> dict[str, Any]:
+            from progress_snapshot import build as build_progress
+
+            return build_progress(self, run_id)
+
+        return CollaborationSession(
+            self.state, group_client, approvals=self.approvals,
+            progress_provider=progress_provider,
+        )
 
     def icode_runtime(self, run_id: str, **options: Any) -> Any:
         if self.status(run_id)["state"] == "RUN_NOT_FOUND":
@@ -1718,8 +1726,17 @@ class Orchestrator:
             "member_policy": request["member_policy"],
         }
         outcomes = []
+        progress = None
+        try:
+            from progress_snapshot import build as build_progress
+
+            progress = build_progress(self, run_id)
+        except Exception:  # noqa: BLE001 - approval delivery remains usable without detail
+            progress = None
         for channel, client in (("comate", comate_client), ("infoflow", infoflow_client)):
             envelope = {"channel": channel, "approval": payload}
+            if channel == "comate" and isinstance(progress, dict):
+                envelope["progress"] = progress
             outcome = self._deliver_approval_channel(run_id, request["approval_id"], channel, client, envelope, input_hash)
             if outcome.get("reason_code") == "APPROVAL_DELIVERY_CONFLICT":
                 # The payload no longer matches the one this approval_id was claimed
@@ -1765,7 +1782,11 @@ class Orchestrator:
         self, run_id: str, approval_id: str, channel: str, client: Any, payload: dict[str, Any], payload_hash: str
     ) -> dict[str, Any]:
         key = f"approval.delivery:{approval_id}:{channel}"
-        canonical_payload = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        # Progress is a presentation snapshot, not part of the approval binding. It
+        # can change between a retry while the approval id and input hash stay fixed;
+        # hashing it here would turn a harmless refresh into an intent conflict.
+        binding_payload = {key: value for key, value in payload.items() if key != "progress"}
+        canonical_payload = json.dumps(binding_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         canonical_payload_hash = hashlib.sha256(canonical_payload.encode()).hexdigest()
         claim_payload = {"approval_id": approval_id, "canonical_payload_sha256": canonical_payload_hash}
         claim = self.state.claim_intent(run_id, f"approval.delivery.{channel}", key, claim_payload)
@@ -2893,6 +2914,15 @@ def main(argv: list[str] | None = None) -> int:
     abandon.add_argument("--reason", required=True, help="为什么不再等这条外部写")
     abandon.add_argument("--actor", required=True, help="谁做的这个决定")
 
+    work_card = subparsers.add_parser("work-card", help="查询或处理动态工作卡的未知投递")
+    work_card.add_argument("operation", choices=("reconcile",))
+    work_card.add_argument("intent_id")
+    work_card.add_argument("outcome", choices=("delivered", "abandoned"))
+    work_card.add_argument("--card-id")
+    work_card.add_argument("--revision", type=int)
+    work_card.add_argument("--reason", required=True)
+    work_card.add_argument("--actor", required=True)
+
     artifact = subparsers.add_parser("artifact", help="按 artifact_id 读回归档内容（含哈希校验）")
     artifact.add_argument("operation", choices=("show",))
     artifact.add_argument("artifact_id")
@@ -3176,6 +3206,14 @@ def main(argv: list[str] | None = None) -> int:
         result = _submit(orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
     elif args.command == "abandon-intent":
         result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor)
+    elif args.command == "work-card":
+        from work_card import reconcile
+
+        result = reconcile(
+            orchestrator, args.intent_id, args.outcome,
+            actor=args.actor, reason=args.reason,
+            card_id=args.card_id, revision=args.revision,
+        )
     elif args.command == "artifact":
         result = _artifact_show(orchestrator, args.artifact_id)
     else:
@@ -3292,7 +3330,7 @@ def _cli_exit_code(result: Any) -> int:
     return 0 if reason in {
         None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
         "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT",
-        "PARKED",
+        "PARKED", "WORK_CARD_RECONCILED", "WORK_CARD_ABANDONED",
     } else 1
 
 
@@ -3311,11 +3349,17 @@ def _infoflow_approval_client(orchestrator: Orchestrator) -> Any:
     from clients.infoflow_bot_client import InfoflowBotClient
     from clients.infoflow_reply_client import InfoflowReplyConsumer, InfoflowReplyJournal
 
+    def progress_provider(run_id: str) -> dict[str, Any]:
+        from progress_snapshot import build as build_progress
+
+        return build_progress(orchestrator, run_id)
+
     journal_path = orchestrator.config_root / "infoflow-replies.jsonl"
     return InfoflowApprovalClient(
         InfoflowApprovalTransport(
             orchestrator.state,
             InfoflowBotClient(journal_path=journal_path),
+            progress_provider=progress_provider,
             reply_consumer=InfoflowReplyConsumer(
                 InfoflowReplyJournal(journal_path),
                 # Cards go to the run's group, so a reply typed there has to be

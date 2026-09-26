@@ -74,13 +74,104 @@ class IpipeWatcher:
     def tick(self) -> list[dict[str, Any]]:
         outcomes = []
         for latest in self.orchestrator.state.latest_states():
-            if latest.get("state") != "IPIPE":
+            state = latest.get("state")
+            if state not in {"IPIPE", "RELEASE"}:
                 continue
-            for outcome in self._observe(latest["run_id"]):
+            observer = self._observe_release if state == "RELEASE" else self._observe
+            for outcome in observer(latest["run_id"]):
+                outcomes.append(outcome)
+                if self.reporter is not None:
+                    self.reporter(outcome)
+        if callable(getattr(self.notify_client, "send_work_card", None)):
+            from work_card import refresh_all
+
+            for outcome in refresh_all(self.orchestrator, self.notify_client):
                 outcomes.append(outcome)
                 if self.reporter is not None:
                     self.reporter(outcome)
         return outcomes
+
+    def _observe_release(self, run_id: str) -> list[dict[str, Any]]:
+        """Observe the already-approved release without advancing or publishing it."""
+        blocked = execution_guard(self.orchestrator.state, run_id)
+        if blocked is not None:
+            return [blocked]
+        try:
+            from pipeline_plan import frozen_plan, release_builds
+
+            plan = frozen_plan(self.orchestrator.state.events(run_id))
+            if plan is None:
+                return [{"ok": True, "reason_code": "NO_RELEASE_PLAN", "run_id": run_id}]
+            selected = release_builds(
+                self.orchestrator.artifacts, self.orchestrator.state, run_id, plan
+            )
+        except Exception as error:  # noqa: BLE001 - a poll must not kill the watcher
+            return [{"ok": False, "reason_code": "RELEASE_OBSERVE_FAILED",
+                     "run_id": run_id, "detail": str(error)}]
+
+        runtime = self.runtime_factory(run_id)
+        if isinstance(runtime, dict):
+            return [{**runtime, "run_id": run_id}]
+        outcomes = []
+        for module in plan["required_modules"]:
+            artifact = selected.get(module)
+            if not isinstance(artifact, dict):
+                outcomes.append({"ok": False, "reason_code": "RELEASE_EVIDENCE_INCOMPLETE",
+                                 "run_id": run_id, "module": module})
+                continue
+            content = (artifact.get("envelope") or {}).get("content") or {}
+            build_id = content.get("build_id")
+            target = plan["modules"].get(module)
+            if not isinstance(build_id, str) or not isinstance(target, dict):
+                outcomes.append({"ok": False, "reason_code": "RELEASE_BINDING_INCOMPLETE",
+                                 "run_id": run_id, "module": module})
+                continue
+            try:
+                result = runtime.verify_planned_release(build_id, target)
+            except Exception as error:  # noqa: BLE001
+                outcomes.append({"ok": False, "reason_code": "RELEASE_VERIFY_CALL_FAILED",
+                                 "run_id": run_id, "module": module, "build_id": build_id,
+                                 "detail": str(error)})
+                continue
+            result = {**result, "run_id": run_id, "module": module, "build_id": build_id}
+            self._save_release_checkpoint(run_id, module, build_id, target, result)
+            if result.get("status") == "RELEASE_WAITING":
+                binding_hash = target.get("binding_hash") or _result_hash(target)
+                token = f"release-waiting:{module}:{build_id}:{binding_hash}"
+                outcomes.append(self._notice(run_id, token, _release_waiting_markdown, result))
+            elif result.get("status") == "SUCCESS":
+                binding_hash = target.get("binding_hash") or _result_hash(target)
+                token = f"release-success:{module}:{build_id}:{binding_hash}"
+                outcomes.append(self._notice(run_id, token, _release_success_markdown, result))
+            else:
+                outcomes.append(result)
+        return outcomes
+
+    def _save_release_checkpoint(
+        self, run_id: str, module: str, build_id: str,
+        target: dict[str, Any], result: dict[str, Any],
+    ) -> None:
+        save_checkpoint = getattr(self.orchestrator.state, "save_ipipe_monitoring", None)
+        if not callable(save_checkpoint):
+            return
+        # The table is keyed by build_id for backwards compatibility. Prefixing the
+        # release observation keeps it from overwriting the IPIPE poll checkpoint.
+        save_checkpoint(
+            run_id,
+            f"release:{module}:{build_id}",
+            {
+                "kind": "release",
+                "module": module,
+                "build_id": build_id,
+                "status": result.get("status"),
+                "reason_code": result.get("reason_code"),
+                "release_id": result.get("release_id"),
+                "release_rule": target.get("release_rule"),
+                "binding_hash": target.get("binding_hash"),
+                "next_poll_after_seconds": 300,
+                "evidence_refs": result.get("evidence_refs") or [],
+            },
+        )
 
     def _observe(self, run_id: str) -> list[dict[str, Any]]:
         blocked = execution_guard(self.orchestrator.state, run_id)
@@ -247,8 +338,15 @@ class IpipeWatcher:
         try:
             # Single chat on purpose: the group already carries the first notice, and a
             # reminder is addressed at one person's inbox, not at everyone again.
+            progress = None
+            try:
+                from progress_snapshot import build as build_progress
+
+                progress = build_progress(self.orchestrator, run_id)
+            except Exception:  # noqa: BLE001 - the reminder remains useful without detail
+                progress = None
             receipt = self.notify_client.send_markdown(
-                recipients, _nudge_markdown(run_id, result, int(elapsed // 60))
+                recipients, _nudge_markdown(run_id, result, int(elapsed // 60), progress)
             )
         except Exception as error:  # noqa: BLE001
             return {"ok": False, "reason_code": "IPIPE_NUDGE_FAILED", "run_id": run_id,
@@ -345,14 +443,54 @@ def _manual_markdown(run_id: str, result: dict[str, Any], mention: Any = None) -
     return "\n".join(lines)
 
 
-def _nudge_markdown(run_id: str, result: dict[str, Any], minutes: int) -> str:
-    return "\n".join([
+def _release_waiting_markdown(run_id: str, result: dict[str, Any], mention: Any = None) -> str:
+    lines = _head(
+        {"title": "## 发布还未完成，watcher 会继续观察", "build_id": result.get("build_id")},
+        run_id, mention,
+    )
+    lines += [
+        f"**模块** {result.get('module') or '-'}",
+        f"**发布状态** `RELEASE_WAITING`",
+        f"**发布规则** {result.get('release_rule') or '-'}",
+        "",
+        "> iPipe 构建已经具备发布证据，但平台尚未发布该 build。",
+        "> 无需重新申请 G9，不会重复触发 iPipe；平台发布后 watcher 会再次核验。",
+    ]
+    return "\n".join(lines)
+
+
+def _release_success_markdown(run_id: str, result: dict[str, Any], mention: Any = None) -> str:
+    lines = _head(
+        {"title": "## 发布已具备证据，等你在 IDE 继续", "build_id": result.get("build_id")},
+        run_id, mention,
+    )
+    lines += [
+        f"**模块** {result.get('module') or '-'}",
+        f"**release_id** `{result.get('release_id') or '-'}`",
+        "",
+        "**请在 Comate 里回复**",
+        "继续",
+        "",
+        "> watcher 只完成只读核验；G9 证据仍由 worker 继续落账。",
+    ]
+    return "\n".join(lines)
+
+
+def _nudge_markdown(
+    run_id: str, result: dict[str, Any], minutes: int,
+    progress: dict[str, Any] | None = None,
+) -> str:
+    lines = [
         "## iPipe 人工阶段还在等",
         "",
         f"**已等** {minutes} 分钟",
         f"**构建** {result.get('build_id')}",
         f"**人工阶段** {result.get('stage_build_id')}",
         f"**run_id** `{run_id[:12]}…`",
-        "",
-        "> 在 iPipe 上完成该阶段后，流程才会继续。",
-    ])
+    ]
+    if progress:
+        from progress_snapshot import render as render_progress
+
+        lines += ["", "**整体进度**", render_progress(progress)]
+    lines += ["", "> 在 iPipe 上完成该阶段后，流程才会继续。"]
+    return "\n".join(lines)

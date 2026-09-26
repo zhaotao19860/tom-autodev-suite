@@ -107,7 +107,18 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["pipelines"]["total"], 2)
         self.assertEqual(snapshot["pipelines"]["done"], 1)
         self.assertEqual(snapshot["pipelines"]["status"], "MONITORING")
-        self.assertEqual(snapshot["release"]["waiting_for"], ["agent"])
+        # Pipeline success alone does not prove platform publication.
+        self.assertEqual(snapshot["release"]["waiting_for"], ["bgw", "agent"])
+        self.assertEqual(snapshot["release"]["done"], 0)
+        orch.state.ipipe_monitoring = lambda run_id: [
+            {"checkpoint": {"kind": "release", "module": "bgw", "status": "SUCCESS"}},
+            {"checkpoint": {"module": "bgw", "status": "SUCCESS", "build_id": "build-bgw"}},
+            {"checkpoint": {"module": "agent", "status": "MONITORING", "build_id": "build-agent"}},
+        ]
+        published = progress_snapshot.build(orch, "run-1")
+        self.assertEqual(published["pipelines"]["done"], 1)
+        self.assertEqual(published["release"]["done"], 1)
+        self.assertEqual(published["release"]["waiting_for"], ["agent"])
 
 
 if __name__ == "__main__":

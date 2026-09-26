@@ -120,6 +120,13 @@ class ApprovalWatcher:
             outcomes.append(handoff)
             if self.reporter is not None:
                 self.reporter(handoff)
+        if callable(getattr(self.notify_client, "send_work_card", None)):
+            from work_card import refresh_all
+
+            for outcome in refresh_all(self.orchestrator, self.notify_client):
+                outcomes.append(outcome)
+                if self.reporter is not None:
+                    self.reporter(outcome)
         return outcomes
 
     def _handoff(self) -> list[dict[str, Any]]:
@@ -438,13 +445,16 @@ class ApprovalWatcher:
                 "action": approval.get("action"), "reason_code": "APPROVAL_REMINDER_CONFLICT",
             }
         card = _delivered_content(client, approval)
+        progress = _progress_for(self.orchestrator, approval["run_id"])
         try:
             receipt = deliver_markdown(
                 self.notify_client,
                 self.orchestrator.state,
                 approval["run_id"],
                 recipients,
-                lambda mention: _nudge_markdown(approval, card, remaining, mention and recipients),
+                lambda mention: _nudge_markdown(
+                    approval, card, remaining, mention and recipients, progress=progress
+                ),
             )
         except Exception as error:  # noqa: BLE001 - a failed reminder must not stop the loop
             return {
@@ -548,12 +558,15 @@ class ApprovalWatcher:
         if claim["status"] == "CONFLICT":
             return {"reason_code": "APPROVAL_ACK_CONFLICT"}
         try:
+            progress = _progress_for(self.orchestrator, approval["run_id"])
             receipt = deliver_markdown(
                 self.notify_client,
                 self.orchestrator.state,
                 approval["run_id"],
                 recipients,
-                lambda mention: _ack_markdown(approval, decision, responder),
+                lambda mention: _ack_markdown(
+                    approval, decision, responder, progress=progress
+                ),
             )
         except Exception as error:  # noqa: BLE001 - the ledger already holds the decision
             return {"reason_code": "APPROVAL_ACK_FAILED", "detail": str(error)}
@@ -588,6 +601,7 @@ def _nudge_markdown(
     card: str,
     remaining_seconds: float,
     mention: Any = None,
+    progress: dict[str, Any] | None = None,
 ) -> str:
     action = approval.get("action") or "gate"
     hours = max(1, int(remaining_seconds // 3600))
@@ -597,6 +611,10 @@ def _nudge_markdown(
     ]
     if mention:
         head += [f"**待审批** {mention_line(list(mention))}", ""]
+    if progress:
+        from progress_snapshot import render as render_progress
+
+        head += ["**整体进度**", render_progress(progress), ""]
     head += [
         f"**剩余** 约 {hours} 小时后超时，超时后该闸门不能补批，只能重新发起",
         "",
@@ -710,25 +728,29 @@ def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[st
     }
 
 
-def _ack_markdown(approval: dict[str, Any], decision: str, responder: str | None) -> str:
+def _ack_markdown(
+    approval: dict[str, Any], decision: str, responder: str | None,
+    *, progress: dict[str, Any] | None = None,
+) -> str:
     action = approval.get("action") or "gate"
     if decision == "TIMEOUT":
-        return "\n".join(
-            [
-                f"## tom-autodev {action} 审批超时",
-                "",
-                "**结果** 未在截止前收到决策，流程已停在该闸门",
-                f"**approval_id** `{approval['approval_id'][:12]}…`",
-                "",
-                "> 需要重新发起审批；内容若已变更，会绑定新的 input_hash。",
-            ]
-        )
+        lines = [
+            f"## tom-autodev {action} 审批超时",
+            "",
+            "**结果** 未在截止前收到决策，流程已停在该闸门",
+            f"**approval_id** `{approval['approval_id'][:12]}…`",
+        ]
+        if progress:
+            from progress_snapshot import render as render_progress
+
+            lines += ["", "**整体进度**", render_progress(progress)]
+        lines += ["", "> 需要重新发起审批；内容若已变更，会绑定新的 input_hash。"]
+        return "\n".join(lines)
     landed = "已同意" if decision == "APPROVE" else "已驳回"
     following = (
         "Comate 会在下一步继续该 run。" if decision == "APPROVE" else "Comate 不会继续该闸门之后的动作。"
     )
-    return "\n".join(
-        [
+    lines = [
             f"## tom-autodev {action} {landed}",
             "",
             f"**决策** {decision}",
@@ -736,8 +758,22 @@ def _ack_markdown(approval: dict[str, Any], decision: str, responder: str | None
             f"**approval_id** `{approval['approval_id'][:12]}…`",
             "",
             f"> 决策已写入审批账本，后续回复不会改变结果。{following}",
-        ]
-    )
+    ]
+    if progress:
+        from progress_snapshot import render as render_progress
+
+        lines[5:5] = ["", "**整体进度**", render_progress(progress)]
+    return "\n".join(lines)
+
+
+def _progress_for(orchestrator: Any, run_id: str) -> dict[str, Any] | None:
+    try:
+        from progress_snapshot import build as build_progress
+
+        snapshot = build_progress(orchestrator, run_id)
+        return snapshot if isinstance(snapshot, dict) else None
+    except Exception:  # noqa: BLE001 - notification detail must not stop the watcher
+        return None
 
 
 def _ide_turn_markdown(brief: dict[str, Any], mention: Any = None) -> str:

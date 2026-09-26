@@ -216,7 +216,19 @@ python3 tom-autodev/scripts/cli.py context CARD_OR_RUN
 
 在 `IPIPE` 阶段，`status` 还会显示每个 run-owned build 最近一次 bounded poll 的 checkpoint，包括 build、当前状态、活动 stage 和最近检查时间。`MONITORING` 只是观察事实，不代表流水线成功；成功、失败或人工等待仍必须经过正常的 iPipe evidence ingest。
 
-审批续跑、IDE 停靠和 iPipe watcher 通知也复用同一份进度快照，因此多仓 run 会在通知中同时显示当前阶段、各模块状态和发布等待项。快照只读，不新增审批或外部写入；动态工作卡更新仍不属于当前阶段。
+审批初始消息、Comate 本地审批输出、协作失败路由、提醒、确认/超时、IDE 停靠和 iPipe watcher 通知也复用同一份进度快照，因此多仓 run 会在通知中同时显示当前阶段、阶段路线、各模块状态和发布等待项。审批与 iPipe watcher 都会在已有协作群里维护每个 run 一张只读如流工作卡：阶段、任务、模块、流水线、发布状态和下一步变化时重绘同一张卡；原审批卡及通知仍独立存在。工作卡投递和回执落在持久化 intent 中，结果未知时停止后续更新并提示查询，避免盲目重发。进入 `RELEASE` 后，iPipe watcher 按冻结的 pipeline plan 只读核验每个模块的发布状态；平台尚未发布时发送一次幂等的 `RELEASE_WAITING` 通知，并继续轮询，不重新申请 G9、不重复触发 iPipe。发布完成后发送成功通知，最终证据仍由 worker 摄取。状态快照只读，不新增审批或发布动作。
+
+工作卡的 `cardId` 固定为 `work-<run_id>`，每次刷新使用独立的 `cardInstanceId`。若网关明确在发送前拒绝，会撤回本次 intent 并允许重试；网络中断或服务端结果不明则保留 intent，不能盲目重发。核对远端卡片后可执行：
+
+```bash
+python3 tom-autodev/scripts/cli.py work-card reconcile INTENT_ID delivered \
+  --card-id work-RUN_ID --revision REVISION --actor USER \
+  --reason "已在如流核对该卡片确已更新"
+python3 tom-autodev/scripts/cli.py work-card reconcile INTENT_ID abandoned \
+  --reason "已确认远端没有该次刷新" --actor USER
+```
+
+`delivered` 必须同时提供 `card-id`、`actor` 和 `reason`，会写入人工核对回执并解除阻塞；`abandoned` 会保留审计记录并允许后续刷新。两者都不会伪造发布证据或推进流程。
 
 `context` 是只读查询，显示当前 action 的固定输入、前驱产物引用、版本、schema、任务模式和 ProducerJob 状态。它不会执行阶段、恢复 SUBMIT、写 action 缓存、创建任务或输出草案正文。读取产物正文时使用：
 
@@ -329,6 +341,7 @@ python3 tom-autodev/scripts/cli.py recover-stale-rebuilt-plan --help
 python3 tom-autodev/scripts/cli.py recover-legacy-pipeline-plan --help
 python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
+python3 tom-autodev/scripts/cli.py work-card reconcile --help
 ```
 
 `recover-legacy-pipeline-plan` 只用于升级前已进入 IPIPE、但缺少冻结 `pipeline_plan` 的历史 run。它从该 run 自己获审的提交和固定 profile 重建计划，不提交、不发布、不审批、不调用 runtime；旧 build 会按模块重新核验。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录解除阻断。

@@ -14,6 +14,19 @@ _DEFAULT_URL = "http://127.0.0.1:18791"
 _REGISTRY = "http://registry.npm.baidu-int.com"
 
 
+class InfoflowRequestError(ValueError):
+    """Transport error with an explicit dispatch outcome.
+
+    Callers must only withdraw an intent when the request was rejected before the
+    gateway could dispatch it. Network failures and 5xx responses remain unknown.
+    """
+
+    def __init__(self, reason_code: str, outcome: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.outcome = outcome
+
+
 class InfoflowBotClient:
     """Approval delivery through the bot's own gateway.
 
@@ -66,14 +79,13 @@ class InfoflowBotClient:
                 "/notify",
                 {"recipients": [_uuap(recipient) for recipient in recipients], "content": content},
             )
-        except urllib.error.HTTPError:
-            # The gateway answers a rejected send with a non-2xx status; the message
-            # did not land, so this must never look like a delivered request.
-            raise ValueError("MESSAGE_REJECTED:GATEWAY") from None
+        except urllib.error.HTTPError as error:
+            outcome = "REJECTED_BEFORE_SEND" if 400 <= error.code < 500 else "UNKNOWN_REMOTE_OUTCOME"
+            raise InfoflowRequestError("MESSAGE_REJECTED:GATEWAY", outcome) from None
         except (urllib.error.URLError, OSError):
-            raise ValueError("INFOFLOW_GATEWAY_UNAVAILABLE") from None
-        if response is None or response.get("ok") is not True:
-            raise ValueError("MESSAGE_REJECTED:GATEWAY")
+            raise InfoflowRequestError("INFOFLOW_GATEWAY_UNAVAILABLE", "UNKNOWN_REMOTE_OUTCOME") from None
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            raise InfoflowRequestError("MESSAGE_REJECTED:GATEWAY", "UNKNOWN_REMOTE_OUTCOME")
         identity = response.get("message_key")
         if not isinstance(identity, str) or not identity:
             raise ValueError("MESSAGE_RESPONSE_INVALID")
@@ -173,16 +185,38 @@ class InfoflowBotClient:
             raise ValueError("CARD_RESPONSE_INVALID")
         return {"card_id": identity, "created": response.get("created") is True}
 
+    def send_work_card(
+        self, *, run_id: str, target_type: str, target_id: str,
+        title: str, question: str, lines: list[str], card_instance_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Refresh a read-only run card using the same stable remote card identity."""
+        payload = {
+            "run_id": run_id, "target_type": target_type, "target_id": target_id,
+            "title": title, "question": question, "lines": list(lines),
+        }
+        if card_instance_id:
+            payload["card_instance_id"] = card_instance_id
+        response = self._post("/card/work", payload)
+        identity = response.get("card_id")
+        if identity != f"work-{run_id}":
+            raise ValueError("CARD_RESPONSE_INVALID")
+        return {"card_id": identity, "created": response.get("created") is True,
+                "revision": response.get("revision")}
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.ensure_ready()
         try:
             response = self._request("POST", path, payload)
-        except urllib.error.HTTPError:
-            raise ValueError("MESSAGE_REJECTED:GATEWAY") from None
+        except urllib.error.HTTPError as error:
+            outcome = "REJECTED_BEFORE_SEND" if 400 <= error.code < 500 else "UNKNOWN_REMOTE_OUTCOME"
+            raise InfoflowRequestError("MESSAGE_REJECTED:GATEWAY", outcome) from None
         except (urllib.error.URLError, OSError):
-            raise ValueError("INFOFLOW_GATEWAY_UNAVAILABLE") from None
-        if response is None or response.get("ok") is not True:
-            raise ValueError("MESSAGE_REJECTED:GATEWAY")
+            raise InfoflowRequestError("INFOFLOW_GATEWAY_UNAVAILABLE", "UNKNOWN_REMOTE_OUTCOME") from None
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            # A 2xx response proves only that the gateway answered.  It does not
+            # prove that the platform rejected the card before dispatch, so callers
+            # must preserve the intent and reconcile instead of retrying blindly.
+            raise InfoflowRequestError("MESSAGE_REJECTED:GATEWAY", "UNKNOWN_REMOTE_OUTCOME")
         return response
 
     def ensure_ready(self) -> dict[str, Any]:

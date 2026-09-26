@@ -4,6 +4,16 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-26 · 工作卡一致性与通知进度收口
+
+- 工作卡成功去重只认有效卡片回执；放弃的未知 intent 不会被误判为已刷新。
+- 人工核对回执要求记录核对人和理由，并严格校验 `work-<run_id>` 卡片身份；2xx 但网关返回业务失败时保留未知结果。
+- 发布进度按当前冻结计划的 build 与 binding 计数，旧 build 的发布记录不能覆盖新 build。
+- 工作卡刷新补充每次 intent 对应的 `cardInstanceId`，并区分发送前拒绝与远端结果未知；新增 `work-card reconcile` 人工核对/放弃入口。
+- 审批初始消息、提醒、确认/超时、iPipe watcher 和动态工作卡统一展示阶段路线与整体进度；iPipe watcher 也会刷新工作卡。
+- Comate 本地审批回执同时携带可直接展示的 `progress_text`，与如流审批消息使用同一份快照。
+- 协作失败路由也追加同一份整体进度，并保持通知幂等键不受展示快照变化影响。
+
 ## 2026-09-25 · 增量前沿与 iPipe 观察优化
 
 - DAG amend 改为按 task scope 判断 Review 是否仍覆盖当前任务：节点语义和直接前驱未变化的 task 继续复用 Review，变化 task 才重新进入 frontier；缺少 Review 时刻 DAG 证据时 fail-closed。补充增量 amend、受影响 task 重开和 frontier 不清空回归。
@@ -25,6 +35,21 @@ suite had no version control before then.
 - `pipeline_plan.current_descriptors()` 现在要求带 Review 绑定的 PASS change-set 同时具备有效的当前 Review，且 Review 的 `change_set_hash` 必须匹配 descriptor 的 `candidate_hash`。
 - Review 缺失、损坏、错绑 candidate 或 archive/index 中断时，descriptor 不再进入 submission 和 pipeline plan；未带 Review 绑定的历史 descriptor 继续保留兼容读取。
 - 新增缺失 Review 和 candidate hash 错配回归，验证提交前 fail-closed。
+
+## 2026-09-26 · 补齐 RELEASE_WAITING 观察闭环
+
+- iPipe watcher 同时观察 `IPIPE` 和 `RELEASE`；进入发布阶段后按冻结 pipeline plan 和 run-owned build 逐模块只读核验发布状态。
+- 平台尚未发布时发送幂等 `RELEASE_WAITING` 通知，包含模块、build、发布规则和统一 `ProgressSnapshot`；watcher 会继续检查，不重新申请 G9，也不重复触发 iPipe。
+- 发布出现后发送一次模块成功通知；发布观察 checkpoint 与编译观察 checkpoint 分开保存，避免覆盖多仓 build 的最新状态。
+- 新增发布等待、重启幂等和发布完成通知回归；受影响控制面测试 80 项通过，watcher 测试 11 项通过。
+
+## 2026-09-26 · 如流动态工作卡
+
+- 新增固定 `work-<run_id>` 身份的无按钮工作卡；审批 watcher 以统一进度快照刷新群内同一张卡，覆盖任务、多仓模块、流水线、发布和下一步。
+- 通过持久化外部 intent 与 receipt 去重；未知投递结果阻止后续刷新并返回 `WORK_CARD_QUERY_REQUIRED`，避免跨重启重复发送。
+- 工作卡是只读展示，审批卡与 iPipe 通知仍保留原有独立语义；不自动推进阶段、不写业务发布证据。
+- 发布进度区分流水线成功与平台发布核验：只有 release checkpoint 成功或 run 达到 `RELEASE_SUCCESS` 才计入发布模块完成数。
+- 阶段路线按当前事件的 predecessor 链展示；诊断回退会收起失效的下游分支，`RELEASE_SUCCESS` 才统一显示全路线完成。
 
 ## 2026-09-24 · 日常入口第二轮优化
 

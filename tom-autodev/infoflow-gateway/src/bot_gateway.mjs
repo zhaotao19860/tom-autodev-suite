@@ -311,6 +311,20 @@ async function sendChoiceCard(request) {
   })
 }
 
+async function sendWorkCard(request) {
+  return await renderCard({
+    card_id: `work-${request.run_id}`,
+    request_id: request.card_instance_id || request.run_id,
+    card_instance_id: request.card_instance_id,
+    target_type: request.target_type,
+    target_id: request.target_id,
+    title: request.title,
+    question: request.question,
+    lines: request.lines,
+    buttons: [],
+  })
+}
+
 async function renderCard(request) {
   const cards = await interactiveCards()
   const components = request.lines
@@ -320,6 +334,7 @@ async function renderCard(request) {
     // One card per subject: resending refreshes the same bubble instead of stacking a
     // second one that could still be tapped after the first was answered.
     cardId: request.card_id,
+    ...(request.card_instance_id ? { cardInstanceId: request.card_instance_id } : {}),
     caller: { callerName: CARD_CALLER, requestId: request.request_id },
     question: request.question,
     receiver: { type: request.target_type, id: request.target_id },
@@ -741,6 +756,30 @@ const server = createServer(async (req, res) => {
         options,
       })
       sendJson(res, 200, { ok: true, decision_id: decisionId, ...receipt })
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/card/work') {
+      const body = await parseJsonBody(req)
+      const runId = readString(body.run_id).trim()
+      const targetType = readString(body.target_type).trim()
+      const targetId = readString(body.target_id).trim()
+      const title = readString(body.title).trim()
+      const cardInstanceId = readString(body.card_instance_id).trim()
+      const lines = Array.isArray(body.lines)
+        ? body.lines.map((line) => readString(line).trim()).filter(Boolean)
+        : []
+      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(runId)
+          || !['group', 'user'].includes(targetType) || !targetId || !title
+          || !lines.length || lines.length > 8) {
+        sendJson(res, 400, { ok: false, error: 'invalid work card' })
+        return
+      }
+      const receipt = await sendWorkCard({
+        run_id: runId, target_type: targetType, target_id: targetId,
+        title, question: readString(body.question).trim(), lines,
+        card_instance_id: cardInstanceId || undefined,
+      })
+      sendJson(res, 200, { ok: true, run_id: runId, ...receipt })
       return
     }
     sendJson(res, 404, { ok: false, error: 'not found' })

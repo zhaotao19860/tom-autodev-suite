@@ -463,6 +463,15 @@ class StateStore:
             ).fetchone()
         return _intent_row(row) if row is not None else None
 
+    def intent_by_id(self, intent_id: str) -> dict[str, Any] | None:
+        """Return one durable external intent without exposing its response."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM external_intents WHERE intent_id = ?",
+                (intent_id,),
+            ).fetchone()
+        return _intent_row(row) if row is not None else None
+
     def live_idempotency_key(self, base_key: str, *, depth: int = 8) -> str:
         """The key a fresh attempt should claim, skipping abandoned predecessors.
 
