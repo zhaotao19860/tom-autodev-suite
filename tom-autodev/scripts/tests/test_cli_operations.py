@@ -189,6 +189,38 @@ class CliOperationTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["worker_reason_code"], "PARKED")
 
+    def test_approval_delivery_failure_without_ok_field_changes_top_level_result(self):
+        from orchestrator import _deliver_worker_approval
+        parked = {
+            "ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT",
+            "run_id": self.run_id, "gate": "G0", "approval_input_hash": "b" * 64,
+        }
+        # request_infoflow_approval returns the approval ledger row on a partial
+        # delivery failure; that row has status/reason_code but no top-level ok.
+        failure = {
+            "approval_id": "approval-2", "status": "DELIVERY_FAILED",
+            "reason_code": "APPROVAL_DELIVERY_FAILED", "retry_allowed": True,
+        }
+        with patch("orchestrator._request_approval", return_value=failure) as request:
+            result = _deliver_worker_approval(self.orchestrator, parked)
+        request.assert_called_once_with(self.orchestrator, self.run_id, "G0", "b" * 64)
+        self.assertEqual(result["reason_code"], "APPROVAL_DELIVERY_FAILED")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["worker_reason_code"], "PARKED")
+
+    def test_contract_shaped_pending_approval_is_accepted_without_ok_field(self):
+        from orchestrator import _deliver_worker_approval
+        parked = {
+            "ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT",
+            "run_id": self.run_id, "gate": "G0", "approval_input_hash": "c" * 64,
+        }
+        approval = {"approval_id": "approval-3", "status": "PENDING"}
+        with patch("orchestrator._request_approval", return_value=approval):
+            result = _deliver_worker_approval(self.orchestrator, parked)
+        self.assertEqual((result["ok"], result["reason_code"], result["parked"]),
+                         (True, "PARKED", "APPROVAL_WAIT"))
+        self.assertEqual(result["approval"], approval)
+
 
     def test_stop_accepts_card_target_and_resolves_unique_run(self):
         from test_orchestrator import _start

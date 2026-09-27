@@ -3570,10 +3570,22 @@ def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any])
     if not isinstance(gate, str) or not isinstance(input_hash, str):
         return result
     approval = _request_approval(orchestrator, result.get("run_id"), gate, input_hash)
-    if isinstance(approval, dict) and approval.get("ok") is False:
+    approval_succeeded = isinstance(approval, dict) and (
+        approval.get("ok") is True
+        or (
+            approval.get("status") == "PENDING"
+            and isinstance(approval.get("approval_id"), str)
+            and bool(approval.get("approval_id"))
+        )
+    )
+    if not approval_succeeded:
+        approval_failure = approval if isinstance(approval, dict) else {
+            "reason_code": "APPROVAL_DELIVERY_INCOMPLETE",
+        }
         return {
             **result,
-            **approval,
+            **approval_failure,
+            "ok": False,
             **({"draft_saved": True} if approval_required else {}),
             "worker_reason_code": result.get("reason_code"),
             "worker_result": result,
