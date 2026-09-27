@@ -109,6 +109,9 @@ def _card_payload(snapshot: dict[str, Any], group_id: str) -> dict[str, Any]:
     modules_line = "、".join(visible) or "-"
     if omitted:
         modules_line += f"、另有{omitted}个模块（详情见 status）"
+    # The gateway renders at most 8 text components per card, so keep this to 7 rows
+    # and leave one slot of headroom. run_id lives in the title (and in the card_id),
+    # not on its own row, to stay under that cap.
     lines = [
         f"阶段 {phase} · {overall.get('done', 0)}/{overall.get('total', 0)}",
         f"流程 {phase_route(snapshot, max_chars=210)}",
@@ -117,11 +120,10 @@ def _card_payload(snapshot: dict[str, Any], group_id: str) -> dict[str, Any]:
         f"流水线 {pipelines.get('done', 0)}/{pipelines.get('total', 0)} · {pipelines.get('status') or 'PENDING'}",
         f"发布 {release.get('status') or 'PENDING'} · 待处理 {','.join(release.get('waiting_for') or []) or '-'}",
         f"下一步 {next_action.get('owner') or '-'}：{str(next_action.get('text') or '-')[:180]}",
-        f"run_id {run_id}",
     ]
     return {
         "run_id": run_id, "target_type": "group", "target_id": group_id,
-        "title": "tom-autodev 工作进度", "question": "只读状态；审批请使用独立审批卡",
+        "title": f"tom-autodev 工作进度 · {run_id}", "question": "只读状态；审批请使用独立审批卡",
         "lines": lines,
     }
 

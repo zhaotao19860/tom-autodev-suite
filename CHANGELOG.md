@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-27 · 工作卡进度收口修复
+
+- 工作卡新增"流程"行后同步更新回归：模块/待处理断言的行位改到插入后的位置，发布快照回归补齐 release checkpoint 的 `build_id`，与当前 build 身份匹配对齐。
+- 工作卡正文压到 7 行、`run_id` 收进标题，在网关 8 组件上限下留出一行余量，避免后续新增行被静默截断。
+- `_current_release_identities` 在发布 build 解析器临时不可用时回退到流水线 checkpoint 身份，而不是直接清空——已核验的发布进度不再被静默清零；发布 checkpoint 自带 `build_id/binding_hash` 仍做防陈旧校验。
+- 验证：全量控制面回归 `1043` 项通过（修复前有 3 项转红）。
+
 ## 2026-09-26 · 工作卡一致性与通知进度收口
 
 - 工作卡成功去重只认有效卡片回执；放弃的未知 intent 不会被误判为已刷新。

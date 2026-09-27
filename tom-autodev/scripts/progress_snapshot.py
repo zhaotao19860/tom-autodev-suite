@@ -414,8 +414,13 @@ def _current_release_identities(
                         "build_id": content["build_id"],
                         "binding_hash": target.get("binding_hash"),
                     }
-        except Exception:  # noqa: BLE001 - an incomplete plan means nothing is published yet
-            return identities
+        except Exception:  # noqa: BLE001 - resolver may be unavailable mid-run
+            # Fall through to the pipeline checkpoints below. A verified release
+            # checkpoint (kind="release", written only after verify_planned_release
+            # succeeded) still carries the build it published; the checkpoint's own
+            # build_id/binding_hash guards staleness, so an unresolvable plan should
+            # not silently drop already-observed release progress to zero.
+            pass
     for item in pipelines.get("modules") or []:
         if not isinstance(item, dict) or item.get("module") in identities:
             continue

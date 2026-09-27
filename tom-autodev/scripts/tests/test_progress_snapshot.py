@@ -111,7 +111,8 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["release"]["waiting_for"], ["bgw", "agent"])
         self.assertEqual(snapshot["release"]["done"], 0)
         orch.state.ipipe_monitoring = lambda run_id: [
-            {"checkpoint": {"kind": "release", "module": "bgw", "status": "SUCCESS"}},
+            {"checkpoint": {"kind": "release", "module": "bgw", "status": "SUCCESS",
+                            "build_id": "build-bgw"}},
             {"checkpoint": {"module": "bgw", "status": "SUCCESS", "build_id": "build-bgw"}},
             {"checkpoint": {"module": "agent", "status": "MONITORING", "build_id": "build-agent"}},
         ]

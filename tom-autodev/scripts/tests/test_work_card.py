@@ -61,7 +61,7 @@ class WorkCardTests(unittest.TestCase):
         self.assertEqual(len(self.client.sent), 2)
         self.assertEqual(self.client.sent[0]["run_id"], self.client.sent[1]["run_id"])
         self.assertEqual(self.client.sent[1]["lines"][0], "阶段 RELEASE · 8/11")
-        self.assertIn("x86bgw=SUCCESS", self.client.sent[1]["lines"][2])
+        self.assertIn("x86bgw=SUCCESS", self.client.sent[1]["lines"][3])
         self.assertLessEqual(len(self.client.sent[1]["lines"]), 8)
 
     def test_unknown_delivery_blocks_later_updates_until_reconciled(self):
@@ -92,9 +92,9 @@ class WorkCardTests(unittest.TestCase):
         self.current["repositories"].append({"module": "x86bgw", "status": "MONITORING"})
         self.current["release"]["waiting_for"] = ["bgwagent", "x86bgw"]
         refresh(self.orchestrator, self.client, "run-1")
-        self.assertIn("bgwagent=SUCCESS", self.client.sent[0]["lines"][2])
-        self.assertIn("x86bgw=MONITORING", self.client.sent[0]["lines"][2])
-        self.assertIn("bgwagent,x86bgw", self.client.sent[0]["lines"][4])
+        self.assertIn("bgwagent=SUCCESS", self.client.sent[0]["lines"][3])
+        self.assertIn("x86bgw=MONITORING", self.client.sent[0]["lines"][3])
+        self.assertIn("bgwagent,x86bgw", self.client.sent[0]["lines"][5])
 
     def test_missing_group_does_not_send(self):
         with patch("work_card.group_id_for_run", return_value=None):
