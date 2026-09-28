@@ -1,0 +1,23 @@
+Independent C review evidence, target_commit=2fcb4aa785bc826da0796338e671515aead4db74
+
+Reproduction (PYTHONPATH=tom-autodev/scripts:tom-autodev/scripts/tests):
+- Create a temporary Orchestrator and a strict INTAKE run.
+- Comate client raises AttributeError before dispatch; Infoflow client returns a valid pending receipt.
+- Call Orchestrator.request_infoflow_approval(...).
+- Pass the returned approval to orchestrator._deliver_worker_approval for a worker APPROVAL_REQUIRED result.
+
+Observed request_infoflow_approval result (sensitive values omitted):
+  status=DELIVERY_FAILED
+  reason_code=APPROVAL_DELIVERY_FAILED
+  retry_allowed=True
+  delivery_failure.channels=[comate]
+  delivery_receipts.channels=[infoflow]
+  no top-level `ok` field
+
+Observed _deliver_worker_approval result:
+  ok=True
+  reason_code=PARKED
+  parked=APPROVAL_WAIT
+  approval.status=DELIVERY_FAILED
+
+This demonstrates a failed approval delivery is reported as successful parked work by the CLI boundary.

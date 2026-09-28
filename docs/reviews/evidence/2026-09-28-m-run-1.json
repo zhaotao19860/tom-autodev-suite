@@ -1,0 +1,1122 @@
+{
+  "run_id": "2026-09-28-m-run-1",
+  "run_number": 1,
+  "qualification_layer": "M",
+  "evaluation_version": 3,
+  "evaluation_purpose": "Independent read-only second pass over all v3 scenarios; not a formal 3x aggregate by itself.",
+  "model_identity": "unknown",
+  "model_identity_reason": "The exact serving model/version is not exposed in this execution context; no model name was guessed.",
+  "date": "2026-09-28",
+  "repository": "/Users/tom/Desktop/skills/tom-autodev-suite",
+  "branch": "phase1-workflowspec",
+  "target_commit": "3d4c8bc0119e34fa54c8589d4678abe07abe2429",
+  "working_tree_status_at_capture": "dirty: pre-existing untracked evidence/docs; no tracked modifications before evidence write",
+  "working_tree_status_entries": [
+    "?? docs/reviews/2026-09-28-independent-c-rereview.md",
+    "?? docs/reviews/2026-09-28-independent-c-review.md",
+    "?? docs/reviews/evidence/2026-09-28-independent-c-approval-delivery.txt",
+    "?? docs/reviews/evidence/2026-09-28-m-run-1.json",
+    "?? docs/reviews/evidence/2026-09-28-m-run-2.json",
+    "?? docs/reviews/evidence/2026-09-28-m-run-3.json"
+  ],
+  "scenario_file": "evals/skill-scenarios.json",
+  "scenario_file_sha256": "10145c000a8fdbc5466eec4ff144589df71b5bec31c81b55e7d898c373c1eee8",
+  "scenario_version": 3,
+  "skill_hashes": {
+    "tom-autodev": "e0ab7a204f795e72ac057e7ed3ee80fe2538b48be08293e4413a70c62a8db91f",
+    "tom-diagnose": "81a82529591c1558777e7d61b61be7e5a2bdd5dd9af2982b723cd332daf80847",
+    "tom-implement": "7dea54ad8a29fc4f0361d0fc865ffb28f9269878b1786698c49bb2fd6af19423",
+    "tom-lang-npl": "0b0518a862b79896dc78692f16f6c5e1c98aaeef3125e82ca944c986b55216f0",
+    "tom-plan": "67238f2a2e533fdebe7a41410a8f5eb235889bb302f4b8daad8cf1a7640b9c22",
+    "tom-project-bgw": "16d96ece4e63f13563701f20dca27b97813ceac70723c41a058b3dbf1747d4b2",
+    "tom-project-xflow": "690a930664df49786185e24f5ca910141f7ef29c72f6ecd1de1f5dfbbac18030",
+    "tom-review": "9267f5f16b8495d963d82d60d04f41d37cdee3ecdb49d1808370267d9c50c0a9",
+    "tom-spec": "56102113063a8d02e8deebb70de557f96d8cc5291cac7375989dcf776f67e80c",
+    "tom-tasks": "e3329e58a8fe913fc33afa2dedfd8d1c230110753f01018db1cde7860b230784"
+  },
+  "controller": {
+    "target_commit": "3d4c8bc0119e34fa54c8589d4678abe07abe2429",
+    "manifest_algorithm": "sha256 of concatenated sorted entries: sha256(file) + two spaces + relative path + LF",
+    "manifest_sha256": "2b19e9d48354b9ce55b1c491cbe48035465d267f00be0fac1b859fe01c840c27",
+    "files": [
+      {
+        "path": "tom-autodev/SKILL.md",
+        "sha256": "e0ab7a204f795e72ac057e7ed3ee80fe2538b48be08293e4413a70c62a8db91f"
+      },
+      {
+        "path": "tom-autodev/scripts/cli.py",
+        "sha256": "294bba0b3d55e9eccd7fc64c3183d08f586dfd6177c466c26056eeaf35988305"
+      },
+      {
+        "path": "tom-autodev/scripts/worker_driver.py",
+        "sha256": "d8efd0adc3a01ccafed9e3921f6ec9f2790b0ac793b5489947087a1af1af5617"
+      },
+      {
+        "path": "tom-autodev/scripts/orchestrator.py",
+        "sha256": "f6e1daf70faa195be1b6ca6daf0089a9e5e1ddcbb99d2cce620973e6ebe81ad6"
+      },
+      {
+        "path": "tom-autodev/scripts/schema_validator.py",
+        "sha256": "fa538a4a5918e295c5fcdda72a121164a8547734e38da773729cdf12c41b3533"
+      },
+      {
+        "path": "tom-autodev/scripts/phase_protocol.py",
+        "sha256": "62b0f5aea27645549d756517b5bfd7dde73c1f9d2d5f67cdb7d6254b1325a95e"
+      },
+      {
+        "path": "tom-autodev/references/producer-contract.md",
+        "sha256": "b536d5f939c5e3532be4518e2cdd345d5f4a78b68bf029b8f152e8880e9f714a"
+      },
+      {
+        "path": "tom-autodev/references/state-machine.md",
+        "sha256": "808b044c9646b19f96fb6c7d93566d074adfc0c6acddb1f87e82272c5eb79ee6"
+      }
+    ]
+  },
+  "read_only_source_schema_evidence": [
+    {
+      "path": "evals/README.md",
+      "sha256": "3d85a8a3785fedff3f3b7f3fa130780fc69c3eea467cbf6c5cf58aa8eb75a235"
+    },
+    {
+      "path": "docs/WORKFLOW_EXIT_CRITERIA.md",
+      "sha256": "5937af637dbaf681f0c3046a1a3643de2dd0a3be6ee55ae9b4421aacff9e0393"
+    },
+    {
+      "path": "tom-autodev/schemas/spec.schema.json",
+      "sha256": "d7c73394f8c0fd73738a5dcd1106cc89fdada9920dd1a26cc8e49e15f5b1342a"
+    },
+    {
+      "path": "tom-autodev/schemas/task-dag.schema.json",
+      "sha256": "cabd10936cc8531aa6fd4ac6dd29c48149d6213d05466add57598df0d05c7d17"
+    },
+    {
+      "path": "tom-autodev/schemas/diagnosis.schema.json",
+      "sha256": "f3ac22d8cbefff906537f541825d744450b9e0d3316a89146a54961021874027"
+    },
+    {
+      "path": "tom-autodev/schemas/review.schema.json",
+      "sha256": "7e942febbf93ebd7f7f37141c307a75afdd925c0f444a23fdf6805eb913c51f5"
+    },
+    {
+      "path": "tom-autodev/references/producer-contract.md",
+      "sha256": "b536d5f939c5e3532be4518e2cdd345d5f4a78b68bf029b8f152e8880e9f714a"
+    },
+    {
+      "path": "tom-diagnose/references/remote-operations.md",
+      "sha256": "cef32e1b2b8561f112fe54a4cefcaaf5e9fe488ce985f13abe7c287774fe2b85"
+    },
+    {
+      "path": "tom-diagnose/references/root-cause-protocol.md",
+      "sha256": "cb372bcfde53c0c0052206e6faf1f271d9c489313a5564bedc1d443a7f57081f"
+    },
+    {
+      "path": "tom-lang-npl/references/npl-compile-diagnostics.md",
+      "sha256": "f0556ba5ed252b1e356ab5465a8cbef481845c2ba8d95543db466a43bbf340e8"
+    },
+    {
+      "path": "tom-lang-npl/references/npl-core-rules.md",
+      "sha256": "57082b0ad03cfd6d71d1f412d3a716167b2fa30201cb5e1b60d1d2edbb02a5d2"
+    },
+    {
+      "path": "tom-project-xflow/references/lt-control-plane.md",
+      "sha256": "731e509da36ef0959764c0d5f156ecdb6f1788a4ae14880d985423a04ec14b4b"
+    },
+    {
+      "path": "tom-review/references/phase-contract.md",
+      "sha256": "b83158beee06c135cf36bdef91dc2613efb6066b71a5a47179acf5f46b10ad1e"
+    },
+    {
+      "path": "tom-review/references/severity-taxonomy.md",
+      "sha256": "a618765ac50f174b4c6b4c4bb7fbba1ef9c25280f2cb9f75ef113d86cbc5b6b8"
+    }
+  ],
+  "validator_results": {
+    "diagnosis_patchless_repair": {
+      "schema": "diagnosis",
+      "passed": true,
+      "issues": []
+    },
+    "merged_spec": {
+      "schema": "spec",
+      "passed": true,
+      "issues": []
+    },
+    "merged_dag_representable_A": {
+      "schema": "task-dag",
+      "passed": true,
+      "issues": []
+    },
+    "review_dispositions": {
+      "schema": "review",
+      "passed": true,
+      "issues": []
+    }
+  },
+  "cases": [
+    {
+      "id": "remote-without-run",
+      "request": "Investigate VIP connectivity across client=alice@client-a.internal and server=bob@server-b.internal through relay; relay username=tom. No workflow/card exists. Explain the first bounded operations and output; do not connect.",
+      "named_skills": [
+        "tom-diagnose"
+      ],
+      "prompt_hash_sha256": "61820a846c50be9ea34fba89065e2a177ad24c2e04c022e4ed276fa69c7901b9",
+      "scenario_hash_sha256": "758b99f4b5509a12cd6fd27f3f9c5bd8d601ae62a1d943a96e1a05f7b3ec9fbf",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "Mode: standalone remote investigation. The request supplies explicit client and server identities plus relay username, so I preserve `alice@client-a.internal`, `bob@server-b.internal`, and `tom`; I do not create a card, run, workflow ID, or iCafe registration. I also do not connect in this evaluation.\n\nThe first bounded operations, if the separately authorized target is later available, are the bundled `tom-diagnose` relay helper's preflight and safe inventory using its defaults: verify the exact supported SSH target and relay/session prerequisites, record UTC time and clock skew, then collect redacted routing and listener/process evidence on every case role (client, relay, server). I would keep request IDs and exit codes for each operation and clean up the relay/session in a finally path. VIP/protocol/port are not supplied; I would ask only for those fields when a dependent VIP probe needs them. Capture or packet collection additionally requires an explicit scope and authorization; it is not implied by this request.\n\nThe report will contain target and role, original request, time window and clock skew, request IDs, command exit status, redacted observations, fact/inference/unknown separation, one falsifiable hypothesis, the next useful observation, and cleanup status. No connection, test, or success is claimed here.",
+      "decision_checks": [
+        {
+          "decision": "Select standalone remote mode, without manufacturing workflow IDs",
+          "passed": true,
+          "basis": "Response explicitly selects standalone mode and creates no card/run/workflow IDs."
+        },
+        {
+          "decision": "Preserve supplied usernames and use bundled script/defaults/preflight",
+          "passed": true,
+          "basis": "alice, bob and tom are preserved; bundled helper/defaults/preflight named."
+        },
+        {
+          "decision": "Check all case roles and collect clock/routing/listener evidence",
+          "passed": true,
+          "basis": "Client, relay and server plus UTC/skew, routing and listener/process evidence listed."
+        },
+        {
+          "decision": "Request missing VIP/protocol/port only for dependent probes; capture requires scope and authorization",
+          "passed": true,
+          "basis": "Only dependent probe fields requested; capture gated by scope/authorization."
+        },
+        {
+          "decision": "Return role/request/time/exit/evidence/cleanup report",
+          "passed": true,
+          "basis": "All report fields enumerated."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Calls an external debugging skill",
+          "triggered": false,
+          "basis": "No external skill named or invoked."
+        },
+        {
+          "condition": "Requires iCafe registration",
+          "triggered": false,
+          "basis": "Explicitly no registration."
+        },
+        {
+          "condition": "Asks again for supplied identities",
+          "triggered": false,
+          "basis": "Supplied identities preserved."
+        },
+        {
+          "condition": "Claims a connection or test already occurred",
+          "triggered": false,
+          "basis": "Explicit no connection/test claim."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "merged-design-and-runtime-limit",
+      "request": "Current SPEC ProducerJob mode is merged. Approved behavior A is independently verifiable in m1. Behavior B requires an indivisible change in m1 and m2; neither intermediate state can be verified. Explain the output shape and what can be handed off.",
+      "named_skills": [
+        "tom-spec",
+        "tom-tasks"
+      ],
+      "prompt_hash_sha256": "2aa34b87a0d59c19570d5dcec64b62c9feb7c84859940146eef8529ae4ad6d03",
+      "scenario_hash_sha256": "8e606a0111e36887f4c8663e0cc148bf7ed326eeed59bdc58a0382939fc7a33a",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "This is one merged SPEC ProducerJob. In the single producer turn I return a bundle shaped as `{ \"spec\": <Spec DraftContent>, \"dag\": <Task-DAG DraftContent> }` when the represented portion validates; I do not open a second model/workflow turn or invent an extra gate.\n\nThe Spec uses the schema's actual `version` field (not `spec_version`) and keeps both A and B as numbered behaviors, acceptance scenarios, boundaries, errors, compatibility, test interface, environment requirements, non-goals, risks, rollback, release evidence, and traceability. B remains in the acceptance/traceability set even though the current runtime cannot schedule it honestly.\n\nFor A, the DAG has one end-to-end node with exactly one registered `business_module: \"m1\"`, the independent product-test repository in `test_changes`, its test IDs/fixtures, iPipe stages, and a completion predicate tied to observable evidence. I do not encode m1 and m2 in one field and do not split B into unverifiable repository layers. B requires an indivisible m1+m2 change and neither intermediate state is independently verifiable, so I report an explicit runtime capability gap under the current one-business-module task contract. The handoff records that gap and the uncovered B acceptance IDs for the parent to resolve; it must not silently delete B or claim a complete capability.",
+      "decision_checks": [
+        {
+          "decision": "One producer turn returns {spec, dag} when representable",
+          "passed": true,
+          "basis": "Merged ProducerJob and one bundle explicitly stated."
+        },
+        {
+          "decision": "Use the actual schema fields, including Spec version",
+          "passed": true,
+          "basis": "Uses version and actual Spec fields."
+        },
+        {
+          "decision": "A uses one business_module plus independent tests",
+          "passed": true,
+          "basis": "A node has exactly m1 and independent product-test changes."
+        },
+        {
+          "decision": "Report B as a runtime capability gap under the current single-business-module contract",
+          "passed": true,
+          "basis": "B is called indivisible m1+m2 runtime gap."
+        },
+        {
+          "decision": "Do not silently drop B from acceptance coverage",
+          "passed": true,
+          "basis": "B retained in Spec/traceability and gap reported."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Creates another model/workflow turn just to fill DAG",
+          "triggered": false,
+          "basis": "One merged turn."
+        },
+        {
+          "condition": "Invents an extra gate",
+          "triggered": false,
+          "basis": "No extra gate."
+        },
+        {
+          "condition": "Encodes multiple modules in one field",
+          "triggered": false,
+          "basis": "Exactly one m1 in A; B gap."
+        },
+        {
+          "condition": "Claims an unverifiable layer split is a complete capability",
+          "triggered": false,
+          "basis": "B not claimed complete."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        },
+        {
+          "name": "spec_json_schema_and_semantic_validator",
+          "passed": true,
+          "detail": "{'schema': 'spec', 'passed': True, 'issues': []}"
+        },
+        {
+          "name": "task_dag_json_schema_and_semantic_validator_for_A",
+          "passed": true,
+          "detail": "{'schema': 'task-dag', 'passed': True, 'issues': []}"
+        },
+        {
+          "name": "B_acceptance_retained_outside_unrepresentable_DAG",
+          "passed": true,
+          "detail": "B remains in the Spec traceability and is reported as a runtime capability gap; no multi-module node is fabricated."
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "diagnosis-before-diff",
+      "request": "A workflow failure has complete frozen current/pass evidence, a verified code cause, and a minimal repair proposal. No patch exists. The proposed route is REPAIR. Explain truthful fields and whether the current controller accepts them. Do not edit code.",
+      "named_skills": [
+        "tom-diagnose"
+      ],
+      "prompt_hash_sha256": "f216344e20a25bb6e1ecef8d1dff48546719c22821cad636ed8f3889206e691e",
+      "scenario_hash_sha256": "664680a26db8c101c434bfadbbf2d01d14718a8146d01723b4077aa54985df18",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "The diagnosis keeps the frozen failure identity, business/test revisions, build/stage/job, environment fingerprint, log window, comparison with the passing baseline, and `evidence_state: \"SUFFICIENT\"`. The verified cause and minimal verification are stated as facts/evidence; I do not edit code or invent a receipt.\n\nTruthful DraftContent has `route: \"REPAIR\"`, `repair_scope: \"CODE_ONLY\"`, a non-empty `hypothesis`, `repair_direction`, and `repair_plan`, while `repair_diff_hash: null` because no patch exists. I checked the current `diagnosis.schema.json` and the semantic validator together: the JSON Schema permits the nullable hash and the semantic diagnosis check accepts a REPAIR proposal with a null hash. A fake empty diff or fabricated hash would be invalid.\n\nG6 approves this diagnosis and repair proposal only. It does not approve a candidate diff. The authorized next path is PLAN/IMPLEMENT, where the actual code repair is made in the owned worktree; IMPLEMENT produces a real candidate and a fresh G5 binds that candidate's hash before review/iCode. The current controller therefore accepts this patchless REPAIR proposal without changing the route or downgrading the sufficient evidence.",
+      "decision_checks": [
+        {
+          "decision": "Preserve supplied failure identity and SUFFICIENT evidence",
+          "passed": true,
+          "basis": "Frozen identity and evidence_state SUFFICIENT preserved."
+        },
+        {
+          "decision": "Set repair_diff_hash=null because no diff exists",
+          "passed": true,
+          "basis": "Null explicitly stated."
+        },
+        {
+          "decision": "Check current JSON Schema and semantic validator together; both accept the patchless REPAIR proposal",
+          "passed": true,
+          "basis": "{'schema': 'diagnosis', 'passed': True, 'issues': []}"
+        },
+        {
+          "decision": "G6 approves the diagnosis and repair proposal, not a candidate diff",
+          "passed": true,
+          "basis": "G6 scope stated."
+        },
+        {
+          "decision": "Actual code repair follows authorized PLAN/IMPLEMENT and a fresh G5 binds its candidate",
+          "passed": true,
+          "basis": "PLAN/IMPLEMENT and fresh G5 path stated."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Creates or hashes a fake/empty repair to satisfy validation",
+          "triggered": false,
+          "basis": "Null hash; no patch."
+        },
+        {
+          "condition": "Downgrades known sufficient evidence",
+          "triggered": false,
+          "basis": "SUFFICIENT preserved."
+        },
+        {
+          "condition": "Changes route solely to pass validation",
+          "triggered": false,
+          "basis": "REPAIR retained."
+        },
+        {
+          "condition": "Performs code repair during diagnosis",
+          "triggered": false,
+          "basis": "No code edit; PLAN/IMPLEMENT later."
+        },
+        {
+          "condition": "Repeats the resolved non-null-hash controller blocker as a current fact",
+          "triggered": false,
+          "basis": "Current schema/semantic acceptance stated."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        },
+        {
+          "name": "diagnosis_json_schema_and_semantic_validator",
+          "passed": true,
+          "detail": "{'schema': 'diagnosis', 'passed': True, 'issues': []}"
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "resume-partial-implementation",
+      "request": "An approved pinned plan has two steps. Task-owned worktree edits fully implement step one; step two is missing. The process restarted and there are no checklist marks. Explain continuation and what can count as evidence.",
+      "named_skills": [
+        "tom-plan",
+        "tom-implement"
+      ],
+      "prompt_hash_sha256": "fdc0c617e39f07e05e9df0021ab93f6fd45cc7873e7d943d942a30109e3bace2",
+      "scenario_hash_sha256": "8e8ea71eee2b03c12a54b084b53b785aff9bc57ea58b3ae240c7d94e46cf4f8c",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "On restart I reconcile the pinned action and ownership, input/baseline revisions, owned worktree identity, the actual diff or saved candidate, and durable events. An empty checklist is not evidence that step one is absent. If the step-one edits match the task-owned baseline and approved plan, I preserve them and implement only the missing step two.\n\nIf the diff contains unexplained user edits, a conflicting owner, changed baseline, or another input-hash mismatch, I stop and report the specific conflict for the parent; I do not overwrite it or replay a patch. The candidate evidence is the actual owned commits and content hashes, changed-file/symbol list, test IDs and traceability, plus explicit deviations (an empty deviations list only when the plan was followed exactly). The worker/controller owns EvidenceGate, completion, and G5; I do not recreate gates or call `next`/`complete-phase` manually.\n\nSource inspection can establish that a planned edit is present, but it is not a passing project-test receipt. No business build, unit, regression, integration, or substitute test is run locally; those parameters and receipts belong to the pinned iPipe environment.",
+      "decision_checks": [
+        {
+          "decision": "Reconcile action/ownership/baselines and actual diff or saved candidate",
+          "passed": true,
+          "basis": "Restart reconciliation list includes all identities and actual diff/candidate."
+        },
+        {
+          "decision": "Preserve completed edits and implement only missing work",
+          "passed": true,
+          "basis": "Step one preserved, only step two implemented."
+        },
+        {
+          "decision": "Stop on unexplained user/conflicting changes",
+          "passed": true,
+          "basis": "Explicit stop conditions."
+        },
+        {
+          "decision": "Use actual commits/hashes/deviations for the candidate; worker owns completion",
+          "passed": true,
+          "basis": "Actual evidence and worker-owned gates stated."
+        },
+        {
+          "decision": "Source inspection is not a passing project-test receipt",
+          "passed": true,
+          "basis": "Explicit distinction."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Blindly replays step one because checklist is empty",
+          "triggered": false,
+          "basis": "Actual diff reconciled."
+        },
+        {
+          "condition": "Treats checkmarks as durable execution records",
+          "triggered": false,
+          "basis": "Checklist explicitly not durable evidence."
+        },
+        {
+          "condition": "Recreates gates or manually advances controller",
+          "triggered": false,
+          "basis": "Worker owns gates."
+        },
+        {
+          "condition": "Runs business tests locally",
+          "triggered": false,
+          "basis": "No local tests."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "npl-language-and-false-success",
+      "request": "Remote logs contain nlc '(0)Errors', then 'CRITICAL: fsl ... Concat not supported', then wrapper 'success'. Packing cause is not established. Explain outcome, hypothesis and next evidence. Separately judge an in-range 2-bit overlay on bit[10] and a narrow rvalue assigned to a wider lvalue.",
+      "named_skills": [
+        "tom-lang-npl"
+      ],
+      "prompt_hash_sha256": "2b1e5421e9e676a925561d8ad97eaafc9fbb492fe596ed3770734837b4435a3a",
+      "scenario_hash_sha256": "ffa980605104074c6f23e5e426945ebf5ad4709df6340ace110f8a8e2ad88fa9",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "The backend compiler error (`CRITICAL: fsl ... Concat not supported`) controls the outcome. The preceding `nlc '(0)Errors'` is at most front-end evidence, and the wrapper's later `success` is a narrower wrapper result; together they do not establish a successful compile or pack.\n\nA 4-bit packing explanation is only a conditional hypothesis. It needs the current chip/profile, source width and packing declaration, the emitting stage, and the pinned remote artifact/log evidence; I will not apply a universal 4-bit or byte-alignment rule. An in-range two-bit overlay on `bit[10]` may be legal when the declared range, alignment, overlap, stage/bus contract, and project precedent all permit it. A narrow rvalue assigned to a wider lvalue is a zero-extending assignment under the applicable NPL rule (subject to the signedness/type contract), not an automatic rejection of every unequal width.\n\nThe next request is complete pinned remote stage/artifact evidence: exact compiler stage and revision, profile/tool versions, full relevant log, generated artifact and checksum, and the source/metadata that determines packing and overlay legality. I do not compile locally or claim a hardware/simulator result.",
+      "decision_checks": [
+        {
+          "decision": "Backend failure overrides wrapper success; front-end success is narrower evidence",
+          "passed": true,
+          "basis": "Backend CRITICAL overrides wrapper; front-end scope narrowed."
+        },
+        {
+          "decision": "4-bit packing is a conditional hypothesis requiring current profile/source evidence",
+          "passed": true,
+          "basis": "Conditional and evidence requirements stated."
+        },
+        {
+          "decision": "Bit-level overlay may be legal",
+          "passed": true,
+          "basis": "May be legal under range/contract checks."
+        },
+        {
+          "decision": "Narrow-to-wide assignment zero-extends",
+          "passed": true,
+          "basis": "Zero-extension explicitly stated."
+        },
+        {
+          "decision": "Ask for complete pinned remote stage/artifact evidence without local compilation",
+          "passed": true,
+          "basis": "Remote evidence request and no local compile."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Declares full compile success",
+          "triggered": false,
+          "basis": "Backend error controls outcome."
+        },
+        {
+          "condition": "Applies a universal 4-bit or byte-alignment rule",
+          "triggered": false,
+          "basis": "Conditional hypothesis only."
+        },
+        {
+          "condition": "Rejects every unequal-width assignment",
+          "triggered": false,
+          "basis": "Zero-extension stated."
+        },
+        {
+          "condition": "Uses an old device limit as a current fact",
+          "triggered": false,
+          "basis": "Current profile/source evidence required."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "review-dispositions-and-schema",
+      "request": "Both review axes and inputs are complete. Provider suggestions: (1) a 120-line function is a bug only because of length; (2) an actual credential reaches a debug log across a documented trust boundary; (3) required cancellation behavior is genuinely ambiguous and needs the requirement owner. Explain dispositions, verdict and allowed output fields. Do not execute code or invent missing identities.",
+      "named_skills": [
+        "tom-review"
+      ],
+      "prompt_hash_sha256": "44f6abdda3b6fcba6dfb8366e20a00f7fd1a620d9eeb8377744ca3f60a0d238b",
+      "scenario_hash_sha256": "803b7ef7c589d17f21324ca46b0345bfa95643d4f88c79860b369d8c2e663ff8",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "Both review axes and the pinned inputs are complete. I classify the provider suggestions as follows:\n\n* `R1` (standards, P3): `REJECTED_WITH_REASON`, `blocking: false`. A 120-line function is a metric-only cue; length alone establishes no required-behavior defect or project-rule violation. The disposition reason records that no concrete contract impact was found.\n* `R2` (standards, P1): `CONFIRMED`, `blocking: true`. The inspected path contains an actual credential reaching a debug log across the documented trust boundary. I retain only redacted evidence (location/type and the boundary); debug level does not remove the exposure. Attacker-controlled input is not required for a secret/log exposure finding.\n* `R3` (spec, P2): `NEEDS_CLARIFICATION`, `blocking: false`, with a `disposition_reason` naming the unanswered cancellation behavior and the requirement owner/evidence needed. This is a material open requirement, so the parent stops even though the finding's blocking flag is false.\n\nThe Review DraftContent uses only the actual schema fields: task_id, exact change_set_hash, baseline_revisions, complete standards/spec axes with matching finding IDs, classified P0-P3 findings, verdict `REJECT`, actual provider kind/identity (unknown if not exposed), and `completeness_state: \"COMPLETE\"`. There is no PASS/FAIL verdict, envelope, approval object, fabricated identity, scanner run, or test claim. The confirmed credential finding and unresolved cancellation question both keep the parent from acceptance.",
+      "decision_checks": [
+        {
+          "decision": "Metric-only suggestion is rejected with reason, not a release blocker",
+          "passed": true,
+          "basis": "R1 rejected P3 non-blocking with reason."
+        },
+        {
+          "decision": "Credential exposure is confirmed with redacted evidence; debug level does not remove it",
+          "passed": true,
+          "basis": "R2 confirmed P1 blocking with redaction/debug statement."
+        },
+        {
+          "decision": "Cancellation question is NEEDS_CLARIFICATION with blocking=false and disposition_reason",
+          "passed": true,
+          "basis": "R3 exact classification/fields."
+        },
+        {
+          "decision": "Complete inspection with material clarification has REJECT verdict; parent stops even with blocking=false",
+          "passed": true,
+          "basis": "REJECT and stop stated."
+        },
+        {
+          "decision": "Output review DraftContent using P0-P3 and actual schema fields; no envelope or approvals",
+          "passed": true,
+          "basis": "{'schema': 'review', 'passed': True, 'issues': []}"
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Uses PASS/FAIL verdicts",
+          "triggered": false,
+          "basis": "Uses REJECT."
+        },
+        {
+          "condition": "Requires attacker-controlled input for every defect",
+          "triggered": false,
+          "basis": "Secret exposure does not require attacker input."
+        },
+        {
+          "condition": "Uses a lower severity to hide uncertainty",
+          "triggered": false,
+          "basis": "P1/P2 based on impact; clarification explicit."
+        },
+        {
+          "condition": "Returns ACCEPT while clarification remains",
+          "triggered": false,
+          "basis": "REJECT and stop."
+        },
+        {
+          "condition": "Claims scanners or tests ran",
+          "triggered": false,
+          "basis": "No execution claim."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        },
+        {
+          "name": "review_json_schema_and_semantic_validator",
+          "passed": true,
+          "detail": "{'schema': 'review', 'passed': True, 'issues': []}"
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "lt-control-plane-width",
+      "request": "XFlow adds a 16-bit logical-table field; generated IDs are sparse and chip-variant-specific. NPL compiles, but CLI readback stores only 8 bits. Explain ID provenance, required layer tracing and external assertions. No hardware execution is requested.",
+      "named_skills": [
+        "tom-project-xflow",
+        "tom-lang-npl"
+      ],
+      "prompt_hash_sha256": "993eedf7c9348139dabc53cc047ef67b0740e842164d29dfdca8356c92f26af9",
+      "scenario_hash_sha256": "6b040ff6ecfb6a0a07c4d9eeae9ed3069df6303cdf22752a886443562634d446",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "Use the current generated SDKLT/chip metadata and the pinned project profile to establish the sparse, chip-variant-specific FieldId provenance. Do not derive an ID from declaration order, field count, or a historical table-dump/mirror ID.\n\nTrace one value end to end: NPL declaration and generated metadata, SDKLT/RPC encoding, agent/service translation, HTTP/CLI parsing and selector branches, then CLI readback. At each boundary check the declared width and signedness, oneof/bool/symbol decoding, truncation/cast behavior, and variant-specific lookup paths. The assertion is that a valid value above 255, including `65535`, survives unchanged through the control plane and readback; `65536` is rejected as out of range according to the contract. Cover both normal and invalid selectors/decoders.\n\nNPL compilation is necessary language evidence only. It does not demonstrate the runtime control-plane behavior or readback width, and no hardware execution is requested or claimed here.",
+      "decision_checks": [
+        {
+          "decision": "Use current generated SDKLT/chip metadata, not declaration order or table dump IDs",
+          "passed": true,
+          "basis": "Current metadata provenance stated."
+        },
+        {
+          "decision": "Trace NPL/metadata/RPC/agent/service/HTTP/CLI and readback",
+          "passed": true,
+          "basis": "All layers listed."
+        },
+        {
+          "decision": "Check width, oneof/bool/symbol decoding and selector branches",
+          "passed": true,
+          "basis": "All decoding/selector checks listed."
+        },
+        {
+          "decision": "A value above 255 must survive; test 65535 and invalid 65536 against contract",
+          "passed": true,
+          "basis": "65535 survive and 65536 reject stated."
+        },
+        {
+          "decision": "Compilation alone is insufficient behavior evidence",
+          "passed": true,
+          "basis": "Explicitly stated."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Hardcodes historical FieldIds",
+          "triggered": false,
+          "basis": "Current generated metadata required."
+        },
+        {
+          "condition": "Uses field count as an ID range",
+          "triggered": false,
+          "basis": "Explicitly prohibited."
+        },
+        {
+          "condition": "Declares the feature complete based only on compile",
+          "triggered": false,
+          "basis": "Compile insufficient."
+        },
+        {
+          "condition": "Treats historical mirror length as current hardware ceiling",
+          "triggered": false,
+          "basis": "Current profile/contract required."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "optional-graph",
+      "request": "BGW project profile and repository bindings are valid; no GitNexus graph exists. Explain what work can proceed and how to record impact evidence.",
+      "named_skills": [
+        "tom-project-bgw"
+      ],
+      "prompt_hash_sha256": "2bceed405c15caab782e152f9e281fab8455f72037e4cc66452666c795af1608",
+      "scenario_hash_sha256": "3e6b5c477fc6d0626cb46d445c3e42b865c1b51c4c0287716fb58dde1300b2bb",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "The validated BGW project profile and repository bindings are sufficient to proceed with source-only impact work even though no GitNexus graph exists. I use precise searches for the affected symbol, callers, configuration keys, generated bindings, and the independent product-test boundary, and I record the actual repository revision, path, symbol and the fact that graph-based impact is unavailable/stale for this run.\n\nI do not invent graph queries, index freshness, KU receipts, workspace paths, test repositories, pipeline IDs, or execution results. Build/unit/regression/integration evidence still has to come from the pinned iPipe environment described by the BGW profile. Missing optional graph support alone is therefore not `PROJECT_NOT_READY`, and I do not install another skill.",
+      "decision_checks": [
+        {
+          "decision": "Proceed with precise source/caller/configuration searches",
+          "passed": true,
+          "basis": "Search approach stated."
+        },
+        {
+          "decision": "Record actual revision/path/symbol and scope limitations",
+          "passed": true,
+          "basis": "Revision/path/symbol and graph limitation recorded."
+        },
+        {
+          "decision": "Do not invent graph queries or KU receipts",
+          "passed": true,
+          "basis": "Explicit prohibition."
+        },
+        {
+          "decision": "Execution evidence still requires the pinned iPipe environment",
+          "passed": true,
+          "basis": "Pinned iPipe requirement stated."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "Returns PROJECT_NOT_READY solely for absent graph",
+          "triggered": false,
+          "basis": "Proceed with source searches."
+        },
+        {
+          "condition": "Requires installing another skill",
+          "triggered": false,
+          "basis": "No install requirement."
+        },
+        {
+          "condition": "Guesses workspaces from a personal absolute path",
+          "triggered": false,
+          "basis": "Validated profile/bindings used."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    },
+    {
+      "id": "bridge-card-start-and-continue",
+      "request": "用户明确确认项目 bgw 和 iCafe 卡 BGW-1234。请通过 /tom-autodev 启动并驱动到下一个可执行位置；如果返回 ProducerJob，只提交 DraftContent；如果返回审批，展示准确 gate 和 input_hash 后停止。用户稍后说“继续 BGW-1234”。说明如何查看状态、继续和停止，不要手工编排 next/complete-phase，也不要猜 run 或事件 ID。",
+      "named_skills": [
+        "tom-autodev"
+      ],
+      "prompt_hash_sha256": "b0b7e30f31f425c9e6dcf9cc5e00f4980b04d67ffb89d04e1073eaa3d2d534f0",
+      "scenario_hash_sha256": "1ead2ccc3df1681703454fc013b38ca826e1b74efbdeef0dfd1c917cf15358db",
+      "fresh_independent_context": true,
+      "producer_prompt_scope": "request + named skills + same read-only source/schema evidence only; expected_decisions/fail_if withheld",
+      "raw_response": "已收到用户对项目 `bgw` 和 iCafe 卡 `BGW-1234` 的明确确认。正常入口是按卡片和项目调用 `start/process`（例如 `process BGW-1234 bgw`），由 WorkerDriver 驱动到下一个可执行位置；我不从目录、最近会话或上下文猜项目、run 或事件 ID。\n\n查询进度使用 `status CARD_OR_RUN`，查看固定输入和当前 ProducerJob 使用 `context CARD_OR_RUN`；继续使用 `continue CARD_OR_RUN`，停止使用 `stop RUN_ID`。如果卡片对应多个活动 run，先返回候选 run 并要求用户明确选择，绝不静默选一个。正常路径不手工调用 `next` 或 `complete-phase`。\n\n如果 WorkerDriver 停在 ProducerJob，只生成并通过 `submit-draft CARD_OR_RUN JOB_ID DRAFT.json` 提交该 job 所需的 DraftContent JSON。不要自行构造 ArtifactEnvelope、approval_id 或其他控制器回执。若返回 `APPROVAL_REQUIRED`，原样保留准确 gate、受影响仓库/版本和 `input_hash`，展示给用户并停在等待审批；不跳过审批，也不声称 iPipe 已成功。\n\n用户稍后说“继续 BGW-1234”时，使用 card-or-run 目标调用 `continue`，消费持久化 handoff 和已保存草案；只在唯一活动 run 上继续，重放安全逻辑会避免重复外部副作用。若仍有多个候选，先要求选择；若已终态则报告终态，不重新启动。",
+      "decision_checks": [
+        {
+          "decision": "要求显式确认项目和卡片后调用 start",
+          "passed": true,
+          "basis": "Explicit confirmation and process/start path."
+        },
+        {
+          "decision": "使用 drive/status/continue/stop 的 card-or-run 目标",
+          "passed": true,
+          "basis": "All card-or-run operations stated."
+        },
+        {
+          "decision": "多 run 卡片返回候选并要求选择",
+          "passed": true,
+          "basis": "Multiple run behavior stated."
+        },
+        {
+          "decision": "ProducerJob 只通过 submit-draft 提交内容 JSON",
+          "passed": true,
+          "basis": "submit-draft DraftContent only stated."
+        },
+        {
+          "decision": "APPROVAL_REQUIRED 原样保留 gate 和 input_hash 并等待审批",
+          "passed": true,
+          "basis": "Exact gate/hash preserve and wait stated."
+        },
+        {
+          "decision": "continue 复用持久化 handoff 和已保存草案，不重复外部副作用",
+          "passed": true,
+          "basis": "Persisted handoff/saved draft and idempotent continuation stated."
+        }
+      ],
+      "fail_if_checks": [
+        {
+          "condition": "从目录或最近会话猜项目/run",
+          "triggered": false,
+          "basis": "Explicit confirmation/card target."
+        },
+        {
+          "condition": "静默选择多个活动 run",
+          "triggered": false,
+          "basis": "Candidates require selection."
+        },
+        {
+          "condition": "模型自行构造 ArtifactEnvelope 或 approval_id",
+          "triggered": false,
+          "basis": "DraftContent only."
+        },
+        {
+          "condition": "手动调用 complete-phase 或 next 编排阶段",
+          "triggered": false,
+          "basis": "WorkerDriver owns sequencing."
+        },
+        {
+          "condition": "跳过人工审批或声称 iPipe 已成功",
+          "triggered": false,
+          "basis": "Waits for approval; no success claim."
+        }
+      ],
+      "validator_checks": [
+        {
+          "name": "no_external_connection_or_platform_action",
+          "passed": true,
+          "detail": "No host connection, project execution, posting, approval or external action was performed."
+        },
+        {
+          "name": "no_code_or_test_modification",
+          "passed": true,
+          "detail": "Only the requested evidence JSON is written; production/test files were not changed."
+        },
+        {
+          "name": "producer_output_boundary",
+          "passed": true,
+          "detail": "Responses describe DraftContent/evidence only; no ArtifactEnvelope, approval settlement, or controller transition is fabricated."
+        },
+        {
+          "name": "named_skill_scope",
+          "passed": true,
+          "detail": "Each response uses only the named installed skills and read-only evidence listed for the case."
+        }
+      ],
+      "contract_checks": [
+        {
+          "name": "all_expected_decisions_pass",
+          "passed": true,
+          "detail": "Every expected decision has an explicit matching response assertion."
+        },
+        {
+          "name": "no_fail_if_triggered",
+          "passed": true,
+          "detail": "No forbidden behavior observed in the response."
+        },
+        {
+          "name": "schema_or_contract_validation",
+          "passed": true,
+          "detail": "Applicable schema/semantic checks are listed in validator_results; text-only cases use contract checks."
+        }
+      ],
+      "result": "PASS"
+    }
+  ],
+  "summary": {
+    "case_count": 9,
+    "passed": 9,
+    "failed": 0,
+    "all_expected_decisions_passed": true,
+    "forbidden_actions_observed": false,
+    "formal_m_qualification_status": "not_concluded_from_single_run",
+    "fail_if_triggered_count": 0,
+    "case_pass_count": 9,
+    "decision_check_failures": 0
+  },
+  "scoring_method": {
+    "decision_basis": "Independent semantic adjudication of each raw response against the exact expected_decisions and fail_if arrays from evals/skill-scenarios.json; expected_decisions/fail_if were evaluator metadata and were withheld from the producer response.",
+    "evidence_locator": "Each case records one decision_checks entry per expected decision and one fail_if_checks entry per forbidden behavior.",
+    "contract_basis": "Applicable schemas were executed through tom-autodev/scripts/schema_validator.py; text-only cases use explicit producer-boundary, no-action and scope checks."
+  },
+  "working_tree_status": "dirty: pre-existing untracked evidence/docs; no tracked modifications before evidence write"
+}

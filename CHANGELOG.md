@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-28 · 审批投递失败闭合与资格证据
+
+- 审批投递结果改为 fail-closed：真实 `DELIVERY_FAILED` 回执不会再被误判为 `PARKED / APPROVAL_WAIT`；合同形状的 `PENDING + approval_id` 正常等待路径保留。
+- 独立 C 修复后复核关闭 `IND-C-001/P1`；生产形状 CLI 回归返回 `ok=false`、`APPROVAL_DELIVERY_FAILED` 和非零退出。
+- M v3 的 9 个场景在 3 个独立上下文各运行一次，三批均 9/9、`fail_if=0`、合同/语义校验通过；精确模型身份在当前执行环境不可见，故形式化 M 结论记录为 `INCOMPLETE`，不宣称跨模型资格。
+- 验证：tom-autodev 1045 项、tom-review 6 项、tom-diagnose 回归、Python 编译、Node 语法和 `git diff --check` 全部通过。
+
 ## 2026-09-27 · 工作卡进度收口修复
 
 - 工作卡新增"流程"行后同步更新回归：模块/待处理断言的行位改到插入后的位置，发布快照回归补齐 release checkpoint 的 `build_id`，与当前 build 身份匹配对齐。
