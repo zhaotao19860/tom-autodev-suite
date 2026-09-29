@@ -26,7 +26,80 @@ def project_profiles_dir(config_root: Path | str | None = None) -> Path:
 
 
 def profile_path(project: str, config_root: Path | str | None = None) -> Path:
+    """Legacy one-per-project profile path.
+
+    Retained for backward compatibility: runs started before per-requirement
+    profiles pinned this path, and `resolve_active_profile_path` still falls back
+    to it when no requirement-level profile exists.
+    """
     return project_profiles_dir(config_root) / f"{project}.yaml"
+
+
+_CARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _safe_card_component(requirement_id: str) -> str:
+    """Reject a card id that could escape the project's profile directory.
+
+    A per-requirement profile lives at a path built from the card id, so a value
+    with a separator or `..` would let one requirement write outside its project
+    folder. Card ids in this system look like `BGW-1995`; anything else is refused
+    rather than silently sanitised, so a caller cannot think it wrote a profile it
+    did not.
+    """
+    if not isinstance(requirement_id, str) or not _CARD_ID.fullmatch(requirement_id):
+        raise ValueError("REQUIREMENT_ID_INVALID")
+    return requirement_id
+
+
+def requirement_profile_path(
+    project: str, requirement_id: str, config_root: Path | str | None = None
+) -> Path:
+    """Per-requirement profile path: one file per card, grouped by project.
+
+    Each requirement pins its own profile so two requirements developed at the
+    same time never overwrite one another. The path is a pure function of
+    (project, card), so the runtime guards can re-derive and verify it.
+    """
+    card = _safe_card_component(requirement_id)
+    return project_profiles_dir(config_root) / project / f"{card}.yaml"
+
+
+def resolve_active_profile_path(
+    project: str, requirement_id: str, config_root: Path | str | None = None
+) -> Path:
+    """The profile a run should pin: the per-requirement file if it exists, else
+    the legacy per-project file, else the per-requirement path (so a missing
+    profile is reported at the location the wizard is expected to write)."""
+    try:
+        per_card = requirement_profile_path(project, requirement_id, config_root)
+    except ValueError:
+        return profile_path(project, config_root)
+    if per_card.is_file():
+        return per_card
+    legacy = profile_path(project, config_root)
+    if legacy.is_file():
+        return legacy
+    return per_card
+
+
+def acceptable_profile_paths(
+    project: str, requirement_id: str | None, config_root: Path | str | None = None
+) -> set[str]:
+    """The profile paths a run for (project, card) is allowed to have pinned.
+
+    A run may legitimately pin either the per-requirement profile or, for runs
+    started before per-requirement profiles existed, the legacy per-project one.
+    Any other path means the recorded intake was pointed somewhere it should not
+    be, which the guards reject with `PROJECT_PROFILE_PATH_MISMATCH`.
+    """
+    allowed = {str(profile_path(project, config_root))}
+    if isinstance(requirement_id, str) and requirement_id:
+        try:
+            allowed.add(str(requirement_profile_path(project, requirement_id, config_root)))
+        except ValueError:
+            pass
+    return allowed
 
 
 def validate_profile(profile: dict[str, Any], *, check_paths: bool = True) -> dict[str, Any]:
@@ -75,11 +148,13 @@ def save_profile(
     profile: dict[str, Any],
     previous_hash: str | None,
     confirmation: bool,
+    *,
+    check_paths: bool = True,
 ) -> dict[str, Any]:
     profile_path = Path(path).expanduser()
     if not confirmation:
         return {"ready": False, "reason_code": "PROFILE_CONFIRMATION_REQUIRED", "profile_path": str(profile_path)}
-    validation = validate_profile(profile)
+    validation = validate_profile(profile, check_paths=check_paths)
     if not validation["ready"]:
         return {**validation, "profile_path": str(profile_path)}
     profile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -128,6 +203,27 @@ def _semantic_invalid_paths(profile: dict[str, Any]) -> list[str]:
     mapping ambiguous, which is worse than having no entry at all.
     """
     invalid: list[str] = []
+    environment = profile.get("environment_profile")
+    if isinstance(environment, dict):
+        provenance = environment.get("provenance")
+        marker_paths = _environment_marker_paths(environment)
+        if marker_paths:
+            invalid.extend(marker_paths)
+        if isinstance(provenance, dict):
+            if provenance.get("status") != "VERIFIED":
+                invalid.append("environment_profile.provenance.status")
+            for field in (
+                "runner_identity",
+                "image_toolchain_identity",
+                "verified_at",
+                "verifier",
+                "evidence_ref",
+            ):
+                value = provenance.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    invalid.append(f"environment_profile.provenance.{field}")
+        elif marker_paths:
+            invalid.append("environment_profile.provenance")
     pipeline = profile.get("pipeline_profile")
     entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
     if not isinstance(entries, list):
@@ -157,6 +253,26 @@ def _semantic_invalid_paths(profile: dict[str, Any]) -> list[str]:
         # A release nobody is required to pass cannot ever be decided.
         invalid.append("pipeline_profile.pipelines.required_for_release")
     return invalid
+
+
+def _environment_marker_paths(value: Any, path: str = "environment_profile") -> list[str]:
+    """Reject descriptive guesses that masquerade as verified environment facts."""
+    markers = ("unverified", "assumed", "placeholder", "__")
+    if isinstance(value, dict):
+        result: list[str] = []
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if isinstance(child, str) and any(marker in child.lower() for marker in markers):
+                result.append(child_path)
+            elif isinstance(child, (dict, list)):
+                result.extend(_environment_marker_paths(child, child_path))
+        return result
+    if isinstance(value, list):
+        result = []
+        for index, child in enumerate(value):
+            result.extend(_environment_marker_paths(child, f"{path}[{index}]"))
+        return result
+    return []
 
 
 def _semantic_missing_paths(profile: dict[str, Any]) -> list[str]:

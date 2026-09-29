@@ -3,11 +3,14 @@ from __future__ import annotations
 from execution_guard import execution_guard
 
 import hashlib
+import inspect
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from approval_contract import ApprovalGatewayResult, parse_gateway_result
 from collaboration import group_id_for_run
+from approval_summary import gate_intent, references
 
 
 _RECORD_KEY = "approval.gateway.infoflow"
@@ -40,39 +43,99 @@ def mention_line(recipients: list[str]) -> str:
     return " ".join(f"@{_uuap(recipient)}" for recipient in sorted(recipients))
 
 
-def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[str, Any]) -> Any:
-    """Add the one-tap button card next to the markdown card, when it is possible.
+def _review_gate(request: dict[str, Any]) -> dict[str, Any]:
+    evidence = request.get("evidence") or {}
+    gate = {**gate_intent(request.get("action")), **(evidence.get("gate") or {})}
+    if not gate.get("references"):
+        gate["references"] = references({
+            key: value for key, value in evidence.items()
+            if key not in {"gate", "documents", "progress"}
+        })
+    return gate
 
-    Only a collaboration group is targeted: that path is the one the buttons were
-    verified on, and it is also the surface where the typing was painful. The card is
-    an accelerator, not the record — the markdown message still carries the links,
-    hashes and documents — so any failure here is swallowed and reported in the stored
-    receipt instead of failing the gate.
+
+def _reading_lines(gate: dict[str, Any]) -> list[str]:
+    lines = []
+    for item in gate.get("references") or []:
+        if not isinstance(item, dict) or not isinstance(item.get("ref"), str):
+            continue
+        label = _link_label(item.get("label") or "材料")
+        ref = item["ref"]
+        url = _url(ref)
+        if url:
+            lines.append(f"[{label}]({url})")
+        else:
+            # Never truncate a local path/hash into a locator that cannot be opened.
+            ref = " ".join(ref.split()).replace("`", "")
+            lines.append(f"{label}：`{ref}`")
+    return list(dict.fromkeys(lines))
+
+
+def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[str, Any]) -> Any:
+    """Send to the collaboration group, or each authorized private recipient.
+
+    Persist each target's outcome separately. An exception can mean remote delivery
+    is unknown; a replay must not resend successful OR uncertain targets blindly.
+    Markdown remains the reply fallback, and degraded button delivery is explicit.
     """
     group_id = group_id_for_run(state_store, gateway_request["run_id"])
-    if group_id is None or not hasattr(client, "send_approval_card"):
-        return None
+    if not hasattr(client, "send_approval_card"):
+        return {"status": "UNAVAILABLE", "reason_code": "APPROVAL_BUTTON_UNSUPPORTED"}
     evidence = gateway_request.get("evidence")
-    gate = evidence.get("gate") if isinstance(evidence, dict) else None
-    gate = gate if isinstance(gate, dict) else {}
+    gate = _review_gate(gateway_request)
     action = str(gateway_request.get("action") or "gate")
+    reads = _reading_lines(gate)
     lines = [
         f"需求 {_safe(_evidence(evidence, 'card_id'))} {_safe(_evidence(evidence, 'card_title'))}".strip(),
         f"本次审批 {_line(gate.get('subject'))}" if _line(gate.get("subject")) else "",
+        "审批重点 " + "；".join(gate.get("checklist") or []),
+        ("材料缺口：未取得与本次 hash 匹配的产物，请勿批准"
+         if gate.get("material_status") == "MISSING"
+         else "请先查看 " + ("；".join(reads[:2]) if reads else "材料未齐，请先在 IDE 补齐，勿盲批")),
         f"批准后 {_line(gate.get('effect'))}" if _line(gate.get("effect")) else "",
+        f"版本 {gateway_request['input_hash'][:12]}…；完整材料及本地文件位置见同一审批的详情消息",
         f"截止 {_moment(gateway_request['deadline_at'])}",
     ]
-    try:
-        return client.send_approval_card(
-            approval_id=gateway_request["approval_id"],
-            target_type="group",
-            target_id=group_id,
-            title=f"tom-autodev {action} 审批",
-            question="点「同意」或「驳回」即可，无需再输入 approval_id；详情见上一条消息。",
-            lines=[line for line in lines if line],
-        )
-    except Exception as error:  # noqa: BLE001 - the card is best effort; markdown is authoritative
-        return {"error": str(error)}
+    targets = [("group", group_id)] if group_id is not None else [
+        ("user", member) for member in sorted({
+            _uuap(member) for member in gateway_request["member_policy"]["infoflow"]
+        })
+    ]
+    outcomes = []
+    for target_type, target_id in targets:
+        key = f"approval.button:{_request_id(gateway_request)}:{target_type}:{target_id}"
+        saved = state_store.idempotency_result(key)
+        if saved is None:
+            try:
+                state_store.save_idempotency_result(key + ":intent", {"attempt": uuid.uuid4().hex})
+            except ValueError:
+                # Another sender may have completed between our read and claim.
+                saved = state_store.idempotency_result(key) or {
+                    "status": "UNKNOWN", "reason_code": "QUERY_REQUIRED",
+                }
+                outcomes.append({"target_type": target_type, "target_id": target_id, **saved})
+                continue
+            try:
+                receipt = client.send_approval_card(
+                    approval_id=gateway_request["approval_id"],
+                    target_type=target_type, target_id=target_id,
+                    title=f"tom-autodev {action} 审批",
+                    question="待你审批：请先核对材料和重点，再点「同意」或「驳回」。",
+                    lines=[line for line in lines if line],
+                )
+                if (not isinstance(receipt, dict)
+                        or not isinstance(receipt.get("card_id"), str)
+                        or not receipt["card_id"].strip()):
+                    raise ValueError("CARD_RESPONSE_INVALID")
+                saved = {"status": "DELIVERED", "receipt": receipt}
+            except Exception as error:  # remote outcome may be unknown; do not replay
+                saved = {"status": "UNKNOWN", "reason_code": type(error).__name__}
+            saved = state_store.save_idempotency_result(key, saved)
+        outcomes.append({"target_type": target_type, "target_id": target_id, **saved})
+    return {
+        "status": "DELIVERED" if all(x["status"] == "DELIVERED" for x in outcomes) else "DEGRADED",
+        "targets": outcomes,
+    }
 
 
 def _uuap(recipient: str) -> str:
@@ -150,11 +213,49 @@ class InfoflowApprovalTransport:
         recipients = gateway_request["member_policy"].get("infoflow")
         if not isinstance(recipients, list) or not recipients:
             raise ValueError("APPROVAL_ENVELOPE_INVALID")
+        if any(not isinstance(member, str) or not _uuap(member).strip() for member in recipients):
+            raise ValueError("APPROVAL_ENVELOPE_INVALID")
+        deadline_at = _deadline(gateway_request["deadline_at"]).isoformat()
 
         request_id = _request_id(gateway_request)
         stored = self.state.idempotency_result(f"{_RECORD_KEY}:{request_id}")
         if stored is not None:
             return self._resolved(stored["record"])
+        intent_key = f"approval.delivery:{request_id}:intent"
+        if self.state.idempotency_result(intent_key) is None:
+            # Prove missing methods/non-callables/signature mismatches locally,
+            # before a permanent claim can contradict the caller's retry_allowed.
+            # Never infer "not sent" from an exception raised INSIDE the method.
+            group_id = group_id_for_run(self.state, gateway_request["run_id"])
+            if group_id is None:
+                sender = self.notify_client.send_markdown
+                args = (sorted(recipients), "")
+            else:
+                sender = self.notify_client.send_group_markdown
+                args = (group_id, "", [_uuap(item) for item in sorted(recipients)])
+            if not callable(sender):
+                raise TypeError("markdown sender is not callable")
+            try:
+                signature = inspect.signature(sender)
+            except (TypeError, ValueError):
+                # Some extension callables expose no signature. Keep the normal
+                # claim-before-call protection rather than guessing dispatch.
+                pass
+            else:
+                signature.bind(*args)
+        # The outer controller normally serializes a run, but this transport is
+        # also called directly. Claim BEFORE the first remote side effect, not
+        # merely before the buttons. A crash/partial markdown send without a final
+        # receipt is unknown and requires reconciliation, never a blind retry.
+        try:
+            self.state.save_idempotency_result(
+                intent_key, {"attempt": uuid.uuid4().hex}
+            )
+        except ValueError:
+            stored = self.state.idempotency_result(f"{_RECORD_KEY}:{request_id}")
+            if stored is not None:
+                return self._resolved(stored["record"])
+            raise ValueError("APPROVAL_DELIVERY_QUERY_REQUIRED") from None
         delivered_content: list[str] = []
 
         progress = None
@@ -194,7 +295,7 @@ class InfoflowApprovalTransport:
             },
             "status": "PENDING",
             "created_at": self.clock().isoformat(),
-            "deadline_at": _deadline(gateway_request["deadline_at"]).isoformat(),
+            "deadline_at": deadline_at,
             "heartbeat_at": None,
             "updated_at": None,
             "reply": None,
@@ -215,6 +316,23 @@ class InfoflowApprovalTransport:
                 "card": card,
             },
         )
+        if card.get("status") != "DELIVERED":
+            warning = (
+                f"## tom-autodev 审批操作提示（不是新审批）\n\n"
+                f"审批 {gateway_request['approval_id']} 的按钮未完整送达或结果未确认。"
+                "\n请先阅读审批详情；可使用其中的 APPROVE / REJECT 回复，或在 IDE 处理。"
+                "\n这不表示审批已通过；不会自动重复发送结果不明的按钮。"
+            )
+            try:
+                delivered_warning = deliver_markdown(
+                    self.notify_client, self.state, gateway_request["run_id"],
+                    sorted(recipients), lambda _: warning,
+                )
+            except Exception as error:
+                delivered_warning = {"status": "UNKNOWN", "reason_code": type(error).__name__}
+            self.state.save_idempotency_result(
+                f"approval.button.warning:{request_id}", delivered_warning
+            )
         return self._resolved(record)
 
     def delivered(self, request_id: str) -> dict[str, Any] | None:
@@ -226,6 +344,7 @@ class InfoflowApprovalTransport:
         return {
             "content": stored.get("content") or "",
             "evidence": evidence if isinstance(evidence, dict) else {},
+            "card": stored.get("card"),
         }
 
     def reconcile(self, gateway_request: dict[str, Any]) -> dict[str, Any] | None:
@@ -347,14 +466,23 @@ def _approval_markdown(
         f"**协作群** {_safe(_evidence(evidence, 'group_name')) or '-'}",
         f"**截止** {_moment(gateway_request['deadline_at'])}",
     ]
-    gate = _evidence(evidence, "gate")
-    gate = gate if isinstance(gate, dict) else {}
+    gate = _review_gate(gateway_request)
     subject = _line(gate.get("subject"))
     effect = _line(gate.get("effect"))
     if subject:
         lines += ["", f"**本次审批** {subject}"]
     if effect:
         lines += [f"**批准后** {effect}"]
+    lines += ["", "**审批重点（请逐项核对）**",
+              "", *(f"- {_line(item)}" for item in gate.get("checklist") or []),
+              "", "**请先查看这些文件 / 证据**", ""]
+    reads = _reading_lines(gate)
+    lines += [f"- {item}" for item in reads] if reads else [
+        "- 未提供本次固定版本材料的位置，请先在 IDE 补齐；需求背景链接不能替代审批产物。"
+    ]
+    if gate.get("material_status") == "MISSING":
+        lines += ["", "**材料缺口：未取得与本次 hash 匹配的产物，请勿批准。**"]
+    lines += ["", f"**决定边界** {_line(gate.get('decision'))}"]
     summary = [_line(item) for item in gate.get("summary") or []]
     summary = [item for item in summary if item]
     if summary:
@@ -365,7 +493,8 @@ def _approval_markdown(
     if progress:
         from progress_snapshot import render as render_progress
 
-        lines += ["", "**整体进度**", render_progress(progress)]
+        approval_progress = {**progress, "next_action": {"owner": "你", "text": f"核对上述材料，处理 {action} 审批"}}
+        lines += ["", "**整体进度（辅助信息）**", render_progress(approval_progress)]
     lines += [
         "",
         "**同意请回复**",

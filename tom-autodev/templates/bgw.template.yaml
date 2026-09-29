@@ -1,0 +1,157 @@
+# BGW project template for tom-autodev.
+#
+# This file ships with the skill and holds every STABLE field of a BGW profile.
+# The per-requirement wizard (scripts/profile_wizard.py) copies it, fills only the
+# VARIABLE slots from your answers, auto-derives the dependent slots, and writes a
+# per-requirement profile to config/projects/bgw/<CARD>.yaml — one file per card, so
+# two requirements developed at the same time never overwrite each other.
+#
+# Variable slots the wizard fills from answers:
+#   - business_repos[].branch / .lock         (from branches; lock last segment = branch)
+#   - test_repo.branch / .lock                (from test_branch)
+#   - knowledge_sources[ku].repo_id/parent_doc_id/revision   (from ku)
+#   - approval_channels.role_members          (from members)
+# Auto-discovered defaults (suggested, override if wrong):
+#   - branches + revisions   = each repo's current git checkout branch and HEAD
+#                              (profile_wizard.discover_branches)
+#   - pipeline_id per module = ChangePipeline id from `ipipe-cli pipeline list --module`
+#                              (profile_wizard.discover_pipeline_ids)
+# Dependent slots the wizard auto-derives (never ask for these):
+#   - knowledge_sources[repository|gitnexus].revision  = the matching repo revision
+#   - pipeline_profile.release_rule {primary_branch}    = primary business branch
+#   - *.lock last segment                               = the branch
+#   - pipeline_profile.pipeline_id                      = primary business module's pipeline
+# Default (carried as-is):
+#   - pipeline_profile.pipelines stages/parameters
+# The environment block below is deliberately UNVERIFIED. It is descriptive
+# template context only; project_registry refuses a READY profile until a
+# real platform verification receipt replaces the provenance fields.
+#
+# review_provider is intentionally absent: review is produced by tom-review as a
+# model phase, so no external review command needs to be associated.
+
+project_id: bgw
+language_skill: /Users/tom/.comate/skills/tom-lang-c-cpp
+project_skill: /Users/tom/.comate/skills/tom-project-bgw
+submission_policy: one_cr_per_repo
+
+business_repos:
+- module: baidu/sysip/x86bgw
+  path: __WORKSPACE_ROOT__/x86bgw
+  branch: __BRANCH__
+  lock: bgw/x86bgw/__BRANCH__
+- module: baidu/sysip/bgwagent
+  path: __WORKSPACE_ROOT__/bgwagent
+  branch: __BRANCH__
+  lock: bgw/bgwagent/__BRANCH__
+
+test_repo:
+  module: baidu/nsiqa/x86bgw
+  path: __WORKSPACE_ROOT__/x86bgw-qa
+  branch: __TEST_BRANCH__
+  lock: bgw/x86bgw-qa/__TEST_BRANCH__
+
+knowledge_sources:
+- provider: ku
+  priority: 0
+  repo_id: __KU_REPO_ID__
+  parent_doc_id: __KU_PARENT_DOC_ID__
+  revision: __KU_REVISION__
+  repository: https://ku.baidu-int.com/
+  search_scope: BGW requirement analysis and development directory
+- provider: repository
+  priority: 1
+  repository: baidu/sysip/x86bgw
+  revision: __REVISION__
+  search_scope: x86bgw source at requirement branch
+- provider: repository
+  priority: 1
+  repository: baidu/sysip/bgwagent
+  revision: __REVISION__
+  search_scope: bgwagent source at requirement branch
+- provider: gitnexus
+  priority: 2
+  repository: x86bgw
+  revision: __REVISION__
+  search_scope: x86bgw graph impact analysis
+- provider: gitnexus
+  priority: 2
+  repository: bgwagent
+  revision: __REVISION__
+  search_scope: bgwagent graph impact analysis
+
+pipeline_profile:
+  pipeline_id: __PIPELINE_ID__
+  allowed_parameters:
+  - AGILE_COMPILE_BRANCH
+  stage_classes:
+  - compile
+  - scan
+  - regression
+  - system-regression
+  - submit-test
+  - exit-audit
+  - test-exit
+  - release
+  release_rule: "x86bgw 与 bgwagent 的 ChangePipeline 必须都通过 compile/scan/unit/regression 各阶段；baidu/nsiqa/x86bgw 的 ChangePipeline 只打包产品用例，不作为发布门禁；release 阶段为 MANUAL，需如流审批；发布版本跟随目标分支 {primary_branch}"
+  pipelines:
+  - module: baidu/sysip/x86bgw
+    pipeline_id: __PIPELINE_ID__
+    pipeline_name: ChangePipeline
+    required_for_release: true
+    allowed_parameters:
+    - AGILE_COMPILE_BRANCH
+    stage_classes:
+    - compile
+    - scan
+    - unit
+    - regression
+    - system-regression
+  - module: baidu/sysip/bgwagent
+    pipeline_id: __PIPELINE_ID__
+    pipeline_name: ChangePipeline
+    required_for_release: true
+    allowed_parameters:
+    - AGILE_COMPILE_BRANCH
+    stage_classes:
+    - compile
+    - unit
+    - regression
+  - module: baidu/nsiqa/x86bgw
+    pipeline_id: __PIPELINE_ID__
+    pipeline_name: ChangePipeline
+    required_for_release: false
+    allowed_parameters: []
+    stage_classes:
+    - compile
+
+environment_profile:
+  runner: ipipe-agile-compile-env:newx86bgw
+  os_arch: linux/x86_64
+  image_digest: pending
+  toolchain_digest: pending
+  hardware_or_simulator: iPipe shared compile/regression runner
+  data: fixtures owned by baidu/nsiqa/x86bgw
+  services: iPipe build/regression/release services
+  capacity: default iPipe concurrency
+  provenance:
+    status: UNVERIFIED
+    runner_identity: unverified
+    image_toolchain_identity: unverified
+    verified_at: unverified
+    verifier: unverified
+    evidence_ref: unverified
+
+approval_channels:
+  comate:
+    channel: comate-cli
+  infoflow:
+    channel: single:zhaotao02
+  group_topic: "支持基于url负载均衡"
+  role_members:
+    development:
+    - __DEVELOPMENT__
+    test:
+    - __TEST__
+    project:
+    - __PROJECT__

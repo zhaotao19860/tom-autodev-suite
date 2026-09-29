@@ -777,8 +777,9 @@ def _progress_for(orchestrator: Any, run_id: str) -> dict[str, Any] | None:
 
 
 def _ide_turn_markdown(brief: dict[str, Any], mention: Any = None) -> str:
-    """Say what landed, what is next, and that the next move happens in the IDE."""
-    lines = [f"## tom-autodev 阶段已落账，等你在 IDE 继续", ""]
+    """A parked session is not evidence that its current phase completed."""
+    lines = ["## tom-autodev 进度通知（非审批），请在 IDE 继续", "",
+             "> 本消息不请求批准，也不会授权任何动作；停驻不代表当前阶段已完成。"]
     if mention:
         lines += [f"**待操作** {mention_line(list(mention))}", ""]
     lines += [
@@ -790,7 +791,7 @@ def _ide_turn_markdown(brief: dict[str, Any], mention: Any = None) -> str:
         from progress_snapshot import render as render_progress
         lines += ["", "**整体进度**", render_progress(progress)]
     if brief.get("gate"):
-        lines.append(f"**之后要批** {brief['gate']}（卡片会在阶段执行完之后发出）")
+        lines.append(f"**阶段闸门** {brief['gate']}（是否已批准以账本为准；本消息不是审批卡）")
     lines += [
         "",
         "**请在 Comate 里回复**",

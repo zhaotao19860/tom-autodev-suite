@@ -2303,7 +2303,32 @@ def _pinned_profile_error(events: list[dict[str, Any]], repin: Any = None) -> st
         actual = hashlib.sha256(Path(profile_path).read_bytes()).hexdigest()
     except OSError:
         return "PROJECT_NOT_READY"
-    return None if actual == expected else "PROFILE_CONFLICT"
+    if actual != expected:
+        return "PROFILE_CONFLICT"
+    payload_project = payload.get("project")
+    requirement_id = payload.get("requirement_id")
+    profile_file = Path(profile_path)
+    if (
+        isinstance(payload_project, str)
+        and isinstance(requirement_id, str)
+        and profile_file.parent.name == payload_project
+        and profile_file.name != f"{payload_project}.yaml"
+    ):
+        from profile_wizard import confirmation_hash, confirmed_inputs
+
+        loaded = load_profile(profile_path, check_paths=False)
+        confirmation = (
+            loaded.get("profile", {}).get("profile_confirmation")
+            if loaded.get("ready")
+            else None
+        )
+        if not isinstance(confirmation, dict):
+            return "PROFILE_CONFIRMATION_REQUIRED"
+        if confirmation.get("confirmed_inputs_hash") != confirmation_hash(
+            confirmed_inputs(loaded["profile"])
+        ):
+            return "PROFILE_CONFIRMATION_MISMATCH"
+    return None
 
 
 def _requirement_id(events: list[dict[str, Any]]) -> str:

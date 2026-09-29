@@ -15,6 +15,19 @@ from run_summary import redact_structured
 
 
 COMPONENTS = ("icafe", "ku", "icode", "review", "infoflow", "ipipe")
+
+
+def _active_components(profile: dict[str, Any]) -> tuple[str, ...]:
+    """Components to preflight for this profile.
+
+    `review` is only probed when the profile still declares a `review_provider`.
+    Review is produced by tom-review as a model phase, so a profile that omits the
+    provider has no external review command to reach and must not fail preflight for
+    a dependency it no longer has.
+    """
+    if isinstance(profile, dict) and profile.get("review_provider"):
+        return COMPONENTS
+    return tuple(name for name in COMPONENTS if name != "review")
 _PREFLIGHT_REASON_CODES = frozenset({
     "OK",
     "PREFLIGHT_QUERY_FAILED",
@@ -51,7 +64,8 @@ def run_preflight(
     profile_hash: str,
     probes: dict[str, Any],
 ) -> dict[str, Any]:
-    missing = [f"preflight.{name}" for name in COMPONENTS if not callable(getattr(probes.get(name), "query", None))]
+    active = _active_components(profile)
+    missing = [f"preflight.{name}" for name in active if not callable(getattr(probes.get(name), "query", None))]
     if missing:
         return {
             "ready": False,
@@ -64,7 +78,7 @@ def run_preflight(
         }
     contexts = _contexts(profile)
     results: dict[str, dict[str, Any]] = {}
-    for name in COMPONENTS:
+    for name in active:
         try:
             raw = probes[name].query(contexts[name])
         except Exception as error:
@@ -204,17 +218,19 @@ def _contexts(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
         for repo in [*profile["business_repos"], profile["test_repo"]]
     ]
     primary_module = profile["business_repos"][0]["module"]
-    return {
+    contexts = {
         "icafe": {"project_id": profile["project_id"]},
         "ku": {"repo_id": ku.get("repo_id"), "parent_doc_id": ku.get("parent_doc_id")},
         "icode": {"repositories": repositories},
-        "review": dict(profile["review_provider"]),
         "infoflow": {"channel": profile["approval_channels"]["infoflow"]["channel"]},
         "ipipe": {
             "pipeline_id": profile["pipeline_profile"]["pipeline_id"],
             "module": primary_module,
         },
     }
+    if profile.get("review_provider"):
+        contexts["review"] = dict(profile["review_provider"])
+    return contexts
 
 
 def _component_result(value: Any) -> dict[str, Any]:

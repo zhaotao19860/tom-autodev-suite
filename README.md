@@ -32,6 +32,16 @@ python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
 
 `submit-draft` 只接收当前 schema 要求的 `DraftContent`，不接收 `ArtifactEnvelope`。需要审批时，CLI 会自动发起绑定当前草案和 `approval_input_hash` 的审批；成功返回 `PARKED / APPROVAL_WAIT`，不会自动批准。
 
+### 审批消息与进度通知
+
+- 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G10 和 `PROFILE_REPIN` 都有各自的检查重点。
+- 自动草案审批会提供本次材料的本地 JSON 快照路径；这是阅读副本，不是已验收产物。路径只能在运行机器打开，已有 KU 文档才显示网页链接。缺少与 hash 匹配的材料会明确提示“请勿批准”。
+- 如流正文旁有“同意 / 驳回”按钮。有协作群时发群；G0 尚未建群时发给审批成员的机器人单聊。按钮未完整送达会单独提示，可按审批详情中的 `APPROVE / REJECT` 方式回复。
+- “进度通知（非审批）”只报告停驻位置，不请求批准，也不代表阶段完成。没有待审批账本记录时，不会让你处理一个尚未创建的审批。
+- 点击只表示收到选择。最终是否有效以权限、有效期、hash 和送达回执校验后的审批回执为准；审批本身不会推进业务阶段。
+
+具体规则与门禁材料清单见 [Approval Policy](tom-autodev/references/approval-policy.md)，G0/G5/G9 与非审批通知的对照见 [消息示例](docs/APPROVAL_UX_EXAMPLES.md)。
+
 ### 一张卡的完整路径
 
 ```text
@@ -139,9 +149,33 @@ python3 tom-autodev/scripts/install_links.py \
 - 业务仓、iCode 模块、目标分支、独立产品测试仓。
 - 测试接口、夹具、iPipe 模板、允许参数和 runner 要求。
 - 项目 skill、语言 skill、源码和可核对版本的知识文档。
-- Review 方式、KU 位置、Comate/如流审批人、发布规则。
+- KU 位置、Comate/如流审批人、发布规则。Review 由 `tom-review` 以模型阶段产出，`review_provider` 已改为可选，无需再关联外部审查命令。
 
-profile 保存在 `~/.tom-autodev/config/projects/<project>.yaml`。注册只保存和验证配置，不启动需求、不生成代码、不提交 iCode、不触发 iPipe。字段说明见 [项目注册说明](tom-autodev/references/setup.md) 和 [profile schema](tom-autodev/schemas/project-profile.schema.json)。
+项目的稳定信息以模板形式随仓分发：`tom-autodev/templates/<project>.template.yaml`。profile 按需求（卡片）隔离，每个需求各存一份 `~/.tom-autodev/config/projects/<project>/<CARD>.yaml`，并发需求不会互相覆盖。用向导生成需求级 profile，只填变化的部分（项目 / 知识库父目录 / 仓库与分支 / 修订 / 成员），其余从模板继承或自动推导：
+
+```bash
+python3 tom-autodev/scripts/profile_wizard.py --project bgw --card BGW-1995 --workspace-root /path/to/bgw-ref
+```
+
+命令会扫描 `--workspace-root`（默认当前工作目录）下的 Git checkout，展示可选仓目录、
+当前 checkout 的分支/HEAD，以及从 iPipe 查询到的精确
+`ChangePipeline` ID 候选值。用户确认或修改后，再在 `answers.json` 中写入
+`repository_paths`、`confirmed_inputs` 和 `confirmed_by`，最后执行：
+
+```bash
+python3 tom-autodev/scripts/profile_wizard.py --project bgw --card BGW-1995 --answers answers.json
+```
+
+需求启动要求这个需求级 profile 带有匹配的确认 hash，不再静默回退到旧的项目级
+profile。注册只保存和验证配置，不启动需求、不生成代码、不提交 iCode、不触发
+iPipe。字段说明见 [项目注册说明](tom-autodev/references/setup.md) 和
+[profile schema](tom-autodev/schemas/project-profile.schema.json)。
+
+BGW 的模板环境只描述预期 runner、镜像/工具链和服务，不代表平台已经验证。只有
+`environment_profile.provenance.status=VERIFIED`，并且带有 runner/image-toolchain
+身份、验证时间、验证人和证据引用，profile 才能进入 `READY`；`UNVERIFIED`、
+`assumed` 或 placeholder 环境会在写入前被拒绝。iPipe 查询使用有超时的只读适配器，
+查询失败、超时、非 JSON 或同名多候选都会保留为未解决项，不能自动选一个继续。
 
 ### 3. 做只读预检
 

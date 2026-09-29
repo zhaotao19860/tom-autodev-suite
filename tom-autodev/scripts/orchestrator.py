@@ -29,7 +29,13 @@ from evidence_gate import EvidenceGate
 from evidence_policy import requirement_for
 from knowledge_sync import KnowledgeSync, project_ku_target
 from phase_protocol import PhaseProtocol
-from project_registry import load_profile, profile_path
+from project_registry import (
+    acceptable_profile_paths,
+    load_profile,
+    profile_path,
+    requirement_profile_path,
+    resolve_active_profile_path,
+)
 from requirement_snapshot import validation_error as snapshot_validation_error
 from recovery import Recovery
 from state_store import StateStore
@@ -61,6 +67,7 @@ def _pinned_profile_hash(orchestrator: Any, run_id: str, events: list[dict[str, 
 class Orchestrator:
     def __init__(self, config_root: Path | str | None = None):
         self.config_root = Path(config_root or (Path.home() / ".tom-autodev")).expanduser()
+        self.require_requirement_profiles = False
         self.state = StateStore(self.config_root / "state.sqlite")
         self.recovery = Recovery(self.config_root / "state.sqlite")
         self.approvals = ApprovalLedger(self.config_root / "approvals.sqlite")
@@ -78,12 +85,18 @@ class Orchestrator:
         *,
         requirement_snapshot: dict[str, Any] | None = None,
         change_class: str | None = None,
+        require_requirement_profile: bool | None = None,
     ) -> dict[str, Any]:
-        configured_profile_path = profile_path(project, self.config_root)
+        if require_requirement_profile is None:
+            require_requirement_profile = self.require_requirement_profiles
+        configured_profile_path = (
+            requirement_profile_path(project, requirement_id, self.config_root)
+            if require_requirement_profile
+            else resolve_active_profile_path(project, requirement_id, self.config_root)
+        )
         profile_result = load_profile(configured_profile_path)
         if not profile_result.get("ready"):
             return profile_result
-
         profile_hash = hashlib.sha256(configured_profile_path.read_bytes()).hexdigest()
         if requirement_snapshot is None:
             return {
@@ -100,6 +113,24 @@ class Orchestrator:
                 "project": project,
                 "requirement_id": requirement_id,
             }
+        if require_requirement_profile:
+            from profile_wizard import confirmation_hash, confirmed_inputs
+
+            profile = profile_result["profile"]
+            confirmation = profile.get("profile_confirmation")
+            if not isinstance(confirmation, dict):
+                return {
+                    "ready": False,
+                    "reason_code": "PROFILE_CONFIRMATION_REQUIRED",
+                    "profile_path": str(configured_profile_path),
+                }
+            expected_hash = confirmation_hash(confirmed_inputs(profile))
+            if confirmation.get("confirmed_inputs_hash") != expected_hash:
+                return {
+                    "ready": False,
+                    "reason_code": "PROFILE_CONFIRMATION_MISMATCH",
+                    "profile_path": str(configured_profile_path),
+                }
         snapshot_identity = requirement_snapshot["content_hash"]
         idempotency_key = f"start:{project}:{requirement_id}:{profile_hash}:{snapshot_identity}"
         existing = self.state.idempotency_result(idempotency_key)
@@ -785,7 +816,9 @@ class Orchestrator:
             or not card_id
         ):
             return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
-        if recorded_path != str(profile_path(recorded_project, self.config_root)):
+        if recorded_path not in acceptable_profile_paths(
+            recorded_project, card_id, self.config_root
+        ):
             return {"ok": False, "reason_code": "PROJECT_PROFILE_PATH_MISMATCH", "run_id": run_id}
         try:
             current_hash = hashlib.sha256(Path(recorded_path).read_bytes()).hexdigest()
@@ -1677,10 +1710,42 @@ class Orchestrator:
         recorded_path = intake.get("profile_path")
         recorded_hash = _pinned_profile_hash(self, run_id, events)
         recorded_project = intake.get("project")
+        card_id = intake.get("requirement_id")
         if not all(isinstance(value, str) and value for value in (recorded_path, recorded_hash, recorded_project)):
             return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
-        if recorded_path != str(profile_path(recorded_project, self.config_root)):
+        if recorded_path not in acceptable_profile_paths(
+            recorded_project, card_id, self.config_root
+        ):
             return {"ok": False, "reason_code": "PROJECT_PROFILE_PATH_MISMATCH", "run_id": run_id}
+        try:
+            is_requirement_profile = recorded_path == str(
+                requirement_profile_path(recorded_project, card_id, self.config_root)
+            )
+        except ValueError:
+            is_requirement_profile = False
+        if is_requirement_profile:
+            from profile_wizard import confirmation_hash, confirmed_inputs
+
+            loaded_for_confirmation = load_profile(recorded_path, check_paths=False)
+            confirmation = (
+                loaded_for_confirmation.get("profile", {}).get("profile_confirmation")
+                if loaded_for_confirmation.get("ready")
+                else None
+            )
+            if not isinstance(confirmation, dict):
+                return {
+                    "ok": False,
+                    "reason_code": "PROFILE_CONFIRMATION_REQUIRED",
+                    "run_id": run_id,
+                }
+            if confirmation.get("confirmed_inputs_hash") != confirmation_hash(
+                confirmed_inputs(loaded_for_confirmation["profile"])
+            ):
+                return {
+                    "ok": False,
+                    "reason_code": "PROFILE_CONFIRMATION_MISMATCH",
+                    "run_id": run_id,
+                }
         try:
             current_hash = hashlib.sha256(Path(recorded_path).read_bytes()).hexdigest()
         except OSError:
@@ -2929,6 +2994,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     orchestrator = Orchestrator(args.config_root)
+    # The high-level process command starts new requirements and must use a
+    # confirmed per-card profile. The lower-level `start` command retains its
+    # legacy compatibility during migration.
+    orchestrator.require_requirement_profiles = args.command == "process"
     if args.command == "start":
         from clients.icafe_client import CafeClient
 
@@ -2942,7 +3011,9 @@ def main(argv: list[str] | None = None) -> int:
             }
         else:
             result = orchestrator.start(
-                args.requirement_id, args.project, requirement_snapshot=snapshot
+                args.requirement_id,
+                args.project,
+                requirement_snapshot=snapshot,
             )
     elif args.command == "process":
         from agent_bridge import AgentBridge, resolve_status_target
@@ -2984,7 +3055,9 @@ def main(argv: list[str] | None = None) -> int:
                 }
             else:
                 started = orchestrator.start(
-                    args.requirement_id, args.project, requirement_snapshot=snapshot
+                    args.requirement_id,
+                    args.project,
+                    requirement_snapshot=snapshot,
                 )
                 if not isinstance(started, dict) or started.get("ok") is False or not started.get("run_id"):
                     result = started
@@ -3430,6 +3503,12 @@ def _approval_context(
     The member policy is the union of the profile's role members: a gate that only
     reached one role could be answered without the others ever seeing it.
     """
+    cache_key = (
+        f"approval.context:{run_id}:{action or '-'}:{input_hash or '-'}"
+    )
+    cached = orchestrator.state.idempotency_result(cache_key)
+    if isinstance(cached, dict):
+        return cached
     loaded = orchestrator._runtime_profile(run_id)
     if not loaded.get("ok"):
         return {"error": loaded}
@@ -3445,10 +3524,140 @@ def _approval_context(
     binding = payload.get("collaboration_binding")
     binding = binding if isinstance(binding, dict) else {}
     card_id = binding.get("card_id", payload.get("requirement_id", ""))
-    gate = _gate_evidence(action, payload, binding, content_path, input_hash)
+
+    # Preserve an already-delivered legacy CLI evidence envelope only when the
+    # durable delivery claim proves it was built from this exact evidence.  The
+    # claim stores a digest rather than the old payload, so reconstructing the
+    # canonical legacy shape is the safe compatibility check; a nearby approval
+    # or a changed digest must use the current material path instead.
+    for approval in orchestrator.approvals.for_run(run_id):
+        if approval.get("action") != action or approval.get("input_hash") != input_hash:
+            continue
+        intent = orchestrator.state.intent_by_idempotency_key(
+            f"approval.delivery:{approval.get('approval_id')}:comate"
+        )
+        claim = intent.get("payload") if isinstance(intent, dict) else {}
+        digest = claim.get("canonical_payload_sha256") if isinstance(claim, dict) else None
+        from approval_summary import _GATES, _hash
+        gate_name = gate_of(str(action))
+        subject, effect = _GATES.get(gate_name, ("", ""))
+        legacy_evidence = {
+            "project": payload.get("project", ""),
+            "card_id": card_id,
+            "card_title": binding.get("card_title", ""),
+            "card_url": _icafe_url(card_id),
+            "group_name": binding.get("group_name", ""),
+            "documents": _requirement_documents(loaded["profile"]),
+            "gate": {
+                "subject": subject,
+                "effect": effect,
+                "summary": [
+                    f"群名 {binding.get('group_name', '')}",
+                    f"成员 {'、'.join(binding.get('member_snapshot') or [])}",
+                    *(
+                        f"{role} {'、'.join(people)}"
+                        for role, people in sorted((binding.get("roles") or {}).items())
+                    ),
+                ],
+                "content_hash": payload.get("requirement_snapshot", {}).get("content_hash"),
+            },
+        }
+        legacy_approval = {
+            key: approval[key]
+            for key in (
+                "approval_id", "run_id", "action", "input_hash",
+                "deadline_at", "member_policy",
+            )
+            if key in approval
+        }
+        if digest == _hash({"channel": "comate", "approval": {
+            **legacy_approval, "evidence": legacy_evidence,
+        }}):
+            return {
+                "member_policy": approval.get("member_policy") or {},
+                "evidence": legacy_evidence,
+            }
+
+    # Explicit content is a producer-supplied envelope. Rebuild its identity
+    # from the current action instead of trusting fields the file reports about
+    # itself; a foreign run/task or altered content must fail closed.
+    if content_path:
+        try:
+            from run_brief import _read_only_next
+            from worker_driver import build_envelope
+            document = json.loads(Path(content_path).read_text(encoding="utf-8"))
+            content = document.get("content") if isinstance(document, dict) else None
+            content = content if isinstance(content, dict) else document
+            current = _read_only_next(orchestrator, run_id)
+            expected = build_envelope(current, content)
+            if (
+                not isinstance(document, dict)
+                or document.get("run_id") != run_id
+                or document.get("action_id") != current.get("action_id")
+                or document.get("source_event_id") != current.get("source_event_id")
+                or document.get("task_id") != current.get("task_id")
+                or document.get("content_hash") != expected.get("content_hash")
+                or document.get("approval_input_hash") != expected.get("approval_input_hash")
+                or expected.get("approval_input_hash") != input_hash
+            ):
+                return {"error": {"ok": False, "reason_code": "APPROVAL_CONTENT_MISMATCH", "run_id": run_id}}
+        except (OSError, ValueError, TypeError, KeyError):
+            return {"error": {"ok": False, "reason_code": "APPROVAL_CONTENT_INVALID", "run_id": run_id}}
+
+    from approval_summary import pinned_context
+    if content_path:
+        gate = _gate_evidence(action, payload, binding, content_path, input_hash)
+    else:
+        gate = {"gate": pinned_context(orchestrator, run_id, str(action or ""), input_hash or "")}
+        if gate["gate"].get("material_status") == "MISSING":
+            if str(action or "") in {"G0", "G4", "G5", "G9", "G10"}:
+                reason = (
+                    "APPROVAL_CONTENT_MISMATCH"
+                    if input_hash != payload.get("g0_input_hash") and str(action or "") == "G0"
+                    else "APPROVAL_MATERIAL_MISSING"
+                )
+                return {"error": {"ok": False, "reason_code": reason, "run_id": run_id}}
+            # Keep the old summary path for gates whose controller action is
+            # already the exact binding but has no specialized archive reader.
+            fallback = _gate_evidence(action, payload, binding, content_path, input_hash)
+            gate = fallback if "error" in fallback or fallback.get("gate", {}).get("summary") else gate
     if "error" in gate:
         return {"error": {"ok": False, "reason_code": gate["error"], "run_id": run_id}}
-    return {
+    gate_payload = gate["gate"]
+    if content_path:
+        gate_payload = {
+            **gate_payload,
+            "material_status": "PINNED",
+        }
+    if gate_payload.get("material_status") == "MISSING":
+        return {
+            "error": {
+                "ok": False,
+                "reason_code": "APPROVAL_MATERIAL_MISSING",
+                "run_id": run_id,
+            }
+        }
+    if gate_payload.get("material_status") == "PINNED":
+        packet_dir = orchestrator.config_root / "approval-materials"
+        packet_dir.mkdir(parents=True, exist_ok=True)
+        packet_path = packet_dir / f"{run_id}-{action}-{(input_hash or '')[:16]}.json"
+        material = gate_payload.get("_review_content") or {}
+        packet = {
+            "run_id": run_id,
+            "gate": action,
+            "input_hash": input_hash,
+            "material": material,
+        }
+        encoded = json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)
+        if not packet_path.exists() or packet_path.read_text(encoding="utf-8") != encoded:
+            packet_path.write_text(encoded, encoding="utf-8")
+        refs = [{"label": "本次审批材料包", "ref": str(packet_path)}]
+        refs.extend(ref for ref in gate_payload.get("references", []) if ref.get("ref") != str(packet_path))
+        gate_payload = {
+            **gate_payload,
+            "references": refs,
+        }
+    result = {
         "member_policy": {"comate": members, "infoflow": members},
         "evidence": {
             "project": payload.get("project", ""),
@@ -3457,9 +3666,11 @@ def _approval_context(
             "card_url": _icafe_url(card_id),
             "group_name": binding.get("group_name", ""),
             "documents": _requirement_documents(loaded["profile"]),
-            "gate": gate["gate"],
+            "gate": gate_payload,
         },
     }
+    orchestrator.state.save_idempotency_result(cache_key, result)
+    return result
 
 
 def _gate_evidence(
@@ -3567,6 +3778,15 @@ def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any])
         return result
     gate = result.get("gate")
     input_hash = result.get("approval_input_hash")
+    # WorkerDriver returns its normalized approval action under `decision.action`
+    # for parked approvals. Older controller paths returned gate/hash at the top
+    # level. Normalize both shapes here; otherwise G0/G1/... is computed but no
+    # ApprovalLedger row or Infoflow/Comate delivery is created.
+    decision = result.get("decision")
+    action = decision.get("action") if isinstance(decision, dict) else None
+    if isinstance(action, dict):
+        gate = gate or action.get("required_human_gate")
+        input_hash = input_hash or action.get("input_hash")
     if not isinstance(gate, str) or not isinstance(input_hash, str):
         return result
     approval = _request_approval(orchestrator, result.get("run_id"), gate, input_hash)

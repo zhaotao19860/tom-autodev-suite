@@ -1,6 +1,7 @@
 # BGW Runtime Topology and iPipe Parameters
 
-This file is project knowledge for `tom-autodev`. It records a BGW test topology,
+This file is project knowledge for `tom-autodev`. It records the BGW test topologies
+for its four iPipe pipelines (100G/25G × bgw/bgwagent),
 where to read logs, how to inspect versions and counters, and which iPipe stage
 parameters belong to which compiled product. It does not execute iPipe, iCode, or
 remote writes. Match the current profile and runner evidence before using recorded
@@ -9,29 +10,33 @@ The parent controller fills parameters, requests G8, and reruns stages.
 
 ## Test Topology
 
-The 25G product-case topology used by `P0新case回归` is:
+BGW/bgwagent has four stable iPipe pipelines: 100G bgw, 100G bgwagent, 25G bgw, 25G
+bgwagent. In every one the **client and RS are the same host** — `sep6`
+(`bjkjy-sys-ip-base-sep6.bjkjy`, client `xgbe0: 192.168.37.8`, RS `xgbe1: 192.168.38.8`)
+— and traffic reaches BGW over the VIP/vs. Only the **BGW server host + binary path** and
+the **qa branch** change per pipeline and test type. These addresses are reference
+knowledge, not a target binding: match the current profile and runner evidence before
+connecting, and update this file if the real config differs.
 
-```text
-client
-bjkjy-sys-ip-base-sep6.bjkjy
-xgbe0: 192.168.37.8
-        │
-        │  VIP / vs traffic
-        ▼
-bgw
-bjkjy-sys-ip-base-sep5.bjkjy
-eth1: 10.130.21.19
-control plane: 10.130.21.19:6666
-binary: /home/work/x86bgw_for_agile/output/bgw
-        │
-        │
-rs
-bjkjy-sys-ip-base-sep6.bjkjy
-xgbe1: 192.168.38.8
-```
+| Pipeline | BGW server host | BGW binary |
+|---|---|---|
+| 25G bgw | `bjkjy-sys-ip-base-sep5.bjkjy` (control plane `10.130.21.19:6666`) | `/home/work/x86bgw_for_agile/output/bgw` |
+| 25G bgwagent | `bjkjy-sys-ip-base-sep7.bjkjy` | `/home/work/x86bgw_for_cov/output/bgw` |
+| 100G bgw | `bjkjy-sys-100g-x86bgw-dev01.bjkjy` | `/home/liuman/x86bgw_for_agile/output/bgw` |
+| 100G bgwagent | `bjkjy-sys-100g-x86bgw-dev01.bjkjy` | `/home/liuman/x86bgw_for_agile/output/bgw` |
 
-`sep6` is both client and RS. Cases talk to BGW through `bgw_auto/tool/bgwagent -b 10.130.21.19`.
-Do not infer this topology from a directory name or from a Mac checkout.
+Test type sets the qa branch on both client and RS (the client always also carries
+`bgwagent`):
+
+- `P0级自动化回归测试` → qa **master** branch.
+- `P0新case回归测试` → qa **新用例 (new-case)** branch.
+
+Only the bgw pipelines document a `P0新case回归测试` variant; the bgwagent pipelines run the
+master-branch `P0级自动化回归测试`.
+
+For the 25G bgw pipeline, cases talk to BGW through `bgw_auto/tool/bgwagent -b 10.130.21.19`;
+other pipelines use their own server control-plane address from the profile. Do not infer
+any of this from a directory name or from a Mac checkout.
 
 ## Who Replaces What
 

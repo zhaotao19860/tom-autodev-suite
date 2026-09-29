@@ -21,7 +21,7 @@ This is a Comate-only entrypoint. There is no alternate host or entrypoint. The 
 
 ## Project Registration (Setup)
 
-Register a new project or language once before this skill can process its requirements. Setup is a one-time, human-supervised operation that produces a validated profile at `~/.tom-autodev/config/projects/<project>.yaml`; it never starts a run, generates code, submits iCode, or triggers iPipe. Only a `READY` profile allows `start`. See [`references/setup.md`](references/setup.md).
+Register a new project or language once before this skill can process its requirements. Setup is a one-time, human-supervised operation that produces a validated profile; it never starts a run, generates code, submits iCode, or triggers iPipe. Stable per-project facts ship as a template at `tom-autodev/templates/<project>.template.yaml`; each requirement derives its own profile at `~/.tom-autodev/config/projects/<project>/<CARD>.yaml` (one file per card, so concurrent requirements never clash) via `scripts/profile_wizard.py`, which asks only the changed parts (project, KB parent, repos/branches, revisions, members) and derives the rest. `review_provider` is optional — review is produced by `tom-review`, not an external command. Only a `READY` profile allows `start`. See [`references/setup.md`](references/setup.md).
 
 ## Start and Continue
 

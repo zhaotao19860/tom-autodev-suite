@@ -238,10 +238,13 @@ class TransportReplyIntegrationTests(unittest.TestCase):
     def test_the_decision_survives_a_journal_that_no_longer_has_it(self):
         state, notify, transport = self._transport([_message("APPROVE approval-1")])
         request_id = transport.request(_envelope())["request_id"]
+        # A markdown-only client gets the detail and one button-degradation notice.
+        delivered = list(notify.sends)
+        self.assertEqual(len(delivered), 2)
         transport.wait(request_id, 5)
         transport.reply_consumer = InfoflowReplyConsumer(FakeJournal([]), clock=lambda: _NOW)
         self.assertEqual(transport.wait(request_id, 5)["status"], "APPROVE")
-        self.assertEqual(len(notify.sends), 1)
+        self.assertEqual(notify.sends, delivered)
 
     def test_a_reply_is_never_applied_without_a_consumer(self):
         _, _, transport = self._transport([_message("APPROVE approval-1")])

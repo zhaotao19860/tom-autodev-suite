@@ -4,6 +4,34 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-29 · 套件维护：审批材料闭环与环境 provenance
+
+- 修复 Infoflow 审批卡按 `target_type:target_id` 隔离 card identity；点击只显示待权限/有效期校验并保留按钮，直到账本回执确认终态；重启恢复不重复累积点击状态。
+- 将 `pinned_context()` 接入实际 `_approval_context()`，G0/G4/G5/G9/G10 按当前 run、task、revision 和 input hash 读取精确材料；首次审批归档材料包，重试复用同一份内容，显式 envelope 重新计算绑定。
+- BGW 模板环境改为显式 `UNVERIFIED` provenance；缺少真实 runner/image-toolchain 身份、验证时间、验证人和证据引用时拒绝写成 `READY` profile。iPipe pipeline discovery 增加注入式 transport、超时和响应 schema 校验。
+- 当前定向控制面验证：gateway 6 项、approval materials 13 项、workspace materials 6 项、delivery 44 项、retry 20 项、progress 12 项、profile wizard 21 项、registry 20 项、schema 20 项、runtime guard 24 项通过；未据此宣称完整套件、模型资格或真实平台资格。
+
+## 2026-09-29 · 审批可读材料、单聊按钮与通知区分
+
+- G0–G10 / `PROFILE_REPIN` 增加对象、核对重点、应读材料与授权边界；从匹配审批 hash 的草案/固定产物提取文件和版本。自动草案及 G0 请求保存本地只读审批材料副本，不冒充已通过的阶段产物，不编造网页链接。
+- 修复 worker `decision.action` 中的嵌套 G0/hash 未被投递入口读取的问题，避免仅返回 `APPROVAL_WAIT` 却不创建审批请求。
+- 初始 G0 无协作群时也向成员单聊发送“同意 / 驳回”；按钮按接收目标分别记录幂等结果，未知发送结果不盲重发，降级时给出明确提示与文字回复方式。
+- 按钮点击先显示“待权限和有效期校验”，不在授权前冒称处理成功；审批成员、有效期、输入 hash 和首次有效回应规则保持不变。
+- IDE 停驻通知明确标为“进度通知（非审批）”，整体进度的下一步来自实际账本与当前动作，不再仅凭 `required_human_gate` 就要求用户批准。
+- 定向复核补齐：首次审批材料持久化后重试复用，旧 CLI 展示只在完整送达指纹一致时兼容；显式 envelope 按当前 run/action/task/版本重算审批 hash，不信任文件自报绑定。
+- 验证范围为本地控制面与网关模拟回归；不代表真实如流点击资格，也未发送 BGW-1995 审批或推进该需求。
+- 当时的历史记录曾写入全量 1100 项与审批交互 233 项通过；本次维护以当前磁盘版本重新运行的定向结果为准，不将该历史数字作为现行完整回归结论。网关 Node 语法和 `git diff --check` 仍需单独验证。
+
+## 2026-09-28 · 需求级 profile、模板向导与 Review 内联
+
+- 项目 profile 改为按需求（卡片）隔离：`~/.tom-autodev/config/projects/<project>/<CARD>.yaml`，每个需求各存一份，并发开发的两个需求不再互相覆盖。新增 `requirement_profile_path` / `resolve_active_profile_path` / `acceptable_profile_paths`；`start` 钉住需求级 profile，运行期两处守卫（`knowledge_sync`、`_runtime_profile`）接受需求级或旧版单项目路径，其余仍报 `PROJECT_PROFILE_PATH_MISMATCH`；卡片 id 做路径穿越校验。旧的单项目 profile 保留兼容读取。
+- `review_provider` 改为 schema 可选：Review 由 `tom-review` 以模型阶段产出，preflight 在缺省时跳过 review 组件，不再强依赖外部 `code-review-qa` 命令；仍支持显式配置 `source-only` 命令做兼容。
+- 新增项目模板 `tom-autodev/templates/bgw.template.yaml` 与向导 `scripts/profile_wizard.py`：每个新需求只询问变化项（项目 / 知识库父目录 / 仓库与分支 / 修订 / 成员），其余从模板继承。自动推导此前易漏而变陈旧的字段——`repository`/`gitnexus` 知识源修订跟随各仓修订、`lock` 末段跟随分支、`release_rule` 的 `{primary_branch}` 跟随主业务分支；填充前若仍有 `__PLACEHOLDER__` 拒绝写入，重写同一卡片按当前 hash 守卫。
+- 文档同步：`SKILL.md`、`references/setup.md`、`references/project-registry.md` 更新为需求级 profile、模板向导与 Review 内联说明。
+- 验证：全量控制面回归 `1059` 项通过（新增 14 项 wizard 用例），无回归。
+- 后续收紧需求启动：wizard 先展示本地 checkout 分支/HEAD 与 iPipe `ChangePipeline` 候选 ID，只有 `confirmed_inputs` 与最终 profile 完全匹配并记录 `confirmed_by` 后才允许写入；CLI 新需求启动不再静默回退到旧的项目级 profile。发现值只是候选值，不再等同于用户确认。
+- 修正 checkout 来源：wizard 默认扫描当前工作目录（可用 `--workspace-root` 明确指定），模板使用 `__WORKSPACE_ROOT__` 展开仓库路径；不再读取模板中写死的 `/Users/.../bgw` 目录。候选列表同时展示当前目录下所有 Git checkout 的路径、分支和 HEAD，仓目录选择也进入确认内容。
+
 ## 2026-09-28 · 审批投递失败闭合与资格证据
 
 - 审批投递结果改为 fail-closed：真实 `DELIVERY_FAILED` 回执不会再被误判为 `PARKED / APPROVAL_WAIT`；合同形状的 `PENDING + approval_id` 正常等待路径保留。

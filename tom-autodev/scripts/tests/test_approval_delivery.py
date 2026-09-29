@@ -1,15 +1,21 @@
 import io
+import json
 import sys
 import tempfile
 import unittest
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from approval_delivery import ComateApprovalClient, InfoflowApprovalTransport
+from approval_delivery import (
+    ComateApprovalClient, InfoflowApprovalTransport, _deliver_approval_card, _request_id,
+)
 from approval_summary import content_summary
 from clients.infoflow_approval_client import InfoflowApprovalClient
 from clients.infoflow_bot_client import InfoflowBotClient
@@ -150,7 +156,8 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
             {"channel": "infoflow", "approval": _envelope()}
         )
         _, content = notify.sends[0]
-        self.assertNotIn("**本次审批**", content)
+        self.assertIn("**本次审批**", content)
+        self.assertIn("材料的位置", content)
         self.assertIn("APPROVE approval-1", content)
 
     def test_a_run_with_a_group_is_asked_in_the_group_and_mentions_the_approvers(self):
@@ -194,15 +201,18 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         self.assertEqual(card["title"], "tom-autodev G0 审批")
         self.assertEqual(len(notify.group_sends), 1)
 
-    def test_a_run_without_a_group_gets_no_card(self):
+    def test_a_run_without_a_group_gets_individual_private_cards(self):
         notify = FakeCardClient()
         _, transport = self._transport(notify)
 
         transport.request(_envelope())
 
-        # A private chat has no verified card target, and typing there was never the
-        # thing that hurt, so the gate stays a markdown message.
-        self.assertEqual(notify.cards, [])
+        self.assertEqual(
+            [(card["target_type"], card["target_id"]) for card in notify.cards],
+            [("user", "owner"), ("user", "qa")],
+        )
+        self.assertTrue(all(len(card["lines"]) <= 7 for card in notify.cards))
+        self.assertEqual(len(notify.sends), 1)
 
     def test_a_rejected_card_leaves_the_gate_pending_and_records_why(self):
         notify = FakeCardClient(error=ValueError("MESSAGE_REJECTED:GATEWAY"))
@@ -215,7 +225,14 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         stored = state.idempotency_result(
             f"approval.gateway.infoflow:{result['request_id']}"
         )
-        self.assertEqual(stored["card"], {"error": "MESSAGE_REJECTED:GATEWAY"})
+        self.assertEqual(stored["card"]["status"], "DEGRADED")
+        self.assertEqual(stored["card"]["targets"][0]["status"], "UNKNOWN")
+        self.assertEqual(stored["card"]["targets"][0]["reason_code"], "ValueError")
+        self.assertEqual(len(notify.group_sends), 2)
+        warning = notify.group_sends[1][1]
+        self.assertIn("不是新审批", warning)
+        self.assertIn("这不表示审批已通过", warning)
+        self.assertIn("APPROVE / REJECT", warning)
 
     def test_card_type_error_does_not_replay_the_markdown_message(self):
         notify = FakeCardClient(error=TypeError("card signature mismatch"))
@@ -226,7 +243,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         second = transport.request(_envelope())
 
         self.assertEqual(first, second)
-        self.assertEqual(len(notify.group_sends), 1)
+        self.assertEqual(len(notify.group_sends), 2)  # detail + explicit degradation warning
         self.assertEqual(len(notify.cards), 1)
 
     def test_card_runtime_error_is_recorded_as_best_effort_failure(self):
@@ -238,7 +255,8 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         stored = state.idempotency_result(f"approval.gateway.infoflow:{result['request_id']}")
 
         self.assertEqual(result["status"], "PENDING")
-        self.assertEqual(stored["card"], {"error": "card gateway down"})
+        self.assertEqual(stored["card"]["status"], "DEGRADED")
+        self.assertEqual(stored["card"]["targets"][0]["reason_code"], "RuntimeError")
 
     def test_a_run_without_a_group_still_goes_to_private_chats(self):
         notify = FakeNotifyClient()
@@ -258,7 +276,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         first = transport.request(_envelope())
         second = transport.request(_envelope())
         self.assertEqual(first, second)
-        self.assertEqual(len(notify.sends), 1)
+        self.assertEqual(len(notify.sends), 2)  # detail + unsupported-button warning
 
     def test_a_changed_input_hash_is_a_different_request(self):
         notify = FakeNotifyClient()
@@ -266,7 +284,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         first = transport.request(_envelope())
         second = transport.request(_envelope("hash-b"))
         self.assertNotEqual(first["request_id"], second["request_id"])
-        self.assertEqual(len(notify.sends), 2)
+        self.assertEqual(len(notify.sends), 4)
 
     def test_wait_reports_pending_before_the_deadline(self):
         notify = FakeNotifyClient()
@@ -306,7 +324,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         delivered = transport.request(_envelope())
         self.assertEqual(transport.reconcile(_envelope()), delivered)
         self.assertIsNone(transport.reconcile(_envelope("hash-b")))
-        self.assertEqual(len(notify.sends), 1)
+        self.assertEqual(len(notify.sends), 2)
 
     def test_client_reconcile_matches_the_bound_request(self):
         notify = FakeNotifyClient()
@@ -316,7 +334,232 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         self.assertIsNone(client.reconcile(envelope))
         delivered = client.request(envelope)
         self.assertEqual(client.reconcile(envelope), delivered)
+        self.assertEqual(len(notify.sends), 2)
+
+    def test_private_target_aliases_are_deduplicated_before_card_send(self):
+        notify = FakeCardClient()
+        _, transport = self._transport(notify)
+        envelope = _envelope()
+        envelope["member_policy"] = {
+            **_POLICY, "infoflow": ["owner@a.test", "owner@b.test"],
+        }
+        transport.request(envelope)
+        self.assertEqual([card["target_id"] for card in notify.cards], ["owner"])
+
+    def test_partial_card_failure_and_restart_do_not_resend_any_target(self):
+        class PartialClient(FakeCardClient):
+            def send_approval_card(self, **request):
+                receipt = super().send_approval_card(**request)
+                if request["target_id"] == "qa":
+                    raise TimeoutError("remote result unknown")
+                return receipt
+
+        notify = PartialClient()
+        state, transport = self._transport(notify)
+        first = transport.request(_envelope())
+        restarted = InfoflowApprovalTransport(
+            StateStore(Path(self.directory.name) / "state.sqlite"), notify, clock=lambda: _NOW
+        )
+        self.assertEqual(restarted.request(_envelope()), first)
+        self.assertEqual(len(notify.cards), 2)
+        self.assertEqual(len(notify.sends), 2)
+        card = state.idempotency_result(
+            f"approval.gateway.infoflow:{first['request_id']}"
+        )["card"]
+        self.assertEqual([item["status"] for item in card["targets"]], ["DELIVERED", "UNKNOWN"])
+        for target in ("owner", "qa"):
+            intent = state.idempotency_result(
+                f"approval.button:{first['request_id']}:user:{target}:intent"
+            )
+            self.assertRegex(intent["attempt"], r"^[0-9a-f]{32}$")
+        self.assertEqual(first["status"], "PENDING")
+
+    def test_card_intent_without_receipt_is_not_resent_but_other_target_is_sent(self):
+        notify = FakeCardClient()
+        state, _ = self._transport(notify)
+        envelope = _envelope()
+        state.save_idempotency_result(
+            f"approval.button:{_request_id(envelope)}:user:owner:intent", {"attempt": "crashed"}
+        )
+        first = _deliver_approval_card(notify, state, envelope)
+        second = _deliver_approval_card(notify, state, envelope)
+        self.assertEqual(first, second)
+        self.assertEqual([card["target_id"] for card in notify.cards], ["qa"])
+        self.assertEqual(first["targets"][0]["reason_code"], "QUERY_REQUIRED")
+
+    def test_invalid_card_receipt_is_unknown_and_never_replayed(self):
+        notify = FakeCardClient()
+        state, _ = self._transport(notify)
+        with patch.object(notify, "send_approval_card", return_value={"card_id": 42}) as send:
+            first = _deliver_approval_card(notify, state, _envelope())
+            second = _deliver_approval_card(notify, state, _envelope())
+        self.assertEqual(first, second)
+        self.assertEqual(send.call_count, 2)
+        self.assertTrue(all(item["status"] == "UNKNOWN" for item in first["targets"]))
+
+    def test_partial_markdown_send_is_not_blindly_retried(self):
+        notify = FakeCardClient()
+        _, transport = self._transport(notify)
+
+        def partial_send(*args):
+            notify.sends.append(args)
+            raise TimeoutError("one recipient may have received the message")
+
+        with patch.object(notify, "send_markdown", side_effect=partial_send):
+            with self.assertRaises(TimeoutError):
+                transport.request(_envelope())
+            with self.assertRaisesRegex(ValueError, "APPROVAL_DELIVERY_QUERY_REQUIRED"):
+                transport.request(_envelope())
         self.assertEqual(len(notify.sends), 1)
+        self.assertEqual(notify.cards, [])
+        self.assertIsNone(transport.reconcile(_envelope()))
+
+    def test_local_dispatch_defect_can_retry_through_orchestrator_after_client_fix(self):
+        from orchestrator import Orchestrator
+
+        for group in (False, True):
+            for defect in ("missing_method", "not_callable", "wrong_signature"):
+                with self.subTest(group=group, defect=defect), tempfile.TemporaryDirectory() as root:
+                    orch = Orchestrator(Path(root))
+                    if group:
+                        self._with_group(orch.state)
+                    approval = orch.approvals.request(
+                        "G0", "hash-a", ["comate", "infoflow"],
+                        run_id="run-1", member_policy=_POLICY,
+                    )
+                    envelope = {**_envelope(), **approval, "channel": "infoflow"}
+                    broken = type("BrokenClient", (), {})()
+                    method = "send_group_markdown" if group else "send_markdown"
+                    if defect == "not_callable":
+                        setattr(broken, method, None)
+                    elif defect == "wrong_signature":
+                        def wrong_signature():
+                            self.fail("signature mismatch must be detected before entering the body")
+                        setattr(broken, method, wrong_signature)
+                    transport = InfoflowApprovalTransport(orch.state, broken)
+                    client = InfoflowApprovalClient(transport)
+
+                    def deliver():
+                        return orch._deliver_approval_channel(
+                            "run-1", approval["approval_id"], "infoflow", client,
+                            {"channel": "infoflow", "approval": envelope}, "hash-a",
+                        )
+
+                    first = deliver()
+                    self.assertEqual(first["reason_code"], "APPROVAL_DELIVERY_FAILED", first)
+                    self.assertTrue(first["retry_allowed"])
+                    intent_after_failure = orch.state.idempotency_result(
+                        f"approval.delivery:{_request_id(envelope)}:intent"
+                    )
+                    fixed = FakeCardClient()
+                    transport.notify_client = fixed
+                    second = deliver()
+                    self.assertEqual(second["reason_code"], "OK", second)
+                    self.assertIsNone(intent_after_failure)
+                    self.assertEqual(deliver()["reason_code"], "OK")
+                    self.assertEqual(len(fixed.group_sends if group else fixed.sends), 1)
+                    self.assertEqual(len(fixed.cards), 1 if group else 2)
+
+    def test_dispatch_body_type_errors_remain_unknown_and_never_retry(self):
+        # An exception class alone cannot prove nothing was sent: the client may
+        # raise while handling a response after a successful remote dispatch.
+        for error_type in (AttributeError, TypeError):
+            with self.subTest(error_type=error_type):
+                notify = FakeCardClient()
+                state, transport = self._transport(notify)
+
+                def sent_then_failed(recipients, content):
+                    notify.sends.append((recipients, content))
+                    raise error_type("response handling failed")
+
+                with patch.object(notify, "send_markdown", new=sent_then_failed):
+                    with self.assertRaises(error_type):
+                        transport.request(_envelope())
+                self.assertIsNotNone(state.idempotency_result(
+                    f"approval.delivery:{_request_id(_envelope())}:intent"
+                ))
+                with self.assertRaisesRegex(ValueError, "APPROVAL_DELIVERY_QUERY_REQUIRED"):
+                    transport.request(_envelope())
+                self.assertEqual(len(notify.sends), 1)
+                self.assertEqual(notify.cards, [])
+
+    def test_crash_before_final_record_does_not_replay_details_or_cards(self):
+        notify = FakeCardClient()
+        state, transport = self._transport(notify)
+        original = state.save_idempotency_result
+
+        def crash(key, value):
+            if key.startswith("approval.gateway.infoflow:"):
+                raise KeyboardInterrupt("crash after send")
+            return original(key, value)
+
+        with patch.object(state, "save_idempotency_result", side_effect=crash):
+            with self.assertRaises(KeyboardInterrupt):
+                transport.request(_envelope())
+        restarted = InfoflowApprovalTransport(state, notify, clock=lambda: _NOW)
+        with self.assertRaisesRegex(ValueError, "APPROVAL_DELIVERY_QUERY_REQUIRED"):
+            restarted.request(_envelope())
+        self.assertEqual(len(notify.sends), 1)
+        self.assertEqual(len(notify.cards), 2)
+
+    def test_concurrent_transport_claim_precedes_every_send(self):
+        notify = FakeCardClient()
+        _, transport = self._transport(notify)
+        entered, release = Event(), Event()
+        original = notify.send_markdown
+
+        def hold(*args):
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError("test timed out")
+            return original(*args)
+
+        other = InfoflowApprovalTransport(
+            StateStore(Path(self.directory.name) / "state.sqlite"), notify, clock=lambda: _NOW
+        )
+        with patch.object(notify, "send_markdown", side_effect=hold):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                worker = pool.submit(transport.request, _envelope())
+                try:
+                    self.assertTrue(entered.wait(5))
+                    with self.assertRaisesRegex(ValueError, "APPROVAL_DELIVERY_QUERY_REQUIRED"):
+                        other.request(_envelope())
+                finally:
+                    release.set()
+                first = worker.result(timeout=5)
+        self.assertEqual(other.request(_envelope()), first)
+        self.assertEqual(len(notify.sends), 1)
+        self.assertEqual(len(notify.cards), 2)
+
+    def test_invalid_deadline_is_rejected_before_claim_or_send(self):
+        notify = FakeCardClient()
+        state, transport = self._transport(notify)
+        envelope = {**_envelope(), "deadline_at": "bad"}
+        with self.assertRaisesRegex(ValueError, "APPROVAL_DEADLINE_INVALID"):
+            transport.request(envelope)
+        self.assertIsNone(state.idempotency_result(
+            f"approval.delivery:{_request_id(envelope)}:intent"
+        ))
+        self.assertEqual(notify.sends, [])
+
+    def test_failed_degradation_warning_is_not_retried(self):
+        notify = FakeCardClient(error=TimeoutError())
+        state, transport = self._transport(notify)
+        original = notify.send_markdown
+
+        def warning_fails(recipients, content):
+            receipt = original(recipients, content)
+            if "不是新审批" in content:
+                raise TimeoutError()
+            return receipt
+
+        with patch.object(notify, "send_markdown", side_effect=warning_fails):
+            first = transport.request(_envelope())
+            self.assertEqual(transport.request(_envelope()), first)
+        self.assertEqual(len(notify.sends), 2)
+        self.assertEqual(state.idempotency_result(
+            f"approval.button.warning:{first['request_id']}"
+        )["status"], "UNKNOWN")
 
 
 class FakeGatewayOpener:
@@ -369,6 +612,22 @@ class InfoflowBotClientTests(unittest.TestCase):
         self.assertEqual(self.opener.calls[1][0], "POST")
         self.assertIn(b'"owner"', self.opener.calls[1][2])
         self.assertIn(b'"qa"', self.opener.calls[1][2])
+        self.assertEqual(self.launched, [])
+
+    def test_private_card_uses_real_client_endpoint_without_network(self):
+        client = self._client([
+            '{"ok": true, "journal": "/tmp/replies.jsonl"}',
+            '{"ok": true, "card_id": "approval-target-owner", "created": true}',
+        ])
+        result = client.send_approval_card(
+            approval_id="a" * 32, target_type="user", target_id="owner",
+            title="审批", question="请先核对材料", lines=["材料"],
+        )
+        method, url, body = self.opener.calls[1]
+        self.assertEqual((method, url), ("POST", "http://127.0.0.1:18791/card/approval"))
+        self.assertEqual(json.loads(body)["target_type"], "user")
+        self.assertEqual(json.loads(body)["target_id"], "owner")
+        self.assertEqual(result["card_id"], "approval-target-owner")
         self.assertEqual(self.launched, [])
 
     def test_an_absent_gateway_is_started_once_and_then_used(self):

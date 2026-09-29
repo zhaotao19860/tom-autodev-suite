@@ -539,7 +539,8 @@ class IdeTurnNoticeTests(unittest.TestCase):
         self.assertEqual(first["reason_code"], "OK")
         self.assertEqual(second["reason_code"], "ALREADY_NOTIFIED")
         self.assertEqual(len(notify.sent), 1)
-        self.assertIn("等你在 IDE 继续", notify.sent[0][1])
+        self.assertIn("进度通知（非审批）", notify.sent[0][1])
+        self.assertIn("本消息不请求批准", notify.sent[0][1])
 
     def test_a_stop_notifies_every_live_run_without_being_given_one(self):
         """A stop hook knows nothing about run ids, so the ledger has to supply them."""
@@ -611,8 +612,9 @@ class IdeTurnNoticeTests(unittest.TestCase):
 
         self.assertEqual(result["reason_code"], "OK")
         self.assertEqual(len(notify.sent), 1)
-        self.assertIn("等你在 IDE 继续", notify.sent[0][1])
-        self.assertIn("之后要批** G5", notify.sent[0][1])
+        self.assertIn("进度通知（非审批）", notify.sent[0][1])
+        self.assertIn("阶段闸门** G5", notify.sent[0][1])
+        self.assertIn("本消息不是审批卡", notify.sent[0][1])
 
 
 class AutoResumeHookTests(unittest.TestCase):

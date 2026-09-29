@@ -38,7 +38,7 @@ _PHASE_SHORT_TITLES = {
 }
 
 
-def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
+def build(orchestrator: Any, run_id: str, *, next_step: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return a stable, JSON-friendly progress snapshot for ``run_id``."""
     events = _events(orchestrator, run_id)
     if not events:
@@ -57,7 +57,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
 
     state = str(events[-1].get("state") or "UNKNOWN")
     action = _next(orchestrator, run_id)
-    brief = _safe_brief(orchestrator, run_id)
+    brief = {"next": next_step} if next_step is not None else _safe_brief(orchestrator, run_id)
     phases = _phases_for_events(state, events)
     phase_index = next((index for index, item in enumerate(phases) if item["state"] == state), 0)
     phase_done = sum(item["status"] == "DONE" for item in phases)
@@ -177,15 +177,20 @@ def _next(orchestrator: Any, run_id: str) -> dict[str, Any]:
 
 
 def _safe_brief(orchestrator: Any, run_id: str) -> dict[str, Any]:
-    # Avoid recursion: run_brief calls us, so only use its next projection here.
-    return {}
+    # The ledger, not a phase's *future* output gate, decides whether a person
+    # currently has an approval to answer. Exclude progress to avoid recursion.
+    try:
+        from run_brief import build as build_brief
+        return build_brief(orchestrator, run_id, include_progress=False)
+    except Exception:  # noqa: BLE001 - incomplete observational adapters
+        return {}
 
 
 def _next_action(action: dict[str, Any], state: str) -> dict[str, str]:
-    if action.get("required_human_gate"):
-        return {"owner": "你", "text": f"处理 {action['required_human_gate']} 审批"}
     if state in _TERMINAL:
         return {"owner": "-", "text": "运行已结束，无后续动作"}
+    if not action.get("ok"):
+        return {"owner": "-", "text": "状态证据不完整，请在 IDE 查看 status；不能据此认定待审批"}
     return {"owner": "Comate", "text": f"继续处理 {state}"}
 
 

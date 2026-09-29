@@ -10,7 +10,6 @@
   "language_skill",
   "project_skill",
   "knowledge_sources",
-  "review_provider",
   "pipeline_profile",
   "environment_profile",
   "approval_channels"
@@ -37,6 +36,28 @@
   "project_skill": {
    "type": "string",
    "minLength": 1
+  },
+  "profile_confirmation": {
+   "type": "object",
+   "required": [
+    "confirmed_by",
+    "confirmed_inputs_hash",
+    "source"
+   ],
+   "properties": {
+    "confirmed_by": {
+     "type": "string",
+     "minLength": 1
+    },
+    "confirmed_inputs_hash": {
+     "type": "string",
+     "pattern": "^[a-f0-9]{64}$"
+    },
+    "source": {
+     "const": "profile_wizard"
+    }
+   },
+   "additionalProperties": false
   },
   "knowledge_sources": {
    "type": "array",
@@ -201,11 +222,52 @@
      "minLength": 1
     },
     "capacity": {
-     "type": "string",
-     "minLength": 1
+      "type": "string",
+      "minLength": 1
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "status",
+        "runner_identity",
+        "image_toolchain_identity",
+        "verified_at",
+        "verifier",
+        "evidence_ref"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "VERIFIED",
+            "UNVERIFIED"
+          ]
+        },
+        "runner_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "image_toolchain_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verified_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verifier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_ref": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
     }
-   },
-   "additionalProperties": false
+  },
+  "additionalProperties": false
   },
   "approval_channels": {
    "type": "object",

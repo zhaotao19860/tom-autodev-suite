@@ -83,7 +83,7 @@ def _read_only_next(orchestrator: Any, run_id: str) -> dict[str, Any]:
     return next_fn(run_id)
 
 
-def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
+def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> dict[str, Any]:
     events = orchestrator.state.events(run_id)
     if not events:
         return {"run_id": run_id, "state": "RUN_NOT_FOUND", "waiting_on": [], "blocked": None}
@@ -145,7 +145,8 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
     producer_job = _producer_context(orchestrator, run_id, action, terminal)
     status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved, producer_job)
     from progress_snapshot import build as build_progress
-    progress = build_progress(orchestrator, run_id)
+    next_step = _next_step(action, current["state"], open_gates, pending, blocked, approved, producer_job)
+    progress = build_progress(orchestrator, run_id, next_step=next_step) if include_progress else None
     return {
         "run_id": run_id,
         "requirement_id": intake.get("requirement_id"),
@@ -163,7 +164,7 @@ def build(orchestrator: Any, run_id: str) -> dict[str, Any]:
         # The gate this phase will have to pass, so a caller can tell an unanswered
         # gate from one that is already approved while the phase has not landed.
         "gate": action.get("required_human_gate"),
-        "next": _next_step(action, current["state"], open_gates, pending, blocked, approved, producer_job),
+        "next": next_step,
     }
 
 
@@ -210,10 +211,16 @@ def _next_step(
         return {
             "owner": "你",
             "text": (
-                f"在如流回复 APPROVE {gate['approval_id']} 或 REJECT {gate['approval_id']}"
-                f"（{gate['action']} 门，截止 {gate['deadline_at']}）"
+                f"请查看已创建的如流审批卡，核对材料后处理 {gate['action']} 门"
+                f"（截止 {gate['deadline_at']}）；本消息不是审批"
             ),
         }
+    # A phase's future gate is not an approval request.  Until the controller
+    # has created a ledger row and delivered the exact hash, Comate still owns
+    # the next step and the progress notice must not look like a prompt to
+    # approve something that does not exist.
+    if blocked == "APPROVAL_REQUIRED" and not open_gates:
+        return {"owner": "Comate", "text": "审批记录尚未创建；Comate先补齐本次审批材料并创建审批"}
     if blocked == "RECOVERY_REQUIRED" or pending:
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
         return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
@@ -236,6 +243,8 @@ def _next_step(
         return {"owner": "Comate", "text": "草案已保存；调用 continue 补发对应审批并等待审批结果"}
     work = _WORK.get(state, state)
     gate = action.get("required_human_gate")
+    if gate:
+        return {"owner": "Comate", "text": f"当前将进入 {gate}；审批记录尚未创建，继续处理材料"}
     if state == "IMPLEMENT":
         tail = "，当前为待生成；生成真实 change-set 后开 G5 门等你批"
     else:

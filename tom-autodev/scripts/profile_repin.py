@@ -227,6 +227,14 @@ def request(
             "gate": {
                 "subject": "把运行重新钉到改过的 project profile",
                 "effect": f"profile_hash {prepared['old_hash'][:12]}… → {prepared['new_hash'][:12]}…",
+                "summary": [f"变更字段：{'、'.join(prepared['changed_keys'])}"],
+                "references": [
+                    {"label": "已校验的旧 profile", "ref": str(Path(previous_path).expanduser().resolve())},
+                    {"label": "待采用的新 profile",
+                     "ref": orchestrator.state.events(run_id)[0]["payload"]["profile_path"]},
+                    {"label": "old_hash", "ref": prepared["old_hash"]},
+                    {"label": "new_hash", "ref": prepared["new_hash"]},
+                ],
             },
             "changed_keys": prepared["changed_keys"],
             "old_hash": prepared["old_hash"],

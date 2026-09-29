@@ -249,6 +249,20 @@ function buttonEventKey(button, approvalId) {
   return `${button}.${approvalId}`
 }
 
+function targetCardKey(targetType, targetId) {
+  return createHash('sha256')
+    .update(`${targetType}:${targetId}`)
+    .digest('hex')
+    .slice(0, 16)
+}
+
+function approvalCardId(approvalId, targetType, targetId) {
+  // The same approval may be delivered to a group and to several private
+  // reviewers. Card identity is global on the platform, so the recipient must
+  // participate in the identity or one target overwrites another target.
+  return `approval-${approvalId}-${targetCardKey(targetType, targetId)}`
+}
+
 function parseDecision(eventKey) {
   const raw = readString(eventKey).trim()
   const gate = /^(approve|reject)\.([0-9a-f]{32})$/.exec(raw)
@@ -281,13 +295,14 @@ async function interactiveCards() {
 
 async function sendApprovalCard(request) {
   return await renderCard({
-    card_id: `approval-${request.approval_id}`,
+    card_id: approvalCardId(request.approval_id, request.target_type, request.target_id),
     request_id: request.approval_id,
     target_type: request.target_type,
     target_id: request.target_id,
     title: request.title,
     question: request.question,
-    lines: request.lines,
+    // Reserve one component for the pending-validation status after a tap.
+    lines: request.lines.slice(0, 7),
     buttons: [
       { eventKey: buttonEventKey('approve', request.approval_id), text: '同意' },
       { eventKey: buttonEventKey('reject', request.approval_id), text: '驳回' },
@@ -329,7 +344,13 @@ async function renderCard(request) {
   const cards = await interactiveCards()
   const components = request.lines
     .slice(0, 8)
-    .map((text, index) => ({ componentId: `line-${index}`, type: 'text', text }))
+    .map((line, index) => isRecord(line)
+      ? {
+          componentId: readString(line.componentId || line.component_id) || `line-${index}`,
+          type: readString(line.type) || 'text',
+          text: readString(line.text ?? line.label),
+        }
+      : { componentId: `line-${index}`, type: 'text', text: line })
   const result = await cards.render({
     // One card per subject: resending refreshes the same bubble instead of stacking a
     // second one that could still be tapped after the first was answered.
@@ -360,7 +381,10 @@ async function renderCard(request) {
       target_id: request.target_id,
       title: request.title,
       question: request.question,
-      lines: [...request.lines],
+      base_lines: [...(request.base_lines || request.lines)],
+      // Compatibility alias for offline consumers that inspect the saved
+      // material lines directly.
+      lines: [...(request.base_lines || request.lines)],
       labels: Object.fromEntries(request.buttons.map((button) => [button.eventKey, button.text])),
     })
   }
@@ -387,25 +411,45 @@ async function answerCard(data, eventKey, sender) {
   const echoed = Array.isArray(submit.components)
     ? submit.components
         .filter((item) => isRecord(item) && readString(item.type) === 'text')
-        .map((item) => readString(item.label))
+        .filter((item) => readString(item.componentId ?? item.component_id) !== 'click-status')
+        .map((item) => readString(item.label ?? item.text))
         .filter(Boolean)
     : []
-  const lines = known?.lines?.length ? known.lines : echoed
-  const label = known?.labels?.[readString(eventKey).trim()] || readString(eventKey).trim()
+  const baseLines = known?.base_lines?.length ? known.base_lines : echoed
+  const event = readString(eventKey).trim()
+  const parsed = parseDecision(event)
+  const label = known?.labels?.[event]
+    || (parsed?.text?.startsWith('APPROVE ') ? '同意'
+      : parsed?.text?.startsWith('REJECT ') ? '驳回' : event)
+  const approvalId = parsed?.subject || known?.request_id || readString(
+    isRecord(data.caller) ? data.caller.requestId : '',
+  )
+  const buttons = approvalId
+    ? [
+        { eventKey: buttonEventKey('approve', approvalId), text: '同意' },
+        { eventKey: buttonEventKey('reject', approvalId), text: '驳回' },
+      ]
+    : []
   await renderCard({
     card_id: cardId,
     request_id: known?.request_id || readString(isRecord(data.caller) ? data.caller.requestId : ''),
+    card_instance_id: readString(data.cardInstanceId || data.card_instance_id) || undefined,
     target_type: targetType,
     target_id: targetId,
     title: known?.title || '',
-    question: `已由 ${sender} 处理：${label}`,
-    // No buttons: a terminal card must not offer a tap that would run anything again.
-    buttons: [],
-    // The answered card appends one line of its own, so the caller's lines are capped
-    // one short of the platform's eight-component ceiling.
-    lines: [...lines.slice(0, 7), `已选择「${label}」· ${sender} · ${nowIso()}`],
+    // A click is only an input to the reply consumer. Until the ledger accepts
+    // it, the card must not claim that anyone approved or rejected anything.
+    question: '已收到点击，待权限和有效期校验；以审批回执为准。',
+    buttons,
+    // Keep the status separate from the material so repeated taps and restart
+    // recovery cannot grow the card or make an old status look reviewable.
+    lines: [...baseLines.slice(0, 7), {
+      componentId: 'click-status',
+      type: 'text',
+      text: `点击待校验「${label}」· ${sender} · ${nowIso()}`,
+    }],
+    base_lines: [...baseLines.slice(0, 7)],
   })
-  live.delete(cardId)
 }
 
 function journalInteraction(data) {
