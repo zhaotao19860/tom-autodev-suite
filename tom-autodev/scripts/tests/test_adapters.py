@@ -1469,6 +1469,8 @@ class KuClientTests(unittest.TestCase):
             result = client.update_index("root-1", entry)
 
         self.assertTrue(result["ok"])
+        query = transport.calls[0][0]
+        self.assertEqual(query[query.index("--protocol") + 1], "mdhtml")
         edit = transport.calls[2][0]
         self.assertIn("--editor-mode", edit)
         self.assertEqual(edit[edit.index("--editor-mode") + 1], "mdsl")

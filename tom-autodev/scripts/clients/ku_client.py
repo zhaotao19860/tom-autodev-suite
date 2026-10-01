@@ -847,7 +847,10 @@ class KuClient:
                 "--doc-id",
                 doc_id,
                 "--protocol",
-                "markdown",
+                # KU's mdsl editor resolves complete blocks from the mdhtml
+                # representation.  Markdown preview text can omit mention/link
+                # nodes and makes an otherwise valid anchor fail business validation.
+                "mdhtml",
                 "--show-doc-info",
             ]
         )
