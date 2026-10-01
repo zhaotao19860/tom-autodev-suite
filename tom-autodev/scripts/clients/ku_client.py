@@ -916,7 +916,16 @@ class KuClient:
             return _failure(error.reason_code, diagnostic=error.diagnostic)
         code = payload.get("returnCode")
         if code != 200 or payload.get("success") is False:
-            return _failure(_business_reason(code))
+            return _failure(
+                _business_reason(code),
+                diagnostic={
+                    "return_code": code,
+                    "return_message": payload.get("returnMessage"),
+                    "message": payload.get("msg"),
+                    "result": payload.get("result"),
+                    "trace_id": payload.get("traceId"),
+                },
+            )
         return {"ok": True, "reason_code": "OK", "payload": payload}
 
     def _matching_child(
