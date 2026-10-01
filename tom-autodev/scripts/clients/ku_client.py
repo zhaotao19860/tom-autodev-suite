@@ -419,8 +419,6 @@ class KuClient:
             return _failure("KU_INDEX_CONFLICT")
         edit_key = f"ku-index-edit:{doc_id}:{_content_hash(marker)}"
         completed = self.state.result_by_idempotency_key(edit_key)
-        if completed is not None and not completed["receipt"]["response"].get("ok"):
-            return completed["receipt"]["response"]
         pending = self.state.intent_by_idempotency_key(edit_key) if completed is None else None
 
         if state == "EXACT":
@@ -434,12 +432,28 @@ class KuClient:
                     self._edit_payload(doc_id, entry, entry_markdown),
                 )
                 self._persist_edit_receipt(reconciled, current, entry_markdown)
+            elif not completed["receipt"]["response"].get("ok"):
+                # The failed receipt is immutable evidence of an earlier attempt.  The
+                # remote document is authoritative for recovery, so close this landing
+                # with a distinct reconciliation intent instead of replaying edit-content
+                # or trying to overwrite the failed receipt.
+                reconcile_key = f"{edit_key}:reconcile"
+                reconciled = self.state.intent(
+                    self.run_id,
+                    "ku.index.edit.reconcile",
+                    reconcile_key,
+                    self._edit_payload(doc_id, entry, entry_markdown),
+                )
+                self._persist_edit_receipt(reconciled, current, entry_markdown)
             return self._publish(
                 doc_id,
                 current["content_hash"],
                 verified=current,
                 required_entry=marker,
             )
+
+        if completed is not None and not completed["receipt"]["response"].get("ok"):
+            return completed["receipt"]["response"]
 
         if pending is not None:
             # An mdsl edit lands in KU's edit state, so the preview text a query returns
@@ -594,6 +608,19 @@ class KuClient:
         if completed is not None:
             response = completed["receipt"]["response"]
             if not response.get("ok"):
+                if verified is None:
+                    verified = self._query_document(doc_id)
+                if self._publish_verifies(verified, expected_text, required_entry):
+                    reconcile_key = f"{key}:reconcile"
+                    reconciled = self.state.intent(
+                        self.run_id,
+                        "ku.document.publish.reconcile",
+                        reconcile_key,
+                        {"doc_id": doc_id, "content_hash": content_hash},
+                    )
+                    return self._persist_publish_receipt(
+                        reconciled, doc_id, content_hash, verified["version"]
+                    )
                 return response
             if verified is None:
                 verified = self._query_document(doc_id)
