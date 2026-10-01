@@ -21,7 +21,18 @@ import { dirname } from 'node:path';
 const require = createRequire(GATEWAY + '/package.json');
 // Real SDK field mapping and limit checks; only the HTTP boundary is fake.
 const { BubbleWorkflowCardApi } = require('@baidu/infoflow-sdk-nodejs');
-const rendered = [], journal = [], handlers = {}, files = new Map();
+const rendered = [], journal = [], handlers = {}, files = new Map(), sent = [];
+// Mirrors the platform: a markdown body over 1800 characters is rejected with 40068.
+function fakeSend(url, options) {
+  const body = JSON.parse(options.body);
+  sent.push({ url, body });
+  const parts = body.md ? [body.md.content]
+    : body.message.body.filter(x => x.type === 'MD').map(x => x.content);
+  const errcode = parts.some(x => x.length > 1800) ? 40068 : 0;
+  return { status: 200, json: async () => (
+    body.md ? { errcode, msgkey: 'k' + sent.length }
+      : { code: 0, data: { errcode, data: { messageid: 'm' + sent.length } } }) };
+}
 let httpHandler, failRender = false;
 const sdk = new BubbleWorkflowCardApi({
   async post(path, body) {
@@ -37,7 +48,10 @@ const sdk = new BubbleWorkflowCardApi({
 const context = vm.createContext({
   process: { env: { INFOFLOW_APP_KEY: 'fake-key', INFOFLOW_APP_SECRET: 'fake-secret' } },
   console: { log() {} }, Buffer, URL,
-  fetch: async (url) => {
+  fetch: async (url, options) => {
+    if (url.endsWith('/api/v1/app/message/send') || url.endsWith('/api/v1/robot/msg/groupmsgsend')) {
+      return fakeSend(url, options);
+    }
     if (url.endsWith('/api/v1/auth/app_access_token')) {
       return { json: async () => ({ data: { app_access_token: 'fake-token', expire: 7200 } }) };
     }
@@ -287,6 +301,37 @@ const failed = await post('/card/approval', request);
 assert.equal(failed.status, 500);
 assert.equal(rendered.length, 1);
 assert.equal(api.live.size, 0);
+""")
+
+    def test_long_markdown_is_split_under_platform_limit(self):
+        self._run(r"""
+const fenced = ['```', ...Array.from({ length: 120 }, (_, i) => 'code line ' + i + ' 中文'), '```'];
+const content = ['# 审批材料', ...Array.from({ length: 200 }, (_, i) => '第' + i + '行：材料说明'), ...fenced].join('\n');
+assert.ok(content.length > 1800 * 2);
+const group = await post('/group/message', { group_id: '123', content, at_users: ['owner'] });
+assert.equal(group.status, 200);
+assert.equal(group.payload.message_key, 'm1');
+const groupParts = sent.map(x => x.body.message.body);
+assert.ok(groupParts.length >= 3);
+assert.equal(groupParts.filter(blocks => blocks.some(b => b.type === 'AT')).length, 1);
+assert.ok(groupParts[0].some(b => b.type === 'AT'));
+const texts = groupParts.map(blocks => blocks.find(b => b.type === 'MD').content);
+for (const text of texts) {
+  assert.ok(text.length <= 1800);
+  assert.equal((text.match(/^```/gm) || []).length % 2, 0, text.slice(-80));
+}
+assert.equal(texts.join('\n').replace(/\n```\n```/g, '\n').length >= content.length, true);
+sent.length = 0;
+const single = await post('/notify', { recipients: ['owner'], content: 'x'.repeat(4000) });
+assert.equal(single.status, 200);
+assert.equal(single.payload.message_key, 'k1');
+assert.ok(sent.length >= 3);
+assert.ok(sent.every(x => x.body.md.content.length <= 1800));
+assert.equal(sent.map(x => x.body.md.content).join(''), 'x'.repeat(4000));
+sent.length = 0;
+await post('/notify', { recipients: ['owner'], content: '短消息' });
+assert.equal(sent.length, 1);
+assert.equal(sent[0].body.md.content, '短消息');
 """)
 
     def test_group_create_reads_nested_receipt_and_uses_requested_bot_identity(self):

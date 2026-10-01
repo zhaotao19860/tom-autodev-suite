@@ -135,10 +135,50 @@ function sendReceipt(payload) {
   return identity
 }
 
+// The platform rejects a markdown body over this many characters with errcode 40068.
+const MARKDOWN_LIMIT = 1800
+
+function hardSplit(text, limit) {
+  const pieces = []
+  for (let start = 0; start < text.length; start += limit) pieces.push(text.slice(start, start + limit))
+  return pieces
+}
+
+// Splits on line boundaries; a code fence cut by a split is closed and reopened so
+// every part still renders on its own.
+function splitMarkdown(content, limit = MARKDOWN_LIMIT) {
+  if (content.length <= limit) return [content]
+  const fence = '```'
+  const budget = limit - (fence.length + 1) * 2
+  const parts = []
+  let current = ''
+  let open = null
+  const flush = () => {
+    if (!current) return
+    parts.push(open !== null ? `${current}\n${fence}` : current)
+    current = open !== null ? `${fence}${open}` : ''
+  }
+  for (const line of content.split('\n')) {
+    for (const piece of line.length > budget ? hardSplit(line, budget) : [line]) {
+      if (current && current.length + 1 + piece.length > budget) flush()
+      current = current ? `${current}\n${piece}` : piece
+    }
+    const marker = /^\s*```(.*)$/.exec(line)
+    if (marker) open = open === null ? marker[1].trim() : null
+  }
+  if (current) parts.push(current)
+  return parts
+}
+
 async function sendMarkdown(recipients, content) {
   const touser = recipients.join('|')
-  const body = JSON.stringify({ touser, msgtype: 'md', md: { content } })
-  return await authorizedPost('/api/v1/app/message/send', body, sendReceipt)
+  let first = null
+  for (const part of splitMarkdown(content)) {
+    const body = JSON.stringify({ touser, msgtype: 'md', md: { content: part } })
+    const key = await authorizedPost('/api/v1/app/message/send', body, sendReceipt)
+    first = first || key
+  }
+  return first
 }
 
 // Group creation and group sends live here for the same reason single sends do:
@@ -333,22 +373,29 @@ async function createGroup(request) {
 }
 
 async function sendGroupMarkdown(groupId, content, atUsers) {
-  const blocks = atUsers.length
-    ? [{ type: 'AT', atall: false, atuserids: atUsers }, { type: 'MD', content }]
-    : [{ type: 'MD', content }]
-  const body = JSON.stringify({
-    message: {
-      header: {
-        toid: Number(groupId),
-        totype: 'GROUP',
-        msgtype: 'MD',
-        clientmsgid: Date.now(),
-        role: 'robot',
+  let first = null
+  const parts = splitMarkdown(content)
+  for (const [index, part] of parts.entries()) {
+    // Mention people once, on the first part, rather than pinging them per part.
+    const blocks = index === 0 && atUsers.length
+      ? [{ type: 'AT', atall: false, atuserids: atUsers }, { type: 'MD', content: part }]
+      : [{ type: 'MD', content: part }]
+    const body = JSON.stringify({
+      message: {
+        header: {
+          toid: Number(groupId),
+          totype: 'GROUP',
+          msgtype: 'MD',
+          clientmsgid: Date.now() + index,
+          role: 'robot',
+        },
+        body: blocks,
       },
-      body: blocks,
-    },
-  })
-  return await authorizedPost('/api/v1/robot/msg/groupmsgsend', body, sendReceipt)
+    })
+    const key = await authorizedPost('/api/v1/robot/msg/groupmsgsend', body, sendReceipt)
+    first = first || key
+  }
+  return first
 }
 
 const seen = new Set()
@@ -991,7 +1038,9 @@ const server = createServer(async (req, res) => {
     }
     sendJson(res, 404, { ok: false, error: 'not found' })
   } catch (err) {
-    sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+    const error = err instanceof Error ? err.message : String(err)
+    log('request failed', { method: req.method, path: req.url, error: error.slice(0, 400) })
+    sendJson(res, 500, { ok: false, error })
   }
 })
 
