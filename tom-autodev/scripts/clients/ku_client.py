@@ -420,6 +420,7 @@ class KuClient:
         edit_key = f"ku-index-edit:{doc_id}:{_content_hash(marker)}"
         completed = self.state.result_by_idempotency_key(edit_key)
         pending = self.state.intent_by_idempotency_key(edit_key) if completed is None else None
+        retry_intent = None
 
         if state == "EXACT":
             if pending is not None:
@@ -453,7 +454,20 @@ class KuClient:
             )
 
         if completed is not None and not completed["receipt"]["response"].get("ok"):
-            return completed["receipt"]["response"]
+            # A deterministic business failure means the edit was rejected before it
+            # could be verified. Keep that immutable failure receipt, but allow one
+            # controlled retry under a chained key after the fresh remote read above
+            # proved that the marker is still absent. Unknown outcomes remain blocked.
+            reason_code = completed["receipt"]["response"].get("reason_code")
+            if _unknown_result(reason_code):
+                return completed["receipt"]["response"]
+            retry_key = f"{edit_key}:retry"
+            retry_intent = self.state.intent(
+                self.run_id,
+                "ku.index.edit.retry",
+                retry_key,
+                self._edit_payload(doc_id, entry, entry_markdown),
+            )
 
         if pending is not None:
             # An mdsl edit lands in KU's edit state, so the preview text a query returns
@@ -466,7 +480,7 @@ class KuClient:
         anchor = _last_markdown_block(current["text"])
         if anchor is None:
             return _failure("KU_INDEX_ANCHOR_MISSING")
-        intent = self.state.intent(
+        intent = retry_intent or self.state.intent(
             self.run_id,
             "ku.index.edit",
             edit_key,
