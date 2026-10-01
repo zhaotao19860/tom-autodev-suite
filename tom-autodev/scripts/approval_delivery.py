@@ -512,6 +512,9 @@ def _approval_markdown(
     lines += ["", "**审批重点（请逐项核对）**",
               "", *(f"- {_line(item)}" for item in gate.get("checklist") or []),
               "", "**请先查看这些文件 / 证据**", ""]
+    body = _review_body(gate) if gate.get("material_status") != "MISSING" else []
+    if body:
+        lines += ["- 本次审批的完整内容见下方「审批正文」；下列本机路径和账本 ID 仅供在 IDE 中核对。"]
     reads = _reading_lines(gate)
     lines += [f"- {item}" for item in reads] if reads else [
         "- 未提供本次固定版本材料的位置，请先在 IDE 补齐；需求背景链接不能替代审批产物。"
@@ -526,6 +529,8 @@ def _approval_markdown(
     documents = _documents(_evidence(evidence, "documents"))
     if documents:
         lines += ["", "**需求文档**", *(f"- {document}" for document in documents)]
+    if body:
+        lines += ["", "**审批正文（本次 input_hash 绑定的内容）**", "", *body]
     if progress:
         from progress_snapshot import render as render_progress
 
@@ -547,6 +552,40 @@ def _approval_markdown(
     if content_hash:
         lines.append(f"> 产物哈希 `{content_hash[:12]}…`")
     return "\n".join(lines)
+
+
+_REVIEW_BODY_LIMIT = 12000
+
+
+def _review_body(gate: dict[str, Any]) -> list[str]:
+    """The draft under review, readable in the chat itself.
+
+    The material packet is a local file on the controller host; a reviewer in
+    Infoflow cannot open it, so the reviewed content has to travel with the message.
+    """
+    from phase_document import content_lines
+
+    material = gate.get("_review_content")
+    draft = material.get("draft") if isinstance(material, dict) else None
+    if not isinstance(draft, dict):
+        return []
+    if isinstance(draft.get("spec"), dict):
+        lines = content_lines(draft["spec"], "SPEC")
+        if isinstance(draft.get("dag"), dict):
+            lines += ["", "## 关联 DAG（任务覆盖，随 Spec 一并核对，不单独审批）", "",
+                      *content_lines(draft["dag"], "TASKS")]
+    else:
+        lines = content_lines(draft, "TASKS" if {"nodes", "edges"} <= set(draft) else None)
+    # One level below the message title so the body never reads as a new message.
+    lines = [f"#{line}" if line.startswith("#") else line for line in lines]
+    kept, used = [], 0
+    for line in lines:
+        used += len(line) + 1
+        if used > _REVIEW_BODY_LIMIT:
+            kept += ["", "> 正文超过消息篇幅上限，以上为前半部分；完整内容以上面的材料包为准，请在 IDE 中核对后再决定。"]
+            break
+        kept.append(line)
+    return kept
 
 
 def _card(evidence: Any) -> str:

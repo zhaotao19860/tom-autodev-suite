@@ -314,21 +314,7 @@ def render_phase_markdown(
     references = _upstream_references(content)
     if references:
         lines += [f"- {item}" for item in references]
-    lines += ["", "## 实际内容", ""]
-    if isinstance(content, dict) and "canonical_card_id" in content:
-        lines += _requirement_snapshot(content)
-    elif isinstance(content, dict) and "decision_result" in content:
-        lines += _decision_log(content)
-    elif isinstance(content, dict) and "behaviors" in content and "acceptance_scenarios" in content:
-        lines += _spec(content)
-    elif isinstance(content, dict) and "business_patch" in content and "test_patch" in content:
-        lines += _change_set(content)
-    elif isinstance(content, dict) and _looks_like_phase_schema(resolved_phase, content):
-        lines += _schema_content(resolved_phase, content)
-    elif isinstance(content, dict):
-        lines += _generic(content)
-    else:
-        lines += _structured_lines(content)
+    lines += ["", "## 实际内容", "", *content_lines(content, resolved_phase)]
     lines += [
         "",
         "## 当前可核对内容",
@@ -361,6 +347,23 @@ def render_phase_markdown(
     return "\n".join(
         lines + _audit_context(audit_context) + _appendix(content_hash, canonical)
     ).rstrip()
+
+
+def content_lines(content: Any, phase: str | None = None) -> list[str]:
+    """The readable body of one phase artifact, without the document frame."""
+    if isinstance(content, dict) and "canonical_card_id" in content:
+        return _requirement_snapshot(content)
+    if isinstance(content, dict) and "decision_result" in content:
+        return _decision_log(content)
+    if isinstance(content, dict) and "behaviors" in content and "acceptance_scenarios" in content:
+        return _spec(content)
+    if isinstance(content, dict) and "business_patch" in content and "test_patch" in content:
+        return _change_set(content)
+    if isinstance(content, dict) and _looks_like_phase_schema(phase, content):
+        return _schema_content(phase, content)
+    if isinstance(content, dict):
+        return _generic(content)
+    return _structured_lines(content)
 
 
 def canonical_appendix(canonical: str) -> str:

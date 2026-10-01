@@ -103,7 +103,7 @@ class ApprovalMaterialsTests(unittest.TestCase):
         self.assertIn("审批重点", rendered)
         self.assertIn("不授权代码提交或发布", rendered)
 
-    def _draft_orchestrator(self, *, merged=False):
+    def _draft_orchestrator(self, *, merged=False, merged_draft=None):
         action = {
             "ok": True, "run_id": "run-1", "action_id": "action-1",
             "source_event_id": "event-1", "phase": "SPEC" if merged else "IMPLEMENT",
@@ -115,7 +115,7 @@ class ApprovalMaterialsTests(unittest.TestCase):
                    "business_patch": "diff --git a/main.c b/main.c\n+fix\n",
                    "test_patch": "diff --git a/test.py b/test.py\n+test\n",
                    "full_diff_hash": "d" * 64}
-        draft = {"spec": {"version": "1"}, "dag": {"nodes": []}} if merged else content
+        draft = (merged_draft or {"spec": {"version": "1"}, "dag": {"nodes": []}}) if merged else content
         orch = SimpleNamespace(
             state=SimpleNamespace(producer_job=lambda _: {"status": "FULFILLED", "draft": draft}),
             next=lambda run_id, *, read_only=False: action,
@@ -172,6 +172,49 @@ class ApprovalMaterialsTests(unittest.TestCase):
         detail = pinned_context(orch, "run-1", "G2", binding)
         self.assertEqual(detail["_review_content"]["draft"]["dag"], draft["dag"])
         self.assertIn("G2 只绑定 Spec", " ".join(detail["summary"]))
+
+    def test_merged_g2_message_carries_readable_spec_and_dag(self):
+        orch, action, draft = self._draft_orchestrator(merged=True, merged_draft={
+            "spec": {
+                "version": "1.0",
+                "behaviors": [{"id": "B1", "number": 1, "description": "合法 cookie 通过，字段不一致拒绝。"}],
+                "acceptance_scenarios": [{"id": "S1", "acceptance_point_ids": ["AC-1"],
+                                          "given": "字段合法", "when": "经过校验", "then": "接受"}],
+                "non_goals": ["不调整网络配置"],
+                "test_interface": ["产品测试覆盖畸形报文"],
+                "environment_requirements": ["由 iPipe 管理"],
+                "traceability": [{"acceptance_point_id": "AC-1", "behavior_ids": ["B1"],
+                                  "scenario_ids": ["S1"]}],
+            },
+            "dag": {"nodes": [{"task_id": "T1", "title": "修复校验", "acceptance_point_ids": ["AC-1"]}],
+                    "edges": [], "acceptance_coverage": [{"acceptance_point_id": "AC-1",
+                                                          "task_ids": ["T1"]}]},
+        })
+        binding = build_envelope(action, draft["spec"])["approval_input_hash"]
+        detail = pinned_context(orch, "run-1", "G2", binding)
+        rendered = self._render("G2", detail)
+        self.assertIn("**审批正文（本次 input_hash 绑定的内容）**", rendered)
+        self.assertIn("完整内容见下方「审批正文」", rendered)
+        body = rendered.split("**审批正文", 1)[1]
+        for behavior in draft["spec"]["behaviors"]:
+            self.assertIn(behavior["description"].split("。")[0], body)
+        for scenario in draft["spec"]["acceptance_scenarios"]:
+            self.assertIn(f"Given：{scenario['given']}", body)
+        self.assertIn("关联 DAG", body)
+        for node in draft["dag"]["nodes"]:
+            self.assertIn(node["task_id"], body)
+        for text in ("不调整网络配置", "产品测试覆盖畸形报文", "由 iPipe 管理"):
+            self.assertIn(text, body)
+        self.assertNotRegex(body, r"(?m)^## ")
+        self.assertLess(rendered.index("**审批正文"), rendered.index("APPROVE "))
+
+    def test_missing_material_never_attaches_a_review_body(self):
+        orch, action, draft = self._draft_orchestrator(merged=True)
+        binding = build_envelope(action, draft["spec"])["approval_input_hash"]
+        detail = {**pinned_context(orch, "run-1", "G2", binding), "material_status": "MISSING"}
+        rendered = self._render("G2", detail)
+        self.assertNotIn("审批正文", rendered)
+        self.assertIn("请勿批准", rendered)
 
     def test_g9_reads_exact_referenced_artifacts_not_latest_build(self):
         store = ArtifactStore(self.root / "artifacts")
