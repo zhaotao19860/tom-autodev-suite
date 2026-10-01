@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from copy import deepcopy
+from datetime import datetime, timezone
 import re
 from pathlib import Path
 from typing import Any
@@ -3680,6 +3681,64 @@ def _confirm_approval_redelivery(
     )
     if "error" in context:
         return context["error"]
+
+    # A redelivery confirmation can arrive after the original approval deadline.
+    # Reusing that row would post a card that is already expired: the transport
+    # correctly resolves it as TIMEOUT, while the client would then misclassify
+    # the non-pending result as APPROVAL_REQUEST_RESPONSE_INVALID. Close the old
+    # attempt and open the normal, fresh retry instead. The old card remains
+    # auditable, and any click on it is correctly treated as late.
+    try:
+        deadline = datetime.fromisoformat(
+            str(approval.get("deadline_at")).replace("Z", "+00:00")
+        )
+        expired = deadline.tzinfo is not None and datetime.now(timezone.utc) >= deadline
+    except (TypeError, ValueError):
+        expired = False
+    if expired:
+        timed_out = orchestrator.approvals.timeout(
+            approval_id,
+            input_hash,
+            run_id=run_id,
+            state_store=orchestrator.state,
+        )
+        if timed_out.get("effective_decision") != "TIMEOUT":
+            return {
+                "ok": False,
+                "reason_code": timed_out.get("reason_code", "APPROVAL_TIMEOUT_FAILED"),
+                "run_id": run_id,
+                "approval_id": approval_id,
+            }
+        abandoned = orchestrator.state.abandon_intent(intent_id, reason, actor)
+        if abandoned.get("status") not in {"ABANDONED", "ALREADY_ABANDONED"}:
+            return {
+                "ok": False,
+                "reason_code": "INTENT_ABANDON_FAILED",
+                "run_id": run_id,
+                "approval_id": approval_id,
+                "intent_id": intent_id,
+                "detail": abandoned,
+            }
+        retry = orchestrator.reissue_infoflow_approval(
+            run_id,
+            gate_of(approval.get("action") or ""),
+            input_hash,
+            member_policy=approval.get("member_policy") or context["member_policy"],
+            evidence=context["evidence"],
+            infoflow_client=_infoflow_approval_client(orchestrator),
+            allow_workflow_spec_migration=migration_exempt(approval.get("action")),
+        )
+        return {
+            **retry,
+            "ok": retry.get("reason_code") in {None, "OK", "PENDING"},
+            "reason_code": (
+                "APPROVAL_EXPIRED_REISSUED"
+                if retry.get("approval_id")
+                else retry.get("reason_code", "APPROVAL_REISSUE_FAILED")
+            ),
+            "previous_approval_id": approval_id,
+            "previous_intent_id": intent_id,
+        }
 
     abandoned = orchestrator.state.abandon_intent(intent_id, reason, actor)
     if abandoned.get("status") not in {"ABANDONED", "ALREADY_ABANDONED"}:

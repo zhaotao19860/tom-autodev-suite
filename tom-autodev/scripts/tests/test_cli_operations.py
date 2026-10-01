@@ -361,6 +361,84 @@ class CliOperationTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "REDISPATCH_CONFIRMATION_REQUIRED")
         self.assertEqual(self.orchestrator.state.pending_intents(self.run_id), [])
 
+    def test_confirm_approval_redelivery_reissues_expired_attempt_instead_of_posting_expired_card(self):
+        approval = self.orchestrator.approvals.request(
+            "G1#retry-1",
+            "hash-expired",
+            ["comate", "infoflow"],
+            run_id=self.run_id,
+            member_policy={
+                "comate": ["manager@example.test"],
+                "infoflow": ["manager@example.test"],
+            },
+            deadline_at="2026-09-30T00:00:00+00:00",
+        )
+        old = self.orchestrator.state.claim_intent(
+            self.run_id,
+            "approval.delivery.infoflow",
+            f"approval.delivery:{approval['approval_id']}:infoflow",
+            {
+                "approval_id": approval["approval_id"],
+                "canonical_payload_sha256": "c" * 64,
+            },
+        )["intent"]
+        calls = []
+
+        class FreshInfoflow:
+            def request(self, request):
+                calls.append(request)
+                approval_request = request["approval"]
+                return {
+                    "request_id": "fresh-request",
+                    "approval_id": approval_request["approval_id"],
+                    "run_id": approval_request["run_id"],
+                    "channel": "infoflow",
+                    "input_hash": approval_request["input_hash"],
+                    "member_policy": approval_request["member_policy"],
+                    "status": "PENDING",
+                    "created_at": "2026-10-01T00:00:00+00:00",
+                    "deadline_at": approval_request["deadline_at"],
+                    "heartbeat_at": None,
+                    "updated_at": None,
+                    "reply": None,
+                    "handoff": None,
+                    "reason_code": None,
+                }
+
+            def reconcile(self, _request):
+                return None
+
+        with patch(
+            "orchestrator._approval_context",
+            return_value={
+                "member_policy": approval["member_policy"],
+                "evidence": {"gate": {"subject": "G1", "effect": "continue"}},
+            },
+        ), patch("orchestrator._infoflow_approval_client", return_value=FreshInfoflow()):
+            result = _confirm_approval_redelivery(
+                self.orchestrator,
+                self.run_id,
+                approval["approval_id"],
+                "hash-expired",
+                old["intent_id"],
+                "未收到，允许重发",
+                "已核对如流会话，没有审批消息或审批卡",
+                "manager@example.test",
+            )
+
+        self.assertEqual(result["reason_code"], "APPROVAL_EXPIRED_REISSUED", result)
+        self.assertNotEqual(result["approval_id"], approval["approval_id"])
+        self.assertEqual(len(calls), 1)
+        self.assertNotEqual(
+            self.orchestrator.approvals.get(result["approval_id"])["deadline_at"],
+            approval["deadline_at"],
+        )
+        self.assertEqual(
+            self.orchestrator.approvals.get(approval["approval_id"])["effective_decision"],
+            "TIMEOUT",
+        )
+        self.assertEqual(self.orchestrator.state.pending_intents(self.run_id), [])
+
     def test_advance_without_an_approved_gate_asks_for_it_rather_than_guessing_a_hash(self):
         code, result = self._run(
             "advance", self.run_id, "GRILL",
