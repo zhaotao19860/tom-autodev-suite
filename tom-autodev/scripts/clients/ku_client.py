@@ -474,7 +474,7 @@ class KuClient:
         )
         operation = {
             "mode": "insert_after",
-            "selectionWithEllipsis": anchor,
+            "selectionByTitle": anchor,
             "markdown": entry_markdown,
         }
         edited = self._invoke(

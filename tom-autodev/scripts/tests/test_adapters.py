@@ -1476,7 +1476,7 @@ class KuClientTests(unittest.TestCase):
         self.assertEqual(edit[edit.index("--editor-mode") + 1], "mdsl")
         operation = json.loads(edit[edit.index("--operation") + 1])
         self.assertEqual(operation["mode"], "insert_after")
-        self.assertEqual(operation["selectionWithEllipsis"], "# Run index")
+        self.assertEqual(operation["selectionByTitle"], "# Run index")
         self.assertIn(KuClient.index_marker("root-1", "01-spec", "child-1", "a" * 64), operation["markdown"])
 
     def test_failed_ku_create_keeps_pending_intent(self):
