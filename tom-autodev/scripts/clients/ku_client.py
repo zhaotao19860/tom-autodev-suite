@@ -453,7 +453,51 @@ class KuClient:
             )
 
         if completed is not None and not completed["receipt"]["response"].get("ok"):
-            return completed["receipt"]["response"]
+            # A prior selector shape may have been rejected by KU.  Permit one
+            # explicit paragraph-anchor fallback; its chained key makes the
+            # additional external attempt auditable and bounded.
+            fallback_key = f"{edit_key}:paragraph"
+            fallback = self.state.result_by_idempotency_key(fallback_key)
+            if fallback is not None:
+                return fallback["receipt"]["response"]
+            fallback_intent = self.state.intent_by_idempotency_key(fallback_key)
+            if fallback_intent is None:
+                fallback_intent = self.state.intent(
+                    self.run_id,
+                    "ku.index.edit.paragraph-fallback",
+                    fallback_key,
+                    self._edit_payload(doc_id, entry, entry_markdown),
+                )
+            intent = fallback_intent
+            anchor = _index_insert_anchor(current["text"])
+            operation = {
+                "mode": "insert_after",
+                "selectionWithEllipsis": anchor,
+                "markdown": entry_markdown,
+            }
+            edited = self._invoke(
+                [
+                    self.binary,
+                    "edit-content",
+                    "--doc-id",
+                    doc_id,
+                    "--username",
+                    self.username or "",
+                    "--editor-mode",
+                    "mdsl",
+                    "--operation",
+                    json.dumps(operation, ensure_ascii=False, separators=(",", ":")),
+                ]
+            )
+            if not edited["ok"]:
+                if not _unknown_result(edited["reason_code"]):
+                    return self._persist_failure(intent, edited["reason_code"])
+                return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
+            settled = self._publish_index(doc_id, marker)
+            if not settled["ok"]:
+                return settled["failure"]
+            self._persist_edit_receipt(intent, settled["verified"], entry_markdown)
+            return settled["publish"]
 
         if pending is not None:
             # An mdsl edit lands in KU's edit state, so the preview text a query returns
@@ -1209,7 +1253,7 @@ def _index_insert_anchor(text: str) -> str | None:
     markdown and mdhtml representations.
     """
     for line in text.splitlines():
-        if line.strip() == "## 阶段产物":
+        if "每个阶段" in line and "追加" in line:
             return line.strip()
     return _last_markdown_block(text)
 
