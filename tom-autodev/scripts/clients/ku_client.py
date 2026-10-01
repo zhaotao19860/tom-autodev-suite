@@ -463,7 +463,7 @@ class KuClient:
                 return settled["failure"]
             self._persist_edit_receipt(pending, settled["verified"], entry_markdown)
             return settled["publish"]
-        anchor = _last_markdown_block(current["text"])
+        anchor = _index_insert_anchor(current["text"])
         if anchor is None:
             return _failure("KU_INDEX_ANCHOR_MISSING")
         intent = self.state.intent(
@@ -1188,6 +1188,21 @@ def _last_markdown_block(text: str) -> str | None:
         if line.strip() and not line.strip().startswith("<!--")
     ]
     return lines[-1] if lines else None
+
+
+def _index_insert_anchor(text: str) -> str | None:
+    """Return a stable full block for appending an index entry.
+
+    KU's mdsl matcher operates on editor blocks.  The previous implementation
+    selected the last visible line, which can be a list item or a rich-text
+    fragment after KU's conversion and is rejected as a non-block.  The
+    dedicated stage heading is a stable paragraph/heading block in both
+    markdown and mdhtml representations.
+    """
+    for line in text.splitlines():
+        if line.strip() == "## 阶段产物":
+            return line.strip()
+    return _last_markdown_block(text)
 
 
 def _index_entry_state(text: str, marker: str) -> str:
