@@ -10,12 +10,13 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+import workflow_spec
 from approval_ledger import gate_of
 
 _TERMINAL_SUCCESS = {"RELEASE_SUCCESS", "STOPPED"}
 
 
-def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str, Any]], pending: list[dict[str, Any]], blocked: str | None, approved: dict[str, Any] | None = None, producer_job: dict[str, Any] | None = None) -> str:
+def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str, Any]], pending: list[dict[str, Any]], blocked: str | None, approved: dict[str, Any] | None = None, producer_job: dict[str, Any] | None = None, rejected: dict[str, Any] | None = None) -> str:
     if state == "RELEASE_SUCCESS":
         return "已完成"
     if state == "STOPPED":
@@ -24,8 +25,14 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
         return "待恢复"
     if open_gates:
         return "待审批"
+    if approved and gate_of(approved.get("action") or "") == "CHANGE_REQUEST":
+        return "变更已批准待执行"
     if approved:
         return "已批准待提交"
+    if rejected:
+        return "已驳回待修改"
+    if state == "ARCHITECTURE_REVIEW":
+        return "待决定回退"
     if producer_job and producer_job.get("awaiting_answers"):
         return "待答题"
     if producer_job and producer_job.get("status") == "FULFILLED":
@@ -113,12 +120,27 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
             latest_approve_at[action_name] = resolved
     # A reissued approval keeps the same bare gate (for example G1#retry-1 is
     # still G1), but only the newest unresolved attempt is actionable.
+    # After a revise/rewind the gates opened before it ask about an action the run
+    # has left; listing them would send the reviewer to a card nothing can use.
+    reentered_at = max(
+        (event.get("created_at") or "" for event in events
+         if isinstance((event.get("payload") or {}).get("reentry"), dict)),
+        default="",
+    )
     latest_unresolved: dict[str, dict[str, Any]] = {}
     for row in approvals:
         if row.get("effective_decision"):
             continue
+        if (row.get("created_at") or "") < reentered_at and gate_of(row.get("action") or "") not in {
+            "WORKFLOW_SPEC_MIGRATION", "PROFILE_REPIN",
+        }:
+            continue
         action_name = gate_of(row.get("action") or "")
-        if current_gate is not None and action_name != current_gate:
+        # A change request is about the run, not the phase's gate, and is the very
+        # thing a person has to answer while the phase waits.
+        if current_gate is not None and action_name not in {current_gate, "CHANGE_REQUEST"}:
+            continue
+        if action_name == "CHANGE_REQUEST" and not _change_request_live(orchestrator, run_id, row, current):
             continue
         created = row.get("created_at") or row.get("deadline_at") or ""
         if action_name in latest_approve_at and latest_approve_at[action_name] >= created:
@@ -166,10 +188,27 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         and row["created_at"] >= current["created_at"]
         and row.get("resolved_at")
     ), None)
+    # A REJECT of the draft this attempt produced: the run waits on a person, not on
+    # `continue`, which would only find the gate already answered.
+    rejected = None if terminal or open_gates or approved else next((
+        row for row in reversed(approvals)
+        if current_gate and gate_of(row.get("action")) == current_gate
+        and row.get("effective_decision") == "REJECT"
+        and row.get("created_at") and current.get("created_at")
+        and row["created_at"] >= current["created_at"]
+    ), None)
+    change_approved = None if terminal else next((
+        row for row in reversed(approvals)
+        if gate_of(row.get("action") or "") == "CHANGE_REQUEST"
+        and row.get("effective_decision") == "APPROVE"
+        and _change_request_live(orchestrator, run_id, row, current)
+    ), None)
+    if change_approved is not None:
+        approved = change_approved
     producer_job = _producer_context(orchestrator, run_id, action, terminal)
-    status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved, producer_job)
+    status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved, producer_job, rejected)
     from progress_snapshot import build as build_progress
-    next_step = _next_step(action, current["state"], open_gates, pending, blocked, approved, producer_job)
+    next_step = _next_step(action, current["state"], open_gates, pending, blocked, approved, producer_job, rejected, events)
     progress = build_progress(orchestrator, run_id, next_step=next_step) if include_progress else None
     return {
         "run_id": run_id,
@@ -190,6 +229,21 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         "gate": action.get("required_human_gate"),
         "next": next_step,
     }
+
+
+def _change_request_live(orchestrator: Any, run_id: str, row: dict[str, Any], current: dict[str, Any]) -> bool:
+    """A change request still applies only where it was opened and until it is applied."""
+    getter = getattr(getattr(orchestrator, "state", None), "idempotency_result", None)
+    if not callable(getter):
+        return False
+    from run_change import snapshot
+
+    prepared = snapshot(orchestrator.state, run_id, row.get("input_hash") or "")
+    return (
+        isinstance(prepared, dict)
+        and prepared.get("from_event_id") == current.get("event_id")
+        and getter(f"run-change:{row.get('approval_id')}") is None
+    )
 
 
 def _producer_context(orchestrator: Any, run_id: str, action: dict[str, Any], terminal: bool) -> dict[str, Any] | None:
@@ -235,6 +289,8 @@ def _next_step(
     blocked: str | None,
     approved: dict[str, Any] | None = None,
     producer_job: dict[str, Any] | None = None,
+    rejected: dict[str, Any] | None = None,
+    events: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     """Who acts next, and what exactly they do.
 
@@ -292,10 +348,48 @@ def _next_step(
     # approve something that does not exist.
     if blocked == "APPROVAL_REQUIRED" and not open_gates:
         return {"owner": "Comate", "text": "审批记录尚未创建；Comate先补齐本次审批材料并创建审批"}
+    if state == "ARCHITECTURE_REVIEW":
+        return {
+            "owner": "你",
+            "text": (
+                "修复预算已用尽或同类失败反复出现，需要人决定回到哪个设计阶段："
+                "告诉 Comate 回到 GRILL / SPEC / TASKS 及原因，由它发起 rewind 变更请求审批"
+            ),
+        }
+    if rejected:
+        gate = gate_of(rejected.get("action") or "")
+        approval_id = rejected.get("approval_id") or "-"
+        if state in workflow_spec.REVISABLE_STATES:
+            return {
+                "owner": "你",
+                "text": (
+                    f"{gate} 已驳回（审批 {approval_id}）。把修改意见告诉 Comate"
+                    f"（或在如流回复 `REJECT {approval_id} 修改意见`），Comate 用 revise 按意见重做草案"
+                    f"并重新发起 {gate}；要回到更早阶段用 rewind，放弃用 stop"
+                ),
+            }
+        from run_change import rewind_available
+
+        way_back = (
+            "；如需改前面的设计，告诉 Comate 回到 GRILL/SPEC/TASKS 中哪个阶段，由它发起 rewind"
+            if rewind_available(events or [], state) else ""
+        )
+        return {
+            "owner": "你",
+            "text": (
+                f"{gate} 已驳回（审批 {approval_id}），该门不会原地重发{way_back}；"
+                "否则 stop 结束本运行"
+            ),
+        }
     if blocked:
         return {"owner": "你", "text": _BLOCKED_HINT.get(blocked, f"处理 {blocked}")}
     if approved:
         gate = gate_of(approved.get("action") or action.get("required_human_gate"))
+        if gate == "CHANGE_REQUEST":
+            return {
+                "owner": "Comate",
+                "text": f"变更请求已批准；执行 rewind --approval-id {approved.get('approval_id')} 回到目标阶段",
+            }
         if gate == "G7" or state == "SUBMIT":
             return {
                 "owner": "Comate",

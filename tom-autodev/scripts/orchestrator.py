@@ -2108,6 +2108,16 @@ class Orchestrator:
         if not attempts:
             return {"run_id": run_id, "reason_code": "APPROVAL_NOT_FOUND"}
         latest = attempts[-1]
+        from run_change import superseded
+
+        if superseded(self.state, run_id, latest):
+            # The run re-entered a phase after this gate was opened: its action is
+            # gone, and asking it again would collect a decision nothing can use.
+            return {
+                "run_id": run_id,
+                "approval_id": latest["approval_id"],
+                "reason_code": "APPROVAL_SUPERSEDED",
+            }
         undeliverable = latest.get("status") == "DELIVERY_FAILED"
         if latest.get("effective_decision") != "TIMEOUT" and not undeliverable:
             return {
@@ -2129,6 +2139,7 @@ class Orchestrator:
                 "approval_id": latest["approval_id"],
                 "reason_code": "APPROVAL_RETRY_EXHAUSTED",
                 "retries": retry - 1,
+                "hint": _retry_exhausted_hint(self.state.events(run_id)),
             }
         return self.request_infoflow_approval(
             run_id,
@@ -3034,6 +3045,27 @@ def main(argv: list[str] | None = None) -> int:
     migrate_spec.add_argument("--request", action="store_true", help="开 WORKFLOW_SPEC_MIGRATION 门")
     migrate_spec.add_argument("--approval-id", help="应用已批准的迁移审批")
 
+    revise = subparsers.add_parser(
+        "revise",
+        help="G1/G2/G3 被驳回后，按修改意见重做本阶段草案并重新发起该门",
+    )
+    revise.add_argument("run_id")
+    revise.add_argument("--approval-id", required=True, help="被驳回的那条审批")
+    revise.add_argument("--feedback", help="修改意见；省略则读取如流里 `REJECT <id> 意见` 的文字")
+    revise.add_argument("--actor", required=True, help="提出修改意见的人")
+
+    rewind = subparsers.add_parser(
+        "rewind",
+        help="变更请求：审批后回到较早阶段重新产出（可同时改 test_repo 等 profile 字段）",
+    )
+    rewind.add_argument("run_id")
+    rewind.add_argument("--to", dest="target", help="回退目标阶段，例如 GRILL / SPEC / TASKS")
+    rewind.add_argument("--reason", help="为什么要回退、要改什么")
+    rewind.add_argument("--actor", help="发起变更的人")
+    rewind.add_argument("--previous-profile", help="改了 profile 时，被钉住的旧 profile 副本")
+    rewind.add_argument("--request", action="store_true", help="开 CHANGE_REQUEST 门")
+    rewind.add_argument("--approval-id", help="执行已批准的变更请求")
+
     advance = subparsers.add_parser("advance", help="推进一次状态迁移，input_hash 从审批台账里取")
     advance.add_argument("run_id")
     advance.add_argument("state", help="目标状态，例如 SPEC / IMPLEMENT / SUBMIT")
@@ -3387,6 +3419,34 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = workflow_spec_migration.plan(orchestrator, args.run_id)
+    elif args.command == "revise":
+        import run_change
+
+        result = run_change.revise(
+            orchestrator, args.run_id, args.approval_id, feedback=args.feedback, actor=args.actor
+        )
+    elif args.command == "rewind":
+        import run_change
+
+        if args.approval_id:
+            result = run_change.apply(orchestrator, args.run_id, args.approval_id)
+        elif not (args.target and args.reason and args.actor):
+            result = {"ok": False, "reason_code": "INVALID_INPUT",
+                      "detail": "rewind 需要 --to、--reason、--actor（执行时只需 --approval-id）"}
+        elif args.request:
+            from approval_delivery import ComateApprovalClient
+
+            result = run_change.request(
+                orchestrator, args.run_id, args.target, args.reason, args.actor,
+                args.previous_profile,
+                comate_client=ComateApprovalClient(),
+                infoflow_client=_infoflow_approval_client(orchestrator),
+            )
+        else:
+            result = run_change.plan(
+                orchestrator, args.run_id, args.target, args.reason, args.actor,
+                args.previous_profile,
+            )
     elif args.command == "advance":
         result = _advance(
             orchestrator, args.run_id, args.state, args.artifacts, args.evidence, args.approval_id
@@ -3980,6 +4040,16 @@ def _approval_context(
     }
     orchestrator.state.save_idempotency_result(cache_key, result)
     return result
+
+
+def _retry_exhausted_hint(events: list[dict[str, Any]]) -> str:
+    from run_change import rewind_available
+
+    state = events[-1].get("state") if events else None
+    if rewind_available(events, state):
+        targets = "/".join(sorted(workflow_spec.REWIND_TARGETS[state]))
+        return f"重发次数已用完：核对审批成员后，可发起 rewind 回到 {targets} 换一道新门，或 stop 结束运行"
+    return "重发次数已用完：核对审批成员与投递后 stop 结束运行，或新建运行"
 
 
 def _gate_evidence(

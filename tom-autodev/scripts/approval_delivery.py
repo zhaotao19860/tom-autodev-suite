@@ -10,6 +10,9 @@ from typing import Any
 
 from approval_contract import ApprovalGatewayResult, parse_gateway_result
 from collaboration import group_id_for_run
+import workflow_spec
+from approval_ledger import gate_of
+from run_change import FEEDBACK_PLACEHOLDER
 from approval_summary import gate_intent, references
 
 
@@ -529,6 +532,9 @@ def _approval_markdown(
     documents = _documents(_evidence(evidence, "documents"))
     if documents:
         lines += ["", "**需求文档**", *(f"- {document}" for document in documents)]
+    revision = _revision_lines(gate) if body else []
+    if revision:
+        lines += ["", *revision]
     if body:
         lines += ["", "**审批正文（本次 input_hash 绑定的内容）**", "", *body]
     if progress:
@@ -542,8 +548,11 @@ def _approval_markdown(
         f"APPROVE {approval_id}",
         "",
         "**驳回请回复**",
-        f"REJECT {approval_id}",
+        f"REJECT {approval_id}" + (f" <{FEEDBACK_PLACEHOLDER}>" if gate_of(action) in _REVISABLE_GATES else ""),
         "",
+        *(["> 驳回时把 <> 处换成修改意见（意见里不要再写 APPROVE/REJECT），系统据此登记重做；"
+           "点卡片驳回则在 IDE 把意见告诉 Comate。之后在 IDE 继续，Comate 会生成新版草案并重新发起本门。"]
+          if gate_of(action) in _REVISABLE_GATES else []),
         "> 回复必须带 approval_id；它绑定本次内容，需求一变即失效。",
         f"> input_hash `{input_hash[:12]}…`",
         f"> run_id `{run_id[:12]}…`",
@@ -557,25 +566,21 @@ def _approval_markdown(
 _REVIEW_BODY_LIMIT = 12000
 
 
+_REVISABLE_GATES = workflow_spec.REVISABLE_GATES
+_DIFF_LIMIT = 4000
+
+
 def _review_body(gate: dict[str, Any]) -> list[str]:
     """The draft under review, readable in the chat itself.
 
     The material packet is a local file on the controller host; a reviewer in
     Infoflow cannot open it, so the reviewed content has to travel with the message.
     """
-    from phase_document import content_lines
-
     material = gate.get("_review_content")
     draft = material.get("draft") if isinstance(material, dict) else None
     if not isinstance(draft, dict):
         return []
-    if isinstance(draft.get("spec"), dict):
-        lines = content_lines(draft["spec"], "SPEC")
-        if isinstance(draft.get("dag"), dict):
-            lines += ["", "## 关联 DAG（任务覆盖，随 Spec 一并核对，不单独审批）", "",
-                      *content_lines(draft["dag"], "TASKS")]
-    else:
-        lines = content_lines(draft, "TASKS" if {"nodes", "edges"} <= set(draft) else None)
+    lines = _draft_lines(draft)
     # One level below the message title so the body never reads as a new message.
     lines = [f"#{line}" if line.startswith("#") else line for line in lines]
     kept, used = [], 0
@@ -586,6 +591,54 @@ def _review_body(gate: dict[str, Any]) -> list[str]:
             break
         kept.append(line)
     return kept
+
+
+def _revision_lines(gate: dict[str, Any]) -> list[str]:
+    """Why this is a new version, and what moved since the one that was sent back."""
+    import difflib
+
+    material = gate.get("_review_content")
+    material = material if isinstance(material, dict) else {}
+    reentry = material.get("reentry")
+    if not isinstance(reentry, dict):
+        return []
+    kind = "驳回后按意见重做" if reentry.get("kind") == "REVISE" else "变更请求回退后重做"
+    note = reentry.get("feedback") or reentry.get("reason")
+    lines = ["**本次修改说明**", f"- {kind}（发起人 {_line(reentry.get('actor')) or '-'}）"]
+    if isinstance(note, str) and note.strip():
+        text = " ".join(note.split()).replace("@", "[at]")
+        lines.append(f"- 意见：{text[:1000]}{'…' if len(text) > 1000 else ''}")
+    previous = material.get("previous_draft")
+    draft = material.get("draft")
+    if not isinstance(previous, dict) or not isinstance(draft, dict):
+        return lines
+    diff = list(difflib.unified_diff(
+        _draft_lines(previous), _draft_lines(draft), "上一版", "本版", n=1, lineterm="",
+    ))[2:]
+    if not diff:
+        return [*lines, "- 与上一版内容相同"]
+    fence = "`" * 3
+    kept, used = [], 0
+    for line in diff:
+        used += len(line) + 1
+        if used > _DIFF_LIMIT:
+            kept.append("… 差异过长，其余部分请对照下方正文")
+            break
+        kept.append(line.replace(fence, "'" * 3))
+    return [*lines, "", "**与上一版的差异**", "", fence + "diff", *kept, fence]
+
+
+def _draft_lines(draft: dict[str, Any]) -> list[str]:
+    from phase_document import content_lines
+
+    if isinstance(draft.get("spec"), dict):
+        lines = content_lines(draft["spec"], "SPEC")
+        if isinstance(draft.get("dag"), dict):
+            lines += ["", "## 关联 DAG（任务覆盖，随 Spec 一并核对，不单独审批）", "",
+                      *content_lines(draft["dag"], "TASKS")]
+    else:
+        lines = content_lines(draft, "TASKS" if {"nodes", "edges"} <= set(draft) else None)
+    return lines
 
 
 def _card(evidence: Any) -> str:

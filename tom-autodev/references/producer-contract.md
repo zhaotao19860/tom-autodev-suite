@@ -33,6 +33,15 @@ The phase schema and actual action take precedence over descriptive field lists 
 - On interruption, inspect durable job/workspace state and actual files before doing work again. A checklist describes intended work; it is not proof that an edit, commit, trigger or publication occurred.
 - Local source reading, source generation and suite helper validation are separate from project execution. Business compilation, simulation and tests require the configured iPipe runner; source reasoning is not a passing test receipt.
 
+## Redo after REJECT or rewind
+
+When `context` returns `revision_context`, this job is a redo, not a fresh draft:
+
+- `instruction` is the reviewer's feedback (`REVISE`) or the change request reason (`REWIND`). Address every point of it and nothing beyond it.
+- `previous_draft`, when present, is the version that was sent back. Start from it: keep what the instruction does not touch, so the diff on the new gate shows only the requested change.
+- Repository facts (`test_repo`, `business_repos`, branches, locks) come from the run's pinned profile; cite them from the profile instead of retyping them, so a profile change made with a rewind cannot leave a stale value in the draft.
+- If the instruction contradicts an approved earlier artifact, say so in the draft's open questions or decline; do not silently override the earlier phase — that is a rewind decision for a human.
+
 ## Knowledge loading
 
 Load the project profile named by the run and the language profiles relevant to the changed files, then only references needed by the affected constructs. Internal suite links are supported package dependencies. No phase requires installing npl-coder, code-review-qa, tom-autodebug, superpowers or a graph-search skill. A graph is optional supporting evidence: record its freshness when used; otherwise inspect symbols/callers/configuration with precise text search and cite file/revision evidence.

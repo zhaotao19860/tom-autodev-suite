@@ -117,6 +117,20 @@ acknowledgement remain authoritative, and duplicate/stale/unauthorized taps cann
 override the effective ledger decision. Replying `APPROVE <approval_id>` /
 `REJECT <approval_id>` as text stays available in every case.
 
+### What a REJECT does
+
+A REJECT never reopens the same hash. On G1/G2/G3 it means "redo this draft": the
+reviewer adds feedback (typed after `REJECT <approval_id>` in 如流, or given to Comate in the
+IDE), `revise` re-enters the same phase with that feedback and the rejected draft, and the
+same gate is asked again for the new hash with a "本次修改说明 / 与上一版的差异" section.
+Only the member who cast the effective REJECT can supply the 如流 feedback. A REJECT of
+any other gate stays a stop; code-phase rework goes through DIAGNOSE.
+
+Moving back to an earlier phase, or changing `test_repo` / `business_repos`, needs a
+`CHANGE_REQUEST` approval bound to the run's current event, the target and the reason
+(and the profile old/new hash when the profile changes). Gates opened before a revise or
+rewind are superseded: they are not nudged, reissued or listed as waiting.
+
 ### What to inspect at each gate
 
 | Gate | Focus and source materials |

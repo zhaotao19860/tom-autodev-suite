@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import workflow_spec
 from execution_guard import execution_guard, guard_execution, migration_exempt
 
 import time
@@ -395,8 +396,11 @@ class ApprovalWatcher:
             STRICT_APPROVAL_TIMEOUT_SECONDS,
         )
         reason = result.get("reason_code")
+        from run_change import superseded
+
+        stale = superseded(self.orchestrator.state, run_id, approval)
         if reason == "PENDING":
-            return self._nudge(approval, client)
+            return None if stale else self._nudge(approval, client)
         decision = result.get("effective_decision")
         outcome = {
             "run_id": run_id,
@@ -405,8 +409,17 @@ class ApprovalWatcher:
             "reason_code": reason,
             "effective_decision": decision,
         }
+        if stale and reason == "APPROVAL_TIMEOUT":
+            # A card the run already left: its silence needs no notice and no new card.
+            return outcome
         if reason == "OK" and decision in {"APPROVE", "REJECT"}:
-            acknowledgement = self._acknowledge(approval, decision, self._responder(approval_id))
+            responder = self._responder(approval_id)
+            revised = self._revise(approval, responder) if decision == "REJECT" and not stale else None
+            if revised is not None:
+                outcome["revised_event_id"] = revised.get("event_id")
+            acknowledgement = self._acknowledge(
+                approval, decision, responder, note=_ack_note(approval, decision, stale, revised)
+            )
             if acknowledgement is not None and acknowledgement.get("reason_code") not in {
                 "ACKNOWLEDGED", "ALREADY_ACKNOWLEDGED",
             }:
@@ -543,7 +556,26 @@ class ApprovalWatcher:
         ]
         return effective[-1].get("responder") if effective else None
 
-    def _acknowledge(self, approval: dict[str, Any], decision: str, responder: str | None) -> dict[str, Any] | None:
+    def _revise(self, approval: dict[str, Any], responder: str | None) -> dict[str, Any] | None:
+        """A REJECT typed with feedback is the redo instruction itself; record the redo.
+
+        Only the feedback of the member who cast the REJECT counts (run_change reads it
+        from the reply journal). A click, or a REJECT without text, waits for the IDE.
+        """
+        if gate_of(approval.get("action") or "") not in workflow_spec.REVISABLE_GATES:
+            return None
+        try:
+            from run_change import revise
+
+            result = revise(
+                self.orchestrator, approval["run_id"], approval["approval_id"],
+                feedback=None, actor=responder or "infoflow",
+            )
+        except Exception:  # noqa: BLE001 - the REJECT already landed; redo stays available in the IDE
+            return None
+        return result if result.get("ok") else None
+
+    def _acknowledge(self, approval: dict[str, Any], decision: str, responder: str | None, *, note: str | None = None) -> dict[str, Any] | None:
         """Tell the approvers the decision landed; send it once per approval.
 
         The decision is already in the ledger by the time this runs, so a failed
@@ -579,7 +611,7 @@ class ApprovalWatcher:
                 approval["run_id"],
                 recipients,
                 lambda mention: _ack_markdown(
-                    approval, decision, responder, progress=progress
+                    approval, decision, responder, progress=progress, note=note
                 ),
             )
         except Exception as error:  # noqa: BLE001 - the ledger already holds the decision
@@ -643,7 +675,8 @@ def _nudge_markdown(
             f"APPROVE {approval_id}",
             "",
             "**驳回请回复**",
-            f"REJECT {approval_id}",
+            f"REJECT {approval_id}"
+            + (" <你的修改意见>" if gate_of(approval.get("action") or "") in workflow_spec.REVISABLE_GATES else ""),
         ]
     )
 
@@ -742,9 +775,33 @@ def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[st
     }
 
 
+def _ack_note(
+    approval: dict[str, Any], decision: str, stale: bool, revised: dict[str, Any] | None
+) -> str | None:
+    """What actually happens next, so the acknowledgement never promises a step nobody takes."""
+    gate = gate_of(approval.get("action") or "")
+    if stale:
+        return "该卡已被之后的重做/回退取代，本决定不会被使用。"
+    if decision == "REJECT" and revised is not None:
+        return (
+            f"已按意见登记重做（{' '.join(str(revised.get('feedback') or '').split())[:200]}）；"
+            "在 IDE 继续后，Comate 生成新版草案并重新发起本门。"
+        )
+    if decision == "REJECT" and gate in workflow_spec.REVISABLE_GATES:
+        from run_change import FEEDBACK_PLACEHOLDER
+
+        return (
+            f"如需按意见修改，请回复 `REJECT {approval['approval_id']} <{FEEDBACK_PLACEHOLDER}>`，"
+            "或在 IDE 把意见告诉 Comate 执行 revise。"
+        )
+    if decision == "APPROVE" and gate == "CHANGE_REQUEST":
+        return f"变更请求只授权回退本身：在 IDE 让 Comate 执行 `rewind --approval-id {approval['approval_id']}`。"
+    return None
+
+
 def _ack_markdown(
     approval: dict[str, Any], decision: str, responder: str | None,
-    *, progress: dict[str, Any] | None = None,
+    *, progress: dict[str, Any] | None = None, note: str | None = None,
 ) -> str:
     action = approval.get("action") or "gate"
     if decision == "TIMEOUT":
@@ -764,6 +821,8 @@ def _ack_markdown(
     following = (
         "Comate 会在下一步继续该 run。" if decision == "APPROVE" else "Comate 不会继续该闸门之后的动作。"
     )
+    if note:
+        following = note if decision == "APPROVE" or "取代" in note else following + note
     lines = [
             f"## tom-autodev {action} {landed}",
             "",

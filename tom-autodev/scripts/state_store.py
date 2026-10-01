@@ -318,8 +318,13 @@ class StateStore:
         result_key: str,
         result: dict[str, Any],
         failure_accounting: dict[str, Any] | None = None,
+        extra_results: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         """CAS the current checkpoint and persist its definite result atomically.
+
+        `extra_results` are further idempotency records that must land with the event or
+        not at all (a rewind's profile re-pin); a key already holding another value
+        aborts the whole commit as RESULT_CONFLICT.
 
         `failure_accounting`, when given, folds the cross-run FailureCase write/resolve into
         the SAME transaction as the transition (R-M6), so a crash or a replay can never leave a
@@ -346,6 +351,13 @@ class StateStore:
             ).fetchone()
             if current is None or current["event_id"] != expected_event_id:
                 return {"status": "SOURCE_EVENT_MISMATCH"}
+            for extra_key, extra_value in extra_results or []:
+                held = connection.execute(
+                    "SELECT result_json FROM idempotency_results WHERE idempotency_key = ?",
+                    (extra_key,),
+                ).fetchone()
+                if held is not None and held["result_json"] != _encode(extra_value):
+                    return {"status": "RESULT_CONFLICT", "result": json.loads(held["result_json"])}
             event_id = uuid.uuid4().hex
             created_at = _now()
             final_result = {
@@ -368,6 +380,14 @@ class StateStore:
                 """,
                 (result_key, _encode(final_result), created_at),
             )
+            for extra_key, extra_value in extra_results or []:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO idempotency_results(idempotency_key, result_json, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (extra_key, _encode(extra_value), created_at),
+                )
             if isinstance(failure_accounting, dict):
                 record = failure_accounting.get("record")
                 if isinstance(record, dict) and record.get("signature") and record.get("run_id"):

@@ -1360,5 +1360,6 @@ def _enqueue_producer_job(orchestrator: Any, run_id: str, decision: dict[str, An
         "source_event_id": action.get("source_event_id"),
         "task_id": action.get("task_id"),
         "required_human_gate": action.get("required_human_gate"),
+        **({"reentry": action["reentry"]} if isinstance(action.get("reentry"), dict) else {}),
     }
     return orchestrator.state.record_producer_job(run_id, job_id, payload)

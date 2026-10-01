@@ -198,6 +198,15 @@ question/purpose/status/handoff, and current collaboration items. See
 [`references/phase-artifacts.md`](references/phase-artifacts.md) for the document map and
 artifact contract.
 
+When a reviewer rejects G1/G2/G3, do not tell them to restart and do not reissue the gate.
+Ask what must change, then run `scripts/cli.py revise RUN_ID --approval-id <rejected>
+--feedback <text> --actor <who>`; the producer is re-entered with
+`revision_context` (instruction plus the previous draft) from `context`, must address every
+point of the instruction, keep what was not objected to, and the new gate shows a diff. When
+an earlier phase or a repository fact must change, open `scripts/cli.py rewind RUN_ID --to
+<GRILL|SPEC|TASKS> --reason ... --actor ... [--previous-profile COPY] --request`, wait for the
+human `CHANGE_REQUEST` approval, then apply it with `--approval-id`. Never move a run by hand.
+
 If a paused run returns `WORKFLOW_SPEC_DRIFT`, do not edit its event or hash in place and do
 not use ordinary `continue` to bypass the guard. Use the dedicated
 `scripts/cli.py migrate-workflow-spec RUN_ID --request` gate, then apply the exact approved

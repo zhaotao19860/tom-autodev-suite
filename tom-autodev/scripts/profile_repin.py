@@ -40,6 +40,10 @@ ACTION = "PROFILE_REPIN"
 # is shaped and is hashed into nothing already produced, so moving it cannot retroactively
 # change what any approval was granted against.
 _ALLOWED_KEYS = frozenset({"pipeline_profile", "submission_policy"})
+# Repository facts are hashed into the drafts that name them, so they may only move
+# together with an approved rewind that produces those drafts again
+# (run_change.rewind), and only before any workspace was bound to them.
+REWIND_KEYS = frozenset({"test_repo", "business_repos"})
 
 
 def pinned_hash(events: list[dict[str, Any]], repin: Any) -> str | None:
@@ -91,7 +95,13 @@ def _next_repin_key(state: Any, run_id: str) -> str:
     return key
 
 
-def plan(orchestrator: Any, run_id: str, previous_path: str | Path) -> dict[str, Any]:
+def plan(
+    orchestrator: Any,
+    run_id: str,
+    previous_path: str | Path,
+    *,
+    extra_keys: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     """Say whether the edit is allowed, and what has to be approved to accept it."""
     events = orchestrator.state.events(run_id)
     if not events:
@@ -133,7 +143,8 @@ def plan(orchestrator: Any, run_id: str, previous_path: str | Path) -> dict[str,
         # Same content, different bytes: formatting only. Still a re-pin, but there is
         # nothing to review, so it is reported rather than hidden.
         changed = ["<formatting-only>"]
-    forbidden = [key for key in changed if key not in _ALLOWED_KEYS and key != "<formatting-only>"]
+    allowed = _ALLOWED_KEYS | (extra_keys & REWIND_KEYS)
+    forbidden = [key for key in changed if key not in allowed and key != "<formatting-only>"]
     if forbidden:
         return _failure("REPIN_FIELD_FORBIDDEN", run_id, forbidden=forbidden, changed=changed)
     if new_profile.get("project_id") != intake.get("project"):
@@ -156,7 +167,6 @@ def plan(orchestrator: Any, run_id: str, previous_path: str | Path) -> dict[str,
 @guard_execution
 def apply(orchestrator: Any, run_id: str, approval_id: str, previous_path: str | Path) -> dict[str, Any]:
     """Move the pin against an approval bound to this exact move."""
-    key = _next_repin_key(orchestrator.state, run_id)
     prepared = plan(orchestrator, run_id, previous_path)
     existing = record(orchestrator, run_id)
     if prepared.get("reason_code") == "NOTHING_TO_REPIN" and isinstance(existing, dict):
@@ -173,6 +183,24 @@ def apply(orchestrator: Any, run_id: str, approval_id: str, previous_path: str |
         return _failure("APPROVAL_INPUT_MISMATCH", run_id)
     if approval.get("effective_decision") != "APPROVE":
         return _failure("APPROVAL_REQUIRED", run_id)
+    return land(orchestrator, run_id, prepared, approval_id)
+
+
+def entry(state: Any, run_id: str, prepared: dict[str, Any], approval_id: str) -> tuple[str, dict[str, Any]]:
+    """The chain key and record for one planned move, for a caller that writes it."""
+    return _next_repin_key(state, run_id), {
+        "old_hash": prepared["old_hash"],
+        "new_hash": prepared["new_hash"],
+        "changed_keys": prepared["changed_keys"],
+        "input_hash": prepared["input_hash"],
+        "approval_id": approval_id,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def land(orchestrator: Any, run_id: str, prepared: dict[str, Any], approval_id: str) -> dict[str, Any]:
+    """Store one planned move at the end of the chain; the caller owns authorization."""
+    key = _next_repin_key(orchestrator.state, run_id)
     stored = {
         "old_hash": prepared["old_hash"],
         "new_hash": prepared["new_hash"],

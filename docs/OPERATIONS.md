@@ -193,6 +193,8 @@ python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py confirm-approval-redelivery --help
 python3 tom-autodev/scripts/cli.py migrate-workflow-spec --help
+python3 tom-autodev/scripts/cli.py revise --help
+python3 tom-autodev/scripts/cli.py rewind --help
 ```
 
 `confirm-approval-redelivery` 只用于如流投递结果未知的那一条 intent：`status` 会给出
@@ -214,6 +216,43 @@ python3 tom-autodev/scripts/cli.py confirm-approval-redelivery "$RUN_ID" APPROVA
 python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --request
 python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --approval-id APPROVAL_ID
 ```
+
+### 改着改着发现前面要动：revise 与 rewind
+
+不需要新建 run。两条路径都只追加事件，原有事件、产物、审批记录全部保留；重做出的每一版
+仍要过各自的门。
+
+- **驳回后按意见重做（revise）**：G1/G2/G3 被驳回时，`status` 显示“已驳回待修改”。
+  把修改意见交给 Comate（或在如流回复 `REJECT <approval_id> 修改意见`），它以这条驳回为
+  授权，带着意见和上一版草案重新进入同一阶段；新草案的审批消息附“本次修改说明”和
+  “与上一版的差异”。驳回只对当前等待中的那一版草案有效。
+
+```bash
+python3 tom-autodev/scripts/cli.py revise "$RUN_ID" --approval-id REJECTED_ID \
+  --feedback '验收场景缺少回滚' --actor zhaotao02@baidu.com
+```
+
+- **变更请求回退（rewind）**：需要回到更早阶段时，开一道 `CHANGE_REQUEST` 审批，绑定
+  当前位置、目标阶段、原因，以及可选的 profile 改动。允许的回退：SPEC→GRILL/SPEC；
+  TASKS→GRILL/SPEC/TASKS；WORKSPACE 与 ARCHITECTURE_REVIEW→GRILL/SPEC/TASKS。代码阶段
+  之后的返工仍走 DIAGNOSE。ARCHITECTURE_REVIEW 只能通过 rewind 离开。
+  `test_repo` / `business_repos` 只能随 rewind 一起改，且仅限该 run 从未绑定过工作区；
+  先把被钉住的 profile 复制一份，再编辑原文件，用 `--previous-profile` 指向副本。
+  批准只在运行仍停在发起时的位置才有效；运行动过就返回 `RUN_MOVED`，需按新位置重新发起。
+
+```bash
+cp ~/.tom-autodev/config/projects/bgw/BGW-1995.yaml /tmp/BGW-1995.pinned.yaml
+# 编辑原 profile 的 test_repo.branch / lock
+python3 tom-autodev/scripts/cli.py rewind "$RUN_ID" --to SPEC --reason '测试仓库改用新分支' \
+  --actor zhaotao02@baidu.com --previous-profile /tmp/BGW-1995.pinned.yaml          # 预览
+python3 tom-autodev/scripts/cli.py rewind "$RUN_ID" --to SPEC --reason '测试仓库改用新分支' \
+  --actor zhaotao02@baidu.com --previous-profile /tmp/BGW-1995.pinned.yaml --request  # 开门
+python3 tom-autodev/scripts/cli.py rewind "$RUN_ID" --approval-id APPROVAL_ID          # 批准后执行
+```
+
+回退或重做之后，回退前开出的旧阶段审批卡视为已被取代：不再催办、不再超时重发
+（`APPROVAL_SUPERSEDED`），也不再出现在 `status` 的待审批列表里。重发次数用完
+（`APPROVAL_RETRY_EXHAUSTED`）的设计阶段门，可用同阶段 rewind 换一道新门。
 
 `repin-profile` 需要保存的上一版 profile 副本和对应审批；直接编辑配置不会自动改变已运行任务的绑定。`recover-legacy-pipeline-plan` 仅用于升级前已进入 IPIPE、事件里没有 `pipeline_plan`（RELEASE 报 `PIPELINE_PLAN_REQUIRED`）的历史 run：它从该 run 自己不可变的、获审的提交与固定 profile 确定性重建并回填冻结计划，不提交、不发布、不审批、不调用任何 runtime，幂等；在途旧构建会按模块重跑，不会被当作发布证据。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录来解除阻断。
 

@@ -230,6 +230,11 @@ class PhaseProtocol:
         if release_inputs is not None:
             input_artifacts = [_artifact_reference(item) for item in release_inputs.values()]
         parent_hash = predecessor["envelope"]["content_hash"] if predecessor is not None else None
+        # A revise/rewind event carries why the phase is produced again. It is part of
+        # the identity, so the redo is a new action, job and gate; absent on every
+        # ordinary event, so those hashes are unchanged.
+        reentry = (current.get("payload") or {}).get("reentry")
+        reentry = reentry if isinstance(reentry, dict) else None
         action_inputs = {
             "run_id": run_id,
             "source_event_id": current["event_id"],
@@ -244,6 +249,7 @@ class PhaseProtocol:
             **({"intake_prerequisites": _intake_prerequisites(events)} if state == "INTAKE" else {}),
             **({"controller_binding": _ipipe_controller_binding(current.get("payload"))} if state == "IPIPE" else {}),
             **({"baseline_revisions": source_revisions} if state == "IMPLEMENT" else {}),
+            **({"reentry": reentry} if reentry is not None else {}),
         }
         input_hash = (
             current["payload"]["g0_input_hash"]
@@ -292,6 +298,7 @@ class PhaseProtocol:
             "completion_predicate": _completion_predicate(state, selected.get("schema")),
             "result_schema": selected.get("schema"),
             "target_state": target,
+            **({"reentry": reentry} if reentry is not None else {}),
             **(
                 {"content": _intake_snapshot(events)} if state == "INTAKE"
                 else ({"content": auto_content} if auto_content is not None else {})

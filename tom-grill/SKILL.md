@@ -20,7 +20,7 @@ Also produce a glossary delta and an ADR candidate only when a decision is hard 
 
 A run may start from a plain card whose `acceptance` list is empty. Record every criterion agreed with the requirement owner in `acceptance_delta` as `{id, statement, decided_by, evidence}`. Never rewrite the snapshot; the parent unions it with the delta before Spec. Either result may carry an `acceptance_delta`, and collecting acceptance criteria is not itself a decision.
 
-Follow the [producer contract](../tom-autodev/references/producer-contract.md) and [decision-log schema](../tom-autodev/schemas/decision-log.schema.json). Return `decision-log` DraftContent; the parent creates the envelope, receipts and applicable gate. See [phase-specific rules](references/phase-contract.md).
+Follow the [producer contract](../tom-autodev/references/producer-contract.md) and [decision-log schema](../tom-autodev/schemas/decision-log.schema.json). When `context` carries `revision_context`, redo the previous draft against its instruction (see the producer contract). Return `decision-log` DraftContent; the parent creates the envelope, receipts and applicable gate. See [phase-specific rules](references/phase-contract.md).
 
 ## Comate structured decision protocol
 

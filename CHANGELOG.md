@@ -4,6 +4,20 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-01 · 不重开 run 的返工：驳回重做与变更请求回退
+
+- 新增 `revise`：G1/G2/G3 驳回后以该驳回为授权、带修改意见与上一版草案重新进入同一阶段，
+  生成新 action/job/门；`context` 暴露 `revision_context`，新审批消息附修改说明与差异。
+  如流 `REJECT <id> 意见` 中的意见只取实际投出驳回的成员。此前驳回是死胡同、意见被丢弃。
+- 新增 `rewind`（`CHANGE_REQUEST` 门）：按 `REWIND_TARGETS` 回到 GRILL/SPEC/TASKS，
+  可同时移动 `test_repo`/`business_repos`（仅未绑定过工作区的 run），绑定发起时事件，
+  以比较后追加写入事件。ARCHITECTURE_REVIEW 不再是无出口的 `INVALID_STATE`。
+- 被 revise/rewind 取代的旧门不再催办、超时重发（`APPROVAL_SUPERSEDED`）或计入待审批；
+  驳回后 `status` 显示“已驳回待修改”并给出 revise/rewind/stop 指引，而不是让人 `continue`；
+  `APPROVAL_RETRY_EXHAUSTED` 附出路说明。
+- `REVISABLE_STATES` / `REWIND_TARGETS` 计入 `workflow_spec_hash`：已有暂停 run 需一次
+  `migrate-workflow-spec` 迁移审批。
+
 ## 2026-09-30 · 漂移迁移闭环、点击身份与状态可操作性
 
 - 修复 `WORKFLOW_SPEC_DRIFT` 下迁移门自身无法结算的死锁：投递、读回、落账、重发和

@@ -140,6 +140,32 @@ def _binding_error(orchestrator: Any, run_id: str) -> dict[str, Any] | None:
     return collaboration_module.collaboration_binding_error(events[0]["payload"], run_id)
 
 
+def _revision_context(orchestrator: Any, action: Any) -> dict[str, Any] | None:
+    """What a redo has to answer: the feedback or reason, and the version it replaces.
+
+    The producer keeps what the review did not object to and changes what it did;
+    without the previous draft it could only start from scratch.
+    """
+    reentry = action.get("reentry") if isinstance(action, dict) else None
+    if not isinstance(reentry, dict):
+        return None
+    context = {
+        "kind": reentry.get("kind"),
+        "instruction": reentry.get("feedback") or reentry.get("reason"),
+        "actor": reentry.get("actor"),
+        "approval_id": reentry.get("approval_id"),
+        "from_state": reentry.get("from_state"),
+        "redo": reentry.get("redo"),
+        "profile_changed_keys": reentry.get("profile_changed_keys"),
+    }
+    job_id = reentry.get("previous_job_id")
+    job = orchestrator.state.producer_job(job_id) if isinstance(job_id, str) and job_id else None
+    if isinstance(job, dict) and isinstance(job.get("draft"), dict):
+        context["previous_job_id"] = job_id
+        context["previous_draft"] = job["draft"]
+    return {key: value for key, value in context.items() if value is not None}
+
+
 class AgentBridge:
     """Thin, stateless assembly boundary for agent-facing run operations."""
 
@@ -223,7 +249,7 @@ class AgentBridge:
                 for key in (
                     "action_id", "source_event_id", "state", "phase", "task_id", "child_skill",
                     "controller", "result_schema", "required_human_gate", "input_hash",
-                    "parent_artifact_hash", "source_revisions", "input_artifacts",
+                    "parent_artifact_hash", "source_revisions", "input_artifacts", "reentry",
                 )
                 if action.get(key) is not None
             }
@@ -253,6 +279,9 @@ class AgentBridge:
             "action": action_view,
             "producer_jobs": jobs,
         }
+        revision = _revision_context(self.orchestrator, action)
+        if revision is not None:
+            result["revision_context"] = revision
         return _json_safe(result)
 
     def stop(self, target: str) -> dict[str, Any]:

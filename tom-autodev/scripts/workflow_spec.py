@@ -207,6 +207,24 @@ FAILURE_TARGETS: dict[str, str] = {
 }
 _FAILURE_DEFAULT = "STOPPED"
 
+# Design-front states whose rejected draft can be redone in place: a REJECT carrying
+# feedback re-enters the same state, so the producer drafts a new version against the
+# feedback and the same gate is asked again for the new hash (run_change.revise).
+REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS"})
+REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3"})
+
+# Approved backward moves (run_change.rewind): the run re-enters the target and every
+# phase from there is produced again; nothing already recorded is rewritten. Later
+# states go back through DIAGNOSE, which owns repair routing once code exists.
+# ARCHITECTURE_REVIEW has no producer, so a rewind is the only way out of it.
+REWIND_TARGETS: dict[str, frozenset[str]] = {
+    "GRILL": frozenset({"GRILL"}),
+    "SPEC": frozenset({"GRILL", "SPEC"}),
+    "TASKS": frozenset({"GRILL", "SPEC", "TASKS"}),
+    "WORKSPACE": frozenset({"GRILL", "SPEC", "TASKS"}),
+    "ARCHITECTURE_REVIEW": frozenset({"GRILL", "SPEC", "TASKS"}),
+}
+
 
 @dataclass(frozen=True)
 class ChangeClass:
@@ -509,6 +527,10 @@ def canonical_hash() -> str:
         },
         "gate_labels": {gate: list(label) for gate, label in sorted(GATE_LABELS.items())},
         "failure_targets": dict(sorted(FAILURE_TARGETS.items())),
+        "revisable_states": sorted(REVISABLE_STATES),
+        "rewind_targets": {
+            state: sorted(targets) for state, targets in sorted(REWIND_TARGETS.items())
+        },
         # Change-class routing and per-phase knowledge scope are part of the control policy:
         # editing a class's phase_modes, the default class, or a phase's KU/iCafe scope must
         # change this hash so a run pinned to the old hash is provably not the new policy.

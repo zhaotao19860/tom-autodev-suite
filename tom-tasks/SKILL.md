@@ -32,6 +32,8 @@ Follow the [producer contract](../tom-autodev/references/producer-contract.md), 
 5. For broad refactors use expand-contract: add compatible interface, migrate callers, then remove the old path in a later slice.
 6. Name each task by its observable capability, not “implement repository X”, “write tests” or “run regression”. A multi-module migration can use expand-contract slices only when each intermediate state has an honest verification and rollback boundary.
 
+When `context` carries `revision_context`, redo the previous DAG against its instruction as the [producer contract](../tom-autodev/references/producer-contract.md) describes.
+
 ## Validation and Gate
 
 Validate that the DAG is acyclic, edges reference unique existing nodes, every criterion is covered, each module is registered, and every blocker represents a real dependency. Each task needs test IDs, fixtures, expected evidence and a completion predicate. The controller decides completion from actual evidence and requests G3 only when the action requires it; the model neither marks planned tasks passed nor opens an extra gate.

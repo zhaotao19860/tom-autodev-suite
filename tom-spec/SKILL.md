@@ -13,7 +13,7 @@ Convert closed requirement decisions into a reviewable behavioral contract. Spec
 
 Require a `RequirementSnapshot`, `CLARIFIED` or `NO_OPEN_DECISIONS` result, Decision Log, project/language rules, repository evidence, independent product-test repository contract, and the current project skill/iPipe environment contract. Return `DECISION_REQUIRED` if any behavior or human tradeoff remains open.
 
-Follow the [producer contract](../tom-autodev/references/producer-contract.md), [spec schema](../tom-autodev/schemas/spec.schema.json) and [phase-specific rules](references/phase-contract.md). Return versioned `spec` DraftContent. In a worker-requested merged SPEC job, also apply [tom-tasks](../tom-tasks/SKILL.md) to this same Spec and return one `{spec, dag}` bundle; this is one producer turn, not a recursive workflow.
+Follow the [producer contract](../tom-autodev/references/producer-contract.md), [spec schema](../tom-autodev/schemas/spec.schema.json) and [phase-specific rules](references/phase-contract.md). When `context` carries `revision_context`, redo the previous draft against its instruction (see the producer contract). Return versioned `spec` DraftContent. In a worker-requested merged SPEC job, also apply [tom-tasks](../tom-tasks/SKILL.md) to this same Spec and return one `{spec, dag}` bundle; this is one producer turn, not a recursive workflow.
 
 ## Spec Contract
 
