@@ -46,14 +46,6 @@ ANSWERS = {
         "test": ["qa@baidu.com"],
         "project": ["pm@baidu.com"],
     },
-    "environment_provenance": {
-        "status": "VERIFIED",
-        "runner_identity": "test-runner-1",
-        "image_toolchain_identity": "sha256:test-toolchain",
-        "verified_at": "2026-09-29T00:00:00Z",
-        "verifier": "test-owner",
-        "evidence_ref": "ipipe:evidence:test-runner-1",
-    },
 }
 
 
@@ -119,14 +111,12 @@ class BuildProfileTests(unittest.TestCase):
         profile = build_profile(load_template("bgw"), answers)
         self.assertIn("__BRANCH__", unfilled_placeholders(profile))
 
-    def test_template_environment_without_platform_provenance_is_not_ready(self):
-        profile = build_profile(load_template("bgw"), {
-            key: value for key, value in ANSWERS.items()
-            if key != "environment_provenance"
-        })
+    def test_environment_provenance_is_not_required_or_confirmed(self):
+        profile = build_profile(load_template("bgw"), ANSWERS)
         result = validate_profile(profile, check_paths=False)
-        self.assertFalse(result["ready"])
-        self.assertIn("environment_profile.provenance.status", result["invalid"])
+        self.assertTrue(result["ready"], result)
+        self.assertNotIn("provenance", profile["environment_profile"])
+        self.assertNotIn("environment_provenance", confirmed_inputs(profile))
 
 
 class WriteRequirementProfileTests(unittest.TestCase):

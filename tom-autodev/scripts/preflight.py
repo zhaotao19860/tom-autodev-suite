@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from cli_transport import CliTransport, CliTransportError
-from clients.ku_client import DEFAULT_KU_BINARY
+from clients.ku_client import resolve_ku_binary
 from run_summary import redact_structured
 
 
@@ -198,9 +198,10 @@ def _contains_hook_reference(value: Any) -> bool:
 def live_probes() -> dict[str, Any]:
     """Create adapters whose command surface contains read operations only."""
     transport = CliTransport(timeout_seconds=30)
+    ku_transport = CliTransport(timeout_seconds=30, allow_json_preamble=True)
     return {
         "icafe": _IcafeProbe(transport),
-        "ku": _KuProbe(transport),
+        "ku": _KuProbe(ku_transport),
         "icode": _IcodeProbe(),
         "review": _ReviewProbe(),
         "infoflow": _InfoflowProbe(transport),
@@ -277,7 +278,7 @@ class _KuProbe:
     def query(self, context: dict[str, Any]) -> dict[str, Any]:
         self.transport.run(
             [
-                DEFAULT_KU_BINARY, "query-repo", "--repo-id", context["repo_id"],
+                resolve_ku_binary(), "query-repo", "--repo-id", context["repo_id"],
                 "--parent-doc-id", context["parent_doc_id"], "--page-num", "1", "--page-size", "1",
             ],
             business_field="returnCode",

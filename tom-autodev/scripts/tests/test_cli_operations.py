@@ -21,7 +21,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "clients"))
 
-from orchestrator import Orchestrator, main
+from orchestrator import Orchestrator, _confirm_approval_redelivery, main
 from test_orchestrator import PROFILE, _approve_for_run, _start, _write_profile
 
 
@@ -277,6 +277,89 @@ class CliOperationTests(unittest.TestCase):
         self.assertFalse(result["retry_allowed"])
         self.assertFalse(result["execution_performed"])
         self.assertEqual(len(result["actions"]), 1)
+
+    def test_confirm_approval_redelivery_is_hash_bound_and_chains_same_approval(self):
+        approval = self.orchestrator.approvals.request(
+            "G1#retry-1",
+            "hash-a",
+            ["comate", "infoflow"],
+            run_id=self.run_id,
+            member_policy={
+                "comate": ["manager@example.test"],
+                "infoflow": ["manager@example.test"],
+            },
+        )
+        old = self.orchestrator.state.claim_intent(
+            self.run_id,
+            "approval.delivery.infoflow",
+            f"approval.delivery:{approval['approval_id']}:infoflow",
+            {
+                "approval_id": approval["approval_id"],
+                "canonical_payload_sha256": "c" * 64,
+            },
+        )["intent"]
+
+        class FakeInfoflow:
+            def request(self, request):
+                approval_request = request["approval"]
+                return {
+                    "request_id": "infoflow-redelivery-1",
+                    "approval_id": approval_request["approval_id"],
+                    "run_id": approval_request["run_id"],
+                    "channel": "infoflow",
+                    "input_hash": approval_request["input_hash"],
+                    "member_policy": approval_request["member_policy"],
+                    "status": "PENDING",
+                    "created_at": "2026-09-30T00:00:00+00:00",
+                    "deadline_at": approval_request["deadline_at"],
+                    "heartbeat_at": None,
+                    "updated_at": None,
+                    "reply": None,
+                    "handoff": None,
+                    "reason_code": None,
+                }
+
+            def reconcile(self, _request):
+                return None
+
+        with patch(
+            "orchestrator._approval_context",
+            return_value={
+                "member_policy": approval["member_policy"],
+                "evidence": {"gate": {"subject": "G1", "effect": "continue"}},
+            },
+        ), patch("orchestrator._infoflow_approval_client", return_value=FakeInfoflow()):
+            result = _confirm_approval_redelivery(
+                self.orchestrator,
+                self.run_id,
+                approval["approval_id"],
+                "hash-a",
+                old["intent_id"],
+                "未收到，允许重发",
+                "已核对如流会话，没有审批消息或审批卡",
+                "manager@example.test",
+            )
+
+        self.assertEqual(result["reason_code"], "APPROVAL_REDELIVERY_CONFIRMED", result)
+        self.assertEqual(result["approval_id"], approval["approval_id"])
+        self.assertNotEqual(result["replacement_intent_id"], old["intent_id"])
+        self.assertEqual(self.orchestrator.state.pending_intents(self.run_id), [])
+        abandoned = self.orchestrator.state.result_by_idempotency_key(old["idempotency_key"])
+        self.assertEqual(abandoned["receipt"]["response"]["reason_code"], "INTENT_ABANDONED")
+
+    def test_confirm_approval_redelivery_rejects_wrong_confirmation_without_writes(self):
+        result = _confirm_approval_redelivery(
+            self.orchestrator,
+            self.run_id,
+            "missing-approval",
+            "hash-a",
+            "missing-intent",
+            "请重发",
+            "reason",
+            "manager@example.test",
+        )
+        self.assertEqual(result["reason_code"], "REDISPATCH_CONFIRMATION_REQUIRED")
+        self.assertEqual(self.orchestrator.state.pending_intents(self.run_id), [])
 
     def test_advance_without_an_approved_gate_asks_for_it_rather_than_guessing_a_hash(self):
         code, result = self._run(

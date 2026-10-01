@@ -34,8 +34,28 @@ Use this as the ordinary command path; run commands from the suite root (or use 
 | Inspect pinned inputs and current model job | `context CARD_OR_RUN` |
 | Continue after approval or a pause | `continue CARD_OR_RUN` |
 | Stop a run | `stop RUN_ID` |
+| Explicitly restart a stopped requirement | `start --fresh CARD PROJECT` |
 
 Confirm the project and iCafe card with the user before starting. If the card maps to multiple runs, show the candidates and ask which run to use; never pick one from recency or chat context. `process` reads the iCafe snapshot and starts/drives a new run only when no history exists; otherwise it continues the unique active run for the specified project. A terminal run returns `RUN_ALREADY_TERMINAL` without restarting; `PROJECT_MISMATCH` requires correcting the project. `start` + `drive` remains available for separate steps. A `PROJECT_NOT_READY` response means setup is required; see [`references/setup.md`](references/setup.md).
+
+### Comate command aliases
+
+When the user writes `/tom-autodev CARD ACTION`, interpret the natural-language action
+according to [`references/chat-commands.md`](references/chat-commands.md):
+
+- `开始` → `process CARD PROJECT`, which creates/continues and drives to the next
+  ProducerJob, approval, remote wait, terminal state, or block. It is not the same as
+  bare `start`, which only creates a run.
+- `结束` → `stop CARD_OR_RUN`, preserving the audit trail.
+- `状态` or `当成状态` → `status CARD_OR_RUN`.
+- `继续` → `continue CARD_OR_RUN`, not read-only `resume`.
+- `重新开始` → stop any selected active run, then `start --fresh CARD PROJECT` and
+  `drive` the new run. Never delete the old event/approval/artifact records.
+
+The project may be omitted only when it is read from a unique active run, a single
+confirmed card profile, or an explicit current-turn confirmation. Never infer it from
+the card prefix, checkout directory, or recency. Multiple candidates must be shown
+before any action.
 
 `process`, `drive` and `continue` let WorkerDriver own sequencing and stop at a ProducerJob, approval, remote wait, terminal state, or actionable block. When it returns a ProducerJob, load that job's pinned inputs, result schema, and applicable child skill, produce only its DraftContent, and submit it with `submit-draft CARD_OR_RUN JOB_ID DRAFT.json`. The CLI automatically requests the returned gate and exact `approval_input_hash`, returning `PARKED / APPROVAL_WAIT` after delivery; it never approves it. If delivery fails, use `continue` to retry with the saved candidate; do not change or regenerate it. Direct Python worker/bridge callers still handle `APPROVAL_REQUIRED` through the host approval adapter. After approval, call `continue` so the worker consumes the handoff and saved draft.
 
@@ -43,7 +63,7 @@ When `status` receives a card ID, it prefers the unique active run and falls bac
 
 `context CARD_OR_RUN` reads pinned action inputs, schema and the current ProducerJob (including saved draft state), without executing a phase, recovering SUBMIT or creating a job. Load referenced artifact content with `artifact show ARTIFACT_ID`; honor the job mode, including `{spec, dag}` for merged SPEC.
 
-`resume RUN_ID` remains a read-only checkpoint and uncertain-intent inspection command. It does not drive a run. Do not use `next` or `complete-phase` to sequence normal work; advanced recovery and manual controls are in [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md). Keep iCafe/project confirmation, human approvals, and final delivery confirmation with the user.
+`resume RUN_ID` remains a read-only checkpoint and uncertain-intent inspection command. It does not drive a run. To restart a stopped requirement, first stop/verify the old run and use `start --fresh`; this creates a new auditable run without deleting the old events, approvals or artifacts. Do not use `next` or `complete-phase` to sequence normal work; advanced recovery and manual controls are in [`../docs/OPERATIONS.md`](../docs/OPERATIONS.md). Keep iCafe/project confirmation, human approvals, and final delivery confirmation with the user.
 
 Do not infer projects from directories or bind iCafe cards without confirmation.
 
@@ -85,7 +105,34 @@ not a fictitious runner. Status must distinguish `待生成` from `已批准待�
 
 Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; Comate and Infoflow share one `approval_id`, and the first valid response wins. Every approval card must identify the affected repository/module, target branch, and pinned revision; a multi-repository change lists one row per repository and revision. G7 cards must also state whether the operation creates a new CR or appends an existing one.
 
-When a run needs a decision that is not a gate, ask it in 如流 as well as in the IDE (`scripts/ask_infoflow.py`, see `references/approval-policy.md`); a question that only exists in the CLI stays invisible until someone comes back to look.
+When a run needs a human decision, use Comate's structured question interface first:
+show each blocking choice as a题目 with background, explicit options, recommendation,
+impact, evidence, and an `其他（请补充）` option when appropriate. Use multiple
+questions in one round only when they are independent; ask dependent questions in
+later rounds after the prior answer is known. Do not make the user extract the
+question from a long paragraph. Map answers into the child phase DraftContent and
+keep unanswered items in `choice_questions` / `unresolved_frontier`; never infer a
+default answer. This interaction is still separate from approval: the worker creates
+G1 only after the final answered `decision-log` is submitted, and the user must
+approve that exact hash-bound result. Mirror the question and the final result in
+如流 when needed (`scripts/ask_infoflow.py`, see `references/approval-policy.md`);
+the weaker non-gate helper must never replace the approval ledger.
+
+Collaboration group creation is a durable external write. Treat a missing local receipt as an
+unknown outcome: the gateway must persist a redacted receipt keyed by the exact run intent, and
+`continue` must query that receipt before phase recovery blocks the worker. A successful create
+needs a valid `group_id`; `bot_id` may be absent when the platform does not echo the robot identity.
+Never search by group name heuristically or issue a second create. A legacy run without a gateway
+receipt remains `QUERY_REQUIRED` until an operator supplies an exact group ID for a controlled,
+audited adoption.
+
+All KU reads and writes go through the installed `/ku-doc-manage` skill entry point. The KU
+adapter discovers it from `TOM_AUTODEV_KU_BINARY`, then `TOM_AUTODEV_KU_SKILL_DIR` or
+`COMATE_SKILL_DIR`, and finally the standard personal skill location. It passes the resolved
+operator as `BAIDU_CC_USERNAME`. The adapter accepts the skill's bounded debug preamble before
+the JSON response, while still rejecting non-JSON output from other CLI adapters. If the KU
+entry point or identity is unavailable, report that concrete prerequisite instead of collapsing
+it into `KU_QUERY_UNKNOWN`.
 
 Approval settlement creates one durable, hash-bound resume handoff containing `approval_id`, `run_id`, `input_hash`, the source event, and the next action. In a live Comate turn, register `scripts/ide_turn_hook.py` as the `Stop` hook in `~/.comate/hooks.json` or `~/.comate/hooks.local.json`: after a valid APPROVE it returns a blocking continuation with `additionalContext`, so Comate resumes without a manual `继续`. The hook only hands control back to Comate; it never executes a phase or external write. Replays are idempotent and stale, rejected, expired, mismatched, or completed handoffs are ignored. `SessionEnd` is fire-and-forget and cannot create a new Agent turn, so an ended session receives the existing 如流 fallback notice; `orchestrator.py notify-ide-turn` remains the manual notification path.
 
@@ -120,7 +167,51 @@ The platform's own review (小码哥) is a second opinion taken after SUBMIT, wh
 
 Project skills supply repository topology, environment, iPipe parameter names, log locations, and version/counter inspection. This controller sequences `next` / G8 / `ipipe-rerun` / evidence ingest. For BGW, read `tom-project-bgw/references/runtime-topology.md` before filling or rerunning `P0新case回归`.
 
-Every child phase follows [`references/phase-protocol.md`](references/phase-protocol.md): consume and emit a schema-validated, content-hashed `ArtifactEnvelope`, persist changed requirement/design/implementation/review/diagnosis documents to KU, and link the artifact in an iCafe comment. Child skills return artifacts and evidence to this controller; only this controller owns iCafe/KU/iCode/iPipe adapters and G0-G10 gates.
+Every child phase follows [`references/phase-protocol.md`](references/phase-protocol.md): consume and emit a schema-validated, content-hashed `ArtifactEnvelope`, persist the human-readable phase document to KU, and link only the required milestone/evidence to iCafe. Child skills return artifacts and evidence to this controller; only this controller owns iCafe/KU/iCode/iPipe adapters and G0-G10 gates.
+
+### Knowledge-base collaboration contract
+
+KU is the human-facing collaboration record for a run. It must let a requirement owner,
+developer, tester, reviewer, or a new owner understand and take over the work without
+opening the control-plane database or reading raw JSON.
+
+For every phase that produces a requirement, decision, specification, task, workspace,
+plan, change, review, diagnosis, iPipe, or release artifact:
+
+- Publish a readable Markdown child document under the run root. Do not publish only a phase
+  title, a field summary, or a JSON dump.
+- The document must explain the one-line conclusion, purpose, upstream inputs, actual
+  analysis/design/change/verification content, confirmed items, outputs, upstream/downstream
+  relationship, risks/open items, and a hand-off checklist.
+- Put canonical JSON, content hash, input hash, approval binding, artifact id, revision,
+  iCafe/iPipe links, and external receipts in the audit section and canonical appendix.
+- Keep the body useful for comments and review. Large diffs, raw HTML, and unbounded logs
+  remain in ArtifactStore; the KU page shows file-level summaries, counts, reasons, tests,
+  and controlled references to the complete artifact.
+- If an artifact or evidence does not exist, state that it is not yet produced or is
+  unknown. Never fill a historical document with guessed design, code, test, delivery, or
+  release facts.
+
+The run root is a reading map, not just an index. It must describe the run purpose, card,
+current status/blocked state when known, reading order, the 00–11 document set, each phase's
+question/purpose/status/handoff, and current collaboration items. See
+[`references/phase-artifacts.md`](references/phase-artifacts.md) for the document map and
+artifact contract.
+
+If a paused run returns `WORKFLOW_SPEC_DRIFT`, do not edit its event or hash in place and do
+not use ordinary `continue` to bypass the guard. Use the dedicated
+`scripts/cli.py migrate-workflow-spec RUN_ID --request` gate, then apply the exact approved
+`approval_id` with `--approval-id`. This appends an auditable workflow-pin migration receipt
+and preserves the run's phase artifacts, existing approval bindings, and external intent
+records. Only after that migration is approved may an unknown approval delivery use
+`confirm-approval-redelivery`; that command still reuses the original approval_id/input_hash
+and never creates a new G1.
+
+For a legacy run, use `scripts/backfill_knowledge.py RUN_ID CARD_ID --project PROJECT
+--username USERNAME`. It reads only integrity-checked phase artifacts, publishes KU-only
+`-human-readable-r2` documents under a separate run root, and reports missing phases.
+It must not alter run state, repin workflow policy, create approvals, or emit duplicate
+iCafe comments. Use `--dry-run` before any external write.
 
 Persist events, artifacts, approvals, locks, heartbeats, external results, and handoffs. Resume only from a confirmed checkpoint; never submit, notify, rerun, or release twice.
 

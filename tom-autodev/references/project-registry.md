@@ -9,7 +9,9 @@ A project profile must define:
 - `project_skill`
 - `knowledge_sources`: provider, repository/revision, search scope, priority
 - `pipeline_profile`: stable pipeline ID, allowed parameters, stage classes, release rule
-- `environment_profile`: runner, image, tools, hardware/simulator, data, services
+- `environment_profile`: stable evidence-binding identity only. BGW runner, image,
+  toolchain, topology, data, services, and capacity are managed by iPipe and
+  `tom-project-bgw`; local profile setup does not verify their availability.
 - `approval_channels`: Comate and Infoflow configuration refs
 
 `review_provider` is optional. Review is produced by `tom-review` as a model phase, so a
@@ -33,3 +35,8 @@ answers, derives the dependent ones, validates, and writes the per-requirement p
 See [`setup.md`](setup.md).
 
 Keep credentials in existing login files or environment variables. Return `PROJECT_NOT_READY` when any required entry is absent or unreadable.
+
+The optional legacy `environment_profile.provenance` object is accepted only so
+older pinned profiles remain readable. New profiles omit it, the wizard never asks
+for it, and it does not affect `READY`; actual provenance comes from iPipe execution
+evidence and its environment fingerprint binding.

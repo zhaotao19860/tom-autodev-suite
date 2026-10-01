@@ -21,7 +21,7 @@ import { dirname } from 'node:path';
 const require = createRequire(GATEWAY + '/package.json');
 // Real SDK field mapping and limit checks; only the HTTP boundary is fake.
 const { BubbleWorkflowCardApi } = require('@baidu/infoflow-sdk-nodejs');
-const rendered = [], journal = [], handlers = {};
+const rendered = [], journal = [], handlers = {}, files = new Map();
 let httpHandler, failRender = false;
 const sdk = new BubbleWorkflowCardApi({
   async post(path, body) {
@@ -41,8 +41,28 @@ const context = vm.createContext({
     if (url.endsWith('/api/v1/auth/app_access_token')) {
       return { json: async () => ({ data: { app_access_token: 'fake-token', expire: 7200 } }) };
     }
-    assert.ok(url.endsWith('/api/v1/imRobot/detail'), 'unexpected outbound request');
-    return { status: 200, json: async () => ({ data: { agentId: 1 } }) };
+    if (url.endsWith('/api/v1/imRobot/detail')) {
+      return { status: 200, json: async () => ({ data: { agentId: 1 } }) };
+    }
+    if (url.endsWith('/api/v1/robot/group/create')) {
+      return {
+        status: 200,
+        json: async () => ({ code: 0, data: { errcode: 0, data: { groupid: '9001' } } }),
+      };
+    }
+    if (url.endsWith('/api/v1/robot/group/getGroupInfo')) {
+      return {
+        status: 200,
+        json: async () => ({ data: { errcode: 0, data: { groupId: '9001', name: 'BGW-19-syncookie' } } }),
+      };
+    }
+    if (url.endsWith('/api/v1/robot/group/memberList')) {
+      return {
+        status: 200,
+        json: async () => ({ data: { errcode: 0, data: { userInfoList: [{ email: 'owner@example.test' }] } } }),
+      };
+    }
+    throw new Error('unexpected outbound request: ' + url);
   },
 });
 const modules = {
@@ -51,10 +71,16 @@ const modules = {
     return { listen() {} };
   }},
   'node:fs': {
-    existsSync: () => false,
-    readFileSync() { throw new Error('must not read credentials'); },
+    existsSync(path) { return files.has(path); },
+    readFileSync(path) {
+      if (files.has(path)) return files.get(path);
+      throw new Error('must not read credentials');
+    },
     mkdirSync() {},
-    appendFileSync(_path, text) { journal.push(JSON.parse(text)); },
+    appendFileSync(path, text) {
+      journal.push(JSON.parse(text));
+      files.set(path, (files.get(path) || '') + text);
+    },
   },
   'node:crypto': { createHash },
   'node:path': { dirname },
@@ -84,6 +110,7 @@ const request = {
   approval_id: 'a'.repeat(32), target_type: 'user', target_id: 'owner',
   title: '审批', question: '请先核对材料',
   lines: Array.from({ length: 7 }, (_, i) => '材料' + i),
+  approvers: ['owner', 'qa'],
 };
 async function post(path, body) {
   const events = {};
@@ -142,12 +169,29 @@ assert.equal(rendered[0].card.buttons[0].event_key, 'approve.' + request.approva
 assert.equal(rendered[0].refresh_default_intermediate_state, false);
 """)
 
-    def test_click_remains_pending_and_preserves_buttons_and_seven_materials(self):
+    def test_approver_click_locks_card_as_selected_and_keeps_seven_materials(self):
         self._run(r"""
 const initial = await api.sendApprovalCard(request);
-for (const button of ['approve', 'reject', 'approve']) {
+await api.answerCard({
+  cardId: initial.card_id, cardInstanceId: 'instance-owner',
+}, 'approve.' + request.approval_id, 'owner');
+const card = rendered.at(-1);
+assert.equal(card.question, '已由 owner 处理：同意');
+assert.equal(card.card.buttons.length, 0);
+assert.equal(card.card.components.length, 8);
+assert.deepEqual(Array.from(card.card.components.slice(0, 7), x => x.text), request.lines);
+assert.equal(card.card.components.at(-1).component_id, 'click-status');
+assert.match(card.card.components.at(-1).text, /^已选择「同意」· owner · /);
+assert.equal(card.card_instance_id, 'instance-owner');
+assert.equal(api.live.has(initial.card_id), false);
+""")
+
+    def test_outsider_click_keeps_buttons_and_claims_no_decision(self):
+        self._run(r"""
+const initial = await api.sendApprovalCard({ ...request, target_type: 'group', target_id: '123' });
+for (const button of ['approve', 'reject']) {
   await api.answerCard({
-    cardId: initial.card_id, cardInstanceId: 'instance-owner',
+    cardId: initial.card_id, cardInstanceId: 'instance-group',
   }, button + '.' + request.approval_id, 'not-an-authorized-member');
   const card = rendered.at(-1);
   assert.match(card.question, /待权限和有效期校验/);
@@ -155,11 +199,26 @@ for (const button of ['approve', 'reject', 'approve']) {
   assert.equal(card.card.buttons.length, 2);
   assert.equal(card.card.components.length, 8);
   assert.deepEqual(Array.from(card.card.components.slice(0, 7), x => x.text), request.lines);
-  assert.equal(card.card.components.at(-1).component_id, 'click-status');
-  assert.match(card.card.components.at(-1).text, /点击待校验/);
-  assert.equal(card.card_instance_id, 'instance-owner');
+  assert.match(card.card.components.at(-1).text, /^点击待校验/);
 }
-assert.equal(api.live.get(initial.card_id).lines.length, 7);
+// The approver can still answer with one tap after the onlooker's clicks.
+assert.equal(api.live.has(initial.card_id), true);
+await api.answerCard({ cardId: initial.card_id }, 'approve.' + request.approval_id, 'qa');
+assert.equal(rendered.at(-1).question, '已由 qa 处理：同意');
+assert.equal(rendered.at(-1).card.buttons.length, 0);
+""")
+
+    def test_restart_without_known_approvers_keeps_the_card_answerable(self):
+        self._run(r"""
+const initial = await api.sendApprovalCard(request);
+api.live.clear();
+await api.answerCard({
+  cardId: initial.card_id, receiver: { type: 'user', id: 'owner' },
+  caller: { requestId: request.approval_id },
+}, 'approve.' + request.approval_id, 'owner');
+const card = rendered.at(-1);
+assert.match(card.question, /待权限和有效期校验/);
+assert.equal(card.card.buttons.length, 2);
 """)
 
     def test_restart_refresh_removes_previous_click_status_and_keeps_target(self):
@@ -190,12 +249,15 @@ const initial = await api.sendApprovalCard({
 assert.equal(rendered[0].card.components.length, 7);
 await api.answerCard({ cardId: initial.card_id }, 'approve.' + request.approval_id, 'owner');
 assert.equal(rendered.at(-1).card.components.length, 8);
-// Short cards must not accumulate a new status line on every click either.
 const short = await api.sendApprovalCard({ ...request, target_id: 'qa', lines: ['材料'] });
-for (let i = 0; i < 4; i++) {
-  await api.answerCard({ cardId: short.card_id }, 'approve.' + request.approval_id, 'qa');
+// Repeated onlooker taps must not accumulate a status line either.
+for (let i = 0; i < 3; i++) {
+  await api.answerCard({ cardId: short.card_id }, 'reject.' + request.approval_id, 'outsider');
   assert.equal(rendered.at(-1).card.components.length, 2);
 }
+await api.answerCard({ cardId: short.card_id }, 'reject.' + request.approval_id, 'qa');
+assert.equal(rendered.at(-1).card.components.length, 2);
+assert.equal(rendered.at(-1).question, '已由 qa 处理：驳回');
 """)
 
     def test_journal_callback_records_untrusted_click_without_approving(self):
@@ -225,6 +287,33 @@ const failed = await post('/card/approval', request);
 assert.equal(failed.status, 500);
 assert.equal(rendered.length, 1);
 assert.equal(api.live.size, 0);
+""")
+
+    def test_group_create_reads_nested_receipt_and_uses_requested_bot_identity(self):
+        self._run(r"""
+const created = await post('/group/create', {
+  group_name: 'BGW-19-syncookie',
+  owner: 'owner@example.test',
+  members: ['owner@example.test'],
+  friendly_level: 3,
+  idempotency_key: 'infoflow.group.create:run-1',
+});
+assert.equal(created.status, 200);
+assert.deepEqual(created.payload, {
+  ok: true, group_id: '9001', bot_id: '1', group_name: 'BGW-19-syncookie',
+});
+const recovered = await post('/group/receipt', {
+  idempotency_key: 'infoflow.group.create:run-1',
+});
+assert.equal(recovered.status, 200);
+assert.equal(recovered.payload.receipt.group_id, '9001');
+assert.equal(recovered.payload.receipt.bot_id, '1');
+const verified = await post('/group/verify', { group_id: '9001' });
+assert.equal(verified.status, 200);
+assert.deepEqual(verified.payload.verification, {
+  group_id: '9001', group_name: 'BGW-19-syncookie',
+  members_queried: true, member_emails: ['owner@example.test'],
+});
 """)
 
 

@@ -89,6 +89,7 @@ class CliTransport:
         timeout_seconds: float = 30,
         stderr_limit: int = 4096,
         environment: Mapping[str, str] | None = None,
+        allow_json_preamble: bool = False,
     ):
         if timeout_seconds <= 0 or stderr_limit < 0:
             raise ValueError("CLI_TRANSPORT_CONFIG_INVALID")
@@ -100,6 +101,7 @@ class CliTransport:
         self.runner = runner
         self.timeout_seconds = timeout_seconds
         self.stderr_limit = stderr_limit
+        self.allow_json_preamble = allow_json_preamble
         self.environment = exported
         self.last_diagnostic: dict[str, Any] = {}
 
@@ -144,7 +146,11 @@ class CliTransport:
         try:
             payload = json.loads(completed.stdout)
         except (TypeError, json.JSONDecodeError):
-            raise CliTransportError("CLI_INVALID_JSON", diagnostic) from None
+            if not self.allow_json_preamble:
+                raise CliTransportError("CLI_INVALID_JSON", diagnostic) from None
+            payload = _decode_json_with_preamble(completed.stdout)
+            if payload is None:
+                raise CliTransportError("CLI_INVALID_JSON", diagnostic) from None
         if not isinstance(payload, dict):
             raise CliTransportError("CLI_INVALID_JSON", diagnostic)
         if business_field is not None:
@@ -163,6 +169,21 @@ class CliTransport:
             raise ValueError("CLI_ARGV_INVALID")
         return command
 
+
+def _decode_json_with_preamble(raw: str) -> dict[str, Any] | None:
+    """Accept CLI diagnostics before the first JSON object without logging them."""
+    if not isinstance(raw, str):
+        return None
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(raw):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(raw[index:])
+        except json.JSONDecodeError:
+            continue
+        return value if isinstance(value, dict) else None
+    return None
 
 def _redact_argv(argv: list[str]) -> list[str]:
     redacted: list[str] = []

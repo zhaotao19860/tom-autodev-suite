@@ -64,6 +64,11 @@ function journalPath() {
     || `${homedir()}/.tom-autodev/infoflow-replies.jsonl`
 }
 
+function groupReceiptPath() {
+  return process.env.TOM_AUTODEV_INFOFLOW_GROUP_RECEIPT_JOURNAL
+    || `${homedir()}/.tom-autodev/infoflow-group-receipts.jsonl`
+}
+
 function baseUrl() {
   return (process.env.INFOFLOW_BASE_URL || DEFAULT_BASE_URL).replace(/\/$/, '')
 }
@@ -139,7 +144,7 @@ async function sendMarkdown(recipients, content) {
 // Group creation and group sends live here for the same reason single sends do:
 // the scripts in `infoflow-message-group` need INFOFLOW_TOKEN in their
 // environment, and tom-autodev's CLI boundary refuses to carry secrets.
-async function authorizedPost(path, body, read) {
+async function authorizedPost(path, body, read, observe = null) {
   let token = await accessToken()
   for (const attempt of [0, 1]) {
     const response = await fetch(`${baseUrl()}${path}`, {
@@ -156,6 +161,7 @@ async function authorizedPost(path, body, read) {
       token = await accessToken(true)
       continue
     }
+    if (typeof observe === 'function') observe(payload)
     return read(payload)
   }
   throw new Error('request failed')
@@ -183,21 +189,113 @@ async function botAgentId() {
   }
 }
 
-function groupReceipt(payload) {
-  const data = isRecord(payload) && isRecord(payload.data) ? payload.data : payload
-  const identity = isRecord(data)
-    // The create endpoint answers with `groupid`; the other group APIs use `groupId`.
-    ? readString(data.groupid || data.groupId || data.group_id || data.chatId)
-    : ''
-  if (!identity) {
-    throw new Error(`group create rejected: ${JSON.stringify(payload)}`)
+function responseEnvelopes(payload) {
+  const envelopes = []
+  let current = payload
+  for (let depth = 0; depth < 4 && isRecord(current); depth++) {
+    envelopes.push(current)
+    current = isRecord(current.data) ? current.data : null
   }
-  const failed = isRecord(data) && Array.isArray(data.failMembers) ? data.failMembers : []
+  return envelopes
+}
+
+function groupReceipt(payload, fallbackBotId = null) {
+  const envelopes = responseEnvelopes(payload)
+  const identity = envelopes
+    .map((data) => readString(data.groupid || data.groupId || data.group_id || data.chatId))
+    .find(Boolean) || ''
+  if (!identity) {
+    throw new Error(`group create rejected: ${JSON.stringify(payload).slice(0, 400)}`)
+  }
+  for (const data of envelopes) {
+    const code = data.errcode
+    if (code !== undefined && code !== null && !['0', '200'].includes(String(code))) {
+      throw new Error(`group create rejected: ${code}`)
+    }
+  }
+  const failed = envelopes.flatMap((data) => [
+    ...(Array.isArray(data.failMembers) ? data.failMembers : []),
+    ...(Array.isArray(data.failRobotIds) ? data.failRobotIds : []),
+    ...(Array.isArray(data.failManager) ? data.failManager : []),
+    ...(Array.isArray(data.failRobotManager) ? data.failRobotManager : []),
+  ])
   if (failed.length) {
     throw new Error(`group members rejected: ${JSON.stringify(failed)}`)
   }
-  const bot = isRecord(data) ? readString(data.botId || data.bot_id) : ''
+  const bot = envelopes
+    .map((data) => readString(data.botId || data.bot_id))
+    .find(Boolean) || readString(fallbackBotId)
   return bot ? { group_id: identity, bot_id: bot } : { group_id: identity }
+}
+
+function appendGroupReceipt(entry) {
+  if (!entry || !entry.idempotency_key || !entry.group_id) return
+  const path = groupReceiptPath()
+  mkdirSync(dirname(path), { recursive: true })
+  appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf8')
+}
+
+function findGroupReceipt(idempotencyKey) {
+  if (!idempotencyKey || !existsSync(groupReceiptPath())) return null
+  const lines = readFileSync(groupReceiptPath(), 'utf8').split(/\r?\n/).filter(Boolean)
+  for (let index = lines.length - 1; index >= 0; index--) {
+    try {
+      const entry = JSON.parse(lines[index])
+      if (entry.idempotency_key === idempotencyKey && entry.group_id) return entry
+    } catch {
+      // Ignore a torn trailing journal line; earlier receipts remain usable.
+    }
+  }
+  return null
+}
+
+function groupInfoReceipt(payload, requestedId) {
+  const envelopes = responseEnvelopes(payload)
+  for (const data of envelopes) {
+    const code = data.errcode
+    if (code !== undefined && code !== null && !['0', '200'].includes(String(code))) {
+      throw new Error(`group info rejected: ${code}`)
+    }
+  }
+  const groupId = envelopes
+    .map((data) => readString(data.groupId || data.groupid || data.group_id))
+    .find(Boolean) || requestedId
+  const groupName = envelopes
+    .map((data) => readString(data.name || data.groupName || data.group_name))
+    .find(Boolean) || ''
+  if (!groupId || !groupName) {
+    throw new Error(`group info response invalid: ${JSON.stringify(payload).slice(0, 400)}`)
+  }
+  return { group_id: groupId, group_name: groupName }
+}
+
+function checkedGroupMembers(payload) {
+  const envelopes = responseEnvelopes(payload)
+  for (const data of envelopes) {
+    const code = data.errcode
+    if (code !== undefined && code !== null && !['0', '200'].includes(String(code))) {
+      throw new Error(`group member query rejected: ${code}`)
+    }
+  }
+  const users = envelopes.flatMap((data) => Array.isArray(data.userInfoList) ? data.userInfoList : [])
+  const emails = users
+    .map((user) => readString(user.email || user.userEmail || user.userId))
+    .filter(Boolean)
+  return { members_queried: true, member_emails: emails }
+}
+
+async function verifyGroup(groupId) {
+  const info = await authorizedPost(
+    '/api/v1/robot/group/getGroupInfo',
+    JSON.stringify({ groupId: Number(groupId) }),
+    (payload) => groupInfoReceipt(payload, groupId),
+  )
+  const members = await authorizedPost(
+    '/api/v1/robot/group/memberList',
+    JSON.stringify({ groupId: Number(groupId), recallType: 0 }),
+    checkedGroupMembers,
+  )
+  return { ...info, ...members }
 }
 
 async function createGroup(request) {
@@ -213,7 +311,25 @@ async function createGroup(request) {
     managers: [],
     robotManagers: [],
   })
-  return await authorizedPost('/api/v1/robot/group/create', body, groupReceipt)
+  const receipt = await authorizedPost(
+    '/api/v1/robot/group/create',
+    body,
+    (payload) => groupReceipt(payload, self),
+    (payload) => {
+      try {
+        const observed = groupReceipt(payload, self)
+        appendGroupReceipt({
+          idempotency_key: request.idempotency_key,
+          group_id: observed.group_id,
+          group_name: request.group_name,
+          ...(observed.bot_id ? { bot_id: observed.bot_id } : {}),
+        })
+      } catch {
+        // The parser below reports the bounded, truncated error to the caller.
+      }
+    },
+  )
+  return receipt
 }
 
 async function sendGroupMarkdown(groupId, content, atUsers) {
@@ -301,6 +417,10 @@ async function sendApprovalCard(request) {
     target_id: request.target_id,
     title: request.title,
     question: request.question,
+    // Who may answer this gate. The gateway authorizes nothing; it only uses this to
+    // decide whether a tap may render the card as answered, so an onlooker in the
+    // collaboration group cannot blank the buttons the real approver still needs.
+    approvers: request.approvers,
     // Reserve one component for the pending-validation status after a tap.
     lines: request.lines.slice(0, 7),
     buttons: [
@@ -386,6 +506,7 @@ async function renderCard(request) {
       // material lines directly.
       lines: [...(request.base_lines || request.lines)],
       labels: Object.fromEntries(request.buttons.map((button) => [button.eventKey, button.text])),
+      approvers: Array.isArray(request.approvers) ? [...request.approvers] : null,
     })
   }
   return {
@@ -421,15 +542,21 @@ async function answerCard(data, eventKey, sender) {
   const label = known?.labels?.[event]
     || (parsed?.text?.startsWith('APPROVE ') ? '同意'
       : parsed?.text?.startsWith('REJECT ') ? '驳回' : event)
-  const approvalId = parsed?.subject || known?.request_id || readString(
-    isRecord(data.caller) ? data.caller.requestId : '',
+  // A group card is shared, so the tap may come from someone who cannot answer this
+  // gate. Only an approver's tap may present the card as answered and drop the
+  // buttons; anyone else's tap is recorded without taking the one-tap path away from
+  // the people who still have to decide. A restart loses the list, and then the card
+  // stays answerable rather than claiming a decision it cannot attribute.
+  const approvers = Array.isArray(known?.approvers) ? known.approvers : null
+  const answered = approvers !== null && approvers.includes(sender)
+  const buttons = answered ? [] : (
+    approvalIdOf(parsed, known, data)
+      ? [
+          { eventKey: buttonEventKey('approve', approvalIdOf(parsed, known, data)), text: '同意' },
+          { eventKey: buttonEventKey('reject', approvalIdOf(parsed, known, data)), text: '驳回' },
+        ]
+      : []
   )
-  const buttons = approvalId
-    ? [
-        { eventKey: buttonEventKey('approve', approvalId), text: '同意' },
-        { eventKey: buttonEventKey('reject', approvalId), text: '驳回' },
-      ]
-    : []
   await renderCard({
     card_id: cardId,
     request_id: known?.request_id || readString(isRecord(data.caller) ? data.caller.requestId : ''),
@@ -437,19 +564,29 @@ async function answerCard(data, eventKey, sender) {
     target_type: targetType,
     target_id: targetId,
     title: known?.title || '',
-    // A click is only an input to the reply consumer. Until the ledger accepts
-    // it, the card must not claim that anyone approved or rejected anything.
-    question: '已收到点击，待权限和有效期校验；以审批回执为准。',
+    approvers: approvers === null ? undefined : [...approvers],
+    question: answered
+      ? `已由 ${sender} 处理：${label}`
+      : '已收到点击，待权限和有效期校验；以审批回执为准。',
     buttons,
     // Keep the status separate from the material so repeated taps and restart
-    // recovery cannot grow the card or make an old status look reviewable.
+    // recovery cannot grow the card or echo an old status back as material.
     lines: [...baseLines.slice(0, 7), {
       componentId: 'click-status',
       type: 'text',
-      text: `点击待校验「${label}」· ${sender} · ${nowIso()}`,
+      text: answered
+        ? `已选择「${label}」· ${sender} · ${nowIso()}`
+        : `点击待校验「${label}」· ${sender} · ${nowIso()}`,
     }],
     base_lines: [...baseLines.slice(0, 7)],
   })
+  if (answered) live.delete(cardId)
+}
+
+function approvalIdOf(parsed, known, data) {
+  return parsed?.subject || known?.request_id || readString(
+    isRecord(data.caller) ? data.caller.requestId : '',
+  )
 }
 
 function journalInteraction(data) {
@@ -667,8 +804,30 @@ const server = createServer(async (req, res) => {
       }
       const receipt = await createGroup({
         group_name: groupName, owner, members, friendly_level: 3,
+        idempotency_key: readString(body.idempotency_key),
       })
       sendJson(res, 200, { ok: true, ...receipt, group_name: groupName })
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/group/receipt') {
+      const body = await parseJsonBody(req)
+      const receipt = findGroupReceipt(readString(body.idempotency_key))
+      if (!receipt) {
+        sendJson(res, 404, { ok: false, error: 'group receipt not found' })
+        return
+      }
+      sendJson(res, 200, { ok: true, receipt })
+      return
+    }
+    if (req.method === 'POST' && url.pathname === '/group/verify') {
+      const body = await parseJsonBody(req)
+      const groupId = readString(body.group_id)
+      if (!/^\d+$/.test(groupId)) {
+        sendJson(res, 400, { ok: false, error: 'numeric group_id is required' })
+        return
+      }
+      const verification = await verifyGroup(groupId)
+      sendJson(res, 200, { ok: true, verification })
       return
     }
     if (req.method === 'POST' && url.pathname === '/group/members') {
@@ -734,6 +893,9 @@ const server = createServer(async (req, res) => {
       const lines = Array.isArray(body.lines)
         ? body.lines.map((line) => readString(line).trim()).filter(Boolean)
         : []
+      const approvers = Array.isArray(body.approvers)
+        ? body.approvers.map((item) => readString(item).trim()).filter(Boolean)
+        : null
       if (
         !/^[0-9a-f]{32}$/.test(approvalId)
         || !['group', 'user'].includes(targetType)
@@ -753,6 +915,7 @@ const server = createServer(async (req, res) => {
         title,
         question,
         lines,
+        approvers,
       })
       sendJson(res, 200, { ok: true, approval_id: approvalId, ...receipt })
       return

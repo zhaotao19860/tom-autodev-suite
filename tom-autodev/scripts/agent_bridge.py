@@ -12,6 +12,7 @@ from typing import Any, Callable
 import worker_driver
 import run_brief
 import workflow_spec
+import collaboration as collaboration_module
 
 _RUN_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 
@@ -132,6 +133,13 @@ def resolve_status_target(orchestrator: Any, target: str) -> dict[str, Any]:
     }
 
 
+def _binding_error(orchestrator: Any, run_id: str) -> dict[str, Any] | None:
+    events = orchestrator.state.events(run_id)
+    if not events or not isinstance(events[0].get("payload"), dict):
+        return None
+    return collaboration_module.collaboration_binding_error(events[0]["payload"], run_id)
+
+
 class AgentBridge:
     """Thin, stateless assembly boundary for agent-facing run operations."""
 
@@ -157,12 +165,18 @@ class AgentBridge:
         return options
 
     def drive(self, run_id: str) -> dict[str, Any]:
+        blocked = _binding_error(self.orchestrator, run_id)
+        if blocked is not None:
+            return blocked
         result = worker_driver.advance(
             self.orchestrator, run_id, **self._worker_options(run_id)
         )
         return _json_safe(result)
 
     def continue_run(self, run_id: str) -> dict[str, Any]:
+        blocked = _binding_error(self.orchestrator, run_id)
+        if blocked is not None:
+            return blocked
         pending_approval_handoffs = [
             handoff for handoff in self.orchestrator.state.incomplete_handoffs(run_id)
             if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"

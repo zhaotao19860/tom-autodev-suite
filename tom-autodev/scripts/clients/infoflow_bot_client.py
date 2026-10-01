@@ -101,6 +101,40 @@ class InfoflowBotClient:
             receipt["bot_id"] = response["bot_id"]
         return receipt
 
+    def query_group_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            return None
+        self.ensure_ready()
+        try:
+            response = self._request(
+                "POST", "/group/receipt", {"idempotency_key": idempotency_key}
+            )
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            raise InfoflowRequestError(
+                "GROUP_RECEIPT_QUERY_FAILED",
+                "REJECTED_BEFORE_SEND" if 400 <= error.code < 500 else "UNKNOWN_REMOTE_OUTCOME",
+            ) from None
+        except (urllib.error.URLError, OSError):
+            raise InfoflowRequestError(
+                "INFOFLOW_GATEWAY_UNAVAILABLE", "UNKNOWN_REMOTE_OUTCOME"
+            ) from None
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            return None
+        receipt = response.get("receipt")
+        return receipt if isinstance(receipt, dict) else None
+
+    def verify_group(self, group_id: str) -> dict[str, Any] | None:
+        if not isinstance(group_id, str) or not group_id.isdigit():
+            return None
+        try:
+            response = self._post("/group/verify", {"group_id": group_id})
+        except (InfoflowRequestError, ValueError):
+            return None
+        verification = response.get("verification")
+        return verification if isinstance(verification, dict) else None
+
     def send_group_markdown(
         self, group_id: str, content: str, at_users: list[str]
     ) -> dict[str, Any]:
@@ -128,6 +162,7 @@ class InfoflowBotClient:
         title: str,
         question: str,
         lines: list[str],
+        approvers: list[str] | None = None,
     ) -> dict[str, Any]:
         """Send the one-tap variant of a gate as an interactive card.
 
@@ -145,6 +180,9 @@ class InfoflowBotClient:
                 "title": title,
                 "question": question,
                 "lines": list(lines),
+                # The gateway authorizes nothing; it only needs to know whose tap may
+                # render the card as answered, so an onlooker cannot blank the buttons.
+                "approvers": sorted({str(item) for item in approvers or [] if str(item)}),
             },
         )
         identity = response.get("card_id")

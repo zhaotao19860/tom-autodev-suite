@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "infoflow-gateway"))
 
 from approval_ledger import ApprovalLedger
-from collaboration import CollaborationSession
+from collaboration import CollaborationSession, collaboration_binding_error
 from clients.infoflow_approval_client import InfoflowApprovalClient
 from clients.infoflow_group_client import InfoflowGroupClient
 from gateway import PendingApprovalGateway
@@ -128,6 +128,7 @@ class CollaborationSafetyTests(unittest.TestCase):
         profile = {
             "project_id": "bgw",
             "approval_channels": {
+                "group_topic": "支持基于url负载均衡",
                 "role_members": {
                     "development": ["dev@example.test"],
                     "test": ["test@example.test"],
@@ -154,6 +155,8 @@ class CollaborationSafetyTests(unittest.TestCase):
         self.assertEqual(binding["run_id"], started["run_id"])
         self.assertEqual(binding["project"], "bgw")
         self.assertEqual(binding["card_id"], "BGW-1")
+        self.assertEqual(binding["group_topic"], "Actual-requi")
+        self.assertEqual(binding["group_name"], "BGW-1-Actual-requi")
         self.assertEqual(binding["owner"], "owner@example.test")
         self.assertEqual(binding["roles"], {
             "development": ["dev@example.test"],
@@ -186,6 +189,30 @@ class CollaborationSafetyTests(unittest.TestCase):
                 prerequisites, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         ).hexdigest())
+
+    def test_stale_group_topic_is_rejected_before_group_creation(self):
+        snapshot = requirement_snapshot()
+        payload = {
+            "project": "bgw",
+            "requirement_id": "BGW-1",
+            "intake_hash_version": "v2",
+            "requirement_snapshot": snapshot,
+            "collaboration_binding": {
+                "run_id": "run-1",
+                "card_id": "BGW-1",
+                "card_title": snapshot["title"],
+                "card_content_hash": snapshot["content_hash"],
+                "group_topic": "支持基于url负载均衡",
+                "group_name": "BGW-1-支持基于url负载均衡",
+            },
+        }
+
+        conflict = collaboration_binding_error(payload, "run-1")
+
+        self.assertEqual(conflict["reason_code"], "COLLABORATION_BINDING_MISMATCH")
+        self.assertEqual(conflict["expected_group_name"], "BGW-1-Actual-requi")
+        self.assertEqual(conflict["recorded_group_name"], "BGW-1-支持基于url负载均衡")
+        self.assertFalse(conflict["retry_allowed"])
 
     def test_start_verifies_the_complete_cafe_snapshot_before_g0_uses_its_title(self):
         profile = {
@@ -1166,26 +1193,48 @@ class ClientAndOrchestratorSafetyTests(unittest.TestCase):
                 return {"message_id": "9", "group_id": group_id}
         bot = Bot()
         client = InfoflowGroupClient(bot_client=bot)
-        group = client.create_or_reuse({"group_name": "n", "owner": "owner@example.test", "member_snapshot": ["owner@example.test"], "friendlyLevel": 3})
+        group = client.create_or_reuse({"group_name": "n", "owner": "owner@example.test", "member_snapshot": ["owner@example.test"], "friendlyLevel": 3, "idempotency_key": "group-key"})
         message = client.send_markdown("8", "@owner@example.test body", ["owner@example.test"], "k")
         self.assertEqual(group, {"group_id": "8", "group_name": "n", "bot_id": "bot-1"})
         self.assertEqual(message["message_id"], "9")
         self.assertEqual(bot.calls[0][1]["friendly_level"], 3)
+        self.assertEqual(bot.calls[0][1]["idempotency_key"], "group-key")
         self.assertEqual(bot.calls[1][3], ["owner@example.test"])
 
-    def test_group_client_rejects_a_group_receipt_without_its_bot(self):
+    def test_group_client_accepts_a_group_receipt_without_an_echoed_bot(self):
         class Bot:
             def create_group(self, _request):
                 return {"group_id": "41"}
 
         client = InfoflowGroupClient(bot_client=Bot())
-        with self.assertRaisesRegex(ValueError, "BOT_AGENT_ID_UNAVAILABLE"):
+        self.assertEqual(
             client.create_or_reuse({
                 "group_name": "BGW-19-Login-flow",
                 "owner": "owner@example.test",
                 "member_snapshot": ["owner@example.test"],
                 "friendlyLevel": 3,
-            })
+            }),
+            {"group_id": "41", "group_name": "BGW-19-Login-flow"},
+        )
+        class VerifyingBot:
+            def verify_group(self, _group_id):
+                return {
+                    "group_id": "41",
+                    "group_name": "BGW-19-Login-flow",
+                    "members_queried": True,
+                    "member_emails": ["owner@example.test"],
+                }
+
+        self.assertEqual(
+            InfoflowGroupClient(bot_client=VerifyingBot()).verify_group(
+                "41", "BGW-19-Login-flow", ["owner@example.test"]
+            ),
+            {
+                "group_id": "41",
+                "group_name": "BGW-19-Login-flow",
+                "members_queried": True,
+            },
+        )
         with self.assertRaisesRegex(ValueError, "MESSAGE_MENTION_MISMATCH"):
             client.send_markdown("8", "body", ["owner@example.test"], "k")
 

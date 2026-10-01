@@ -20,10 +20,14 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
         return "已完成"
     if state == "STOPPED":
         return "已停止"
+    if pending or blocked == "RECOVERY_REQUIRED":
+        return "待恢复"
     if open_gates:
         return "待审批"
     if approved:
         return "已批准待提交"
+    if producer_job and producer_job.get("awaiting_answers"):
+        return "待答题"
     if producer_job and producer_job.get("status") == "FULFILLED":
         return "草案已保存待审批"
     if action.get("child_skill") is not None:
@@ -107,7 +111,9 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         resolved = row.get("resolved_at") or ""
         if action_name and resolved >= latest_approve_at.get(action_name, ""):
             latest_approve_at[action_name] = resolved
-    open_gates = []
+    # A reissued approval keeps the same bare gate (for example G1#retry-1 is
+    # still G1), but only the newest unresolved attempt is actionable.
+    latest_unresolved: dict[str, dict[str, Any]] = {}
     for row in approvals:
         if row.get("effective_decision"):
             continue
@@ -117,18 +123,36 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         created = row.get("created_at") or row.get("deadline_at") or ""
         if action_name in latest_approve_at and latest_approve_at[action_name] >= created:
             continue
-        open_gates.append(
-            {
-                "action": row.get("action"),
-                "approval_id": row.get("approval_id"),
-                "input_hash": row.get("input_hash"),
-                "deadline_at": row.get("deadline_at"),
-            }
-        )
-    pending = [] if terminal else [
-        {"operation": item.get("operation"), "intent_id": item.get("intent_id")}
-        for item in orchestrator.state.pending_intents(run_id)
+        previous = latest_unresolved.get(action_name)
+        previous_created = previous.get("created_at") if previous else ""
+        if previous is None or created >= previous_created:
+            latest_unresolved[action_name] = row
+    open_gates = [
+        {
+            "action": row.get("action"),
+            "approval_id": row.get("approval_id"),
+            "input_hash": row.get("input_hash"),
+            "deadline_at": row.get("deadline_at"),
+        }
+        for row in latest_unresolved.values()
     ]
+    pending = []
+    if not terminal:
+        for item in orchestrator.state.pending_intents(run_id):
+            entry = {
+                "operation": item.get("operation"),
+                "intent_id": item.get("intent_id"),
+            }
+            if item.get("operation") == "approval.delivery.infoflow":
+                payload = item.get("payload")
+                if isinstance(payload, dict) and payload.get("approval_id"):
+                    entry.update(
+                        {
+                            "recovery_action": "CONFIRM_APPROVAL_REDELIVERY",
+                            "approval_id": payload["approval_id"],
+                        }
+                    )
+            pending.append(entry)
     monitoring_reader = getattr(orchestrator.state, "ipipe_monitoring", None)
     monitoring = monitoring_reader(run_id) if callable(monitoring_reader) else []
     blocked = None if terminal or action.get("ok") else action.get("reason_code")
@@ -180,13 +204,26 @@ def _producer_context(orchestrator: Any, run_id: str, action: dict[str, Any], te
     payload = job.get("payload") if isinstance(job, dict) else None
     payload = payload if isinstance(payload, dict) else {}
     status = job.get("status") if isinstance(job, dict) else "PENDING"
-    draft_state = "已保存待审批" if status == "FULFILLED" else "待生成"
+    # A GRILL draft that still carries open questions is FULFILLED but cannot open
+    # G1: `continue` would only fail again. Reporting it as "待审批" sent the operator
+    # after an approval that is never created, so it is a state of its own.
+    draft = job.get("draft") if isinstance(job, dict) else None
+    draft = draft if isinstance(draft, dict) else {}
+    awaiting_answers = status == "FULFILLED" and (
+        draft.get("decision_result") == "UNRESOLVED" or bool(draft.get("choice_questions"))
+    )
+    draft_state = (
+        "待答题" if awaiting_answers
+        else "已保存待审批" if status == "FULFILLED"
+        else "待生成"
+    )
     return {
         "job_id": job.get("job_id") if isinstance(job, dict) else f"producer:{action['action_id']}",
         "phase": payload.get("phase") or action.get("phase"),
         "schema": action.get("result_schema") or payload.get("result_schema"),
         "status": status,
         "draft_state": draft_state,
+        "awaiting_answers": awaiting_answers,
     }
 
 
@@ -201,17 +238,51 @@ def _next_step(
 ) -> dict[str, str]:
     """Who acts next, and what exactly they do.
 
-    An open gate outranks everything else: the phase cannot land until it is
-    answered, so telling the operator to keep working would be wrong.
+    An unresolved external write outranks an open gate: the approval cannot be
+    safely acted on until the delivery lineage is settled or explicitly handed
+    to controlled redelivery.
     """
     if state in {"RELEASE_SUCCESS", "STOPPED"}:
         return {"owner": "-", "text": "运行已结束，无后续动作"}
+    if blocked == "RECOVERY_REQUIRED" or pending:
+        redelivery_candidates = [
+            item
+            for item in pending
+            if item.get("recovery_action") == "CONFIRM_APPROVAL_REDELIVERY"
+        ]
+        current_approval_ids = {
+            item.get("approval_id") for item in open_gates if item.get("approval_id")
+        }
+        redelivery = next(
+            (
+                item for item in redelivery_candidates
+                if item.get("approval_id") in current_approval_ids
+            ),
+            None,
+        ) or (redelivery_candidates[-1] if redelivery_candidates else None)
+        if redelivery:
+            # `confirm-approval-redelivery` takes the intent id as a required
+            # argument, so a status that hides it forces the operator to read the
+            # state database by hand.
+            intent = redelivery.get("intent_id") or "-"
+            return {
+                "owner": "你",
+                "text": (
+                    f"如流审批投递结果未知（审批 {redelivery['approval_id']}，intent {intent}）。"
+                    "如果你已确认没有收到，请回复“未收到，允许重发”，"
+                    "Comate 将绑定当前审批和 intent 做一次受控重发；不会创建新审批。"
+                ),
+            }
+        operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
+        return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
     if open_gates:
         gate = open_gates[0]
+        approval_id = gate.get("approval_id") or "未知"
         return {
             "owner": "你",
             "text": (
-                f"请查看已创建的如流审批卡，核对材料后处理 {gate['action']} 门"
+                f"请查看已创建的如流审批卡（审批 ID {approval_id}），"
+                f"核对材料后处理 {gate['action']} 门"
                 f"（截止 {gate['deadline_at']}）；本消息不是审批"
             ),
         }
@@ -221,9 +292,6 @@ def _next_step(
     # approve something that does not exist.
     if blocked == "APPROVAL_REQUIRED" and not open_gates:
         return {"owner": "Comate", "text": "审批记录尚未创建；Comate先补齐本次审批材料并创建审批"}
-    if blocked == "RECOVERY_REQUIRED" or pending:
-        operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
-        return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
     if blocked:
         return {"owner": "你", "text": _BLOCKED_HINT.get(blocked, f"处理 {blocked}")}
     if approved:
@@ -239,8 +307,23 @@ def _next_step(
                 f"{approved['action']} 已批准待提交；调用 continue，由 worker 复用已保存内容并执行下一步"
             ),
         }
+    if producer_job and producer_job.get("awaiting_answers"):
+        return {
+            "owner": "你",
+            "text": (
+                f"决策日志仍有未答问题，尚未创建审批；先回答问题，Comate 再以同一 job "
+                f"{producer_job.get('job_id')} 重新提交草案"
+            ),
+        }
     if producer_job and producer_job.get("status") == "FULFILLED":
         return {"owner": "Comate", "text": "草案已保存；调用 continue 补发对应审批并等待审批结果"}
+    if action.get("child_skill") is not None:
+        work = _WORK.get(state, state)
+        skill = action.get("child_skill")
+        return {
+            "owner": "Comate",
+            "text": f"{work}，当前为待生成；调用 {skill} 生成内容后提交",
+        }
     work = _WORK.get(state, state)
     gate = action.get("required_human_gate")
     if gate:
@@ -304,7 +387,10 @@ def render(brief: dict[str, Any]) -> str:
             f"Schema {producer.get('schema') or '-'} · 草案{producer.get('draft_state') or '-'}"
         )
     step = brief["next"]
-    if brief["waiting_on"]:
+    if brief["waiting_on"] and not (brief["in_flight"] or brief.get("blocked")):
+        # Only say "open the card" when the card's delivery is settled. An unknown
+        # delivery or a blocked run keeps the derived recovery instruction, which
+        # otherwise sent the operator after a card that never arrived.
         gates = "、".join(sorted({str(item.get("action") or "审批") for item in brief["waiting_on"]}))
         next_text = f"打开如流审批卡处理 {gates}"
     elif brief.get("status_label") == "已完成":

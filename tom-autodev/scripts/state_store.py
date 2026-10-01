@@ -913,12 +913,16 @@ class StateStore:
     ) -> dict[str, Any]:
         """CAS-reopen a content-invalid draft and archive the entire rejected attempt.
 
-        The worker supplies the common validator's rejection. Action changes,
+        The worker supplies the common validator's rejection, or the explicit
+        GRILL ``DECISION_REQUIRED`` parking result. Action changes,
         concurrent replacement, completed actions and uncertain external writes
         fail closed. Cache eviction is restricted to the archived content hash;
         model receipts and approval history are never removed.
         """
-        if validation.get("ok") is not False or validation.get("content_invalid") is not True:
+        if validation.get("ok") is not False or (
+            validation.get("content_invalid") is not True
+            and validation.get("reason_code") != "DECISION_REQUIRED"
+        ):
             return {"ok": False, "reason_code": "DRAFT_INVALIDITY_UNPROVEN"}
         encoded_validation = _encode(validation)
         encoded_draft = _encode(expected["draft"])

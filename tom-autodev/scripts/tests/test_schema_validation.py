@@ -40,6 +40,7 @@ def specialized_examples():
         "requirement-snapshot": snapshot,
         "decision-log": {
             "decision_result": "NO_OPEN_DECISIONS", "status": "COMPLETE", "decisions": [],
+            "choice_questions": [],
             "unresolved_frontier": [], "glossary_delta": {}, "adr_candidates": [],
             "source_evidence": ["icafe:BGW-1/snapshot-1"],
         },
@@ -320,6 +321,22 @@ class NamedSchemaValidationTests(unittest.TestCase):
         contradictory_none = specialized_examples()["decision-log"]
         contradictory_none["status"] = "INCOMPLETE"
         cases.append((contradictory_none, ("decision_result", "inconsistent")))
+        # An unanswered question stays unanswered whichever completion is claimed;
+        # `NO_OPEN_DECISIONS` used to pass and open G1 over a half-answered log.
+        open_questions_none = specialized_examples()["decision-log"]
+        open_questions_none["choice_questions"] = [{
+            "id": "Q-1", "question": "Which timeout?",
+            "options": [
+                {"key": "short", "text": "3s"},
+                {"key": "long", "text": "30s"},
+            ],
+        }]
+        cases.append((open_questions_none, ("choice_questions", "inconsistent")))
+        open_questions_recorded = copy.deepcopy(recorded)
+        open_questions_recorded["choice_questions"] = copy.deepcopy(
+            open_questions_none["choice_questions"]
+        )
+        cases.append((open_questions_recorded, ("choice_questions", "inconsistent")))
 
         for value, expected in cases:
             with self.subTest(expected=expected):

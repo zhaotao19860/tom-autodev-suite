@@ -11,10 +11,11 @@ from state_store import StateStore
 
 
 class FakeGroupClient:
-    def __init__(self, *, create_result=None, send_result=None, create_error=None):
+    def __init__(self, *, create_result=None, send_result=None, create_error=None, reconcile_result=None):
         self.create_result = create_result or {"group_id": "123", "bot_id": "bot-7"}
         self.send_result = send_result or {"message_id": "message-1"}
         self.create_error = create_error
+        self.reconcile_result = reconcile_result
         self.create_calls = []
         self.send_calls = []
         self.reconcile_calls = []
@@ -27,7 +28,7 @@ class FakeGroupClient:
 
     def reconcile_group(self, request):
         self.reconcile_calls.append(request)
-        return None
+        return self.reconcile_result
 
     def send_markdown(self, group_id, content, at_users, idempotency_key):
         self.send_calls.append((group_id, content, at_users, idempotency_key))
@@ -138,6 +139,31 @@ class CollaborationSessionTests(unittest.TestCase):
         self.assertEqual(repeated["reason_code"], "QUERY_REQUIRED")
         self.assertEqual(len(client.create_calls), 1)
         self.assertGreaterEqual(len(client.reconcile_calls), 1)
+
+    def test_pending_group_receipt_can_be_reconciled_before_worker_phase_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            first_client = FakeGroupClient(create_error=TimeoutError("unknown"))
+            first = CollaborationSession(state, first_client)
+            profile = members()
+            profile["g0_approval"] = g0_binding(first, profile)
+
+            pending = first.create("run-1", "bgw", {"id": "BGW-19", "title": "Login flow"}, profile)
+            self.assertEqual(pending["reason_code"], "QUERY_REQUIRED")
+            self.assertEqual(state.pending_intents("run-1")[0]["idempotency_key"], "infoflow.group.create:run-1")
+
+            recovering_client = FakeGroupClient(
+                reconcile_result={"group_id": "987", "bot_id": "bot-7"}
+            )
+            recovered = CollaborationSession(state, recovering_client).reconcile_pending("run-1")
+            self.assertEqual(state.pending_intents("run-1"), [])
+
+        self.assertEqual(recovered["group_id"], "987")
+        self.assertEqual(len(recovering_client.create_calls), 0)
+        self.assertEqual(
+            recovering_client.reconcile_calls[0]["idempotency_key"],
+            "infoflow.group.create:run-1",
+        )
 
     def test_route_failure_targets_the_required_roles_and_replays_duplicate_messages(self):
         routes = {

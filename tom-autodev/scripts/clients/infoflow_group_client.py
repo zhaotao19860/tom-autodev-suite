@@ -31,12 +31,15 @@ class InfoflowGroupClient:
                 "owner": owner,
                 "members": [_email(member) for member in members],
                 "friendly_level": 3,
+                "idempotency_key": group_request.get("idempotency_key"),
             }
         )
         result = {"group_id": receipt["group_id"], "group_name": group_name}
-        if not isinstance(receipt.get("bot_id"), str) or not receipt["bot_id"]:
-            raise ValueError("BOT_AGENT_ID_UNAVAILABLE")
-        result["bot_id"] = receipt["bot_id"]
+        # The platform does not promise to echo the robot identity in a successful
+        # group-create response. The gateway already put the bot in robotList, so a
+        # missing bot_id is not evidence that the group create failed.
+        if isinstance(receipt.get("bot_id"), str) and receipt["bot_id"]:
+            result["bot_id"] = receipt["bot_id"]
         return result
 
     def send_markdown(
@@ -60,8 +63,53 @@ class InfoflowGroupClient:
         }
 
     def reconcile_group(self, group_request: dict[str, Any]) -> dict[str, Any] | None:
-        """Infoflow exposes no lookup by group name, so never replay a pending create."""
-        return None
+        """Read the gateway's durable create receipt without replaying the write."""
+        key = group_request.get("idempotency_key")
+        query = getattr(self.bot, "query_group_receipt", None)
+        if not isinstance(key, str) or not key or not callable(query):
+            return None
+        receipt = query(key)
+        if not isinstance(receipt, dict):
+            return None
+        group_id = receipt.get("group_id")
+        if not isinstance(group_id, str) or not group_id.isdigit():
+            return None
+        recorded_name = receipt.get("group_name")
+        if recorded_name is not None and recorded_name != group_request.get("group_name"):
+            return None
+        result = {"group_id": group_id, "group_name": group_request["group_name"]}
+        if isinstance(receipt.get("bot_id"), str) and receipt["bot_id"]:
+            result["bot_id"] = receipt["bot_id"]
+        return result
+
+    def verify_group(
+        self, group_id: str, expected_name: str, expected_members: list[str] | None = None
+    ) -> dict[str, Any] | None:
+        verify = getattr(self.bot, "verify_group", None)
+        if not callable(verify):
+            return None
+        result = verify(group_id)
+        if not isinstance(result, dict):
+            return None
+        if result.get("group_id") != group_id or result.get("group_name") != expected_name:
+            return None
+        if result.get("members_queried") is not True:
+            return None
+        if expected_members:
+            def member_key(value: str) -> str:
+                return value.split("@", 1)[0]
+
+            actual = {
+                member_key(value) for value in result.get("member_emails", [])
+                if isinstance(value, str) and value
+            }
+            expected = {
+                member_key(value) for value in expected_members
+                if isinstance(value, str) and value
+            }
+            if not expected.issubset(actual):
+                return None
+        return {"group_id": group_id, "group_name": expected_name, "members_queried": True}
 
     def reconcile_message(self, group_id: str, idempotency_key: str) -> dict[str, Any] | None:
         """Infoflow exposes no lookup by client key, so never replay a pending send."""

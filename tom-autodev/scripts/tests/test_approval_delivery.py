@@ -18,7 +18,8 @@ from approval_delivery import (
 )
 from approval_summary import content_summary
 from clients.infoflow_approval_client import InfoflowApprovalClient
-from clients.infoflow_bot_client import InfoflowBotClient
+from clients.infoflow_bot_client import InfoflowBotClient, InfoflowRequestError
+from orchestrator import Orchestrator
 from state_store import StateStore
 
 
@@ -482,6 +483,106 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
                     transport.request(_envelope())
                 self.assertEqual(len(notify.sends), 1)
                 self.assertEqual(notify.cards, [])
+
+    def test_abandoned_delivery_intent_chains_a_new_infoflow_attempt(self):
+        with tempfile.TemporaryDirectory() as root:
+            orch = Orchestrator(Path(root))
+            approval = orch.approvals.request(
+                "G1", "hash-a", ["comate", "infoflow"],
+                run_id="run-1", member_policy=_POLICY,
+            )
+            envelope = {**_envelope(), **approval, "channel": "infoflow"}
+
+            class UnknownOutcome(FakeNotifyClient):
+                def send_markdown(self, recipients, content):
+                    raise TimeoutError("delivery outcome unknown")
+
+            unknown = UnknownOutcome()
+            first_client = InfoflowApprovalClient(
+                InfoflowApprovalTransport(orch.state, unknown)
+            )
+            first = orch._deliver_approval_channel(
+                "run-1", approval["approval_id"], "infoflow",
+                first_client,
+                {"channel": "infoflow", "approval": envelope},
+                "hash-a",
+            )
+            self.assertEqual(first["reason_code"], "QUERY_REQUIRED")
+            base_key = f"approval.delivery:{approval['approval_id']}:infoflow"
+            old_intent = orch.state.intent_by_idempotency_key(base_key)
+            self.assertIsNotNone(old_intent)
+            orch.state.abandon_intent(
+                old_intent["intent_id"], "测试未知投递后的受控重试", "owner@example.test"
+            )
+
+            fixed = FakeNotifyClient()
+            second_client = InfoflowApprovalClient(
+                InfoflowApprovalTransport(orch.state, fixed)
+            )
+            second = orch._deliver_approval_channel(
+                "run-1", approval["approval_id"], "infoflow",
+                second_client,
+                {"channel": "infoflow", "approval": envelope},
+                "hash-a",
+            )
+            self.assertEqual(second["reason_code"], "OK")
+            retried = orch.state.intent_by_idempotency_key(
+                f"{base_key}:after:{old_intent['intent_id']}"
+            )
+            self.assertIsNotNone(retried)
+            self.assertEqual(len(fixed.sends), 2)
+
+    def test_infoflow_pre_send_rejection_is_retryable(self):
+        with tempfile.TemporaryDirectory() as root:
+            orch = Orchestrator(Path(root))
+            approval = orch.approvals.request(
+                "G1", "hash-a", ["comate", "infoflow"],
+                run_id="run-1", member_policy=_POLICY,
+            )
+            envelope = {**_envelope(), **approval, "channel": "infoflow"}
+
+            class RejectedClient:
+                def request(self, _request):
+                    raise InfoflowRequestError("MESSAGE_REJECTED:GATEWAY", "REJECTED_BEFORE_SEND")
+
+                def reconcile(self, _request):
+                    return None
+
+            result = orch._deliver_approval_channel(
+                "run-1", approval["approval_id"], "infoflow",
+                RejectedClient(),
+                {"channel": "infoflow", "approval": envelope},
+                "hash-a",
+            )
+            self.assertEqual(result["reason_code"], "APPROVAL_DELIVERY_FAILED")
+            self.assertTrue(result["retry_allowed"])
+            self.assertEqual(result["outcome"], "REJECTED_BEFORE_SEND")
+
+    def test_infoflow_unknown_outcome_remains_query_required(self):
+        with tempfile.TemporaryDirectory() as root:
+            orch = Orchestrator(Path(root))
+            approval = orch.approvals.request(
+                "G1", "hash-a", ["comate", "infoflow"],
+                run_id="run-1", member_policy=_POLICY,
+            )
+            envelope = {**_envelope(), **approval, "channel": "infoflow"}
+
+            class UnknownClient:
+                def request(self, _request):
+                    raise InfoflowRequestError("INFOFLOW_GATEWAY_UNAVAILABLE", "UNKNOWN_REMOTE_OUTCOME")
+
+                def reconcile(self, _request):
+                    return None
+
+            result = orch._deliver_approval_channel(
+                "run-1", approval["approval_id"], "infoflow",
+                UnknownClient(),
+                {"channel": "infoflow", "approval": envelope},
+                "hash-a",
+            )
+            self.assertEqual(result["reason_code"], "QUERY_REQUIRED")
+            self.assertFalse(result["retry_allowed"])
+            self.assertEqual(result["outcome"], "UNKNOWN_REMOTE_OUTCOME")
 
     def test_crash_before_final_record_does_not_replay_details_or_cards(self):
         notify = FakeCardClient()

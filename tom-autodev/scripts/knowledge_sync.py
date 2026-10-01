@@ -9,7 +9,7 @@ from typing import Any
 from clients.icafe_client import CafeClient
 from clients.ku_client import KuClient
 from persistence_policy import validate_evidence_refs
-from phase_document import canonical_appendix
+from phase_document import canonical_appendix, phase_guide
 from state_store import StateStore
 
 
@@ -82,6 +82,7 @@ class KnowledgeSync:
         cafe_transport: Any | None = None,
         username: str | None = None,
         cafe_preflight: bool = True,
+        run_root_title: str | None = None,
     ) -> "KnowledgeSync":
         expected = project_ku_target(profile)
         if expected is None:
@@ -92,7 +93,7 @@ class KnowledgeSync:
             for repo in (profile.get("business_repos") or [])
             if isinstance(repo, dict) and repo.get("path")
         ] if isinstance(profile, dict) else []
-        root_title = f"{card_id}-{run_id[:12]}-研发测试协作"
+        root_title = run_root_title or f"{card_id}-{run_id[:12]}-研发测试协作"
         return cls(
             state_store=state_store,
             ku_client=KuClient(
@@ -186,7 +187,12 @@ class KnowledgeSync:
                 "doc_id": child["doc_id"],
                 "url": child["url"],
                 "content_hash": content_hash,
+                "phase": artifact.get("phase") or _phase_from_title(title),
+                "status": artifact.get("status") or "已生成",
             }
+            guide = phase_guide(entry["phase"])
+            entry["purpose"] = guide["purpose"]
+            entry["handoff"] = guide["handoff"]
             index = self.ku.update_index(root_doc_id, entry)
             index_error = self._verify_index(index, root_doc_id)
             if index_error is not None:
@@ -379,15 +385,74 @@ def _run_root_markdown(title: str, run_id: str, card_id: str) -> str:
     Phase entries are appended after the last block, so the section note below is
     the anchor the first entry lands after.
     """
+    catalog = (
+        ("00", "需求快照与运行章程", "这次需求是什么，基线和协作边界是什么？"),
+        ("01", "需求澄清与决策日志", "哪些问题由需求负责人选择确认？"),
+        ("02", "行为规格说明", "目标行为、边界和验收场景是什么？"),
+        ("03", "任务拆解与验收覆盖", "谁做什么，依赖和验收覆盖是什么？"),
+        ("04", "工作区与基线绑定", "实际仓库、分支、revision 和工作区是什么？"),
+        ("05", "任务实现计划", "准备改哪些文件、接口和测试？"),
+        ("06", "候选改动说明", "实际改了什么，为什么这样改？"),
+        ("07", "变更评审报告", "标准与规格评审确认了什么？"),
+        ("08", "iCode 提交与流水线计划", "提交什么 revision，触发哪些流水线？"),
+        ("09", "远程验证报告", "iPipe 的真实结果和证据是什么？"),
+        ("10", "失败诊断与修复决策", "失败根因、修复路线和重新验证是什么？"),
+        ("11", "发布验证证书", "哪个版本发布到哪里，发布后验证如何？"),
+    )
+    catalog_lines = [
+        f"| {number} | {name} | {question} | 待产出 |"
+        for number, name, question in catalog
+    ]
     return (
         f"# {title}\n\n"
         f"本文档由 tom-autodev 自动维护，收录 iCafe 卡片 {card_id} 在本次运行中产出的阶段文档。\n\n"
         f"* iCafe 卡片：{card_id}\n"
-        f"* 运行编号：{run_id}\n\n"
+        f"* 运行编号：{run_id}\n"
+        "* 阅读原则：先读正文结论、实际内容、确认项和交接清单；机器审计信息在各文档末尾。\n\n"
+        "## 这次运行是做什么的\n\n"
+        f"围绕 `{card_id}` 形成一套可供需求、开发、测试和接手同学共同阅读的需求分析、设计、改动、评审、验证和发布记录。"
+        "若某阶段尚未执行，文档树保持“待产出”，不会用模板内容冒充事实。\n\n"
+        "## 如何阅读\n\n"
+        "1. 从 00 了解需求快照、参与人、仓库和运行边界。\n"
+        "2. 从 01、02 看需求选择如何变成行为和验收标准。\n"
+        "3. 从 03～07 看任务、基线、计划、实际改动和评审结论。\n"
+        "4. 从 08～11 看提交、iPipe 证据、失败修复和发布验证。\n\n"
+        "## 阶段导航\n\n"
+        "下表是完整文档目录；每行状态以“阶段产物”中的真实条目和子文档为准，"
+        "未出现条目的阶段表示尚未产生可回填 artifact。\n\n"
+        "| 编号 | 文档 | 这篇文档回答什么问题 | 状态 |\n"
+        "| --- | --- | --- | --- |\n"
+        + "\n".join(catalog_lines)
+        + "\n\n"
         "## 阶段产物\n\n"
-        "每个阶段完成后在下面追加一条。条目后面的 `tom-autodev-index` 注释与文末的 "
-        "`tom-autodev-run-root` 注释是校验标记，工具靠它们核对文档身份与产物哈希，请不要手工修改。"
+        "完成阶段后追加带用途、状态和交接提示的条目。条目后面的 `tom-autodev-index` 注释与文末的 "
+        "`tom-autodev-run-root` 注释是校验标记，工具靠它们核对文档身份与产物哈希，请不要手工修改。\n\n"
+        "## 当前协作待办\n\n"
+        "- 待确认事项：以最新阶段文档的“本阶段确认了什么”为准。\n"
+        "- 待审批事项：以当前 run 的 approval ledger 和审批消息为准。\n"
+        "- 待验证事项：以远程验证报告和 iPipe evidence 为准。\n"
+        "- 需要谁处理：以阶段文档中的负责人和交接清单为准。\n\n"
+        "阶段条目后的 `tom-autodev-index` 注释与文末的 `tom-autodev-run-root` 注释是校验标记，"
+        "工具靠它们核对文档身份与产物哈希，请不要手工修改。"
     )
+
+
+def _phase_from_title(title: str) -> str | None:
+    prefix = str(title or "").split("-", 1)[0]
+    return {
+        "00": "INTAKE",
+        "01": "GRILL",
+        "02": "SPEC",
+        "03": "TASKS",
+        "04": "PLAN",
+        "05": "IMPLEMENT",
+        "06": "REVIEW",
+        "07": "DIAGNOSE",
+        "08": "IPIPE",
+        "09": "RELEASE",
+        "10": "DIAGNOSE",
+        "11": "RELEASE",
+    }.get(prefix)
 
 
 def _failure(reason_code: str) -> dict[str, Any]:

@@ -9,7 +9,12 @@ description: Use when tom-autodev targets the BGW C/C++ project and needs reposi
 
 Resolve BGW workspaces from the validated project profile and owned workspace binding. A requirement may span repositories; each runtime task binds one business module and its independent test repository as an externally observable capability slice. An indivisible multi-business-repository task is a runtime capability gap, not permission to guess workspace ownership.
 
-Require an independent BGW product-test repository. Require a configured source-only Review provider, stable iPipe pipeline template, environment profile, approval channels, and release rule. Missing or unreadable values return `PROJECT_NOT_READY`; never infer a test repository or pipeline from a directory name.
+Require an independent BGW product-test repository, a stable iPipe pipeline
+template, approval channels, and a release rule. BGW runner selection, compiler,
+test topology, fixtures, and services are owned by this skill and the selected
+iPipe pipeline; tom-autodev does not require a separately verified local
+environment provenance record. Missing or unreadable profile/pipeline values return
+`PROJECT_NOT_READY`; never infer a test repository or pipeline from a directory name.
 
 ## Knowledge Priority
 
@@ -24,7 +29,7 @@ Record repository, revision, path/symbol and source type for each reference. Git
 
 The profile must explicitly name each business repository/module, independent product-test repository, branch/revision policy, external test interface, fixture/data source, and the iPipe build/unit/regression/integration stages. Never infer a test repository, executable, compiler flag, environment, or release target from a directory name. Record the source paths/revisions, cited document versions, and fixture/test-plan hashes that actually support the Task Plan or remote result; do not invent graph queries or KU receipts.
 
-BGW tests must assert the stable externally observable gateway/API/protocol boundary and include valid, boundary, malformed, compatibility, and regression cases. Environment readiness must include runner OS/architecture, image/toolchain digests, services/data/capacity, and reproducible cleanup. All build, unit, regression, integration, packaging, and release commands run only in the pinned iPipe runner; Mac performs source generation/Review and evidence parsing.
+BGW tests must assert the stable externally observable gateway/API/protocol boundary and include valid, boundary, malformed, compatibility, and regression cases. The iPipe pipeline and this skill define runner OS/architecture, image/toolchain, services/data/capacity, topology, and cleanup. All build, unit, regression, integration, packaging, and release commands run only in the pinned iPipe runner; Mac performs source generation/Review and evidence parsing.
 
 ## Runtime Topology and Manual Stages
 
@@ -32,6 +37,11 @@ Read [`references/runtime-topology.md`](references/runtime-topology.md) before d
 
 ## Verification Contract
 
-The BGW project profile must map each task to business revisions, product-test revision, test plan hash, environment fingerprint, iPipe build/stage evidence, and release version. Compile, unit, regression, integration, deployment, and release execution occur only in that profile's iPipe runner. The Mac may generate source/test patches and perform source Review, but never run BGW build or tests.
+The BGW project profile must map each task to business revisions, product-test revision,
+test plan hash, the stable environment-binding fingerprint, iPipe build/stage evidence,
+and release version. The fingerprint binds evidence to the selected profile; it is not
+local proof that the runner is available. Compile, unit, regression, integration,
+deployment, and release execution occur only in that profile's iPipe runner. The Mac may
+generate source/test patches and perform source Review, but never run BGW build or tests.
 
 **REQUIRED PARENT:** Return topology, knowledge, environment, iPipe parameter mapping, and release evidence requirements to `tom-autodev`; do not call iCode/iPipe directly.

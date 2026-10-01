@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from execution_guard import execution_guard
+from execution_guard import execution_guard, migration_exempt
 
 import hashlib
 import inspect
@@ -15,6 +15,20 @@ from approval_summary import gate_intent, references
 
 _RECORD_KEY = "approval.gateway.infoflow"
 _REPLY_KEY = "approval.gateway.infoflow.reply"
+
+
+def _delivery_guard(state: Any, run_id: Any, action: Any) -> dict[str, Any] | None:
+    """Guard delivery, except for the gate that authorizes the migration itself.
+
+    Opening and answering the migration gate is the one write allowed while the old
+    workflow pin is drifted (see `execution_guard.guard_execution`). The controller
+    exempts it, so this boundary must too: guarding it here suppressed the card
+    without sending anything, the ledger then refused every decision for a gate it
+    considered undelivered, and the paused run could never be migrated at all.
+    """
+    if migration_exempt(action):
+        return None
+    return execution_guard(state, run_id)
 
 
 def deliver_markdown(client: Any, state_store: Any, run_id: Any, recipients: list[str], render: Any) -> dict[str, Any]:
@@ -122,6 +136,12 @@ def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[
                     title=f"tom-autodev {action} 审批",
                     question="待你审批：请先核对材料和重点，再点「同意」或「驳回」。",
                     lines=[line for line in lines if line],
+                    # Who may answer, so a shared group card only reads as answered
+                    # when the tap came from an approver. The ledger still decides.
+                    approvers=sorted({
+                        _uuap(member)
+                        for member in gateway_request["member_policy"]["infoflow"]
+                    }),
                 )
                 if (not isinstance(receipt, dict)
                         or not isinstance(receipt.get("card_id"), str)
@@ -200,11 +220,13 @@ class InfoflowApprovalTransport:
         self.progress_provider = progress_provider
 
     def request(self, gateway_request: dict[str, Any]) -> dict[str, Any]:
-        blocked = execution_guard(self.state, gateway_request.get("run_id") if isinstance(gateway_request, dict) else None)
-        if blocked is not None:
-            return blocked
         if not isinstance(gateway_request, dict):
             raise ValueError("APPROVAL_ENVELOPE_INVALID")
+        blocked = _delivery_guard(
+            self.state, gateway_request.get("run_id"), gateway_request.get("action")
+        )
+        if blocked is not None:
+            return blocked
         required = ("run_id", "approval_id", "input_hash", "deadline_at", "member_policy")
         if any(not gateway_request.get(field) for field in required):
             raise ValueError("APPROVAL_ENVELOPE_INVALID")
@@ -220,8 +242,13 @@ class InfoflowApprovalTransport:
         request_id = _request_id(gateway_request)
         stored = self.state.idempotency_result(f"{_RECORD_KEY}:{request_id}")
         if stored is not None:
-            return self._resolved(stored["record"])
-        intent_key = f"approval.delivery:{request_id}:intent"
+            return self._resolved(stored["record"], gateway_request.get("action"))
+        attempt_key = gateway_request.get("_delivery_attempt_key")
+        intent_key = (
+            f"{attempt_key}:transport"
+            if isinstance(attempt_key, str) and attempt_key
+            else f"approval.delivery:{request_id}:intent"
+        )
         if self.state.idempotency_result(intent_key) is None:
             # Prove missing methods/non-callables/signature mismatches locally,
             # before a permanent claim can contradict the caller's retry_allowed.
@@ -254,7 +281,7 @@ class InfoflowApprovalTransport:
         except ValueError:
             stored = self.state.idempotency_result(f"{_RECORD_KEY}:{request_id}")
             if stored is not None:
-                return self._resolved(stored["record"])
+                return self._resolved(stored["record"], gateway_request.get("action"))
             raise ValueError("APPROVAL_DELIVERY_QUERY_REQUIRED") from None
         delivered_content: list[str] = []
 
@@ -307,6 +334,11 @@ class InfoflowApprovalTransport:
             {
                 "record": record,
                 "delivery": receipt,
+                # Outside the gateway record, whose field set is fixed by
+                # `parse_gateway_result`. Re-reading the request needs the gate name to
+                # know whether it is the migration gate, which stays answerable while
+                # the run's old workflow pin is drifted.
+                "action": gateway_request.get("action"),
                 # Kept so a reminder repeats the exact card the approvers already saw,
                 # and so a timed-out gate can be reissued without rebuilding evidence.
                 "content": content,
@@ -333,7 +365,7 @@ class InfoflowApprovalTransport:
             self.state.save_idempotency_result(
                 f"approval.button.warning:{request_id}", delivered_warning
             )
-        return self._resolved(record)
+        return self._resolved(record, gateway_request.get("action"))
 
     def delivered(self, request_id: str) -> dict[str, Any] | None:
         """The card and evidence a request was delivered with, when they were stored."""
@@ -354,19 +386,23 @@ class InfoflowApprovalTransport:
         ):
             return None
         stored = self.state.idempotency_result(f"{_RECORD_KEY}:{_request_id(gateway_request)}")
-        return self._resolved(stored["record"]) if stored is not None else None
+        if stored is None:
+            return None
+        # The persisted action wins: the guard exemption must follow what this
+        # request was actually delivered as, never what a caller now claims.
+        return self._resolved(stored["record"], stored.get("action") or gateway_request.get("action"))
 
     def wait(self, request_id: str, timeout_seconds: float) -> dict[str, Any]:
         del timeout_seconds  # A caller's wait bound must never move the approved deadline.
         stored = self.state.idempotency_result(f"{_RECORD_KEY}:{request_id}")
         if stored is None:
             raise ValueError("APPROVAL_WAIT_RESPONSE_INVALID")
-        return self._resolved(stored["record"])
+        return self._resolved(stored["record"], stored.get("action"))
 
-    def _resolved(self, record: dict[str, Any]) -> ApprovalGatewayResult:
+    def _resolved(self, record: dict[str, Any], action: Any = None) -> ApprovalGatewayResult:
         # Re-reading a delivered card can persist its new reply or timeout
         # handoff. Treat request/reconcile/wait as execution at this boundary.
-        blocked = execution_guard(self.state, record.get("run_id"))
+        blocked = _delivery_guard(self.state, record.get("run_id"), action)
         if blocked is not None:
             return blocked
         record = self._with_reply(record)

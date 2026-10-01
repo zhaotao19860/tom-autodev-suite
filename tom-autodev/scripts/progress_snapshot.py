@@ -22,20 +22,27 @@ _PHASE_TITLES = {
 }
 _PHASE_SHORT_TITLES = {
     "INTAKE": "需求",
-    "GRILL": "研判",
-    "SPEC": "规格",
-    "TASKS": "任务",
-    "WORKSPACE": "工作区",
-    "PLAN": "计划",
-    "IMPLEMENT": "实现",
-    "REVIEW": "评审",
-    "SUBMIT": "提交",
-    "IPIPE": "流水线",
-    "DIAGNOSE": "诊断",
+    "GRILL": "需求研判",
+    "SPEC": "规格说明",
+    "TASKS": "任务拆解",
+    "WORKSPACE": "工作区准备",
+    "PLAN": "任务计划",
+    "IMPLEMENT": "代码实现",
+    "REVIEW": "变更评审",
+    "SUBMIT": "提交变更",
+    "IPIPE": "流水线验证",
+    "DIAGNOSE": "失败诊断",
     "RELEASE": "发布",
+    "ARCHITECTURE_REVIEW": "架构复核",
+    "ENVIRONMENT_BLOCKED": "环境受阻",
     "RELEASE_SUCCESS": "已完成",
     "STOPPED": "已停止",
 }
+
+# These are recovery branches, not steps on the normal delivery route.  They
+# should be shown only when the run is actually in one of them; appending them
+# to every progress bar made the route look as if it always had two extra phases.
+_RECOVERY_STATES = frozenset({"ARCHITECTURE_REVIEW", "ENVIRONMENT_BLOCKED"})
 
 
 def build(orchestrator: Any, run_id: str, *, next_step: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -211,6 +218,8 @@ def _phases_for_events(current: str, events: list[dict[str, Any]]) -> list[dict[
     for state in _PHASE_ORDER:
         spec = workflow_spec.STATES[state]
         if spec.terminal:
+            continue
+        if state in _RECOVERY_STATES and state != current and state not in visited:
             continue
         if completed_terminal:
             status = "DONE"

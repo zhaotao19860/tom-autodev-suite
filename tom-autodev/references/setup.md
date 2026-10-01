@@ -6,8 +6,11 @@ Comate host only. Do not add a second adapter or entrypoint; release stays a con
 
 ## Template + per-requirement profile
 
-Stable per-project facts (repository modules/paths, pipeline registration, environment,
-approval channels) ship as a template at `tom-autodev/templates/<project>.template.yaml`.
+Stable per-project facts (repository modules/paths, pipeline registration, the
+declarative evidence identity, and approval channels) ship as a template at
+`tom-autodev/templates/<project>.template.yaml`. BGW runner selection, compilation,
+test topology, and environment availability remain owned by iPipe and
+`tom-project-bgw`.
 Each requirement gets its own profile derived from that template — one file per card at
 `~/.tom-autodev/config/projects/<project>/<CARD>.yaml` — so concurrent requirements never
 overwrite one another.
@@ -24,9 +27,8 @@ is carried from the template or derived:
 Auto-derived (never asked): each `repository`/`gitnexus` knowledge revision follows its
 repo's pinned revision; each `lock`'s last segment follows the branch; `release_rule`'s
 `{primary_branch}` follows the primary business branch. iPipe pipelines are discovered as
-bounded read-only candidates; the user must confirm the selected IDs. The BGW template's
-environment block is descriptive `UNVERIFIED` context until a real platform receipt fills
-its provenance; such a profile is deliberately rejected as `READY`.
+bounded read-only candidates; the user must confirm the selected IDs. The environment
+block is not a local readiness claim and has no user-supplied provenance field.
 
 Run the wizard with an answers file:
 
@@ -40,7 +42,7 @@ ID candidates discovered through iPipe. It does not read a separate hardcoded ch
 directory. The user must choose or replace those candidates before preparing
 `answers.json`. The answers file holds only the variable parts:
 `repository_paths`, `branches`, `test_branch`, `revisions`, `ku`, `pipeline_ids`, and
-`members`, and, when environment evidence is available, `environment_provenance`, plus:
+`members`, plus:
 
 - `confirmed_inputs`: the exact effective values after the user confirms or edits them;
 - `confirmed_by`: the confirming owner.
@@ -68,7 +70,10 @@ Store non-secret data at the per-requirement path above; an explicit config root
 1. Inspect repository paths, Git revisions, worktree state, read-only knowledge paths, and profile references.
 2. Confirm each business/test repository belongs to the same product and has a lock key.
 3. Confirm the pipeline is a preconfigured stable template and list its allowed runtime parameters; do not create dynamic stages.
-4. Confirm the environment profile declares runner, image/tool versions, hardware/simulator, data, services, and capacity, and attach `provenance.status=VERIFIED`, runner/image-toolchain identity, verification time, verifier, and an evidence reference.
+4. Confirm the project skill and selected iPipe pipelines own the runner, compiler,
+   test topology, fixtures, services, and capacity. Do not ask the user to provide
+   local runner/image/toolchain provenance; the iPipe execution receipt is the
+   authoritative environment evidence.
 5. Run `project_registry.validate_profile`; return `PROJECT_NOT_READY` with the exact missing fields when incomplete.
 6. Save the profile content hash and human setup evidence.
 

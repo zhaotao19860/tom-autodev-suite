@@ -11,7 +11,7 @@ Convert closed requirement decisions into a reviewable behavioral contract. Spec
 
 ## Required Inputs
 
-Require a `RequirementSnapshot`, `CLARIFIED` or `NO_OPEN_DECISIONS` result, Decision Log, project/language rules, repository evidence, independent product-test repository contract, and current iPipe environment profile. Return `DECISION_REQUIRED` if any behavior or human tradeoff remains open.
+Require a `RequirementSnapshot`, `CLARIFIED` or `NO_OPEN_DECISIONS` result, Decision Log, project/language rules, repository evidence, independent product-test repository contract, and the current project skill/iPipe environment contract. Return `DECISION_REQUIRED` if any behavior or human tradeoff remains open.
 
 Follow the [producer contract](../tom-autodev/references/producer-contract.md), [spec schema](../tom-autodev/schemas/spec.schema.json) and [phase-specific rules](references/phase-contract.md). Return versioned `spec` DraftContent. In a worker-requested merged SPEC job, also apply [tom-tasks](../tom-tasks/SKILL.md) to this same Spec and return one `{spec, dag}` bundle; this is one producer turn, not a recursive workflow.
 
@@ -23,7 +23,10 @@ Cover these topics using the schema's actual fields; keep narrative in supported
 2. Numbered user/system behaviors, including normal, boundary, exceptional, and compatibility behavior.
 3. Implementation decisions at module/interface level and any approved ADR references.
 4. Test decisions: selected external test interface, existing precedent, independent expected-result source, fixtures/data, and product-test repository location.
-5. Environment Requirements: runner OS/arch, image digest, compiler/SDK/tool versions, hardware/simulator, data, services, capacity, and pipeline config revision.
+5. Environment Requirements: the runner OS/arch, image, compiler/SDK/tool versions,
+   hardware/simulator, data, services, capacity, and pipeline configuration required
+   by the project skill/iPipe contract. Do not invent local provenance when the
+   platform owns the receipt.
 6. Out of Scope, risks, rollback boundary, and release evidence requirements.
 7. Traceability: each iCafe acceptance criterion maps to one or more Spec behaviors and planned iPipe evidence.
 
@@ -36,7 +39,9 @@ Before G2 approval, verify:
 - Every acceptance criterion has one unambiguous Spec mapping.
 - Every behavior has a product-test case or an explicit human-verification reason.
 - Business and independent test repositories describe the same behavior version.
-- Environment Requirements are sufficient to decide whether an iPipe runner is eligible.
+- Environment Requirements identify the iPipe/project-skill contract and the remote
+  evidence needed to decide runner eligibility; local profile setup does not claim
+  that the runner is available.
 - Scope, exception, compatibility, and rollback statements do not conflict.
 - The Spec has a monotonic `version` (the content schema's field); the controller computes content identity from the actual content.
 

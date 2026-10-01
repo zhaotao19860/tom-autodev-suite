@@ -3,7 +3,7 @@
 | Gate | Approval object |
 |---|---|
 | G0 | iCafe card and project binding |
-| G1 | each human decision from `tom-grill` or architecture Review |
+| G1 | completed `tom-grill` Decision Log / architecture Review decision; Comate answers happen before this gate |
 | G2 | Spec, test interface, environment requirements |
 | G3 | end-to-end Task DAG |
 | G4 | each task's `Task Plan` |
@@ -14,6 +14,7 @@
 | G9 | release evidence and release action |
 | G10 | bounded control-plane optimization candidate |
 | PROFILE_REPIN | permitted old/new profile pin change |
+| WORKFLOW_SPEC_MIGRATION | approved old/new workflow policy pin change for a paused run |
 
 Publish the same `approval_id`, evidence summary, and `input_hash` to Comate and Infoflow. Accept the first valid response. Audit later responses without changing the effective decision. Expire an approval whenever its bound input changes. Default wait limit is ten hours; timeout stops the run.
 
@@ -85,7 +86,7 @@ A gate being approved changes no state, and landing the phase needs the agent, w
 
 Requirement documents come from the profile's `provider: ku` knowledge sources in `priority` order; a source may carry `label` for a short human title, otherwise `search_scope` is used.
 
-Every approval detail states its object (`本次审批`), checklist (`审批重点`), actual file/evidence locators (`请先查看这些文件 / 证据`), exact hashes, effect (`批准后`) and authorization boundary. Presentation guidance lives in `approval_summary` and does not change the workflow fingerprint. The summary is derived from the bound content, never from an unrelated latest artifact:
+Every approval detail states its object (`本次审批`), checklist (`审批重点`), actual file/evidence locators (`请先查看这些文件 / 证据`), exact hashes, effect (`批准后`) and authorization boundary. For G1, the card also lists each answered question, offered options, selected option, remaining unresolved frontier, and acceptance additions. It explicitly says: “Comate 选择已经完成；本卡只审批已生成的 Decision Log，不替用户答题。” If required questions remain unanswered, do not request G1; return to Comate for another structured round. Presentation guidance lives in `approval_summary` and does not change the workflow fingerprint. The summary is derived from the bound content, never from an unrelated latest artifact:
 
 ```bash
 python3 scripts/cli.py request-approval RUN_ID G1 INPUT_HASH --content /path/to/artifact-envelope.json
@@ -99,14 +100,29 @@ The first approval context is persisted for the run/action/input hash before del
 
 Next to the markdown detail, a one-tap button card carries `approve.<approval_id>` / `reject.<approval_id>`. With a collaboration group it goes there; before G0 creates one, each unique authorized member receives a private card. Each target has a distinct card ID and durable delivery outcome. Unknown outcomes are not blindly retried. A separate warning explains incomplete button delivery and the text-reply fallback; success of Markdown alone is not proof that buttons arrived.
 
-A tap is journalled as the same `APPROVE <approval_id>` a person could type. The immediate card refresh says “待权限和有效期校验”, retains buttons, and does not claim authorization. The ledger and watcher acknowledgement remain authoritative; there is not yet a ledger-driven terminal refresh that removes these buttons. Duplicate/stale/unauthorized taps cannot override the effective ledger decision.
+A tap is journalled as the same `APPROVE <approval_id>` a person could type. The card
+is delivered with the approvers' uuap names, so the refresh can tell whose tap it was —
+the gateway still authorizes nothing:
+
+- an approver's tap refreshes the card to “已由 <sender> 处理：<choice>” with a
+  “已选择「<choice>」· <sender> · <time>” line and no buttons, so it cannot be tapped twice;
+- anyone else's tap (a group card is shared) is recorded as
+  “点击待校验「<choice>」· <sender>” and **keeps** the buttons, because blanking them would
+  take the one-tap path away from the people who still have to decide;
+- after a gateway restart the approver list is gone, and the card stays answerable
+  rather than claiming a decision it cannot attribute.
+
+The refresh reports a click, never its authorization. The ledger and watcher
+acknowledgement remain authoritative, and duplicate/stale/unauthorized taps cannot
+override the effective ledger decision. Replying `APPROVE <approval_id>` /
+`REJECT <approval_id>` as text stays available in every case.
 
 ### What to inspect at each gate
 
 | Gate | Focus and source materials |
 |---|---|
 | G0 | Requirement snapshot, profile path/hash, actual repository paths/branches, people, group name and `change_class` / phase modes |
-| G1 | Decision Log decisions, alternatives, unresolved items, acceptance additions and sources |
+| G1 | First complete the Comate question set; then inspect each Decision Log question, all options, selected choices, unresolved items, acceptance additions and sources. Approving G1 approves the resulting Decision Log only; it does not answer questions. |
 | G2 | Spec behavior/non-goals, acceptance scenarios, test interface/environment; associated DAG is not a separate G3 approval |
 | G3 | DAG nodes, dependencies and acceptance coverage, including independent tests |
 | G4 | Actual approval object: workspace receipts/binding OR current Task Plan, pinned revisions/files/tests/rollback |
@@ -133,4 +149,3 @@ python3 scripts/ask_infoflow.py wait RUN_ID DECISION_ID [--timeout 900]
 `ask` sends a button card to the run's collaboration group and records the question under `~/.tom-autodev/decisions/<decision_id>.json`; `wait` polls the journal and returns the tapped option. An answer counts only when it was tapped in that group after the question was asked and names one of the options that were offered.
 
 This is deliberately weaker than a gate and must never replace one: there is no ledger row, no bound `input_hash`, no deadline and no member policy behind it. Ask a real gate through `request-approval`. A `TIMEOUT` from `wait` is not a decision — fall back to asking in the IDE.
-

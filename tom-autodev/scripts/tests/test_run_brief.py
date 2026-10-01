@@ -76,8 +76,35 @@ class RunBriefTests(unittest.TestCase):
         self.assertEqual(brief["next"]["owner"], "你")
         rendered = run_brief.render(brief)
         self.assertIn("如流审批卡", rendered)
-        self.assertNotIn("approval-123456", rendered)
+        self.assertIn("approval-123456", rendered)
         self.assertNotIn("a" * 64, rendered)
+
+    def test_reissued_approval_hides_older_unresolved_attempt(self):
+        approvals = [
+            {
+                "action": "G1",
+                "approval_id": "0fef-old",
+                "input_hash": "a" * 64,
+                "deadline_at": "2026-09-29T22:37:30+00:00",
+                "created_at": "2026-09-29T21:00:00+00:00",
+            },
+            {
+                "action": "G1#retry-1",
+                "approval_id": "edc61-new",
+                "input_hash": "b" * 64,
+                "deadline_at": "2026-09-30T09:40:43+00:00",
+                "created_at": "2026-09-30T08:00:00+00:00",
+            },
+        ]
+        orch = BriefFixture(
+            "GRILL",
+            {"ok": True, "phase": "GRILL", "required_human_gate": "G1"},
+            approvals=approvals,
+        )
+        brief = run_brief.build(orch, "run-1")
+        self.assertEqual([item["approval_id"] for item in brief["waiting_on"]], ["edc61-new"])
+        self.assertIn("edc61-new", brief["next"]["text"])
+        self.assertNotIn("0fef-old", brief["next"]["text"])
 
 
     def test_required_gate_without_open_approval_is_not_misreported_as_waiting(self):
@@ -110,6 +137,71 @@ class RunBriefTests(unittest.TestCase):
         self.assertEqual(brief["status_label"], "待恢复")
         self.assertEqual(brief["next"]["owner"], "Comate")
         self.assertIn("icode.submit", brief["next"]["text"])
+
+    def test_infoflow_recovery_explains_controlled_redelivery(self):
+        orch = BriefFixture(
+            "GRILL",
+            {"ok": False, "reason_code": "RECOVERY_REQUIRED"},
+            pending=[{
+                "operation": "approval.delivery.infoflow",
+                "intent_id": "intent-1",
+                "payload": {"approval_id": "approval-1"},
+            }],
+        )
+        brief = run_brief.build(orch, "run-1")
+        self.assertEqual(brief["next"]["owner"], "你")
+        self.assertIn("未收到，允许重发", brief["next"]["text"])
+        self.assertIn("不会创建新审批", brief["next"]["text"])
+
+    def test_open_gate_does_not_hide_an_unknown_delivery_recovery(self):
+        """A gate whose card may never have arrived must not be reported as openable.
+
+        `render` used to overwrite the derived recovery instruction whenever a gate was
+        open, sending the operator to a card that was never delivered, and it never
+        printed the `intent_id` that `confirm-approval-redelivery` requires.
+        """
+        approval = {"action": "G1", "approval_id": "approval-1", "input_hash": "a" * 64,
+                    "deadline_at": "2026-09-30T09:40:00+00:00", "created_at": "2026-09-29"}
+        orch = BriefFixture(
+            "GRILL",
+            {"ok": False, "reason_code": "RECOVERY_REQUIRED"},
+            approvals=[approval],
+            pending=[{
+                "operation": "approval.delivery.infoflow",
+                "intent_id": "intent-9",
+                "payload": {"approval_id": "approval-1"},
+            }],
+        )
+        brief = run_brief.build(orch, "run-1")
+        rendered = run_brief.render(brief)
+        self.assertEqual(brief["next"]["owner"], "你")
+        self.assertIn("intent intent-9", brief["next"]["text"])
+        self.assertIn("intent intent-9", rendered)
+        self.assertNotIn("下一步（你）：打开如流审批卡", rendered)
+
+    def test_unanswered_grill_draft_is_not_reported_as_awaiting_approval(self):
+        """An UNRESOLVED draft is FULFILLED but can never open G1.
+
+        Reporting it as "草案已保存待审批" told the operator to call `continue`, which
+        only fails again; the way out is answering the questions and resubmitting.
+        """
+        action = {"ok": True, "phase": "GRILL", "child_skill": "tom-grill",
+                  "action_id": "action-7", "required_human_gate": "G1",
+                  "result_schema": "decision-log.v1"}
+        job = {"job_id": "producer:action-7", "status": "FULFILLED",
+               "payload": {"phase": "GRILL", "result_schema": "decision-log.v1"},
+               "draft": {"decision_result": "UNRESOLVED",
+                         "choice_questions": [{"id": "Q1"}]}}
+        orch = BriefFixture("GRILL", action, producer_jobs={job["job_id"]: job})
+        brief = run_brief.build(orch, "run-1")
+        rendered = run_brief.render(brief)
+        self.assertTrue(brief["producer_job"]["awaiting_answers"])
+        self.assertEqual(brief["status_label"], "待答题")
+        self.assertEqual(brief["next"]["owner"], "你")
+        self.assertIn("未答问题", brief["next"]["text"])
+        self.assertIn("producer:action-7", rendered)
+        self.assertNotIn("补发对应审批", rendered)
+        self.assertNotIn("Q1", rendered)
 
     def test_terminal_state_is_reported_as_complete(self):
         old_approval = {"action": "G2", "approval_id": "old-approval", "input_hash": "a" * 64,
@@ -151,6 +243,7 @@ class RunBriefTests(unittest.TestCase):
         self.assertEqual(brief["producer_job"], {
             "job_id": "producer:action-1", "phase": "SPEC", "schema": "spec.v1",
             "status": "FULFILLED", "draft_state": "已保存待审批",
+            "awaiting_answers": False,
         })
         rendered = run_brief.render(brief)
         self.assertIn("草案已保存待审批", rendered)

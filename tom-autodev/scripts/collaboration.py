@@ -52,6 +52,8 @@ def _reason(error: BaseException) -> str:
 
 
 def _not_dispatched(error: BaseException) -> bool:
+    if getattr(error, "outcome", None) == "REJECTED_BEFORE_SEND":
+        return True
     return _reason(error) in _UNDISPATCHED
 
 
@@ -96,7 +98,12 @@ def build_collaboration_binding(
     resolved = resolve_members(members)
     if resolved["reason_code"] != "OK":
         return resolved
-    topic = _group_topic(title, group_topic)
+    # A group belongs to the requirement snapshot, not to a reusable project
+    # profile. Older profiles may still contain a `group_topic` value from a
+    # previous card; accepting it here silently reuses the previous
+    # requirement's collaboration subject. Keep the argument for backward
+    # compatible callers, but derive the topic from this snapshot.
+    topic = _group_topic(title)
     return {
         "reason_code": "OK",
         "binding": {
@@ -170,6 +177,7 @@ def intake_prerequisites_valid(payload: Any, run_id: str) -> bool:
         or binding.get("friendlyLevel") != 3
         or binding.get("session_idempotency_key") != f"infoflow.group.create:{run_id}"
         or not _valid_group_topic(binding.get("group_topic"))
+        or binding.get("group_topic") != _group_topic(str(snapshot.get("title", "")))
         or binding.get("group_name") != _group_name(
             str(binding.get("card_id", "")), str(binding.get("group_topic", ""))
         )
@@ -185,6 +193,46 @@ def intake_prerequisites_valid(payload: Any, run_id: str) -> bool:
     ):
         return False
     return payload.get("g0_input_hash") == intake_input_hash(payload)
+
+
+def collaboration_binding_error(payload: Any, run_id: str) -> dict[str, Any] | None:
+    """Reject a frozen group binding whose subject is not this card snapshot."""
+    if not isinstance(payload, dict):
+        return None
+    snapshot = payload.get("requirement_snapshot")
+    binding = payload.get("collaboration_binding")
+    if not isinstance(snapshot, dict) or not isinstance(binding, dict):
+        return None
+    title = snapshot.get("title")
+    card_id = snapshot.get("canonical_card_id")
+    if not isinstance(title, str) or not isinstance(card_id, str):
+        return None
+    expected_topic = _group_topic(title)
+    expected_name = _group_name(card_id, expected_topic)
+    if (
+        binding.get("run_id") != run_id
+        or binding.get("card_id") != card_id
+        or binding.get("card_title") != title
+        or binding.get("card_content_hash") != snapshot.get("content_hash")
+        or binding.get("group_topic") != expected_topic
+        or binding.get("group_name") != expected_name
+    ):
+        return {
+            "ok": False,
+            "reason_code": "COLLABORATION_BINDING_MISMATCH",
+            "run_id": run_id,
+            "card_id": card_id,
+            "expected_group_topic": expected_topic,
+            "expected_group_name": expected_name,
+            "recorded_group_topic": binding.get("group_topic"),
+            "recorded_group_name": binding.get("group_name"),
+            "retry_allowed": False,
+            "recovery_action": (
+                f"stop {run_id}, then start --fresh {card_id} "
+                f"{payload.get('project', '')}".strip()
+            ),
+        }
+    return None
 
 
 class CollaborationSession:
@@ -232,7 +280,9 @@ class CollaborationSession:
             return {"run_id": run_id, **resolved}
         if context["project"] != project or context["card_id"] != card_id:
             return {"run_id": run_id, "reason_code": "G0_BINDING_MISMATCH"}
-        name = _group_name(card_id, _group_topic(title, context.get("group_topic")))
+        # Legacy contexts can contain a stale profile-level topic. The
+        # current card title remains the only source of truth.
+        name = _group_name(card_id, _group_topic(title))
         binding = {
             "run_id": run_id, "project": project, "card_id": card_id,
             "profile_hash": context["profile_hash"], "group_name": name,
@@ -257,8 +307,8 @@ class CollaborationSession:
                 return {"run_id": run_id, "reason_code": "G0_BINDING_REQUIRED"}
         elif not self._approved_g0(approval_id, run_id, prepared["input_hash"], input_hash):
             return {"run_id": run_id, "reason_code": "G0_BINDING_MISMATCH"}
-        request = {**prepared["request"], "input_hash": prepared["input_hash"], "approval_id": approval_id}
         key = f"infoflow.group.create:{run_id}"
+        request = {**prepared["request"], "input_hash": prepared["input_hash"], "approval_id": approval_id}
         claim = self.state.claim_intent(run_id, "infoflow.group.create", key, request)
         if claim["status"] == "CONFLICT":
             return {"run_id": run_id, "reason_code": "GROUP_CONFLICT"}
@@ -266,24 +316,90 @@ class CollaborationSession:
         if completed is not None:
             return self._restore(completed["receipt"]["response"])
         intent = claim["intent"]
+        outbound_request = {**request, "idempotency_key": key}
         if claim["status"] == "EXISTING":
-            reconciled = self.group_client.reconcile_group(request)
+            reconciled = self.group_client.reconcile_group(outbound_request)
             if reconciled is None:
                 return {"run_id": run_id, "reason_code": "QUERY_REQUIRED", "intent_id": intent["intent_id"], "retry_allowed": False}
             return self._save_group(intent, request, reconciled)
         try:
-            response = self.group_client.create_or_reuse(request)
+            response = self.group_client.create_or_reuse(outbound_request)
         except Exception as error:
             if _not_dispatched(error):
                 self.state.withdraw_intent(run_id, "infoflow.group.create", key, request)
                 return {
                     "run_id": run_id, "reason_code": _reason(error), "retry_allowed": True,
                 }
-            reconciled = self.group_client.reconcile_group(request)
+            reconciled = self.group_client.reconcile_group(outbound_request)
             if reconciled is not None:
                 return self._save_group(intent, request, reconciled)
             return {"run_id": run_id, "reason_code": "QUERY_REQUIRED", "intent_id": intent["intent_id"], "retry_allowed": False}
         return self._save_group(intent, request, response)
+
+    def reconcile_pending(self, run_id: str) -> dict[str, Any] | None:
+        """Reconcile a pending group-create intent without replaying the write."""
+        pending = [
+            item for item in self.state.pending_intents(run_id)
+            if item.get("operation") == "infoflow.group.create"
+        ]
+        if not pending:
+            return None
+        if len(pending) != 1 or not isinstance(pending[0].get("payload"), dict):
+            return {
+                "run_id": run_id,
+                "reason_code": "QUERY_REQUIRED",
+                "retry_allowed": False,
+            }
+        intent = pending[0]
+        request = dict(intent["payload"])
+        request["idempotency_key"] = intent["idempotency_key"]
+        reconciled = self.group_client.reconcile_group(request)
+        if reconciled is None:
+            return {
+                "run_id": run_id,
+                "reason_code": "QUERY_REQUIRED",
+                "intent_id": intent["intent_id"],
+                "retry_allowed": False,
+            }
+        return self._save_group(intent, intent["payload"], reconciled)
+
+    def adopt_pending_group(self, run_id: str, group_id: str, actor: str) -> dict[str, Any]:
+        """Settle a legacy pending create after exact operator-led platform verification."""
+        if not isinstance(group_id, str) or not group_id.isdigit():
+            return {"run_id": run_id, "reason_code": "GROUP_ID_INVALID"}
+        if not isinstance(actor, str) or not actor.strip():
+            return {"run_id": run_id, "reason_code": "ADOPTION_ACTOR_REQUIRED"}
+        pending = [
+            item for item in self.state.pending_intents(run_id)
+            if item.get("operation") == "infoflow.group.create"
+        ]
+        if len(pending) != 1 or not isinstance(pending[0].get("payload"), dict):
+            return {"run_id": run_id, "reason_code": "GROUP_ADOPTION_NOT_AVAILABLE"}
+        intent = pending[0]
+        request = intent["payload"]
+        verify = getattr(self.group_client, "verify_group", None)
+        if not callable(verify):
+            return {"run_id": run_id, "reason_code": "GROUP_ADOPTION_UNSUPPORTED"}
+        verified = verify(
+            group_id, request.get("group_name"), request.get("member_snapshot")
+        )
+        if verified is None:
+            return {
+                "run_id": run_id,
+                "reason_code": "GROUP_ADOPTION_VERIFICATION_FAILED",
+                "intent_id": intent["intent_id"],
+            }
+        response = {
+            "group_id": group_id,
+            "group_name": request["group_name"],
+            "bot_id": verified.get("bot_id"),
+            "adopted": True,
+            "adopted_by": actor.strip(),
+            "members_queried": True,
+        }
+        saved = self._save_group(intent, request, response)
+        saved["adopted"] = True
+        return saved
 
     def route_failure(self, failure_bundle: dict[str, Any]) -> dict[str, Any]:
         run_id = failure_bundle.get("run_id")
@@ -413,6 +529,12 @@ class CollaborationSession:
         if not isinstance(group_id, (str, int)) or not str(group_id):
             return {"reason_code": "GROUP_CREATE_RESPONSE_INVALID"}
         result = {"run_id": intent["run_id"], "group_id": str(group_id), "group_name": request["group_name"], "owner": request["owner"], "roles": request["roles"], "member_snapshot": request["member_snapshot"], "bot_id": str(response["bot_id"]) if response.get("bot_id") is not None else None, "message_receipts": [], "approval_requests": [request["input_hash"]], "g0_approval_id": request.get("approval_id")}
+        if response.get("adopted") is True:
+            result.update({
+                "adopted": True,
+                "adopted_by": response.get("adopted_by"),
+                "members_queried": response.get("members_queried") is True,
+            })
         self.state.receipt(intent["intent_id"], result, [])
         return self._restore(result)
 
@@ -454,11 +576,10 @@ def _group_topic(title: str, override: Any = None) -> str:
     """Short, human-readable topic for the collaboration group name.
 
     Infoflow group names are read in a sidebar, so an untruncated card title is
-    unusable. A profile may pin an explicit topic; otherwise the card title is
-    stripped of a leading bracketed tag and trailing punctuation, then bounded.
+    unusable. The topic is always derived from the current card title. The
+    ``override`` argument remains for source compatibility with older callers,
+    but a project profile must never pin a requirement-specific topic.
     """
-    if isinstance(override, str) and override.strip():
-        return override.strip()[:_GROUP_TOPIC_MAX]
     cleaned = re.sub(r"^\s*[\[【(（][^\]】)）]*[\]】)）]\s*", "", str(title).strip())
     cleaned = _short_title(cleaned).strip("-：:；;，,。.")
     return (cleaned or _short_title(str(title)))[:_GROUP_TOPIC_MAX]

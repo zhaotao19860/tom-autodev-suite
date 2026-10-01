@@ -203,27 +203,6 @@ def _semantic_invalid_paths(profile: dict[str, Any]) -> list[str]:
     mapping ambiguous, which is worse than having no entry at all.
     """
     invalid: list[str] = []
-    environment = profile.get("environment_profile")
-    if isinstance(environment, dict):
-        provenance = environment.get("provenance")
-        marker_paths = _environment_marker_paths(environment)
-        if marker_paths:
-            invalid.extend(marker_paths)
-        if isinstance(provenance, dict):
-            if provenance.get("status") != "VERIFIED":
-                invalid.append("environment_profile.provenance.status")
-            for field in (
-                "runner_identity",
-                "image_toolchain_identity",
-                "verified_at",
-                "verifier",
-                "evidence_ref",
-            ):
-                value = provenance.get(field)
-                if not isinstance(value, str) or not value.strip():
-                    invalid.append(f"environment_profile.provenance.{field}")
-        elif marker_paths:
-            invalid.append("environment_profile.provenance")
     pipeline = profile.get("pipeline_profile")
     entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
     if not isinstance(entries, list):
@@ -253,26 +232,6 @@ def _semantic_invalid_paths(profile: dict[str, Any]) -> list[str]:
         # A release nobody is required to pass cannot ever be decided.
         invalid.append("pipeline_profile.pipelines.required_for_release")
     return invalid
-
-
-def _environment_marker_paths(value: Any, path: str = "environment_profile") -> list[str]:
-    """Reject descriptive guesses that masquerade as verified environment facts."""
-    markers = ("unverified", "assumed", "placeholder", "__")
-    if isinstance(value, dict):
-        result: list[str] = []
-        for key, child in value.items():
-            child_path = f"{path}.{key}"
-            if isinstance(child, str) and any(marker in child.lower() for marker in markers):
-                result.append(child_path)
-            elif isinstance(child, (dict, list)):
-                result.extend(_environment_marker_paths(child, child_path))
-        return result
-    if isinstance(value, list):
-        result = []
-        for index, child in enumerate(value):
-            result.extend(_environment_marker_paths(child, f"{path}[{index}]"))
-        return result
-    return []
 
 
 def _semantic_missing_paths(profile: dict[str, Any]) -> list[str]:

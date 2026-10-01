@@ -10,6 +10,21 @@ from approval_contract import (
 )
 
 
+class ApprovalDeliveryBlocked(ValueError):
+    """The transport refused to send because run policy blocks fresh effects."""
+
+    def __init__(self, reason_code: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+def _policy_refusal(response: dict[str, Any]) -> str | None:
+    reason = response.get("reason_code")
+    if response.get("ok") is False and isinstance(reason, str) and reason:
+        return reason
+    return None
+
+
 class InfoflowApprovalClient:
     """Approval gateway boundary. A transport is required to keep network I/O explicit."""
 
@@ -23,6 +38,12 @@ class InfoflowApprovalClient:
         response = self.transport.request(gateway_request)
         if not isinstance(response, dict):
             raise ValueError("APPROVAL_REQUEST_RESPONSE_INVALID")
+        # A policy refusal is not a malformed gateway answer. Reporting it as one
+        # persisted a permanent delivery failure whose reason code hid the real
+        # cause, so the operator saw a broken gateway instead of a drifted run.
+        blocked = _policy_refusal(response)
+        if blocked is not None:
+            raise ApprovalDeliveryBlocked(blocked)
         result = parse_gateway_result(_public_response(response))
         if (
             result is None
@@ -83,4 +104,14 @@ def _gateway_request(request: Any) -> dict[str, Any] | None:
     required = ("run_id", "approval_id", "input_hash", "member_policy")
     if any(not approval.get(field) for field in required):
         return None
-    return {**approval, "channel": channel}
+    result = {**approval, "channel": channel}
+    # The orchestrator currently puts this transient retry binding on the outer
+    # envelope, while older/direct callers may attach it to the approval payload.
+    # Preserve either form so a chained retry cannot fall back to the abandoned
+    # transport intent key and get stuck in QUERY_REQUIRED.
+    attempt_key = request.get("_delivery_attempt_key")
+    if not attempt_key:
+        attempt_key = approval.get("_delivery_attempt_key")
+    if isinstance(attempt_key, str) and attempt_key:
+        result["_delivery_attempt_key"] = attempt_key
+    return result

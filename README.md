@@ -32,6 +32,47 @@ python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
 
 `submit-draft` 只接收当前 schema 要求的 `DraftContent`，不接收 `ArtifactEnvelope`。需要审批时，CLI 会自动发起绑定当前草案和 `approval_input_hash` 的审批；成功返回 `PARKED / APPROVAL_WAIT`，不会自动批准。
 
+在 Comate 中可以直接使用卡片动作，不必手写 Python CLI：
+
+```text
+/tom-autodev BGW-1995 开始
+/tom-autodev BGW-1995 结束
+/tom-autodev BGW-1995 状态
+/tom-autodev BGW-1995 当成状态
+/tom-autodev BGW-1995 继续
+/tom-autodev BGW-1995 重新开始
+```
+
+这些动作的映射不是简单的同名替换：
+
+- `开始` → `cli.py process CARD PROJECT`，会创建/定位 run 并驱动；裸
+  `cli.py start` 只创建 run。
+- `结束` → `cli.py stop CARD_OR_RUN`，停止活动 run但保留审计记录。
+- `状态` / `当成状态` → `cli.py status CARD_OR_RUN`。
+- `继续` → `cli.py continue CARD_OR_RUN`；只读检查点才使用 `resume`。
+- `重新开始` → 停止选定的活动 run，再执行 `start --fresh` 和 `drive`。
+
+卡片只对应一个活动 run 或一个已确认项目时，可以省略 `PROJECT`；多个候选时
+必须先选择，不能根据 `BGW-` 前缀、目录名或最近使用记录静默绑定项目。完整映射见
+[`chat-commands.md`](tom-autodev/references/chat-commands.md)。
+
+协作群名称按当前 iCafe 快照的卡片标题即时派生，项目 profile 中的
+`approval_channels.group_topic` 仅为旧配置兼容字段，不再覆盖新需求主题。若历史 run
+检测到群名/主题与快照不一致，`drive`、`continue` 和 `process` 会在任何外部写入前停止并提示
+保留审计记录后执行 `stop` + `start --fresh`，不会复用旧群 intent。
+建群回执只把有效 `group_id` 作为成功必要条件；平台不回显 `bot_id` 不再被误判为建群失败。
+网关会按 run intent 持久化脱敏回执，`continue` 在恢复门禁前先查询并补写同一 intent，
+不会重复 create。旧版本没有回执 journal 时仍会停在 `QUERY_REQUIRED`，必须提供明确 group ID
+完成核对后再认领，不能按群名猜测。
+已知准确群 ID 且需要处理旧版本 pending intent 时，使用
+`python3 tom-autodev/scripts/cli.py adopt-group RUN_ID GROUP_ID --actor USER`；它只做按 ID
+的信息/成员核对并补写原 intent，不重新创建群。
+
+KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰好存在 `ku` 命令。
+入口可通过 `TOM_AUTODEV_KU_BINARY`、`TOM_AUTODEV_KU_SKILL_DIR` 或 `COMATE_SKILL_DIR`
+覆盖；操作身份通过 `BAIDU_CC_USERNAME` 传递。skill 输出的 debug 前缀和 JSON 响应会被
+正确分离，避免正常 KU 查询被报告为 `KU_QUERY_UNKNOWN`。
+
 ### 审批消息与进度通知
 
 - 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G10 和 `PROFILE_REPIN` 都有各自的检查重点。
@@ -171,10 +212,11 @@ profile。注册只保存和验证配置，不启动需求、不生成代码、�
 iPipe。字段说明见 [项目注册说明](tom-autodev/references/setup.md) 和
 [profile schema](tom-autodev/schemas/project-profile.schema.json)。
 
-BGW 的模板环境只描述预期 runner、镜像/工具链和服务，不代表平台已经验证。只有
-`environment_profile.provenance.status=VERIFIED`，并且带有 runner/image-toolchain
-身份、验证时间、验证人和证据引用，profile 才能进入 `READY`；`UNVERIFIED`、
-`assumed` 或 placeholder 环境会在写入前被拒绝。iPipe 查询使用有超时的只读适配器，
+BGW 的模板环境只保存用于绑定远程证据的稳定声明，不承担本地平台可用性验证。runner、
+编译器、测试拓扑、数据和服务由 iPipe 与 `tom-project-bgw` 管理；向导不再询问
+`environment_provenance`，profile 也不会因为缺少本地 runner/image/toolchain 证据而
+阻断 `READY`。真正的环境可用性只由 iPipe 执行回执和匹配的 environment fingerprint
+证明。iPipe 查询使用有超时的只读适配器，
 查询失败、超时、非 JSON 或同名多候选都会保留为未解决项，不能自动选一个继续。
 
 ### 3. 做只读预检
@@ -236,6 +278,13 @@ python3 tom-autodev/scripts/cli.py process BGW-1234 bgw
 
 ```bash
 python3 tom-autodev/scripts/cli.py start CARD PROJECT
+python3 tom-autodev/scripts/cli.py drive CARD_OR_RUN
+```
+
+显式从已停止的同卡片 run 重新开始：
+
+```bash
+python3 tom-autodev/scripts/cli.py start --fresh CARD PROJECT
 python3 tom-autodev/scripts/cli.py drive CARD_OR_RUN
 ```
 

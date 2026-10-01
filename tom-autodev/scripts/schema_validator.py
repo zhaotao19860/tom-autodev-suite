@@ -287,6 +287,12 @@ def _validate_decision_log(instance: dict[str, Any]) -> list[SchemaIssue]:
         issues.append(SchemaIssue("decision_result", "inconsistent"))
     if result == "UNRESOLVED" and (not frontier or status != "INCOMPLETE"):
         issues.append(SchemaIssue("decision_result", "inconsistent"))
+    questions = instance.get("choice_questions")
+    # An unanswered question is unanswered whichever completion the draft claims.
+    # Only `UNRESOLVED` may still carry questions: it is the state that routes back
+    # for another round instead of opening G1 over a half-answered decision log.
+    if result in {"DECISIONS_RECORDED", "NO_OPEN_DECISIONS"} and questions:
+        issues.append(SchemaIssue("choice_questions", "inconsistent"))
     seen_ids: set[str] = set()
     if isinstance(decisions, list):
         for index, decision in enumerate(decisions):

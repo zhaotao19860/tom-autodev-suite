@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -17,7 +18,9 @@ from cli_transport import CliTransport, CliTransportError
 from state_store import StateStore
 
 
-DEFAULT_KU_BINARY = "/Users/tom/.comate/skills/.system/ku-doc-manage/bin/ku"
+DEFAULT_KU_BINARY = str(
+    os.path.expanduser("~/.comate/skills/.system/ku-doc-manage/bin/ku")
+)
 _COMPONENT = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 _UNKNOWN_REASONS = frozenset({"CLI_TIMEOUT", "CLI_PROCESS_FAILED", "CLI_INVALID_JSON"})
 
@@ -39,6 +42,23 @@ def resolve_username(repo_paths: Sequence[str] = ()) -> str:
         if "@" in email:
             return email.split("@", 1)[0]
     return ""
+
+
+def resolve_ku_binary(binary: str | None = None) -> str:
+    """Resolve the installed ku-doc-manage entry point for this host."""
+    if isinstance(binary, str) and binary:
+        return binary
+    configured = os.environ.get("TOM_AUTODEV_KU_BINARY")
+    if configured:
+        return configured
+    skill_dir = (
+        os.environ.get("TOM_AUTODEV_KU_SKILL_DIR")
+        or os.environ.get("COMATE_SKILL_DIR")
+    )
+    if skill_dir:
+        return os.path.join(skill_dir, "bin", "ku")
+    discovered = shutil.which("ku")
+    return discovered or DEFAULT_KU_BINARY
 
 
 def _git_email(path: Any) -> str:
@@ -65,19 +85,20 @@ class KuClient:
         repo_id: str,
         username: str | None = None,
         repo_paths: Sequence[str] = (),
-        binary: str = DEFAULT_KU_BINARY,
+        binary: str | None = None,
         settle_attempts: int = 12,
         settle_wait_seconds: float = 6.0,
         sleeper: Any = time.sleep,
     ):
         self.username = username or resolve_username(repo_paths)
         self.transport = transport or CliTransport(
-            environment={"BAIDU_CC_USERNAME": self.username or ""}
+            environment={"BAIDU_CC_USERNAME": self.username or ""},
+            allow_json_preamble=True,
         )
         self.state = state_store
         self.run_id = run_id
         self.repo_id = repo_id
-        self.binary = binary
+        self.binary = resolve_ku_binary(binary)
         # KU serves a document before its content has propagated, so the read-back that
         # immediately follows a create can come back without the marker. That is a read
         # arriving early, not a failed write, and treating it as failure made every phase
@@ -113,8 +134,15 @@ class KuClient:
         marker = cls.index_marker(
             root_doc_id, entry["title"], entry["doc_id"], entry["content_hash"]
         )
+        phase = entry.get("phase") or "未分类"
+        status = entry.get("status") or "已生成"
+        purpose = entry.get("purpose") or "查看本阶段实际产出。"
+        handoff = entry.get("handoff") or "阅读正文后按下游阶段继续。"
         return (
-            f"- [{entry['title']}]({entry['url']}) - `{entry['content_hash']}`\n"
+            f"- [{entry['title']}]({entry['url']}) - {phase} / {status}\n"
+            f"  - 用途：{purpose}\n"
+            f"  - 交接：{handoff}\n"
+            f"  - 产物哈希：`{entry['content_hash']}`\n"
             f"{marker}"
         )
 
@@ -210,7 +238,13 @@ class KuClient:
                 return self._persist_failure(intent, created_call["reason_code"])
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
         info = created_call["payload"].get("result")
-        if not self._valid_remote_info(info, expected_title=title):
+        # The create CLI does not guarantee that the response envelope includes
+        # the requested title (notably when the body is supplied through
+        # --md-file). The document identity is still closed by docGuid,
+        # repositoryGuid, canonical URL, and the marker verified by the
+        # read-back below; requiring title here made a successful remote write
+        # look like KU_RUN_ROOT_VERIFICATION_FAILED.
+        if not self._valid_remote_info(info):
             return _failure("KU_RUN_ROOT_VERIFICATION_FAILED", intent_id=intent["intent_id"])
         remote = self._settled_child(info["docGuid"], initial, info["url"])
         if remote is None:
@@ -294,7 +328,10 @@ class KuClient:
                 return self._persist_failure(intent, created_call["reason_code"])
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
         info = created_call["payload"].get("result")
-        if not self._valid_remote_info(info, expected_title=title):
+        # As with run roots, title is optional in the create response when KU
+        # receives content through --md-file. The later marker read-back binds
+        # this response to the requested parent/title/content identity.
+        if not self._valid_remote_info(info):
             return _failure("KU_CREATE_VERIFICATION_FAILED", intent_id=intent["intent_id"])
         verified = self._settled_child(info["docGuid"], marked, info["url"])
         if verified is None:
@@ -858,7 +895,7 @@ class KuClient:
         return (
             remote.get("ok") is True
             and remote.get("repo_id") == self.repo_id
-            and remote.get("url") == expected_url
+            and _same_ku_document_url(remote.get("url"), expected_url)
             and _carries_marker(remote.get("text", ""), marked)
         )
 
@@ -1090,6 +1127,25 @@ def _canonical_ku_url(value: Any, repo_id: str, doc_id: str) -> bool:
         and not parsed.fragment
         and len(path) >= 5
         and path[-2:] == [repo_id, doc_id]
+    )
+
+
+def _same_ku_document_url(actual: Any, expected: Any) -> bool:
+    """Compare KU document identity while ignoring presentation query parameters.
+
+    The create response may return a mention URL with `t/mt/dt` query fields,
+    while a subsequent query returns the canonical document URL. They identify
+    the same immutable document; requiring byte-equal URLs made a successful
+    historical backfill look like a create verification failure.
+    """
+    if not isinstance(actual, str) or not isinstance(expected, str):
+        return False
+    actual_parts = urlsplit(actual)
+    expected_parts = urlsplit(expected)
+    return (
+        actual_parts.scheme == expected_parts.scheme == "https"
+        and actual_parts.netloc == expected_parts.netloc == "ku.baidu-int.com"
+        and actual_parts.path.rstrip("/") == expected_parts.path.rstrip("/")
     )
 
 

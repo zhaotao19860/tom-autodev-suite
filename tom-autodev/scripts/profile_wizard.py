@@ -18,10 +18,6 @@ answers = {
   "revisions": {"<module>": "<revision>", ...}, # pinned source revisions
   "ku": [{"repo_id": .., "parent_doc_id": .., "revision": ..}, ...],  # by order of ku sources
   "members": {"development": [...], "test": [...], "project": [...]},
-  "environment_provenance": {
-      "status": "VERIFIED", "runner_identity": ..., "image_toolchain_identity": ...,
-      "verified_at": ..., "verifier": ..., "evidence_ref": ...
-  },
 }
 """
 
@@ -146,10 +142,6 @@ def build_profile(template: dict[str, Any], answers: dict[str, Any]) -> dict[str
         for role in ("development", "test", "project"):
             if members.get(role):
                 role_members[role] = list(members[role])
-    environment_provenance = answers.get("environment_provenance")
-    environment = profile.get("environment_profile")
-    if isinstance(environment, dict) and isinstance(environment_provenance, dict):
-        environment["provenance"] = copy.deepcopy(environment_provenance)
     return profile
 
 
@@ -167,7 +159,8 @@ def confirmed_inputs(profile: dict[str, Any]) -> dict[str, Any]:
     """Return the exact variable facts a user must confirm before writing.
 
     Keeping this projection separate from the full profile means stable template
-    data can evolve without making a user re-confirm unrelated environment text.
+    data can evolve without making a user re-confirm iPipe-managed environment
+    details. The project skill and iPipe own environment availability and evidence.
     The writer compares the caller's `confirmed_inputs` with this projection,
     rather than accepting a free-form boolean that could accidentally acknowledge
     values different from those written.
@@ -201,8 +194,6 @@ def confirmed_inputs(profile: dict[str, Any]) -> dict[str, Any]:
         if isinstance(profile.get("approval_channels"), dict)
         else {}
     )
-    environment = profile.get("environment_profile")
-    provenance = environment.get("provenance") if isinstance(environment, dict) else None
     return {
         "repository_paths": {
             repo.get("module"): repo.get("path")
@@ -218,7 +209,6 @@ def confirmed_inputs(profile: dict[str, Any]) -> dict[str, Any]:
             role: list(members.get(role, []))
             for role in ("development", "test", "project")
         },
-        "environment_provenance": copy.deepcopy(provenance),
     }
 
 

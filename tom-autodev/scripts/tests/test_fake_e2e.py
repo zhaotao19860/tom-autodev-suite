@@ -252,6 +252,125 @@ class FakeE2ETests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_worker_advance_consumes_approved_g0_intake_controller(self):
+        profile = self._integrated_profile("bgw")
+        card = "BGW-INTAKE-CONTROLLER"
+        raw_snapshot = snapshot(card)
+        raw_snapshot.pop("content_hash")
+        requirement = CafeClient(
+            fetcher=lambda requested: copy.deepcopy(raw_snapshot)
+        ).snapshot(card)
+        started = self.orchestrator.start(
+            card, "bgw", requirement_snapshot=requirement, change_class="standard"
+        )
+        run_id = started["run_id"]
+        group_client = FakeGroupClient(
+            create_result={"group_id": "group-intake-controller"}
+        )
+        collaboration = self.orchestrator.collaboration_session(group_client)
+        prepared = collaboration.prepare_g0(
+            run_id,
+            "bgw",
+            {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+        )
+        approval = self._approval(run_id, "G0", prepared["input_hash"])
+        knowledge = KnowledgeSync(
+            state_store=self.orchestrator.state,
+            ku_client=FakeKuBoundary("bgw"),
+            cafe_client=FakeCafeBoundary(),
+            parent_doc_id=None,
+            project_parent_doc_id="I15ClP2KW4ZGAK",
+            run_root_title=f"{card}-{run_id[:12]}-fixture",
+            card_id=card,
+            run_id=run_id,
+        )
+
+        result = worker_driver.advance(
+            self.orchestrator,
+            run_id,
+            knowledge_sync=knowledge,
+            collaboration_client=group_client,
+        )
+
+        self.assertEqual((result["ok"], result["reason_code"]), (True, "PARKED"), result)
+        self.assertEqual(result["parked"], worker_driver.PRODUCER_WAIT)
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "GRILL")
+        self.assertEqual(len(group_client.create_calls), 1)
+        self.assertEqual(
+            self.orchestrator.next(run_id)["phase"],
+            "GRILL",
+        )
+        self.assertEqual(
+            self.orchestrator.state.producer_job(
+                result["producer_job"]["job_id"]
+            )["status"],
+            "PENDING",
+        )
+
+        replayed = worker_driver.advance(
+            self.orchestrator,
+            run_id,
+            knowledge_sync=knowledge,
+            collaboration_client=group_client,
+        )
+        self.assertEqual(replayed["producer_job"]["job_id"], result["producer_job"]["job_id"])
+        self.assertEqual(len(group_client.create_calls), 1)
+        self.assertEqual(
+            self.orchestrator.approvals.for_run(run_id)[0]["approval_id"],
+            approval["approval_id"],
+        )
+
+    def test_worker_reconciles_pending_group_before_phase_guard_without_recreating(self):
+        profile = self._integrated_profile("bgw")
+        card = "BGW-INTAKE-RECOVERY"
+        raw_snapshot = snapshot(card)
+        raw_snapshot.pop("content_hash")
+        requirement = CafeClient(
+            fetcher=lambda requested: copy.deepcopy(raw_snapshot)
+        ).snapshot(card)
+        started = self.orchestrator.start(
+            card, "bgw", requirement_snapshot=requirement, change_class="standard"
+        )
+        run_id = started["run_id"]
+        group_client = FakeGroupClient(create_error=TimeoutError("unknown"))
+        collaboration = self.orchestrator.collaboration_session(group_client)
+        prepared = collaboration.prepare_g0(
+            run_id,
+            "bgw",
+            {"id": card, "title": requirement["title"]},
+            profile["approval_channels"]["role_members"],
+        )
+        self._approval(run_id, "G0", prepared["input_hash"])
+        knowledge = KnowledgeSync(
+            state_store=self.orchestrator.state,
+            ku_client=FakeKuBoundary("bgw"),
+            cafe_client=FakeCafeBoundary(),
+            parent_doc_id=None,
+            project_parent_doc_id="I15ClP2KW4ZGAK",
+            run_root_title=f"{card}-{run_id[:12]}-fixture",
+            card_id=card,
+            run_id=run_id,
+        )
+
+        first = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge,
+            collaboration_client=group_client,
+        )
+        self.assertEqual(first["reason_code"], "CONTROLLER_STEP_FAILED")
+        self.assertEqual(len(group_client.create_calls), 1)
+
+        group_client.reconcile_result = {"group_id": "recovered-group", "bot_id": "bot-7"}
+        second = worker_driver.advance(
+            self.orchestrator, run_id, knowledge_sync=knowledge,
+            collaboration_client=group_client,
+        )
+
+        self.assertEqual(second["reason_code"], "PARKED")
+        self.assertEqual(second["parked"], worker_driver.PRODUCER_WAIT)
+        self.assertEqual(len(group_client.create_calls), 1)
+        self.assertEqual(len(group_client.reconcile_calls), 2)
+
     def test_agent_bridge_drives_card_to_producer_submits_draft_and_consumes_handoff_once(self):
         # Real WorkerDriver + bridge, with the existing fake iCafe/KU boundaries and
         # a temporary profile/worktree. Only the approval transport signal is injected.

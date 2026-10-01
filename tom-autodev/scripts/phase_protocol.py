@@ -692,7 +692,21 @@ class PhaseProtocol:
             _phase_attempt(self.state.events(run_id), action["phase"], action.get("task_id")),
         )
         publish_document = render_phase_markdown(
-            title, validated["draft"]["content"], envelope["content_hash"], canonical
+            title,
+            validated["draft"]["content"],
+            envelope["content_hash"],
+            canonical,
+            phase=action.get("phase"),
+            task_id=action.get("task_id"),
+            context={
+                "run_id": run_id,
+                "task_id": action.get("task_id"),
+                "input_hash": envelope.get("input_hash"),
+                "approval_id": envelope.get("approval_id"),
+                "approval_input_hash": envelope.get("approval_input_hash"),
+                "source_revisions": validated["draft"].get("source_revisions"),
+                "source_refs": validated["draft"].get("evidence_refs"),
+            },
         )
         foreign = self._foreign_publish_intent(run_id, title, envelope["content_hash"])
         if foreign is not None:
@@ -709,6 +723,9 @@ class PhaseProtocol:
                 "markdown": publish_document,
                 "content_hash": envelope["content_hash"],
                 "canonical": canonical,
+                "phase": action.get("phase"),
+                "task_id": action.get("task_id"),
+                "status": "待审批或待推进",
             },
             scope=workflow_spec.knowledge_scope(envelope.get("phase")),
         )
@@ -1578,10 +1595,21 @@ class PhaseProtocol:
         receipt = self.knowledge.publish_phase(run_id, {
             "title": ipipe_title,
             "markdown": render_phase_markdown(
-                ipipe_title, content, content_hash, ipipe_canonical
+                ipipe_title, content, content_hash, ipipe_canonical,
+                phase="IPIPE",
+                context={
+                    "run_id": run_id,
+                    "input_hash": action.get("input_hash"),
+                    "approval_id": payload.get("approval_id"),
+                    "approval_input_hash": payload.get("approval_input_hash"),
+                    "source_revisions": revisions,
+                    "source_refs": content.get("remote_evidence_refs"),
+                },
             ),
             "content_hash": content_hash,
             "canonical": ipipe_canonical,
+            "phase": "IPIPE",
+            "status": content.get("result") or content.get("status") or "待核验",
         }, scope=workflow_spec.knowledge_scope("IPIPE"))
         receipt_error = self._receipt_error(run_id, draft, receipt)
         if receipt_error:
@@ -1804,8 +1832,23 @@ class PhaseProtocol:
         canonical = _canonical_json(content)
         receipt = self.knowledge.publish_phase(run_id, {
             "title": title,
-            "markdown": render_phase_markdown(title, content, content_hash, canonical),
-            "content_hash": content_hash, "canonical": canonical,
+            "markdown": render_phase_markdown(
+                title,
+                content,
+                content_hash,
+                canonical,
+                phase="RELEASE",
+                context={
+                    "run_id": run_id,
+                    "input_hash": action.get("input_hash"),
+                    "approval_id": approval.get("approval_id"),
+                    "approval_input_hash": approval.get("input_hash"),
+                    "source_revisions": revisions,
+                    "source_refs": content.get("remote_evidence_refs"),
+                }
+            ),
+            "content_hash": content_hash, "canonical": canonical, "phase": "RELEASE",
+            "status": content.get("result") or content.get("status") or "待核验",
         }, scope=workflow_spec.knowledge_scope("RELEASE"))
         receipt_error = self._receipt_error(run_id, draft, receipt)
         if receipt_error:
@@ -2360,6 +2403,7 @@ def _auto_grill_decision_log(snapshot: dict[str, Any] | None) -> dict[str, Any]:
         "decision_result": "NO_OPEN_DECISIONS",
         "status": "COMPLETE",
         "decisions": [],
+        "choice_questions": [],
         "unresolved_frontier": [],
         "glossary_delta": {},
         "adr_candidates": [],

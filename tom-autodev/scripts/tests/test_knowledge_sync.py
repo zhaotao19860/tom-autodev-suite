@@ -460,7 +460,8 @@ class KnowledgeSyncTests(unittest.TestCase):
         self.assertIn("BGW-1", body)
         self.assertIn("run-8", body)
         self.assertIn("## 阶段产物", body)
-        # Entries are appended after the last block, so the section note has to be it.
+        self.assertIn("## 阶段导航", body)
+        self.assertIn("## 当前协作待办", body)
         self.assertTrue(body.rstrip().endswith("请不要手工修改。"))
 
     def test_from_profile_derives_the_ku_target_from_the_project(self):

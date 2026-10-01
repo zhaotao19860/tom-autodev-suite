@@ -23,9 +23,10 @@
 #   - pipeline_profile.pipeline_id                      = primary business module's pipeline
 # Default (carried as-is):
 #   - pipeline_profile.pipelines stages/parameters
-# The environment block below is deliberately UNVERIFIED. It is descriptive
-# template context only; project_registry refuses a READY profile until a
-# real platform verification receipt replaces the provenance fields.
+# The environment block is a stable identity used to bind remote evidence to this
+# profile. BGW compilation, tests, topology, runner selection, and environment
+# availability are owned by iPipe and tom-project-bgw. The wizard does not ask for
+# local environment provenance and this block is not a local platform readiness check.
 #
 # review_provider is intentionally absent: review is produced by tom-review as a
 # model phase, so no external review command needs to be associated.
@@ -126,28 +127,20 @@ pipeline_profile:
     - compile
 
 environment_profile:
-  runner: ipipe-agile-compile-env:newx86bgw
-  os_arch: linux/x86_64
-  image_digest: pending
-  toolchain_digest: pending
-  hardware_or_simulator: iPipe shared compile/regression runner
-  data: fixtures owned by baidu/nsiqa/x86bgw
-  services: iPipe build/regression/release services
-  capacity: default iPipe concurrency
-  provenance:
-    status: UNVERIFIED
-    runner_identity: unverified
-    image_toolchain_identity: unverified
-    verified_at: unverified
-    verifier: unverified
-    evidence_ref: unverified
+  runner: iPipe-managed by tom-project-bgw
+  os_arch: iPipe-managed
+  image_digest: iPipe-managed
+  toolchain_digest: iPipe-managed
+  hardware_or_simulator: iPipe-managed BGW topology
+  data: tom-project-bgw/iPipe fixtures
+  services: iPipe-managed build/regression/release services
+  capacity: iPipe-managed
 
 approval_channels:
   comate:
     channel: comate-cli
   infoflow:
     channel: single:zhaotao02
-  group_topic: "支持基于url负载均衡"
   role_members:
     development:
     - __DEVELOPMENT__

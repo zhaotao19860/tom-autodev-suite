@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from approval_summary import gate_intent, pinned_context, references, _hash
+from approval_summary import gate_intent, pinned_context, references, content_summary, _hash
 from approval_delivery import _approval_markdown, _deliver_approval_card
 from artifact_store import ArtifactStore
 from orchestrator import Orchestrator, _approval_context, _deliver_worker_approval
@@ -135,6 +135,36 @@ class ApprovalMaterialsTests(unittest.TestCase):
         mismatch = pinned_context(orch, "run-1", "G5", "different")
         self.assertEqual(mismatch["material_status"], "MISSING")
         self.assertNotIn("_review_content", mismatch)
+
+    def test_g1_summary_shows_question_options_and_selection_boundary(self):
+        content = {
+            "decision_result": "DECISIONS_RECORDED",
+            "status": "COMPLETE",
+            "decisions": [{
+                "id": "D-1",
+                "question": "本次采用哪种修复策略？",
+                "options": ["A 根治", "B 兼容", "C 其他"],
+                "choice": "A 根治",
+                "rationale": "需求负责人确认",
+                "evidence": ["ku://analysis"],
+            }],
+            "choice_questions": [],
+            "unresolved_frontier": [],
+            "glossary_delta": {},
+            "adr_candidates": [],
+            "source_evidence": ["icafe://BGW-1"],
+        }
+        summary = content_summary(content)
+        self.assertIn("选项 D-1：A 根治；B 兼容；C 其他", summary)
+        self.assertIn("已选择 D-1：A 根治", summary)
+        rendered = self._render("G1", {
+            "summary": summary,
+            "references": [{"label": "Decision Log", "ref": "decision-log.json"}],
+            "material_status": "PINNED",
+            "_review_content": content,
+        })
+        self.assertIn("Comate 选择已经完成", rendered)
+        self.assertIn("Decision Log", rendered)
 
     def test_merged_g2_explains_dag_is_associated_not_separately_approved(self):
         orch, action, draft = self._draft_orchestrator(merged=True)
@@ -275,6 +305,16 @@ class ApprovalMaterialsTests(unittest.TestCase):
                 orch, run_id, action="G5", input_hash=bound, content_path=str(path)
             )
         self.assertEqual(accepted["evidence"]["gate"]["material_status"], "PINNED")
+
+    def test_reissue_preserves_material_lookup_hash(self):
+        from unittest.mock import Mock
+        from orchestrator import _reissue_approval
+        orch = Mock()
+        context = {"member_policy": {}, "evidence": {}}
+        with patch("orchestrator._approval_context", return_value=context) as lookup, \
+             patch("orchestrator._infoflow_approval_client", return_value=Mock()):
+            _reissue_approval(orch, "run-1", "G1", "hash-a")
+        lookup.assert_called_once_with(orch, "run-1", action="G1", input_hash="hash-a")
 
     def test_upgrade_reuses_legacy_cli_evidence_only_on_exact_delivery_digest(self):
         from orchestrator import _icafe_url, _requirement_documents

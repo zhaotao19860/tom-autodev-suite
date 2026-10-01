@@ -4,11 +4,61 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-09-30 · 漂移迁移闭环、点击身份与状态可操作性
+
+- 修复 `WORKFLOW_SPEC_DRIFT` 下迁移门自身无法结算的死锁：投递、读回、落账、重发和
+  watcher 结算统一按 `migration_exempt()` 豁免（含 `#retry-N`），其它门在漂移下仍一律
+  拒绝。此前卡片能发出但决定永远不落账，`migrate-workflow-spec --approval-id` 恒返回
+  `APPROVAL_REQUIRED`，暂停的 run 只能手改账本。
+- 修复多次策略变更后的迁移链：`effective_pinned_hash` 从链头逐跳校验 `old_hash`，
+  `apply()` 的写入 key 由当前生效 pin 派生。此前第二次迁移被忽略、第三次永久
+  `MIGRATION_CONFLICT`。新增 3 次连续迁移回归。
+- 如流审批卡随卡下发审批成员 uuap：审批人点击仍立即变为“已由 X 处理”并去掉按钮防重复
+  点击；非审批成员在群卡片上的点击只记录“点击待校验”并保留按钮，不再对真正的审批人
+  呈现假终态；网关重启后无成员列表时保持可答复。
+- 区分策略拒绝与网关响应异常：`ApprovalDeliveryBlocked` 不再被写成永久
+  `APPROVAL_REQUEST_RESPONSE_INVALID`；`confirm-approval-redelivery` 在作废 intent 前
+  先做守卫检查，漂移中的非迁移门不会白烧一次确认配额。
+- 状态可操作性：投递结果未知或运行被阻塞时不再把“打开如流审批卡”盖掉恢复指引，并展示
+  `confirm-approval-redelivery` 必需的 `intent_id`；GRILL 草案仍有未答问题时状态为
+  `待答题`，提示回答后以同一 job 重新提交，而不是调用必然失败的 `continue`。
+- `decision_result="NO_OPEN_DECISIONS"` 携带未答 `choice_questions` 时判为不一致，
+  不再允许带着未答题开 G1。
+- `OPERATIONS.md` 收录 `confirm-approval-redelivery` 与 `migrate-workflow-spec` 的参数、
+  精确确认字面量和前置条件。
+- 本轮验证：两份独立评审合并后确认 3 个 P1 + 3 个 P2 并逐项修复，套件全量回归
+  `tom-autodev` 1145 项、`tom-review` 6 项、`tom-autodebug` 通过，`node --check` 与
+  `git diff --check` 通过；未据此宣称模型资格或真实平台资格。
+
 ## 2026-09-29 · 套件维护：审批材料闭环与环境 provenance
 
+- 修复如流建群回执丢失链路：网关支持多层响应 envelope，使用已加入 `robotList` 的机器人
+  身份补齐可选 `bot_id`，并将按 run intent 关联的脱敏 group receipt 持久化到 journal。
+  新增只读 receipt 查询；worker 在 `RECOVERY_REQUIRED` 门禁前先核对并补写原 intent，
+  不会重复建群。旧版本未产生 journal 的历史 intent 仍需明确 group ID 后受控认领，
+  不能按群名猜测；新增 `adopt-group`，只按明确 group ID 核对群信息/成员后补写原 intent。
+- 接通 tom-autodev 与 `/ku-doc-manage` skill：KU 入口支持环境发现和显式覆盖，自动传递
+  `BAIDU_CC_USERNAME`，兼容 skill 的 debug 前缀后 JSON 响应，避免把正常 KU 查询误判为
+  `KU_QUERY_UNKNOWN`。
+- 修复 `run_brief` 摘要分支优先级：ProducerJob 处于待生成时不再被未来的审批 gate
+  文案遮住；已批准待提交状态继续显示为 `已批准待提交`。审批等待提示同时展示当前
+  `approval_id`，便于定位具体如流审批卡。相关的 3 个历史回归失败已补修并纳入验证。
+- 修复协作群主题串用：群 topic/name 只从当前 iCafe requirement snapshot 派生，
+  不再接受项目 profile 中残留的旧 `group_topic`；检测到已落盘 binding 与当前快照不一致时，
+  `drive/continue` 在任何外部写入前 fail-closed，并给出保留审计记录后 `stop` + `start --fresh`
+  的恢复路径。
+- 修复 WorkerDriver 在 G0 批准后遗漏执行 `INTAKE` controller 的问题：按精确 G0 hash
+  创建/复用 durable 协作群 receipt，归档 requirement snapshot，并继续驱动到 GRILL；
+  `build_envelope` 对 INTAKE 使用 G0 原始 input hash，重试保持幂等。
 - 修复 Infoflow 审批卡按 `target_type:target_id` 隔离 card identity；点击只显示待权限/有效期校验并保留按钮，直到账本回执确认终态；重启恢复不重复累积点击状态。
 - 将 `pinned_context()` 接入实际 `_approval_context()`，G0/G4/G5/G9/G10 按当前 run、task、revision 和 input hash 读取精确材料；首次审批归档材料包，重试复用同一份内容，显式 envelope 重新计算绑定。
-- BGW 模板环境改为显式 `UNVERIFIED` provenance；缺少真实 runner/image-toolchain 身份、验证时间、验证人和证据引用时拒绝写成 `READY` profile。iPipe pipeline discovery 增加注入式 transport、超时和响应 schema 校验。
+- BGW 环境责任边界调整为由 `tom-project-bgw` 与 iPipe 统一管理：向导移除
+  `environment_provenance` 询问，profile READY 不再依赖本地 runner/image/toolchain
+  证据或环境 marker 校验；保留 environment fingerprint 与远程 iPipe evidence 的绑定。
+  旧 profile 中的 provenance 仅作兼容读取，不再参与确认和门禁。iPipe pipeline
+  discovery 增加注入式 transport、超时和响应 schema 校验。
+- 增加 `start --fresh CARD PROJECT`，在旧 run 已停止后用显式 fresh token
+  创建新的审计 run；旧事件、审批和产物保留，不再通过删除状态记录实现重启。
 - 当前定向控制面验证：gateway 6 项、approval materials 13 项、workspace materials 6 项、delivery 44 项、retry 20 项、progress 12 项、profile wizard 21 项、registry 20 项、schema 20 项、runtime guard 24 项通过；未据此宣称完整套件、模型资格或真实平台资格。
 
 ## 2026-09-29 · 审批可读材料、单聊按钮与通知区分

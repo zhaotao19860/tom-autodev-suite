@@ -16,7 +16,7 @@ Decision kinds:
                      ProducerJob for a bounded agent turn (a signal-wait).
   - APPROVAL_WAIT  : the action needs a human gate that is not yet settled; park an
                      ApprovalJob (a signal-wait).
-  - CONTROLLER_STEP: a controller action (workspace/submit/ipipe/release) whose gate is
+  - CONTROLLER_STEP: a controller action (intake/workspace/submit/ipipe/release) whose gate is
                      settled (or ungated); the worker runs the deterministic transition
                      (a would-be Temporal activity).
 """
@@ -123,13 +123,17 @@ def build_envelope(
         content.get("revisions") if action.get("phase") == "IMPLEMENT"
         else action.get("source_revisions")
     )
-    approval_input_hash = _canonical_hash({
-        "action_id": action["action_id"],
-        "task_id": action.get("task_id"),
-        "parent_artifact_hash": action.get("parent_artifact_hash"),
-        "source_revisions": source_revisions,
-        "content_hash": content_hash,
-    })
+    approval_input_hash = (
+        action["input_hash"]
+        if action.get("phase") == "INTAKE"
+        else _canonical_hash({
+            "action_id": action["action_id"],
+            "task_id": action.get("task_id"),
+            "parent_artifact_hash": action.get("parent_artifact_hash"),
+            "source_revisions": source_revisions,
+            "content_hash": content_hash,
+        })
+    )
     return {
         "action_id": action["action_id"],
         "source_event_id": action["source_event_id"],
@@ -278,6 +282,28 @@ def submit_draft(
     expected_job = f"producer:{action['action_id']}"
     if job_id != expected_job:
         return {"ok": False, "reason_code": "STALE_PRODUCER_JOB", "expected_job_id": expected_job}
+    previous = orchestrator.state.producer_job(job_id)
+    if (
+        isinstance(previous, dict)
+        and previous.get("status") == "FULFILLED"
+        and action.get("phase") == "GRILL"
+        and isinstance(previous.get("draft"), dict)
+        and previous["draft"].get("decision_result") == "UNRESOLVED"
+    ):
+        reopened = orchestrator.state.reopen_invalid_producer_job(
+            run_id,
+            job_id,
+            previous,
+            action,
+            {
+                "ok": False,
+                "reason_code": "DECISION_REQUIRED",
+                "content_invalid": False,
+                "retry_allowed": True,
+            },
+        )
+        if not reopened.get("ok"):
+            return reopened
     return _produce(orchestrator, run_id, job_id, action, draft, knowledge_sync)
 
 
@@ -310,6 +336,15 @@ def _produce(
     envelope = build_envelope(action, draft)
     schema_name = action.get("result_schema")
     _record_model_receipt(orchestrator, run_id, action, draft, [schema_name])
+    if action.get("phase") == "GRILL" and draft.get("decision_result") == "UNRESOLVED":
+        return {
+            "ok": False,
+            "reason_code": "DECISION_REQUIRED",
+            "phase": "GRILL",
+            "choice_questions": draft.get("choice_questions") or [],
+            "unresolved_frontier": draft.get("unresolved_frontier") or [],
+            "job_id": job_id,
+        }
     gate = action.get("required_human_gate")
     if gate is not None:
         approval_id = _settled_approval_id(orchestrator, run_id, gate, envelope["approval_input_hash"])
@@ -482,10 +517,12 @@ def execute_controller(
     icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
     icode_runtime: Any | None = None,
     ipipe_api: Any | None = None,
+    collaboration_client: Any | None = None,
 ) -> dict[str, Any]:
     """Execute the current controller transition, if it is one the worker owns.
 
-    WORKSPACE (local, reversible worktree binding + gated WORKSPACE->PLAN) and SUBMIT
+    INTAKE (G0-bound collaboration creation + requirement-snapshot completion), WORKSPACE
+    (local, reversible worktree binding + gated WORKSPACE->PLAN) and SUBMIT
     (derive the reviewed descriptor and submit it to iCode under G7) are executed here.
     IPIPE (trigger the pipeline under G7, monitor to a terminal state, ingest the evidence)
     and RELEASE (verify the release under G9, record the evidence, land RELEASE_SUCCESS) are
@@ -501,6 +538,83 @@ def execute_controller(
         return {"ok": False, "reason_code": "NOT_CONTROLLER", "decision_kind": decision["kind"]}
     action = decision.get("action") or {}
     controller = action.get("controller")
+    if controller == "intake":
+        approval_id = _settled_approval_id(
+            orchestrator, run_id, "G0", action.get("input_hash")
+        )
+        if approval_id is None:
+            return {
+                "ok": False,
+                "reason_code": "APPROVAL_REQUIRED",
+                "run_id": run_id,
+                "gate": "G0",
+                "approval_input_hash": action.get("input_hash"),
+            }
+
+        events = orchestrator.state.events(run_id)
+        payload = events[0].get("payload") if events else None
+        if not isinstance(payload, dict):
+            return {"ok": False, "reason_code": "INTAKE_PREREQUISITES_INVALID", "run_id": run_id}
+        snapshot = payload.get("requirement_snapshot")
+        binding = payload.get("collaboration_binding")
+        project = payload.get("project")
+        requirement_id = payload.get("requirement_id")
+        if (
+            not isinstance(snapshot, dict)
+            or not isinstance(binding, dict)
+            or not isinstance(project, str)
+            or not isinstance(requirement_id, str)
+        ):
+            return {"ok": False, "reason_code": "INTAKE_PREREQUISITES_INVALID", "run_id": run_id}
+
+        # G0 authorizes creating the exact collaboration session pinned in INTAKE. The
+        # durable receipt is idempotent, so a retry after an unknown remote outcome
+        # reconciles/reads the same intent instead of creating a second group.
+        if collaboration_client is None:
+            from clients.infoflow_group_client import InfoflowGroupClient
+
+            collaboration_client = InfoflowGroupClient()
+        profile_result = orchestrator._runtime_profile(run_id)
+        if not profile_result.get("ok"):
+            return profile_result
+        profile = profile_result["profile"]
+        role_members = (
+            (profile.get("approval_channels") or {}).get("role_members")
+            if isinstance(profile, dict)
+            else None
+        )
+        if not isinstance(role_members, dict):
+            return {"ok": False, "reason_code": "MEMBER_CONFIRMATION_REQUIRED", "run_id": run_id}
+        collaboration = orchestrator.collaboration_session(collaboration_client)
+        group = collaboration.create(
+            run_id,
+            project,
+            {"id": requirement_id, "title": snapshot.get("title")},
+            role_members,
+            approval_id=approval_id,
+            input_hash=action.get("input_hash"),
+        )
+        if not isinstance(group, dict) or not group.get("group_id"):
+            return {
+                "ok": False,
+                "reason_code": group.get("reason_code", "COLLABORATION_CREATE_FAILED")
+                if isinstance(group, dict)
+                else "COLLABORATION_CREATE_FAILED",
+                "run_id": run_id,
+                "detail": group,
+            }
+
+        envelope = build_envelope(action, approval_id=approval_id)
+        completed = orchestrator.complete_phase(
+            run_id, envelope, knowledge_sync=knowledge_sync
+        )
+        if completed.get("ok"):
+            return {
+                **completed,
+                "controller": "intake",
+                "collaboration": group,
+            }
+        return completed
     if controller == "workspace":
         return _execute_workspace(orchestrator, run_id, action)
     if controller == "submit":
@@ -1033,7 +1147,8 @@ def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, A
 def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
             icode_runtime: Any | None = None, ipipe_api: Any | None = None,
-            locks: Any | None = None, owner_token: str | None = None) -> dict[str, Any]:
+            collaboration_client: Any | None = None, locks: Any | None = None,
+            owner_token: str | None = None) -> dict[str, Any]:
     """Drive a run forward, optionally under a single-writer run lease.
 
     When `locks` (a LockManager) is supplied the worker takes a per-run lease first, so two
@@ -1045,7 +1160,7 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     """
     if locks is None:
         return _drive(orchestrator, run_id, knowledge_sync, max_steps, icode_skill,
-                      icode_runtime, ipipe_api)
+                      icode_runtime, ipipe_api, collaboration_client)
     token = owner_token or uuid.uuid4().hex
     key = f"{_WORKER_LEASE_PREFIX}{run_id}"
     lease = locks.acquire(key, token, _WORKER_LEASE_TTL_SECONDS)
@@ -1054,7 +1169,7 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                 "owner_pid": lease.get("owner_pid")}
     try:
         return _drive(orchestrator, run_id, knowledge_sync, max_steps, icode_skill,
-                      icode_runtime, ipipe_api)
+                      icode_runtime, ipipe_api, collaboration_client)
     finally:
         released = locks.release(key, token)
         if isinstance(released, dict) and not released.get("released"):
@@ -1064,10 +1179,11 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
 
 def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
            max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
-           icode_runtime: Any | None = None, ipipe_api: Any | None = None) -> dict[str, Any]:
+           icode_runtime: Any | None = None, ipipe_api: Any | None = None,
+           collaboration_client: Any | None = None) -> dict[str, Any]:
     """Drive a run forward through every step the worker can take on its own, then park.
 
-    Loops: completes AUTO_COMPLETE frontiers, and executes the WORKSPACE, SUBMIT and (when
+    Loops: completes AUTO_COMPLETE frontiers, and executes the INTAKE, WORKSPACE, SUBMIT and (when
     an `ipipe_api` transport is injected) IPIPE and RELEASE controllers when their gate is
     already settled (the compute-then-approve executors park with the exact hash when it is
     not). It parks — returning the decision the caller must arrange next — on a model phase
@@ -1075,10 +1191,35 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     with no injected runtime (IPIPE/RELEASE without `ipipe_api`), a non-terminal pipeline
     monitor or an unpublished release, a terminal state, or a block. `max_steps` bounds it.
 
-    WORKSPACE (local), SUBMIT (G7-gated CR), IPIPE (G7-gated trigger + monitor + ingest)
+    INTAKE (G0-gated collaboration + snapshot), WORKSPACE (local), SUBMIT (G7-gated CR),
+    IPIPE (G7-gated trigger + monitor + ingest)
     and RELEASE (G9-gated verify + ingest) are the controllers the worker runs. Every
     controller execution goes through the orchestrator's own gate enforcement.
     """
+    pending = orchestrator.state.pending_intents(run_id)
+    if any(item.get("operation") == "infoflow.group.create" for item in pending):
+        if collaboration_client is None:
+            from clients.infoflow_group_client import InfoflowGroupClient
+
+            collaboration_client = InfoflowGroupClient()
+        try:
+            recovered = orchestrator.collaboration_session(
+                collaboration_client
+            ).reconcile_pending(run_id)
+        except Exception as error:  # noqa: BLE001 - recovery must remain parked and auditable
+            return {
+                "ok": False,
+                "reason_code": "RECOVERY_REQUIRED",
+                "run_id": run_id,
+                "detail": {"reason_code": str(error) or error.__class__.__name__},
+            }
+        if isinstance(recovered, dict) and recovered.get("reason_code") not in {None, "OK"}:
+            return {
+                "ok": False,
+                "reason_code": "RECOVERY_REQUIRED",
+                "run_id": run_id,
+                "detail": recovered,
+            }
     steps: list[dict[str, Any]] = []
     for _ in range(max_steps):
         decision = classify_next(orchestrator, run_id)
@@ -1129,13 +1270,14 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                     "auto_completed": steps}
         if kind in (CONTROLLER_STEP, APPROVAL_WAIT):
             controller = (decision.get("action") or {}).get("controller")
-            worker_owned = controller in ("workspace", "submit") or (
+            worker_owned = controller in ("intake", "workspace", "submit") or (
                 controller in ("ipipe", "release") and ipipe_api is not None
             )
             if worker_owned:
                 result = execute_controller(
                     orchestrator, run_id, knowledge_sync=knowledge_sync,
                     icode_skill=icode_skill, icode_runtime=icode_runtime, ipipe_api=ipipe_api,
+                    collaboration_client=collaboration_client,
                 )
                 if result.get("ok") and result.get("reason_code") != "PARKED":
                     steps.append({"controller": controller, "result": result})
@@ -1152,7 +1294,7 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                             "auto_completed": steps}
                 return {"ok": False, "reason_code": "CONTROLLER_STEP_FAILED", "run_id": run_id,
                         "controller": controller, "detail": result, "auto_completed": steps}
-            # intake / ipipe / release without an injected runtime: not run by the loop.
+            # IPIPE / RELEASE without an injected runtime are not run by the loop.
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
                     "parked": kind, "controller": controller, "decision": decision,
                     "auto_completed": steps}
@@ -1167,7 +1309,8 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
 def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
            icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
            icode_runtime: Any | None = None, ipipe_api: Any | None = None,
-           locks: Any | None = None, owner_token: str | None = None) -> dict[str, Any]:
+           collaboration_client: Any | None = None, locks: Any | None = None,
+           owner_token: str | None = None) -> dict[str, Any]:
     """Consume a run's settled approval-resume handoff and drive it forward.
 
     Run-scoped by construction (it only looks at this run's handoffs), which is the fix
@@ -1197,6 +1340,7 @@ def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     orchestrator.state.complete_handoff(handoff["handoff_id"])
     return advance(orchestrator, run_id, knowledge_sync=knowledge_sync,
                    icode_skill=icode_skill, icode_runtime=icode_runtime, ipipe_api=ipipe_api,
+                   collaboration_client=collaboration_client,
                    locks=locks, owner_token=owner_token)
 
 

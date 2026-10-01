@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from execution_guard import execution_guard, guard_execution
+from execution_guard import execution_guard, guard_execution, migration_exempt
 
 import time
 from datetime import datetime, timezone
@@ -96,8 +96,18 @@ class ApprovalWatcher:
         # return the policy failures before bringing up any external client.
         run_ids = {item["run_id"] for item in self.orchestrator.state.latest_states()}
         run_ids.update(item["run_id"] for item in self.orchestrator.approvals.pending())
-        blocked = [execution_guard(self.orchestrator.state, run_id) for run_id in sorted(run_ids)]
-        if blocked and all(item is not None for item in blocked):
+        # A run whose only open gate is its own migration is not unreachable: that
+        # gate is exactly what unblocks the drift, so returning policy failures here
+        # would leave the single-run case permanently unanswerable.
+        migrating = {
+            approval["run_id"] for approval in self.orchestrator.approvals.pending()
+            if migration_exempt(approval.get("action"))
+        }
+        blocked = [
+            execution_guard(self.orchestrator.state, run_id)
+            for run_id in sorted(run_ids) if run_id not in migrating
+        ]
+        if blocked and all(item is not None for item in blocked) and not migrating:
             return blocked
         channel = self._ensure_channel()
         if channel is not None:
@@ -369,9 +379,12 @@ class ApprovalWatcher:
 
     def _settle(self, approval: dict[str, Any]) -> dict[str, Any] | None:
         run_id = approval["run_id"]
-        blocked = execution_guard(self.orchestrator.state, run_id)
-        if blocked is not None:
-            return blocked
+        # The migration gate stays settleable under drift; every other gate needs the
+        # migration first, so its own decision must not be applied yet.
+        if not migration_exempt(approval.get("action")):
+            blocked = execution_guard(self.orchestrator.state, run_id)
+            if blocked is not None:
+                return blocked
         approval_id = approval["approval_id"]
         client = self.client_factory()
         result = self.orchestrator.wait_infoflow_approval(
@@ -502,6 +515,7 @@ class ApprovalWatcher:
                 member_policy=approval.get("member_policy") or {},
                 evidence=payload.get("evidence") or {},
                 infoflow_client=self.client_factory(),
+                allow_workflow_spec_migration=migration_exempt(approval.get("action")),
             )
         except Exception as error:  # noqa: BLE001 - the external outcome is unknown
             return {"reason_code": "APPROVAL_REISSUE_QUERY_REQUIRED", "detail": str(error)}

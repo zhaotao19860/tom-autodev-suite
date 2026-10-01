@@ -189,6 +189,10 @@ GATE_LABELS: dict[str, tuple[str, str]] = {
     "G8": ("重跑失败的流水线阶段", "按当前远程证据重跑该阶段"),
     "G9": ("正式发布", "执行发布阶段"),
     "G10": ("控制面优化建议", "应用优化建议"),
+    "WORKFLOW_SPEC_MIGRATION": (
+        "暂停运行的 workflow policy 版本迁移",
+        "移动 workflow pin，恢复该运行的受控继续",
+    ),
 }
 
 # Failure reason -> next state (transition_policy.failure_target); default STOPPED.
@@ -364,31 +368,43 @@ def spec_drift(events: list[dict[str, Any]] | None) -> dict[str, str] | None:
     return {"pinned_spec_hash": pinned, "current_spec_hash": current}
 
 
-# Per-phase knowledge / collaboration write policy (slimming Stage B). Each archived phase
-# artifact declares whether it publishes a human-readable KU doc and/or comments the iCafe
-# card. The artifact itself is ALWAYS stored in the artifact_store — correctness and
-# recovery read from there, never from KU — so this only trims the human-facing writes:
-#   both       — KU doc + iCafe comment            (INTAKE/G0, RELEASE)
-#   ku_only    — KU doc, no iCafe comment          (SPEC)
-#   icafe_only — iCafe milestone comment, no KU doc (IPIPE)
-#   skip       — neither                           (GRILL, TASKS, PLAN, IMPLEMENT, REVIEW, DIAGNOSE)
-# An unlisted phase defaults to "both" so nothing loses its writes by omission.
+def spec_drift_for_state(state: Any, run_id: str) -> dict[str, str] | None:
+    """The execution-time drift check, including an approved migration chain."""
+    events = state.events(run_id)
+    pinned = pinned_spec_hash(events)
+    if pinned is None:
+        return None
+    try:
+        from workflow_spec_migration import effective_pinned_hash
+
+        migrated = effective_pinned_hash(state, run_id, events=events)
+        if migrated is not None:
+            pinned = migrated
+    except ImportError:
+        # Keep workflow_spec independently usable in schema/hash unit tests.
+        pass
+    current = canonical_hash()
+    if pinned == current:
+        return None
+    return {"pinned_spec_hash": pinned, "current_spec_hash": current}
+
+
+# Per-phase knowledge / collaboration write policy. Every phase that creates a
+# requirement, design, implementation, review, diagnosis or verification artifact
+# gets a human-readable KU document. iCafe remains a short milestone/evidence
+# surface, so it is intentionally not duplicated for every intermediate phase.
+# The artifact itself is ALWAYS stored in artifact_store — correctness and recovery
+# read from there, never from KU.
 _KNOWLEDGE_SCOPE: dict[str, str] = {
-    # INTAKE stays "both": its requirement-snapshot anchors the run's KU root (the doc every
-    # later phase indexes under) and is the G0 milestone, so it is not trimmed.
     "INTAKE": "both",
-    "GRILL": "skip",
-    # SPEC keeps only the KU doc (the behaviour/acceptance the requirement owner reads);
-    # its iCafe comment is dropped as redundant milestone noise.
+    "GRILL": "ku_only",
     "SPEC": "ku_only",
-    "TASKS": "skip",
-    "PLAN": "skip",
-    "IMPLEMENT": "skip",
-    # REVIEW/DIAGNOSE are intermediate engineering records that people rarely re-read in KU;
-    # both are trimmed to neither write. The full artifact still lives in the artifact_store.
-    "REVIEW": "skip",
-    "DIAGNOSE": "skip",
-    "IPIPE": "icafe_only",
+    "TASKS": "ku_only",
+    "PLAN": "ku_only",
+    "IMPLEMENT": "ku_only",
+    "REVIEW": "ku_only",
+    "DIAGNOSE": "ku_only",
+    "IPIPE": "both",
     "RELEASE": "both",
 }
 _KNOWLEDGE_SCOPES = frozenset({"both", "ku_only", "icafe_only", "skip"})

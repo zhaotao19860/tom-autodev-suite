@@ -175,6 +175,25 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(recorded["profile_path"], str(expected))
         self.assertEqual(result["state"], "INTAKE")
 
+    def test_fresh_start_creates_new_run_after_previous_run_is_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_profile(root, PROFILE)
+            orchestrator = Orchestrator(root)
+            first = _start(orchestrator)
+            orchestrator.stop(first["run_id"])
+            second = orchestrator.start(
+                "BGW-1",
+                "bgw",
+                requirement_snapshot=_requirement_snapshot("BGW-1"),
+                fresh_token="restart-1",
+            )
+            first_state = orchestrator.status(first["run_id"])["state"]
+
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        self.assertEqual(second["state"], "INTAKE")
+        self.assertEqual(first_state, "STOPPED")
+
     def test_status_does_not_ask_for_a_superseded_pending_gate(self):
         """A later APPROVE of the same action retires an unanswered earlier card.
 

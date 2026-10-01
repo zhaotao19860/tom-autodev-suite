@@ -126,6 +126,18 @@ class ProjectRegistryTests(unittest.TestCase):
         self.assertEqual(result["missing"], [])
         self.assertEqual(result["invalid"], [])
 
+    def test_environment_provenance_and_descriptive_markers_do_not_gate_ready(self):
+        profile = copy.deepcopy(REQUIRED_PROFILE)
+        profile["environment_profile"].update({
+            "runner": "unverified runner declared by project skill",
+            "provenance": {"status": "UNVERIFIED"},
+        })
+
+        result = validate_profile(profile, check_paths=False)
+
+        self.assertEqual(result["reason_code"], "READY")
+        self.assertEqual(result["invalid"], [])
+
     def test_missing_test_repo_blocks_setup(self):
         profile = dict(REQUIRED_PROFILE)
         profile.pop("test_repo")

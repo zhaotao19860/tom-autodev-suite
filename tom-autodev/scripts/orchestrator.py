@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from execution_guard import execution_guard, guard_execution
+from execution_guard import execution_guard, guard_execution, migration_exempt
 
 import hashlib
 import json
@@ -19,6 +19,8 @@ from approval_contract import (
 )
 from approval_ledger import ApprovalLedger, gate_of, MAX_APPROVAL_RETRIES, _RETRY_MARKER
 from artifact_store import ArtifactStore
+from clients.infoflow_approval_client import ApprovalDeliveryBlocked
+from clients.infoflow_bot_client import InfoflowRequestError
 from collaboration import (
     CollaborationSession,
     build_collaboration_binding,
@@ -86,6 +88,7 @@ class Orchestrator:
         requirement_snapshot: dict[str, Any] | None = None,
         change_class: str | None = None,
         require_requirement_profile: bool | None = None,
+        fresh_token: str | None = None,
     ) -> dict[str, Any]:
         if require_requirement_profile is None:
             require_requirement_profile = self.require_requirement_profiles
@@ -132,7 +135,10 @@ class Orchestrator:
                     "profile_path": str(configured_profile_path),
                 }
         snapshot_identity = requirement_snapshot["content_hash"]
-        idempotency_key = f"start:{project}:{requirement_id}:{profile_hash}:{snapshot_identity}"
+        idempotency_key = (
+            f"start:{project}:{requirement_id}:{profile_hash}:{snapshot_identity}:"
+            f"{fresh_token or 'default'}"
+        )
         existing = self.state.idempotency_result(idempotency_key)
         if existing is not None:
             return existing
@@ -1387,12 +1393,16 @@ class Orchestrator:
         responder: str | None = None,
     ) -> dict[str, Any]:
         bound_run = run_id
+        record = self.approvals.get(approval_id)
         if bound_run is None:
-            record = self.approvals.get(approval_id)
             bound_run = record.get("run_id") if isinstance(record, dict) else None
-        blocked = execution_guard(self.state, bound_run)
-        if blocked is not None:
-            return blocked
+        # A drifted run may still answer the gate that authorizes its migration.
+        # Without this the card could be delivered but its decision never landed,
+        # leaving `migrate-workflow-spec --approval-id` permanently APPROVAL_REQUIRED.
+        if not migration_exempt(record.get("action") if isinstance(record, dict) else None):
+            blocked = execution_guard(self.state, bound_run)
+            if blocked is not None:
+                return blocked
         return self.approvals.resolve(approval_id, decision, input_hash, channel, run_id=run_id, responder=responder, state_store=self.state)
 
     def collaboration_session(self, group_client: Any) -> CollaborationSession:
@@ -1777,6 +1787,7 @@ class Orchestrator:
         evidence: dict[str, Any] | None = None,
         comate_client: Any,
         infoflow_client: Any,
+        allow_workflow_spec_migration: bool = False,
     ) -> dict[str, Any]:
         if self.status(run_id)["state"] == "RUN_NOT_FOUND":
             return {"run_id": run_id, "reason_code": "RUN_NOT_FOUND"}
@@ -1846,7 +1857,13 @@ class Orchestrator:
     def _deliver_approval_channel(
         self, run_id: str, approval_id: str, channel: str, client: Any, payload: dict[str, Any], payload_hash: str
     ) -> dict[str, Any]:
-        key = f"approval.delivery:{approval_id}:{channel}"
+        # An abandoned delivery attempt is a closed, unknown outcome.  A later
+        # explicit retry must chain a fresh idempotency key after that intent;
+        # reusing the base key would find the abandoned receipt forever and
+        # prevent the new approval card from ever being sent.
+        key = self.state.live_idempotency_key(
+            f"approval.delivery:{approval_id}:{channel}"
+        )
         # Progress is a presentation snapshot, not part of the approval binding. It
         # can change between a retry while the approval id and input hash stay fixed;
         # hashing it here would turn a harmless refresh into an intent conflict.
@@ -1865,26 +1882,46 @@ class Orchestrator:
         if completed is not None:
             return {"reason_code": "OK"}
         intent = claim["intent"]
+        delivery_payload = {**payload, "_delivery_attempt_key": key}
         if claim["status"] == "EXISTING":
-            reconciled = client.reconcile(payload) if hasattr(client, "reconcile") else None
+            reconciled = client.reconcile(delivery_payload) if hasattr(client, "reconcile") else None
             if reconciled is None:
                 return {"reason_code": "QUERY_REQUIRED", "intent_id": intent["intent_id"], "retry_allowed": False}
             response = reconciled
         else:
             try:
-                response = client.request(payload)
+                response = client.request(delivery_payload)
+            except InfoflowRequestError as error:
+                if error.outcome == "REJECTED_BEFORE_SEND":
+                    return self._undelivered(run_id, channel, key, claim_payload, error)
+                reconciled = client.reconcile(delivery_payload) if hasattr(client, "reconcile") else None
+                if reconciled is None:
+                    return {
+                        "reason_code": "QUERY_REQUIRED",
+                        "intent_id": intent["intent_id"],
+                        "retry_allowed": False,
+                        "error_type": type(error).__name__,
+                        "outcome": error.outcome,
+                        "detail": f"{type(error).__name__}: {error}",
+                    }
+                response = reconciled
+            except ApprovalDeliveryBlocked as error:
+                # Nothing was sent and nothing is unknown: report the policy reason
+                # and leave no permanent failure, so the same card can be delivered
+                # once the run is allowed to act again.
+                return self._undelivered(run_id, channel, key, claim_payload, error)
             except ValueError as error:
                 if channel == "infoflow" and str(error) == "APPROVAL_REQUEST_RESPONSE_INVALID":
                     failure = {"reason_code": "APPROVAL_REQUEST_RESPONSE_INVALID"}
                     return self.state.save_idempotency_result(failure_key, failure)
-                reconciled = client.reconcile(payload) if hasattr(client, "reconcile") else None
+                reconciled = client.reconcile(delivery_payload) if hasattr(client, "reconcile") else None
                 if reconciled is None:
                     return {"reason_code": "QUERY_REQUIRED", "intent_id": intent["intent_id"], "retry_allowed": False}
                 response = reconciled
             except _NOTHING_SENT_EXCEPTIONS as error:
                 return self._undelivered(run_id, channel, key, claim_payload, error)
             except Exception:
-                reconciled = client.reconcile(payload) if hasattr(client, "reconcile") else None
+                reconciled = client.reconcile(delivery_payload) if hasattr(client, "reconcile") else None
                 if reconciled is None:
                     return {"reason_code": "QUERY_REQUIRED", "intent_id": intent["intent_id"], "retry_allowed": False}
                 response = reconciled
@@ -1925,6 +1962,9 @@ class Orchestrator:
         """
         withdrawn = self.state.withdraw_intent(run_id, f"approval.delivery.{channel}", key, claim_payload)
         outcome = {"error_type": type(error).__name__, "detail": f"{type(error).__name__}: {error}"}
+        dispatch_outcome = getattr(error, "outcome", None)
+        if isinstance(dispatch_outcome, str) and dispatch_outcome:
+            outcome["outcome"] = dispatch_outcome
         if withdrawn.get("status") != "WITHDRAWN":
             return {
                 **outcome, "reason_code": "QUERY_REQUIRED", "retry_allowed": False,
@@ -1932,11 +1972,17 @@ class Orchestrator:
             }
         return {**outcome, "reason_code": "APPROVAL_DELIVERY_FAILED", "retry_allowed": True}
 
-    @guard_execution
     def wait_infoflow_approval(self, run_id: str, approval_id: str, input_hash: str, infoflow_client: Any, timeout_seconds: float) -> dict[str, Any]:
         approval = self.approvals.get(approval_id)
         if approval is None or approval.get("run_id") != run_id or approval.get("run_id") == "legacy":
             return {"reason_code": "APPROVAL_RUN_MISMATCH", "run_id": run_id}
+        # Guarded per approval instead of by decorator: reading the gate back is how
+        # its decision lands, and a drifted run must still be able to answer the gate
+        # that authorizes its own migration.
+        if not migration_exempt(approval.get("action")):
+            blocked = execution_guard(self.state, run_id)
+            if blocked is not None:
+                return blocked
         receipt = next((entry.get("receipt") for entry in approval["delivery_receipts"] if entry.get("channel") == "infoflow"), None)
         request_id = receipt.get("request_id") if isinstance(receipt, dict) else None
         if not isinstance(request_id, str) or not request_id:
@@ -2028,6 +2074,7 @@ class Orchestrator:
         evidence: dict[str, Any] | None = None,
         infoflow_client: Any,
         comate_client: Any | None = None,
+        allow_workflow_spec_migration: bool = False,
     ) -> dict[str, Any]:
         """Open a fresh attempt at a stuck gate, bound to the same input hash.
 
@@ -2090,6 +2137,9 @@ class Orchestrator:
             evidence=evidence,
             comate_client=comate_client or ComateApprovalClient(),
             infoflow_client=infoflow_client,
+            # A timed-out migration gate must be reissuable, otherwise the only path
+            # out of drift disappears the moment nobody answers it in time.
+            allow_workflow_spec_migration=migration_exempt(action),
         )
 
     @guard_execution
@@ -2774,6 +2824,11 @@ def main(argv: list[str] | None = None) -> int:
     start = subparsers.add_parser("start")
     start.add_argument("requirement_id")
     start.add_argument("project")
+    start.add_argument(
+        "--fresh",
+        action="store_true",
+        help="在已停止的同卡片 run 之外创建新的审计 run；不会删除旧事件或产物",
+    )
 
     status = subparsers.add_parser("status")
     status.add_argument("run_id")
@@ -2948,11 +3003,35 @@ def main(argv: list[str] | None = None) -> int:
     reissue.add_argument("action")
     reissue.add_argument("input_hash")
 
+    redelivery = subparsers.add_parser(
+        "confirm-approval-redelivery",
+        help="确认未收到指定如流审批并受控重发同一审批",
+    )
+    redelivery.add_argument("run_id")
+    redelivery.add_argument("approval_id")
+    redelivery.add_argument("input_hash")
+    redelivery.add_argument("intent_id")
+    redelivery.add_argument(
+        "--confirm",
+        required=True,
+        help='必须明确填写“未收到，允许重发”',
+    )
+    redelivery.add_argument("--reason", required=True, help="说明已核对未收到审批的依据")
+    redelivery.add_argument("--actor", required=True, help="执行确认的人员")
+
     repin = subparsers.add_parser("repin-profile")
     repin.add_argument("run_id")
     repin.add_argument("previous", help="被钉住的那份 profile 的副本，用于给出改动 diff")
     repin.add_argument("--request", action="store_true", help="开 PROFILE_REPIN 门")
     repin.add_argument("--approval-id", help="省略则只给出待批的 input_hash，不落账")
+
+    migrate_spec = subparsers.add_parser(
+        "migrate-workflow-spec",
+        help="在审批后把旧运行迁移到当前 workflow policy",
+    )
+    migrate_spec.add_argument("run_id")
+    migrate_spec.add_argument("--request", action="store_true", help="开 WORKFLOW_SPEC_MIGRATION 门")
+    migrate_spec.add_argument("--approval-id", help="应用已批准的迁移审批")
 
     advance = subparsers.add_parser("advance", help="推进一次状态迁移，input_hash 从审批台账里取")
     advance.add_argument("run_id")
@@ -2978,6 +3057,14 @@ def main(argv: list[str] | None = None) -> int:
     abandon.add_argument("intent_id")
     abandon.add_argument("--reason", required=True, help="为什么不再等这条外部写")
     abandon.add_argument("--actor", required=True, help="谁做的这个决定")
+
+    adopt_group = subparsers.add_parser(
+        "adopt-group",
+        help="核对已存在的如流群并认领原建群 intent，不重新创建",
+    )
+    adopt_group.add_argument("run_id")
+    adopt_group.add_argument("group_id")
+    adopt_group.add_argument("--actor", required=True)
 
     work_card = subparsers.add_parser("work-card", help="查询或处理动态工作卡的未知投递")
     work_card.add_argument("operation", choices=("reconcile",))
@@ -3014,6 +3101,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.requirement_id,
                 args.project,
                 requirement_snapshot=snapshot,
+                fresh_token=uuid.uuid4().hex if args.fresh else None,
             )
     elif args.command == "process":
         from agent_bridge import AgentBridge, resolve_status_target
@@ -3254,6 +3342,17 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "reissue-approval":
         result = _reissue_approval(orchestrator, args.run_id, args.action, args.input_hash)
+    elif args.command == "confirm-approval-redelivery":
+        result = _confirm_approval_redelivery(
+            orchestrator,
+            args.run_id,
+            args.approval_id,
+            args.input_hash,
+            args.intent_id,
+            args.confirm,
+            args.reason,
+            args.actor,
+        )
     elif args.command == "repin-profile":
         import profile_repin
 
@@ -3271,6 +3370,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = profile_repin.plan(orchestrator, args.run_id, args.previous)
+    elif args.command == "migrate-workflow-spec":
+        import workflow_spec_migration
+
+        if args.approval_id:
+            result = workflow_spec_migration.apply(orchestrator, args.run_id, args.approval_id)
+        elif args.request:
+            from approval_delivery import ComateApprovalClient
+
+            result = workflow_spec_migration.request(
+                orchestrator,
+                args.run_id,
+                comate_client=ComateApprovalClient(),
+                infoflow_client=_infoflow_approval_client(orchestrator),
+            )
+        else:
+            result = workflow_spec_migration.plan(orchestrator, args.run_id)
     elif args.command == "advance":
         result = _advance(
             orchestrator, args.run_id, args.state, args.artifacts, args.evidence, args.approval_id
@@ -3279,6 +3394,12 @@ def main(argv: list[str] | None = None) -> int:
         result = _submit(orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
     elif args.command == "abandon-intent":
         result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor)
+    elif args.command == "adopt-group":
+        from clients.infoflow_group_client import InfoflowGroupClient
+
+        result = orchestrator.collaboration_session(
+            InfoflowGroupClient()
+        ).adopt_pending_group(args.run_id, args.group_id, args.actor)
     elif args.command == "work-card":
         from work_card import reconcile
 
@@ -3477,7 +3598,7 @@ def _reissue_approval(
     orchestrator: Orchestrator, run_id: str, action: str, input_hash: str
 ) -> dict[str, Any]:
     """Reopen a gate whose deadline passed, keeping the bound input hash."""
-    context = _approval_context(orchestrator, run_id, action=action)
+    context = _approval_context(orchestrator, run_id, action=action, input_hash=input_hash)
     if "error" in context:
         return context["error"]
     return orchestrator.reissue_infoflow_approval(
@@ -3487,7 +3608,136 @@ def _reissue_approval(
         member_policy=context["member_policy"],
         evidence=context["evidence"],
         infoflow_client=_infoflow_approval_client(orchestrator),
+        allow_workflow_spec_migration=migration_exempt(action),
     )
+
+
+def _confirm_approval_redelivery(
+    orchestrator: Orchestrator,
+    run_id: str,
+    approval_id: str,
+    input_hash: str,
+    intent_id: str,
+    confirmation: str,
+    reason: str,
+    actor: str,
+) -> dict[str, Any]:
+    """Close one unknown Infoflow attempt and retry that same approval.
+
+    This is the explicit escape hatch for an operator who checked the remote
+    channel and confirms that the card was not received.  It never creates a
+    new approval, changes its hash, or deletes the old intent; the abandonment
+    receipt makes the retry lineage auditable.
+    """
+    if confirmation != "未收到，允许重发":
+        return {"ok": False, "reason_code": "REDISPATCH_CONFIRMATION_REQUIRED", "run_id": run_id}
+    if not isinstance(reason, str) or not reason.strip():
+        return {"ok": False, "reason_code": "REDISPATCH_REASON_REQUIRED", "run_id": run_id}
+    if not isinstance(actor, str) or not actor.strip():
+        return {"ok": False, "reason_code": "REDISPATCH_ACTOR_REQUIRED", "run_id": run_id}
+
+    approval = orchestrator.approvals.get(approval_id)
+    if not isinstance(approval, dict):
+        return {"ok": False, "reason_code": "APPROVAL_NOT_FOUND", "run_id": run_id}
+    # Refuse before abandoning an intent or caching approval context: only the
+    # migration gate may be redelivered while the run's workflow pin is drifted.
+    if not migration_exempt(approval.get("action")):
+        blocked = execution_guard(orchestrator.state, run_id)
+        if blocked is not None:
+            return blocked
+    if approval.get("run_id") != run_id or approval.get("input_hash") != input_hash:
+        return {
+            "ok": False,
+            "reason_code": "APPROVAL_BINDING_MISMATCH",
+            "run_id": run_id,
+            "approval_id": approval_id,
+        }
+
+    intent = orchestrator.state.intent_by_id(intent_id)
+    if not isinstance(intent, dict):
+        return {"ok": False, "reason_code": "INTENT_NOT_FOUND", "run_id": run_id}
+    if intent.get("run_id") != run_id or intent.get("operation") != "approval.delivery.infoflow":
+        return {"ok": False, "reason_code": "INTENT_BINDING_MISMATCH", "run_id": run_id}
+    payload = intent.get("payload")
+    if not isinstance(payload, dict) or payload.get("approval_id") != approval_id:
+        return {"ok": False, "reason_code": "INTENT_APPROVAL_MISMATCH", "run_id": run_id}
+    if orchestrator.state.result_by_idempotency_key(intent["idempotency_key"]) is not None:
+        return {"ok": False, "reason_code": "INTENT_ALREADY_RECONCILED", "run_id": run_id}
+
+    if any(
+        entry.get("channel") == "infoflow"
+        and entry.get("payload_hash") == input_hash
+        for entry in approval.get("delivery_receipts") or []
+        if isinstance(entry, dict)
+    ):
+        return {"ok": False, "reason_code": "APPROVAL_DELIVERY_ALREADY_CONFIRMED", "run_id": run_id}
+
+    context = _approval_context(
+        orchestrator,
+        run_id,
+        action=gate_of(approval.get("action") or ""),
+        input_hash=input_hash,
+    )
+    if "error" in context:
+        return context["error"]
+
+    abandoned = orchestrator.state.abandon_intent(intent_id, reason, actor)
+    if abandoned.get("status") not in {"ABANDONED", "ALREADY_ABANDONED"}:
+        return {
+            "ok": False,
+            "reason_code": "INTENT_ABANDON_FAILED",
+            "run_id": run_id,
+            "intent_id": intent_id,
+            "detail": abandoned,
+        }
+
+    payload = {
+        "approval_id": approval_id,
+        "run_id": run_id,
+        "action": approval["action"],
+        "input_hash": input_hash,
+        "deadline_at": approval.get("deadline_at"),
+        "evidence": context["evidence"],
+        "member_policy": approval.get("member_policy") or context["member_policy"],
+    }
+    outcome = orchestrator._deliver_approval_channel(
+        run_id,
+        approval_id,
+        "infoflow",
+        _infoflow_approval_client(orchestrator),
+        {"channel": "infoflow", "approval": payload},
+        input_hash,
+    )
+    if outcome.get("reason_code") != "OK":
+        orchestrator.approvals.record_delivery_failure(
+            approval_id,
+            {
+                "reason_code": outcome.get("reason_code"),
+                "channels": ["infoflow"],
+                "error_types": [outcome["error_type"]] if outcome.get("error_type") else [],
+                "retry_allowed": bool(outcome.get("retry_allowed")),
+            },
+        )
+    else:
+        orchestrator.approvals.record_delivery_failure(approval_id, None)
+    return {
+        "ok": outcome.get("reason_code") == "OK",
+        "reason_code": (
+            "APPROVAL_REDELIVERY_CONFIRMED"
+            if outcome.get("reason_code") == "OK"
+            else outcome.get("reason_code")
+        ),
+        "run_id": run_id,
+        "approval_id": approval_id,
+        "input_hash": input_hash,
+        "superseded_intent_id": intent_id,
+        "replacement_intent_id": (
+            orchestrator.state.intent_by_idempotency_key(
+                f"approval.delivery:{approval_id}:infoflow:after:{intent_id}"
+            ) or {}
+        ).get("intent_id"),
+        "delivery": outcome,
+    }
 
 
 def _approval_context(

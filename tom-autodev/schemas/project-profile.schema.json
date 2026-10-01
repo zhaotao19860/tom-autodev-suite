@@ -226,20 +226,14 @@
       "minLength": 1
     },
     "provenance": {
+      "description": "Deprecated compatibility field. New profiles omit it; environment provenance is produced and checked by iPipe evidence.",
       "type": "object",
-      "required": [
-        "status",
-        "runner_identity",
-        "image_toolchain_identity",
-        "verified_at",
-        "verifier",
-        "evidence_ref"
-      ],
       "properties": {
         "status": {
           "type": "string",
           "enum": [
             "VERIFIED",
+            "DECLARED",
             "UNVERIFIED"
           ]
         },
@@ -252,8 +246,10 @@
           "minLength": 1
         },
         "verified_at": {
-          "type": "string",
-          "minLength": 1
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "verifier": {
           "type": "string",
@@ -264,7 +260,7 @@
           "minLength": 1
         }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     }
   },
   "additionalProperties": false

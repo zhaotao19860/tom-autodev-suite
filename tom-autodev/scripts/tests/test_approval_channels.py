@@ -340,6 +340,32 @@ class ApprovalLedgerChannelTests(unittest.TestCase):
         self.assertEqual(transport.requests[0]["channel"], "infoflow")
         self.assertEqual(transport.requests[0]["run_id"], "run-1")
 
+    def test_infoflow_client_preserves_nested_delivery_attempt_key(self):
+        transport = FakeApprovalTransport()
+        client = InfoflowApprovalClient(transport)
+
+        client.request(
+            {
+                "channel": "infoflow",
+                "approval": {
+                    "run_id": "run-1",
+                    "approval_id": "shared-1",
+                    "input_hash": "hash-a",
+                    "member_policy": {
+                        "comate": ["owner@example.test"],
+                        "infoflow": ["owner@example.test"],
+                    },
+                    "deadline_at": "2026-08-11T10:00:00+00:00",
+                    "_delivery_attempt_key": "approval.delivery:retry:transport",
+                },
+            }
+        )
+
+        self.assertEqual(
+            transport.requests[0]["_delivery_attempt_key"],
+            "approval.delivery:retry:transport",
+        )
+
 
 class PendingGatewayTests(unittest.TestCase):
     def test_gateway_timeout_and_heartbeat_do_not_extend_the_bound_deadline(self):

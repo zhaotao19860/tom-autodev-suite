@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -22,9 +23,10 @@ except ModuleNotFoundError as missing_adapter:
     CliTransportError = Exception
 
 try:
-    from clients.ku_client import KuClient
+    from clients.ku_client import KuClient, resolve_ku_binary
 except ModuleNotFoundError:
     KuClient = None
+    resolve_ku_binary = None
 
 
 class FakeTransport:
@@ -866,6 +868,38 @@ class CliTransportTests(unittest.TestCase):
         self.assertEqual(runner.calls[0][1]["env"]["BAIDU_CC_USERNAME"], "tester")
         self.assertNotIn("environment", transport.last_diagnostic)
 
+    def test_ku_skill_debug_preamble_is_parsed_only_when_enabled(self):
+        if CliTransport is None:
+            self.fail("CliTransport is not implemented")
+        raw = '[DEBUG] API response: code=200\n{"returnCode":200,"success":true}\n'
+        tolerant = CliTransport(
+            runner=FakeRunner(stdout=raw), allow_json_preamble=True
+        )
+        self.assertEqual(
+            tolerant.run(["ku", "query-content"], business_field="returnCode")["returnCode"],
+            200,
+        )
+        strict = CliTransport(runner=FakeRunner(stdout=raw))
+        with self.assertRaisesRegex(CliTransportError, "CLI_INVALID_JSON"):
+            strict.run(["ku", "query-content"], business_field="returnCode")
+
+    def test_ku_binary_resolution_prefers_skill_environment(self):
+        if resolve_ku_binary is None:
+            self.fail("KU binary resolver is not implemented")
+        with patch.dict(
+            "os.environ",
+            {
+                "TOM_AUTODEV_KU_BINARY": "",
+                "TOM_AUTODEV_KU_SKILL_DIR": "/tmp/selected-ku-skill",
+                "COMATE_SKILL_DIR": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                resolve_ku_binary(),
+                "/tmp/selected-ku-skill/bin/ku",
+            )
+
     def test_exit_one_distinguishes_auth_failed_json_from_cobra_input_failure(self):
         auth = CliTransport(
             runner=FakeRunner(returncode=1, stderr='{"error":"auth_failed","message":"expired"}')
@@ -911,7 +945,6 @@ class KuClientTests(unittest.TestCase):
                             "docGuid": "child-1",
                             "repositoryGuid": "repo-1",
                             "url": ku_url("child-1"),
-                            "title": "01-spec",
                         },
                     },
                     ku_content("child-1", KuClient.marked_markdown("root-1", "01-spec", markdown)),
@@ -1690,7 +1723,6 @@ class KuClientTests(unittest.TestCase):
                                 "docGuid": "root-1",
                                 "repositoryGuid": "repo-1",
                                 "url": ku_url("root-1"),
-                                "title": title,
                             },
                         },
                         ku_content("root-1", initial),

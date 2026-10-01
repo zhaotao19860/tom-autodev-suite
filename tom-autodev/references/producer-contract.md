@@ -6,11 +6,13 @@ revision and evidence checks. Merged SPEC/TASKS uses the same content validator 
 halves. A rejection leaves the job retryable when the content itself is invalid.
 
 For a historical FULFILLED invalid draft, normal resume/submit revalidates it. Only proven
-content invalidity for the same current action permits a transactional CAS reopen; the old
-draft, payload, hashes, validation and matching cache entries are archived in
-`producer_job_attempts`. Model receipts and approval history remain. Valid drafts awaiting
-approval, stale actions, damaged context, published artifacts and uncertain external writes
-are not automatically replaced. A corrected draft receives its own approval input hash.
+content invalidity or a GRILL `DECISION_REQUIRED` draft for the same current action permits
+a transactional CAS reopen; the old draft, payload, hashes, validation and matching cache
+entries are archived in `producer_job_attempts`. Model receipts and approval history remain.
+An unresolved GRILL draft is deliberately parked without creating G1, so Comate can submit
+the next answer round against the same ProducerJob. Valid complete drafts awaiting approval,
+stale actions, damaged context, published artifacts and uncertain external writes are not
+automatically replaced. A corrected draft receives its own approval input hash.
 
 The suite's worker owns execution order. A child skill is a bounded producer of content, not a second workflow engine. These rules apply to GRILL, SPEC, TASKS, PLAN, IMPLEMENT, REVIEW and DIAGNOSE.
 
@@ -19,7 +21,7 @@ The suite's worker owns execution order. A child skill is a bounded producer of 
 1. Use `context CARD_OR_RUN` to inspect the current job and fixed inputs without advancing. Read referenced content via `artifact show ARTIFACT_ID`. Consume the current ProducerJob/action and its immutable input artifacts. Copy task IDs, input hashes, revisions, module identity and failure identity from that context; do not reconstruct them from chat history or a later checkout.
 2. Read the action's `result_schema` in `../schemas/` and the applicable project/language references. JSON Schema checks shape; context checks also bind acceptance coverage, predecessors, revisions and ownership. A syntactically valid draft can still be wrong.
 3. Return only the schema's content object as `DraftContent` to this job using `python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID DRAFT.json`. The JSON file contains the content object only; do not wrap it in an `ArtifactEnvelope`. A requested merged SPEC job returns exactly `{"spec": <spec content>, "dag": <task-dag content>}` in one producer turn; apply both skills' rules without starting another workflow or agent merely to fill the second half.
-4. The worker constructs and hashes `ArtifactEnvelope`, validates and persists the content, and completes the phase when its gate permits. The CLI automatically requests the exact returned gate and `approval_input_hash`, then returns `PARKED / APPROVAL_WAIT`; stop until human approval. On delivery failure, `continue` retries with the saved candidate. Direct Python worker/bridge callers still receive `APPROVAL_REQUIRED` and must use the host approval adapter. Do not regenerate or alter the saved candidate. Producer output never invents `approval_id`, KU/iCafe receipts, artifact IDs or verification evidence. Hash fields required *inside* a content schema must come from their actual pinned inputs or the suite's canonical calculation.
+4. The worker constructs and hashes `ArtifactEnvelope`, validates and persists the content, and completes the phase when its gate permits. An unresolved GRILL draft returns `DECISION_REQUIRED` with its structured `choice_questions` and does not request G1. After Comate answers, submit the corrected draft; only a complete Decision Log causes the CLI to request the exact G1 and `approval_input_hash`, then returns `PARKED / APPROVAL_WAIT`; stop until human approval. On delivery failure, `continue` retries with the saved candidate. Direct Python worker/bridge callers still receive `APPROVAL_REQUIRED` for a complete gated draft and must use the host approval adapter. Do not regenerate or alter a saved complete candidate. Producer output never invents `approval_id`, KU/iCafe receipts, artifact IDs or verification evidence. Hash fields required *inside* a content schema must come from their actual pinned inputs or the suite's canonical calculation.
 
 The phase schema and actual action take precedence over descriptive field lists in a skill. If a required field cannot be truthfully supplied, return a concrete missing-input/contract explanation to the parent instead of adding arbitrary JSON properties, placeholders or a fabricated hash.
 

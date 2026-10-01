@@ -23,16 +23,33 @@ class Recovery:
         events = self.state.events(run_id)
         checkpoint = events[-1] if events else None
         uncertain = self.state.pending_intents(run_id)
-        actions = [
-            {
+        actions = []
+        for intent in uncertain:
+            action = {
                 "action": "QUERY_EXTERNAL_STATUS",
                 "reason_code": "QUERY_REQUIRED",
                 "intent_id": intent["intent_id"],
                 "operation": intent["operation"],
                 "idempotency_key": intent["idempotency_key"],
             }
-            for intent in uncertain
-        ]
+            payload = intent.get("payload") if isinstance(intent, dict) else None
+            if (
+                isinstance(intent.get("operation"), str)
+                and intent["operation"] == "approval.delivery.infoflow"
+                and isinstance(payload, dict)
+                and isinstance(payload.get("approval_id"), str)
+            ):
+                action.update(
+                    {
+                        "recovery_action": "CONFIRM_APPROVAL_REDELIVERY",
+                        "approval_id": payload["approval_id"],
+                        "message": (
+                            "如流投递结果未知；确认未收到审批后，使用受控重发，"
+                            "不会创建新的审批或改变审批材料。"
+                        ),
+                    }
+                )
+            actions.append(action)
         lock_records = self.locks.records()
         return {
             "run_id": run_id,

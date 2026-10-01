@@ -14,10 +14,15 @@ cron、launchd 或其他外部调度器没有统一的心跳接口，因此审�
 
 ## 日常接口与维护接口
 
+Comate 中的 `/tom-autodev CARD ACTION` 是这些 CLI 操作的自然语言入口。完整映射、
+项目解析和“重新开始”规则见
+[`tom-autodev/references/chat-commands.md`](../tom-autodev/references/chat-commands.md)。
+
 | 命令 | 作用 |
 |---|---|
 | `cli.py process CARD PROJECT` | 推荐入口：无历史时 start + drive，唯一活动 run 用 continue；多候选拒绝选择，项目不匹配拒绝推进，终态返回 RUN_ALREADY_TERMINAL |
 | `cli.py start CARD PROJECT` | 读取 iCafe 快照并创建 run；不启动后台模型 |
+| `cli.py start --fresh CARD PROJECT` | 旧 run 已停止后创建新的审计 run；不删除旧事件、审批或产物 |
 | `cli.py drive TARGET` | 由 WorkerDriver 驱动到 ProducerJob、审批、远端等待、终态或阻塞；TARGET 可为 run id 或唯一活动 run 的卡号 |
 | `cli.py status TARGET` | 输出紧凑进度摘要；按卡号优先选唯一活动 run，无活动 run 时回落到唯一终态 run |
 | `cli.py status TARGET --json` | 输出完整事件 JSON；多个活动 run，或无活动 run 时存在多个终态历史，会返回候选 |
@@ -31,6 +36,25 @@ cron、launchd 或其他外部调度器没有统一的心跳接口，因此审�
 | `cli.py complete-phase RUN ENVELOPE` | 维护用的产物摄取入口；不是 ProducerJob 提交接口 |
 
 普通流程使用 `process`、`status`、`context`、`continue`、`submit-draft` 和 `stop`。需要分步创建时仍可用 `start` + `drive`。`resume` 仍保留原来的只读语义；真实续跑用 `continue`。Producer 只返回 DraftContent，worker 负责 envelope、schema/hash 校验、审批绑定、证据门和外部副作用。审批未送达或输入不一致时，命令返回明确错误，不报告成功。
+
+协作群的 topic/name 只从启动时冻结的 iCafe requirement snapshot 派生。旧 profile
+中的 `approval_channels.group_topic` 不会覆盖当前需求；如果历史 run 已记录了不一致的群绑定，
+`drive`/`continue` 会 fail-closed，不会重试建群或复用旧 intent。保留旧 run 的事件、审批和
+intent 后，使用 `stop RUN`，再用 `start --fresh CARD PROJECT` 创建新的审计 run。
+
+建群成功回执只要求平台返回有效 `group_id`。如流创建接口不保证回显 `bot_id`，网关会使用
+已放入 `robotList` 的机器人身份补齐本地回执。网关按 `infoflow.group.create:<run_id>` 将脱敏
+回执写入独立 journal；`continue` 在 phase recovery 门禁前先查询该 journal，并且只补写原
+intent 的 receipt，绝不重新创建群。旧版本网关没有这份 journal 时，状态只能保持
+`QUERY_REQUIRED`；不能按群名猜测或直接重发。应取得明确的 group ID 后再走受控核对/认领。
+历史 intent 已确认对应某个群时，可使用：
+
+```bash
+python3 tom-autodev/scripts/cli.py adopt-group RUN_ID GROUP_ID --actor USER
+```
+
+该命令通过网关按明确 ID 查询群信息和成员接口，名称不匹配或成员查询失败都会拒绝，
+成功后只补写原 intent 的 receipt。
 
 `submit-draft` 自动将 worker 返回的 gate 与精确 `approval_input_hash` 交给审批投递路径；投递成功返回 `PARKED / APPROVAL_WAIT`、`draft_saved: true` 和审批记录，等待人工决定。投递失败返回非零退出码并保留草案；用 `continue TARGET` 复用草案重试，勿重新生成内容。Python worker/bridge API 仍将 `APPROVAL_REQUIRED` 交给宿主处理。
 
@@ -144,6 +168,19 @@ python3 tom-autodev/scripts/cli.py continue "$RUN_ID"    # worker 续跑
 ```
 
 外部操作状态不明时，先查询平台并与持久化 intent/回执核对；不要用再次提交“试一下”。IMPLEMENT 恢复时检查实际文件与候选 diff，空 checklist 不意味着之前的编辑没发生。
+协作群的 `infoflow.group.create` 也遵守这一规则：`resume` 只读列出待查询项，`continue`
+才会先执行网关回执的只读核对；核对不到时继续停在 `RECOVERY_REQUIRED`，不会调用 create。
+
+KU 文档和目录操作统一使用 `/ku-doc-manage` skill 的 `bin/ku` 入口。默认会从当前
+Comate skill 环境发现入口，也可显式指定：
+
+```bash
+export BAIDU_CC_USERNAME=zhaotao02
+export TOM_AUTODEV_KU_SKILL_DIR=/Users/tom/.comate/skills/.system/ku-doc-manage
+```
+
+skill 产生的前置 debug 文本不会再被误判为 JSON 损坏；如果入口、身份或远端查询确实
+不可用，控制面会保留对应的具体 CLI 错误。
 
 只有符合对应恢复场景时才使用专门命令：
 
@@ -154,6 +191,28 @@ python3 tom-autodev/scripts/cli.py recover-stale-rebuilt-plan --help
 python3 tom-autodev/scripts/cli.py recover-legacy-pipeline-plan --help
 python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
+python3 tom-autodev/scripts/cli.py confirm-approval-redelivery --help
+python3 tom-autodev/scripts/cli.py migrate-workflow-spec --help
+```
+
+`confirm-approval-redelivery` 只用于如流投递结果未知的那一条 intent：`status` 会给出
+`approval_id` 和 `intent_id`，`--confirm` 必须精确填写 `未收到，允许重发`，并带上核对依据
+和操作人。它作废原 intent、链接一个新的投递 key，重发同一个审批，不创建新审批、不改
+`input_hash`。
+
+```bash
+python3 tom-autodev/scripts/cli.py confirm-approval-redelivery "$RUN_ID" APPROVAL_ID INPUT_HASH INTENT_ID \
+  --confirm '未收到，允许重发' --reason '已在如流确认未收到该卡片' --actor zhaotao02@baidu.com
+```
+
+`WORKFLOW_SPEC_DRIFT` 表示该 run 固定的 workflow policy 与当前版本不一致。此时除迁移门
+本身外的写入都会被拒绝：先 `--request` 开 `WORKFLOW_SPEC_MIGRATION` 门，由人批准后再用
+精确的 `approval_id` 应用迁移；迁移只移动策略 pin，不重写阶段事件、不改既有审批绑定。
+只有迁移获批并应用之后，其它门的未知投递才可以走上面的受控重发。
+
+```bash
+python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --request
+python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --approval-id APPROVAL_ID
 ```
 
 `repin-profile` 需要保存的上一版 profile 副本和对应审批；直接编辑配置不会自动改变已运行任务的绑定。`recover-legacy-pipeline-plan` 仅用于升级前已进入 IPIPE、事件里没有 `pipeline_plan`（RELEASE 报 `PIPELINE_PLAN_REQUIRED`）的历史 run：它从该 run 自己不可变的、获审的提交与固定 profile 确定性重建并回填冻结计划，不提交、不发布、不审批、不调用任何 runtime，幂等；在途旧构建会按模块重跑，不会被当作发布证据。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录来解除阻断。

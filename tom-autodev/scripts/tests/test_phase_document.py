@@ -2,6 +2,7 @@ import hashlib
 import json
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -116,7 +117,7 @@ class SpecRenderingTests(unittest.TestCase):
 
     def test_content_without_the_spec_shape_still_uses_the_generic_renderer(self):
         rendered = render_phase_markdown("03-tasks", {"nodes": ["T1"]}, "hash-b", "{}")
-        self.assertIn("## nodes", rendered)
+        self.assertIn("## 任务节点", rendered)
 
 
 class ChangeSetRenderingTests(unittest.TestCase):
@@ -178,7 +179,7 @@ class ChangeSetRenderingTests(unittest.TestCase):
 
     def test_deviations_are_stated_even_when_there_are_none(self):
         rendered = self._render()
-        self.assertIn("无偏离，改动与获批的任务计划一致。", rendered)
+        self.assertIn("偏离列表为空；不代表计划一致性或审批已经核验。", rendered)
         content = {**_change_set_content(), "deviations": [
             {"from_plan": "计划里用查表", "as_implemented": "改成位运算", "reason": "查表越界"}
         ]}
@@ -186,6 +187,105 @@ class ChangeSetRenderingTests(unittest.TestCase):
         self.assertIn("- 计划：计划里用查表", rendered)
         self.assertIn("  - 实现：改成位运算", rendered)
         self.assertIn("  - 理由：查表越界", rendered)
+
+
+class PhaseDocumentSafetyTests(unittest.TestCase):
+    def test_render_is_preview_and_does_not_claim_confirmation_or_persistence(self):
+        rendered = render_phase_markdown(
+            "01-grill",
+            {"decision_result": "unknown", "unresolved_frontier": []},
+            "hash-preview",
+            '{"decision_result":"unknown","unresolved_frontier":[]}',
+        )
+        self.assertIn("文档状态：渲染预览", rendered)
+        self.assertIn("状态未知", rendered)
+        self.assertIn("未决前沿列表为空；不代表整体无阻塞。", rendered)
+        self.assertNotIn("已持久化", rendered)
+        self.assertNotIn("已确认本文档", rendered)
+
+    def test_intake_body_and_html_are_readable_text_not_html_or_json(self):
+        content = {
+            "canonical_card_id": "CARD-1",
+            "title": "正文",
+            "body": "<p>第一段<strong>实际需求</strong></p><ul><li>保留验收点</li></ul>",
+            "html": "<div>HTML 补充</div><script>alert('x')</script>",
+            "acceptance": [],
+            "fields": {"priority": "P1"},
+            "attachments": [],
+            "links": [{"url": "https://example.test/spec", "label": "规格"}],
+            "status": "UNKNOWN",
+            "type": "Story",
+            "responsible_people": [],
+            "created": {"user": {}, "time": "2026-09-30"},
+            "modified": {"user": {}, "time": "2026-09-30"},
+            "content_hash": "a" * 64,
+        }
+        rendered = render_phase_markdown(
+            "00-requirement-snapshot", content, "hash-intake",
+            _canonical_json(content),
+        )
+        body = rendered.split("## 附录：规范化 JSON")[0]
+        self.assertIn("第一段实际需求", body)
+        self.assertIn("- 保留验收点", body)
+        self.assertIn("HTML 补充", body)
+        self.assertNotIn("<p>", body)
+        self.assertNotIn("<script>", body)
+        self.assertNotIn('{"', body)
+
+    def test_schema_phases_render_nested_dicts_and_lists_as_readable_sections(self):
+        tasks = {
+            "nodes": [{
+                "task_id": "T1", "title": "能力切片", "capability_slice": "解析资源",
+                "business_module": "offer_hash", "business_changes": ["src/a.c"],
+                "test_changes": ["test/a.py"], "test_ids": ["T1-001"],
+                "fixtures": ["fixture-a"], "ipipe_stages": ["unit"],
+                "completion_predicate": "单测通过",
+                "acceptance_point_ids": ["AC-1"],
+            }],
+            "edges": [{"from": "T1", "to": "T2"}],
+            "acceptance_coverage": [{"acceptance_point_id": "AC-1", "task_ids": ["T1"]}],
+        }
+        rendered = render_phase_markdown(
+            "03-tasks", tasks, "hash-tasks", _canonical_json(tasks)
+        )
+        body = rendered.split("## 附录：规范化 JSON")[0]
+        self.assertIn("## 任务节点", body)
+        self.assertIn("- 业务改动：", body)
+        self.assertIn("  - src/a.c", body)
+        self.assertIn("`T1` → `T2`", body)
+        self.assertNotIn('"business_changes"', body)
+
+    def test_semantic_title_inference_distinguishes_workspace_and_legacy_plan(self):
+        workspace = render_phase_markdown(
+            "04-workspace", {"status": "UNKNOWN"}, "h1", '{"status":"UNKNOWN"}'
+        )
+        legacy_plan = render_phase_markdown(
+            "04-task-plan", {"status": "UNKNOWN"}, "h2", '{"status":"UNKNOWN"}'
+        )
+        self.assertIn("> 阶段：工作区与基线绑定", workspace)
+        self.assertIn("> 阶段：任务实现计划", legacy_plan)
+        self.assertIn("下一阶段使用：PLAN", workspace)
+        self.assertIn("下一阶段使用：IMPLEMENT", legacy_plan)
+
+    def test_optional_context_is_auditable_but_does_not_fabricate_approval(self):
+        content = {"status": "UNKNOWN", "value": {"owner": "alice", "items": ["x", "y"]}}
+        original = deepcopy(content)
+        context = {
+            "run_id": "run-1", "task_id": "T1", "owner": "alice",
+            "updated_at": "2026-09-30T12:00:00Z", "input_hash": "in-1",
+            "approval_id": "approval-1", "source_refs": ["spec-1"],
+        }
+        rendered = render_phase_markdown("10-diagnosis", content, "hash", "{}", context=context)
+        self.assertIn("运行 ID：run-1", rendered)
+        self.assertIn("审批引用：approval-1", rendered)
+        self.assertIn("审批引用不等于审批通过", rendered)
+        self.assertEqual(content, original)
+
+    def test_render_is_deterministic_for_same_input(self):
+        content = {"status": "UNKNOWN", "items": [{"b": 2, "a": 1}]}
+        first = render_phase_markdown("11-release", content, "hash", '{"status":"UNKNOWN"}')
+        second = render_phase_markdown("11-release", content, "hash", '{"status":"UNKNOWN"}')
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":
