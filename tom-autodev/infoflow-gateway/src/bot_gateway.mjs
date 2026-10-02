@@ -595,7 +595,11 @@ async function answerCard(data, eventKey, sender) {
   // the people who still have to decide. A restart loses the list, and then the card
   // stays answerable rather than claiming a decision it cannot attribute.
   const approvers = Array.isArray(known?.approvers) ? known.approvers : null
-  const answered = approvers !== null && approvers.includes(sender)
+  // A choice has no approver list: `ask_infoflow` takes the first tap in the group as
+  // the answer, so the card closes on it. Approval buttons must never be drawn on it,
+  // since its 16-hex decision id is not an approval id and those taps would be dropped.
+  const choice = parsed?.text?.startsWith('CHOICE ') === true || cardId.startsWith('choice-')
+  const answered = choice || (approvers !== null && approvers.includes(sender))
   const buttons = answered ? [] : (
     approvalIdOf(parsed, known, data)
       ? [
@@ -612,7 +616,9 @@ async function answerCard(data, eventKey, sender) {
     target_id: targetId,
     title: known?.title || '',
     approvers: approvers === null ? undefined : [...approvers],
-    question: answered
+    question: choice
+      ? `已由 ${sender} 选择：${label}`
+      : answered
       ? `已由 ${sender} 处理：${label}`
       : '已收到点击，待权限和有效期校验；以审批回执为准。',
     buttons,

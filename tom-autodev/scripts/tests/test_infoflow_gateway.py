@@ -109,7 +109,7 @@ const modules = {
   },
 };
 const module = new vm.SourceTextModule(SOURCE + `
-export { sendApprovalCard, answerCard, journalInteraction, live, renderCard };
+export { sendApprovalCard, sendChoiceCard, answerCard, journalInteraction, live, renderCard };
 `, { context });
 await module.link(async (name) => {
   assert.ok(modules[name], 'unexpected import: ' + name);
@@ -220,6 +220,26 @@ assert.equal(api.live.has(initial.card_id), true);
 await api.answerCard({ cardId: initial.card_id }, 'approve.' + request.approval_id, 'qa');
 assert.equal(rendered.at(-1).question, '已由 qa 处理：同意');
 assert.equal(rendered.at(-1).card.buttons.length, 0);
+""")
+
+    def test_choice_click_closes_card_without_approval_buttons(self):
+        self._run(r"""
+const choice = { decision_id: '0123456789abcdef', target_type: 'group', target_id: '123',
+  title: '需要一个决定', question: '选哪个？', lines: ['背景'],
+  options: [{ key: 'a', text: '方案 A' }, { key: 'b', text: '方案 B' }] };
+const initial = await api.sendChoiceCard(choice);
+await api.answerCard({ cardId: initial.card_id }, 'choice.' + choice.decision_id + '.b', 'owner');
+let card = rendered.at(-1);
+assert.equal(card.question, '已由 owner 选择：方案 B');
+assert.equal(card.card.buttons.length, 0);
+assert.match(card.card.components.at(-1).text, /^已选择「方案 B」· owner · /);
+// After a restart the label falls back to the event key, but no buttons come back.
+api.live.clear();
+await api.answerCard({ cardId: initial.card_id, receiver: { type: 'group', id: '123' } },
+  'choice.' + choice.decision_id + '.a', 'owner');
+card = rendered.at(-1);
+assert.equal(card.card.buttons.length, 0);
+assert.match(card.question, /^已由 owner 选择：/);
 """)
 
     def test_restart_without_known_approvers_keeps_the_card_answerable(self):
