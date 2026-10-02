@@ -281,7 +281,11 @@ class RunChangeTests(unittest.TestCase):
         self.assertIsNone(_ack_note({"approval_id": "x", "action": "G7"}, "REJECT", False, None))
 
     def test_pending_change_request_is_listed_and_an_approved_one_says_apply(self):
-        run_id, _knowledge, _job_id, _hash = self._at_g2()
+        run_id, _knowledge, _job_id, pending_hash = self._at_g2()
+        self.orchestrator.approvals.request(
+            "G2", pending_hash, ["comate", "infoflow"], run_id=run_id,
+            member_policy={"comate": ["owner@example.test"], "infoflow": ["owner@example.test"]},
+        )
         opened = run_change.request(
             self.orchestrator, run_id, "GRILL", "重新澄清", "owner@example.test",
             comate_client=_Channel(), infoflow_client=_Channel(),
@@ -290,7 +294,7 @@ class RunChangeTests(unittest.TestCase):
         for intent in self.orchestrator.state.pending_intents(run_id):
             self.orchestrator.state.receipt(intent["intent_id"], {"approval_id": approval_id}, [])
         brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
-        self.assertIn(approval_id, [gate["approval_id"] for gate in brief["waiting_on"]])
+        self.assertEqual(brief["waiting_on"][0]["approval_id"], approval_id)
         self._settle(approval_id, opened["input_hash"], run_id)
         brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
         self.assertEqual(brief["status_label"], "变更已批准待执行")

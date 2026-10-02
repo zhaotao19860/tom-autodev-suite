@@ -23,10 +23,10 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
         return "已停止"
     if pending or blocked == "RECOVERY_REQUIRED":
         return "待恢复"
-    if open_gates:
-        return "待审批"
     if approved and gate_of(approved.get("action") or "") == "CHANGE_REQUEST":
         return "变更已批准待执行"
+    if open_gates:
+        return "待审批"
     if approved:
         return "已批准待提交"
     if rejected:
@@ -158,9 +158,10 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         }
         for row in latest_unresolved.values()
     ]
-    # Under policy drift only the migration gate can be settled; pointing at the
-    # phase gate first sends the reviewer to a card whose answer cannot land.
-    open_gates.sort(key=lambda gate: gate_of(gate["action"] or "") != "WORKFLOW_SPEC_MIGRATION")
+    # A migration or change request decides what the phase gate is about (under drift
+    # or a pending profile change its answer cannot even land), so it is named first.
+    _first = {"WORKFLOW_SPEC_MIGRATION": 0, "CHANGE_REQUEST": 1}
+    open_gates.sort(key=lambda gate: _first.get(gate_of(gate["action"] or ""), 2))
     pending = []
     if not terminal:
         for item in orchestrator.state.pending_intents(run_id):
@@ -334,6 +335,13 @@ def _next_step(
             }
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
         return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
+    # An approved change request replaces the phase gates still open, so applying it
+    # comes before answering any of them.
+    if approved and gate_of(approved.get("action") or "") == "CHANGE_REQUEST":
+        return {
+            "owner": "Comate",
+            "text": f"变更请求已批准；执行 rewind --approval-id {approved.get('approval_id')} 回到目标阶段",
+        }
     if open_gates:
         gate = open_gates[0]
         approval_id = gate.get("approval_id") or "未知"
@@ -388,11 +396,6 @@ def _next_step(
         return {"owner": "你", "text": _BLOCKED_HINT.get(blocked, f"处理 {blocked}")}
     if approved:
         gate = gate_of(approved.get("action") or action.get("required_human_gate"))
-        if gate == "CHANGE_REQUEST":
-            return {
-                "owner": "Comate",
-                "text": f"变更请求已批准；执行 rewind --approval-id {approved.get('approval_id')} 回到目标阶段",
-            }
         if gate == "G7" or state == "SUBMIT":
             return {
                 "owner": "Comate",
