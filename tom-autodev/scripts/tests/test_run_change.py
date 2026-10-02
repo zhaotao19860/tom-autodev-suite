@@ -262,6 +262,27 @@ class RunChangeTests(unittest.TestCase):
         self.assertEqual(state.events(run_id)[-1]["event_id"], current["event_id"])
         self.assertIsNone(state.idempotency_result("result-key"))
 
+    def test_rewind_requires_the_edited_profile_to_be_reconfirmed(self):
+        from profile_wizard import confirmation_hash, confirmed_inputs
+
+        run_id, _knowledge, _job_id, _hash = self._at_g2()
+        path = self.root / "config" / "projects" / "bgw.yaml"
+        previous = self.root / "bgw.pinned.yaml"
+        shutil.copyfile(path, previous)
+        profile = yaml.safe_load(path.read_text(encoding="utf-8"))
+        profile["test_repo"]["branch"] = "feature/confirm"
+        profile["profile_confirmation"] = {"confirmed_by": "owner@example.test",
+                                           "confirmed_inputs_hash": "0" * 64,
+                                           "source": "profile_wizard"}
+        path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+        stale = run_change.plan(self.orchestrator, run_id, "SPEC", "换分支", "owner@example.test", previous)
+        self.assertEqual(stale["reason_code"], "PROFILE_CONFIRMATION_MISMATCH")
+        profile["profile_confirmation"]["confirmed_inputs_hash"] = confirmation_hash(confirmed_inputs(profile))
+        path.write_text(yaml.safe_dump(profile), encoding="utf-8")
+        planned = run_change.plan(self.orchestrator, run_id, "SPEC", "换分支", "owner@example.test", previous)
+        self.assertEqual(planned["reason_code"], "OK", planned)
+        self.assertEqual(planned["profile"]["changed_keys"], ["profile_confirmation", "test_repo"])
+
     def test_workspace_that_already_had_code_cannot_rewind(self):
         run_id, _knowledge, _job_id, _hash = self._at_g2()
         for state in ("WORKSPACE", "PLAN", "IMPLEMENT", "REVIEW", "WORKSPACE"):

@@ -43,7 +43,9 @@ _ALLOWED_KEYS = frozenset({"pipeline_profile", "submission_policy"})
 # Repository facts are hashed into the drafts that name them, so they may only move
 # together with an approved rewind that produces those drafts again
 # (run_change.rewind), and only before any workspace was bound to them.
-REWIND_KEYS = frozenset({"test_repo", "business_repos"})
+# `profile_confirmation` re-records the owner's confirmation of those facts and has
+# to move with them, otherwise the edited profile fails its own confirmation check.
+REWIND_KEYS = frozenset({"test_repo", "business_repos", "profile_confirmation"})
 
 
 def pinned_hash(events: list[dict[str, Any]], repin: Any) -> str | None:

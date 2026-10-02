@@ -248,6 +248,11 @@ def plan(
             if prepared.get("reason_code") == "REPIN_FIELD_FORBIDDEN" and not never_bound:
                 prepared["hint"] = "运行已绑定过工作区，仓库字段不能再改；请新建运行"
             return prepared
+        confirmation_error = _confirmation_error(intake.get("profile_path"))
+        if confirmation_error is not None:
+            return _failure(confirmation_error["reason_code"], run_id, **{
+                key: value for key, value in confirmation_error.items() if key != "reason_code"
+            })
         profile = {
             "old_hash": prepared["old_hash"],
             "new_hash": prepared["new_hash"],
@@ -279,6 +284,32 @@ def plan(
         "profile_path": intake.get("profile_path"),
         "previous_profile": str(Path(previous_profile).expanduser().resolve()) if previous_profile else None,
         "input_hash": _hash(binding),
+    }
+
+
+def _confirmation_error(profile_path: Any) -> dict[str, Any] | None:
+    """An edited profile whose recorded confirmation no longer covers its facts.
+
+    Pinning it would land the run on PROFILE_CONFIRMATION_MISMATCH right after the
+    rewind, and fixing the file then needs yet another pin move.
+    """
+    from profile_wizard import confirmation_hash, confirmed_inputs
+    from project_registry import load_profile
+
+    if not isinstance(profile_path, str):
+        return None
+    loaded = load_profile(Path(profile_path), check_paths=False)
+    profile = loaded.get("profile") if loaded.get("ready") else None
+    confirmation = profile.get("profile_confirmation") if isinstance(profile, dict) else None
+    if not isinstance(confirmation, dict):
+        return None
+    expected = confirmed_inputs(profile)
+    if confirmation.get("confirmed_inputs_hash") == confirmation_hash(expected):
+        return None
+    return {
+        "reason_code": "PROFILE_CONFIRMATION_MISMATCH",
+        "confirmed_inputs": expected,
+        "hint": "改过的 profile 需重新确认：核对 confirmed_inputs 后更新 profile_confirmation（confirmed_by 与 confirmed_inputs_hash）",
     }
 
 
