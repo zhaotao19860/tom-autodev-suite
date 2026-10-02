@@ -67,6 +67,19 @@ class RunBriefTests(unittest.TestCase):
         self.assertNotIn("input_hash", rendered)
         self.assertNotIn("event_id", rendered)
 
+    def test_migration_gate_is_named_before_the_phase_gate(self):
+        approvals = [
+            {"action": "G2#retry-1", "approval_id": "approval-g2", "input_hash": "a" * 64,
+             "deadline_at": "2026-09-25T00:00:00+00:00", "created_at": "2026-09-24T00:00:00+00:00"},
+            {"action": "WORKFLOW_SPEC_MIGRATION", "approval_id": "approval-mig", "input_hash": "b" * 64,
+             "deadline_at": "2026-09-25T01:00:00+00:00", "created_at": "2026-09-24T01:00:00+00:00"},
+        ]
+        orch = BriefFixture("SPEC", {"ok": True, "phase": "SPEC", "required_human_gate": None},
+                            approvals=approvals)
+        brief = run_brief.build(orch, "run-1", include_progress=False)
+        self.assertEqual(brief["waiting_on"][0]["approval_id"], "approval-mig")
+        self.assertIn("approval-mig", brief["next"]["text"])
+
     def test_approval_wait_has_human_status_and_approval_action(self):
         approvals = [{"action": "G2", "approval_id": "approval-123456", "input_hash": "a" * 64,
                       "deadline_at": "2026-09-25T00:00:00+00:00", "created_at": "2026-09-24T00:00:00+00:00"}]

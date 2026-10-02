@@ -158,6 +158,9 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         }
         for row in latest_unresolved.values()
     ]
+    # Under policy drift only the migration gate can be settled; pointing at the
+    # phase gate first sends the reviewer to a card whose answer cannot land.
+    open_gates.sort(key=lambda gate: gate_of(gate["action"] or "") != "WORKFLOW_SPEC_MIGRATION")
     pending = []
     if not terminal:
         for item in orchestrator.state.pending_intents(run_id):
