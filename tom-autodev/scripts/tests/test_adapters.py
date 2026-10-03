@@ -1479,6 +1479,47 @@ class KuClientTests(unittest.TestCase):
         self.assertEqual(operation["selectionByTitle"], "# Run index")
         self.assertIn(KuClient.index_marker("root-1", "01-spec", "child-1", "a" * 64), operation["markdown"])
 
+    def test_root_index_uses_paragraph_anchor_as_content_selection(self):
+        if KuClient is None:
+            self.fail("KuClient is not implemented")
+        entry = {
+            "title": "03-tasks",
+            "doc_id": "child-1",
+            "url": ku_url("child-1"),
+            "content_hash": "a" * 64,
+        }
+        anchor = "每个阶段完成后在下面追加一条。条目后的校验标记请不要手工修改。"
+        indexed = KuClient.index_entry_markdown("root-1", entry)
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            transport = FakeTransport(
+                [
+                    ku_content("root-1", f"# Run index\n\n{anchor}"),
+                    ku_version("root-1", 7, 0),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", f"# Run index\n\n{anchor}"),
+                    ku_version("root-1", 8, 0),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", f"# Run index\n\n{anchor}\n\n{indexed}"),
+                    ku_version("root-1", 9, 0),
+                ]
+            )
+            client = KuClient(
+                transport=transport,
+                state_store=state,
+                run_id="run-index-paragraph",
+                repo_id="repo-1",
+                username="tester",
+            )
+
+            result = client.update_index("root-1", entry)
+
+        self.assertTrue(result["ok"])
+        edit = transport.calls[2][0]
+        operation = json.loads(edit[edit.index("--operation") + 1])
+        self.assertEqual(operation["selectionWithEllipsis"], anchor)
+        self.assertNotIn("selectionByTitle", operation)
+
     def test_failed_ku_create_keeps_pending_intent(self):
         if KuClient is None:
             self.fail("KuClient is not implemented")

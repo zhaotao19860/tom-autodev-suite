@@ -4,6 +4,20 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-03 · KU 写入收敛与审批卡动作语义修复
+
+- 修复 KU 根索引追加：普通说明段落不再误用 `selectionByTitle`，改用完整块内容锚点；
+  已落库但索引回写失败的文档可通过受控 paragraph fallback 收敛，保留原始 intent、
+  幂等键和外部收据。补充索引适配器回归。
+- 修复 G4 审批材料重建使用 Intake 历史 `profile_hash` 的问题，改用当前 pinned profile
+  hash，避免工作区、仓库基线和 ownership 均正确时仍报 `APPROVAL_MATERIAL_MISSING`。
+- 如流审批卡统一提供“同意 / 需修改 / 驳回”三按钮，分别映射到 `APPROVE / REVISE /
+  REJECT`。`REVISE` 保留 run 并按意见重做；`REJECT` 停止 run，不再把驳回命令当作修改入口。
+- 超时提醒和重发沿用同一 `input_hash`，但创建新的 approval ID，并通过真实 Infoflow
+  client 重新投递完整按钮；网关 `/health` 增加可核验的版本字段，当前网关版本为 `0.1.1`。
+- 本轮专项验证：审批投递、watcher、网关、run-change 共 92 项通过；G4 材料回归 6 项
+  通过；网关 Node 语法检查和 `git diff --check` 通过。未据此宣称真实如流点击资格。
+
 ## 2026-10-01 · 不重开 run 的返工：驳回重做与变更请求回退
 
 - 新增 `revise`：G1/G2/G3 驳回后以该驳回为授权、带修改意见与上一版草案重新进入同一阶段，

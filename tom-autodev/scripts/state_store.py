@@ -142,6 +142,10 @@ class StateStore:
                     payload_json TEXT NOT NULL,
                     status TEXT NOT NULL,
                     draft_json TEXT,
+                    agent_status TEXT NOT NULL DEFAULT 'IDLE',
+                    agent_id TEXT,
+                    agent_heartbeat_at TEXT,
+                    agent_lease_expires_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -207,6 +211,7 @@ class StateStore:
                 """
             )
             _optimization_migrate(connection)
+            _producer_job_migrate(connection)
 
     def transition(self, run_id: str, state: str, payload: dict[str, Any]) -> dict[str, Any]:
         event = {
@@ -887,10 +892,132 @@ class StateStore:
             connection.execute(
                 """
                 INSERT INTO producer_jobs(
-                    job_id, run_id, payload_json, status, draft_json, created_at, updated_at
-                ) VALUES (?, ?, ?, 'PENDING', NULL, ?, ?)
+                    job_id, run_id, payload_json, status, draft_json,
+                    agent_status, agent_id, agent_heartbeat_at, agent_lease_expires_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, 'PENDING', NULL, 'IDLE', NULL, NULL, NULL, ?, ?)
                 """,
                 (job_id, run_id, encoded, created_at, created_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return _producer_job_row(row)
+
+    def claim_producer_job(
+        self, run_id: str, job_id: str, agent_id: str, lease_seconds: int = 900
+    ) -> dict[str, Any]:
+        """Claim a ProducerJob for a host turn with an explicit expiring lease."""
+        if not agent_id or lease_seconds <= 0:
+            raise ValueError("PRODUCER_AGENT_CLAIM_INVALID")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expiry = (now + timedelta(seconds=lease_seconds)).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None or row["run_id"] != run_id:
+                raise ValueError("PRODUCER_JOB_NOT_FOUND")
+            if row["status"] not in {"PENDING", "FULFILLED"}:
+                raise ValueError("PRODUCER_JOB_NOT_PENDING")
+            current_expiry = row["agent_lease_expires_at"]
+            if (
+                row["agent_status"] == "RUNNING"
+                and current_expiry
+                and current_expiry > now_text
+                and row["agent_id"] != agent_id
+            ):
+                raise ValueError("PRODUCER_JOB_CLAIMED")
+            connection.execute(
+                """
+                UPDATE producer_jobs
+                SET agent_status = 'RUNNING', agent_id = ?,
+                    agent_heartbeat_at = ?, agent_lease_expires_at = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (agent_id, now_text, expiry, now_text, job_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return _producer_job_row(row)
+
+    def heartbeat_producer_job(
+        self, run_id: str, job_id: str, agent_id: str, lease_seconds: int = 900
+    ) -> dict[str, Any]:
+        """Extend a claimed ProducerJob lease; never revives another agent's claim."""
+        if not agent_id or lease_seconds <= 0:
+            raise ValueError("PRODUCER_AGENT_HEARTBEAT_INVALID")
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        expiry = (now + timedelta(seconds=lease_seconds)).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None or row["run_id"] != run_id:
+                raise ValueError("PRODUCER_JOB_NOT_FOUND")
+            if row["agent_status"] != "RUNNING" or row["agent_id"] != agent_id:
+                raise ValueError("PRODUCER_AGENT_NOT_OWNER")
+            connection.execute(
+                """
+                UPDATE producer_jobs
+                SET agent_heartbeat_at = ?, agent_lease_expires_at = ?, updated_at = ?
+                WHERE job_id = ?
+                """,
+                (now_text, expiry, now_text, job_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return _producer_job_row(row)
+
+    def expire_stale_producer_jobs(self, run_id: str) -> list[dict[str, Any]]:
+        """Mark expired external producer turns recoverable without touching drafts."""
+        now_text = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE producer_jobs
+                SET agent_status = 'EXPIRED', agent_id = NULL, updated_at = ?
+                WHERE run_id = ? AND status = 'PENDING' AND agent_status = 'RUNNING'
+                  AND agent_lease_expires_at IS NOT NULL
+                  AND agent_lease_expires_at <= ?
+                """,
+                (now_text, run_id, now_text),
+            )
+            rows = connection.execute(
+                "SELECT * FROM producer_jobs WHERE run_id = ? AND agent_status = 'EXPIRED'",
+                (run_id,),
+            ).fetchall()
+        return [_producer_job_row(row) for row in rows]
+
+    def release_producer_job_agent(
+        self, run_id: str, job_id: str, agent_id: str, *, completed: bool = False
+    ) -> dict[str, Any]:
+        """Release a host turn claim; completion remains controlled by draft validation."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is None or row["run_id"] != run_id:
+                raise ValueError("PRODUCER_JOB_NOT_FOUND")
+            if row["agent_id"] != agent_id:
+                raise ValueError("PRODUCER_AGENT_NOT_OWNER")
+            status = "COMPLETED" if completed else "IDLE"
+            connection.execute(
+                """
+                UPDATE producer_jobs
+                SET agent_status = ?, agent_id = NULL, agent_lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE job_id = ?
+                """,
+                (status, _now(), job_id),
             )
             row = connection.execute(
                 "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
@@ -1523,6 +1650,10 @@ def _producer_job_row(row: sqlite3.Row) -> dict[str, Any]:
         "payload": json.loads(row["payload_json"]),
         "status": row["status"],
         "draft": json.loads(row["draft_json"]) if row["draft_json"] is not None else None,
+        "agent_status": row["agent_status"],
+        "agent_id": row["agent_id"],
+        "agent_heartbeat_at": row["agent_heartbeat_at"],
+        "agent_lease_expires_at": row["agent_lease_expires_at"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -1598,3 +1729,18 @@ def _optimization_migrate(connection: sqlite3.Connection) -> None:
     for field, definition in fields.items():
         if field not in existing:
             connection.execute(f"ALTER TABLE optimization_proposals ADD COLUMN {field} {definition}")
+
+
+def _producer_job_migrate(connection: sqlite3.Connection) -> None:
+    fields = {
+        "agent_status": "TEXT NOT NULL DEFAULT 'IDLE'",
+        "agent_id": "TEXT",
+        "agent_heartbeat_at": "TEXT",
+        "agent_lease_expires_at": "TEXT",
+    }
+    existing = {
+        row["name"] for row in connection.execute("PRAGMA table_info(producer_jobs)")
+    }
+    for field, definition in fields.items():
+        if field not in existing:
+            connection.execute(f"ALTER TABLE producer_jobs ADD COLUMN {field} {definition}")

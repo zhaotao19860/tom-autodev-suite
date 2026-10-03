@@ -140,7 +140,7 @@ def revise(
     gate = workflow_spec.STATES[state].output_gate
     if gate_of(approval.get("action") or "") != gate:
         return _failure("APPROVAL_GATE_MISMATCH", run_id, approval_id=approval_id, expected_gate=gate)
-    if approval.get("effective_decision") != "REJECT":
+    if approval.get("effective_decision") not in {"REVISE", "REJECT"}:
         return _failure("APPROVAL_NOT_REJECTED", run_id, approval_id=approval_id,
                         decision=approval.get("effective_decision"))
     action, job_id, draft = _current_draft(orchestrator, run_id)

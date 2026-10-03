@@ -96,8 +96,7 @@ def gate_intent(action: Any) -> dict[str, Any]:
                 ("Comate 选择已经完成；本卡只审批已生成的 Decision Log，不替用户答题。"
                  "本次授权仍只绑定 input_hash，内容变化须重新审批。" if name == "G1" else
                  "同意仅授权本次 input_hash；内容变化须重新审批，审批本身不推进阶段。")
-                + ("驳回并附修改意见时，按意见重做本阶段草案后重新发起本门。" if revisable
-                   else "驳回不放行。")
+                + "同意继续当前 run；需修改保留 run、按意见重做并重发；驳回停止 run。"
             )}
 
 
@@ -203,8 +202,12 @@ def _workspace_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[
         task_id = action.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             return _missing()
-        profile = _runtime_profile(orchestrator, run_id)
-        if not isinstance(profile, dict):
+        runtime = getattr(orchestrator, "_runtime_profile", lambda _run_id: None)(run_id)
+        if not isinstance(runtime, dict) or not runtime.get("ok"):
+            return _missing()
+        profile = runtime.get("profile")
+        profile_hash = runtime.get("profile_hash")
+        if not isinstance(profile, dict) or not isinstance(profile_hash, str) or not profile_hash:
             return _missing()
         db = _ownership_database(orchestrator.workspaces.worktree_root)
         if not db.exists():
@@ -251,14 +254,16 @@ def _workspace_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[
             }
         if set(repositories) != {"business", "tests"}:
             return _missing()
-        events = orchestrator.state.events(run_id)
-        intake = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
         binding = {
             "schema_version": "1",
             "run_id": run_id,
             "source_event_id": action.get("source_event_id"),
             "task_id": task_id,
-            "profile_hash": intake.get("profile_hash"),
+            # Use the hash pinned by _runtime_profile.  Intake's profile_hash is
+            # the historical intake value and may be different after profile
+            # pinning/normalization; using it here makes a valid G4 binding fail
+            # material reconstruction with APPROVAL_MATERIAL_MISSING.
+            "profile_hash": profile_hash,
             "repositories": repositories,
             "source_revisions": {
                 "business": repositories["business"]["baseline_revision"],

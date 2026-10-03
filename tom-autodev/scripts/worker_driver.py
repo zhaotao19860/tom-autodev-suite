@@ -27,6 +27,7 @@ from execution_guard import guard_execution
 
 import copy
 import logging
+import os
 import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -304,7 +305,22 @@ def submit_draft(
         )
         if not reopened.get("ok"):
             return reopened
-    return _produce(orchestrator, run_id, job_id, action, draft, knowledge_sync)
+    agent_id = f"submit:{os.getpid()}"
+    try:
+        try:
+            orchestrator.state.claim_producer_job(run_id, job_id, agent_id)
+        except ValueError as error:
+            return {"ok": False, "reason_code": str(error), "job_id": job_id}
+        result = _produce(orchestrator, run_id, job_id, action, draft, knowledge_sync)
+        return result
+    finally:
+        try:
+            orchestrator.state.release_producer_job_agent(
+                run_id, job_id, agent_id,
+                completed=orchestrator.state.producer_job(job_id).get("status") == "FULFILLED",
+            )
+        except (ValueError, AttributeError):
+            pass
 
 
 def _produce(

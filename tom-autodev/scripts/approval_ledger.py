@@ -13,7 +13,7 @@ from approval_contract import STRICT_APPROVAL_TIMEOUT_SECONDS
 from persistence_policy import ensure_persistable
 
 APPROVAL_CHANNELS = frozenset({"comate", "infoflow"})
-APPROVAL_DECISIONS = frozenset({"APPROVE", "REJECT"})
+APPROVAL_DECISIONS = frozenset({"APPROVE", "REVISE", "REJECT"})
 
 # A timed-out/undeliverable approval is re-issued under a suffixed action
 # (e.g. "G7#retry-1") so the ledger's (run_id, action, input_hash) identity stays

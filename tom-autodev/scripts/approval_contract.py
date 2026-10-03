@@ -31,7 +31,7 @@ _RESULT_FIELDS = frozenset(
 
 class ApprovalGatewayReply(TypedDict):
     reply_id: str
-    decision: Literal["APPROVE", "REJECT"]
+    decision: Literal["APPROVE", "REVISE", "REJECT"]
     responder: str
     received_at: str
 
@@ -48,7 +48,7 @@ class ApprovalGatewayResult(TypedDict):
     channel: Literal["infoflow"]
     input_hash: str
     member_policy: dict[str, list[str]]
-    status: Literal["PENDING", "APPROVE", "REJECT", "TIMEOUT"]
+    status: Literal["PENDING", "APPROVE", "REVISE", "REJECT", "TIMEOUT"]
     created_at: str
     deadline_at: str
     heartbeat_at: str | None
@@ -87,7 +87,7 @@ def parse_gateway_result(value: Any) -> ApprovalGatewayResult | None:
     if status == "PENDING":
         if reply is not None or handoff is not None:
             return None
-    elif status in {"APPROVE", "REJECT"}:
+    elif status in {"APPROVE", "REVISE", "REJECT"}:
         if not _valid_reply(reply, status) or handoff is not None:
             return None
     elif status == "TIMEOUT":

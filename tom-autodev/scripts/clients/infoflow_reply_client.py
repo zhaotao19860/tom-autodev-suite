@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_DECISIONS = ("APPROVE", "REJECT")
+_DECISIONS = ("APPROVE", "REVISE", "REJECT")
 _WORD = re.compile(r"[A-Za-z]+")
 _JOURNAL_ENV = "TOM_AUTODEV_INFOFLOW_REPLY_JOURNAL"
 

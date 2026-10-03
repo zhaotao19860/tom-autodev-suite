@@ -128,6 +128,19 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         # A non-http link is dropped rather than rendered as a clickable decision aid.
         self.assertNotIn("javascript:", content)
 
+    def test_revisable_gate_exposes_distinct_revise_reply(self):
+        notify = FakeNotifyClient()
+        _, transport = self._transport(notify)
+        envelope = _envelope()
+        envelope["action"] = "G2"
+        InfoflowApprovalClient(transport).request(
+            {"channel": "infoflow", "approval": envelope}
+        )
+        _, content = notify.sends[0]
+        self.assertIn("REVISE approval-1 <你的修改意见>", content)
+        self.assertIn("REJECT approval-1", content)
+        self.assertIn("需修改时把 <>", content)
+
     def test_the_message_says_what_is_approved_and_what_approving_causes(self):
         notify = FakeNotifyClient()
         _, transport = self._transport(notify)
@@ -233,7 +246,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         warning = notify.group_sends[1][1]
         self.assertIn("不是新审批", warning)
         self.assertIn("这不表示审批已通过", warning)
-        self.assertIn("APPROVE / REJECT", warning)
+        self.assertIn("APPROVE / REVISE / REJECT", warning)
 
     def test_card_type_error_does_not_replay_the_markdown_message(self):
         notify = FakeCardClient(error=TypeError("card signature mismatch"))

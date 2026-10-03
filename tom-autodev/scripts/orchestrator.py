@@ -4009,7 +4009,9 @@ def _approval_context(
     if gate_payload.get("material_status") == "PINNED":
         packet_dir = orchestrator.config_root / "approval-materials"
         packet_dir.mkdir(parents=True, exist_ok=True)
-        packet_path = packet_dir / f"{run_id}-{action}-{(input_hash or '')[:16]}.json"
+        material_stem = f"{run_id}-{action}-{(input_hash or '')[:16]}"
+        packet_path = packet_dir / f"{material_stem}.json"
+        preview_path = packet_dir / f"{material_stem}.md"
         material = gate_payload.get("_review_content") or {}
         packet = {
             "run_id": run_id,
@@ -4020,8 +4022,40 @@ def _approval_context(
         encoded = json.dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)
         if not packet_path.exists() or packet_path.read_text(encoding="utf-8") != encoded:
             packet_path.write_text(encoded, encoding="utf-8")
-        refs = [{"label": "本次审批材料包", "ref": str(packet_path)}]
+        from phase_document import content_lines
+
+        draft = material.get("draft") if isinstance(material, dict) else None
+        preview_lines = [
+            "# 本次审批材料预览",
+            "",
+            f"- run_id：`{run_id}`",
+            f"- gate：`{action}`",
+            f"- input_hash：`{input_hash}`",
+            "",
+        ]
+        if isinstance(draft, dict):
+            if isinstance(draft.get("spec"), dict):
+                preview_lines.extend(content_lines(draft["spec"], "SPEC"))
+                if isinstance(draft.get("dag"), dict):
+                    preview_lines.extend([
+                        "",
+                        "## 关联 DAG（随 Spec 一并核对）",
+                        "",
+                        *content_lines(draft["dag"], "TASKS"),
+                    ])
+            else:
+                preview_lines.extend(content_lines(draft, None))
+        else:
+            preview_lines.extend(["## 材料缺失", "", "未找到与 input_hash 匹配的 DraftContent。"])
+        preview = "\n".join(preview_lines).rstrip() + "\n"
+        if not preview_path.exists() or preview_path.read_text(encoding="utf-8") != preview:
+            preview_path.write_text(preview, encoding="utf-8")
+        refs = [
+            {"label": "本次审批材料包（JSON）", "ref": str(packet_path)},
+            {"label": "本次审批可读预览（Markdown）", "ref": str(preview_path)},
+        ]
         refs.extend(ref for ref in gate_payload.get("references", []) if ref.get("ref") != str(packet_path))
+        refs = [ref for ref in refs if ref.get("ref") != str(preview_path) or ref["label"] == "本次审批可读预览（Markdown）"]
         gate_payload = {
             **gate_payload,
             "references": refs,

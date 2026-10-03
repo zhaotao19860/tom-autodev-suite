@@ -228,6 +228,36 @@ class AgentBridge:
         )
         return _json_safe(result)
 
+    def claim_producer(
+        self, run_id: str, job_id: str, agent_id: str, lease_seconds: int = 900
+    ) -> dict[str, Any]:
+        """Register that a host turn has accepted a ProducerJob."""
+        return _json_safe(
+            self.orchestrator.state.claim_producer_job(
+                run_id, job_id, agent_id, lease_seconds
+            )
+        )
+
+    def heartbeat_producer(
+        self, run_id: str, job_id: str, agent_id: str, lease_seconds: int = 900
+    ) -> dict[str, Any]:
+        """Renew a host turn's ProducerJob lease."""
+        return _json_safe(
+            self.orchestrator.state.heartbeat_producer_job(
+                run_id, job_id, agent_id, lease_seconds
+            )
+        )
+
+    def release_producer(
+        self, run_id: str, job_id: str, agent_id: str, *, completed: bool = False
+    ) -> dict[str, Any]:
+        """Release a host turn's ProducerJob lease."""
+        return _json_safe(
+            self.orchestrator.state.release_producer_job_agent(
+                run_id, job_id, agent_id, completed=completed
+            )
+        )
+
     def status(self, target: str) -> dict[str, Any]:
         resolved = resolve_status_target(self.orchestrator, target)
         if not resolved.get("ok"):
@@ -240,6 +270,7 @@ class AgentBridge:
         if not resolved.get("ok"):
             return _json_safe(resolved)
         run_id = resolved["run_id"]
+        self.orchestrator.state.expire_stale_producer_jobs(run_id)
         decision = worker_driver.classify_next(self.orchestrator, run_id, read_only=True)
         action = decision.get("action") if isinstance(decision, dict) else None
         action_view = None

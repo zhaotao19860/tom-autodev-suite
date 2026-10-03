@@ -110,8 +110,8 @@ def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[
          if gate.get("material_status") == "MISSING"
          else "请先查看 " + ("；".join(reads[:2]) if reads else "材料未齐，请先在 IDE 补齐，勿盲批")),
         f"批准后 {_line(gate.get('effect'))}" if _line(gate.get("effect")) else "",
-        f"版本 {gateway_request['input_hash'][:12]}…；完整材料及本地文件位置见同一审批的详情消息",
-        f"截止 {_moment(gateway_request['deadline_at'])}",
+        "按钮含义：同意=继续 run；需修改=保留 run、按意见重做并重发；驳回=停止 run。",
+        f"版本 {gateway_request['input_hash'][:12]}…；截止 {_moment(gateway_request['deadline_at'])}；完整材料及本地文件位置见同一审批详情",
     ]
     targets = [("group", group_id)] if group_id is not None else [
         ("user", member) for member in sorted({
@@ -137,7 +137,7 @@ def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[
                     approval_id=gateway_request["approval_id"],
                     target_type=target_type, target_id=target_id,
                     title=f"tom-autodev {action} 审批",
-                    question="待你审批：请先核对材料和重点，再点「同意」或「驳回」。",
+                    question="待你审批：请先核对材料和重点，再选择「同意」「需修改」或「驳回」。",
                     lines=[line for line in lines if line],
                     # Who may answer, so a shared group card only reads as answered
                     # when the tap came from an approver. The ledger still decides.
@@ -355,7 +355,7 @@ class InfoflowApprovalTransport:
             warning = (
                 f"## tom-autodev 审批操作提示（不是新审批）\n\n"
                 f"审批 {gateway_request['approval_id']} 的按钮未完整送达或结果未确认。"
-                "\n请先阅读审批详情；可使用其中的 APPROVE / REJECT 回复，或在 IDE 处理。"
+                "\n请先阅读审批详情；可使用其中的 APPROVE / REVISE / REJECT 回复，或在 IDE 处理。"
                 "\n这不表示审批已通过；不会自动重复发送结果不明的按钮。"
             )
             try:
@@ -547,11 +547,20 @@ def _approval_markdown(
         "**同意请回复**",
         f"APPROVE {approval_id}",
         "",
+        *(
+            [
+                "**需修改请回复**",
+                f"REVISE {approval_id} <{FEEDBACK_PLACEHOLDER}>",
+                "",
+            ]
+            if gate_of(action) in _REVISABLE_GATES
+            else []
+        ),
         "**驳回请回复**",
-        f"REJECT {approval_id}" + (f" <{FEEDBACK_PLACEHOLDER}>" if gate_of(action) in _REVISABLE_GATES else ""),
+        f"REJECT {approval_id}",
         "",
-        *(["> 驳回时把 <> 处换成修改意见（意见里不要再写 APPROVE/REJECT），系统据此登记重做；"
-           "点卡片驳回则在 IDE 把意见告诉 Comate。之后在 IDE 继续，Comate 会生成新版草案并重新发起本门。"]
+        *(["> 需修改时把 <> 换成修改意见（意见里不要再写 APPROVE/REVISE/REJECT），系统据此登记重做；"
+           "驳回则停止 run。点卡片选择需修改后，在 IDE 继续，Comate 会生成新版草案并重新发起本门。"]
           if gate_of(action) in _REVISABLE_GATES else []),
         "> 回复必须带 approval_id；它绑定本次内容，需求一变即失效。",
         f"> input_hash `{input_hash[:12]}…`",

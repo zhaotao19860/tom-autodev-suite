@@ -90,6 +90,11 @@ class ApprovalMaterialsTests(unittest.TestCase):
         packet = json.loads(Path(paths[0]).read_text())
         self.assertEqual(packet["input_hash"], payload["g0_input_hash"])
         self.assertEqual(packet["material"]["workflow_modes"], payload["workflow_modes"])
+        preview_paths = [path for path in paths if path.endswith(".md")]
+        self.assertEqual(len(preview_paths), 1)
+        preview = Path(preview_paths[0]).read_text()
+        self.assertIn("# 本次审批材料预览", preview)
+        self.assertIn(payload["g0_input_hash"], preview)
         self.assertEqual(len(orch.state.events(run_id)), 1)
         self.assertEqual(orch.approvals.for_run(run_id), [])
         repeat = _approval_context(

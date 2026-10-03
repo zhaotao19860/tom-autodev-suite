@@ -51,6 +51,16 @@ class FakeNotifyClient:
         return {"message_id": f"group-{len(self.group_sends)}", "group_id": group_id}
 
 
+class FakeCardNotifyClient(FakeNotifyClient):
+    def __init__(self):
+        super().__init__()
+        self.cards = []
+
+    def send_approval_card(self, **request):
+        self.cards.append(request)
+        return {"card_id": f"card-{request['approval_id']}", "created": True}
+
+
 class ApprovalWatcherTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -424,6 +434,25 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertEqual(
             len([a for a in self.orchestrator.approvals.for_run("run-1") if "#retry-" in a["action"]]),
             1,
+        )
+
+    def test_timeout_reissue_uses_factory_card_client_and_keeps_buttons(self):
+        self.deadline = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        self.delivery = FakeCardNotifyClient()
+        approval_id = self._request()
+        time.sleep(1.2)
+        self.now = datetime.fromisoformat(self.deadline) + timedelta(minutes=1)
+
+        settled = self.watcher.tick()
+
+        self.assertEqual(settled[0]["reason_code"], "APPROVAL_TIMEOUT")
+        self.assertEqual(len(self.delivery.cards), 2)
+        retry_card = self.delivery.cards[-1]
+        self.assertEqual(retry_card["approval_id"], settled[0]["reissued_approval_id"])
+        self.assertEqual(retry_card["title"], "tom-autodev G0#retry-1 审批")
+        self.assertEqual(
+            retry_card["question"],
+            "待你审批：请先核对材料和重点，再选择「同意」「需修改」或「驳回」。",
         )
 
     def test_reissue_is_refused_while_the_gate_is_still_open(self):

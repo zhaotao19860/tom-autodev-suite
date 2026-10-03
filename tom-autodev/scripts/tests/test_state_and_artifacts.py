@@ -14,6 +14,37 @@ from state_store import StateStore
 
 
 class StateAndArtifactTests(unittest.TestCase):
+    def test_producer_agent_lease_prevents_duplicate_claim_and_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite")
+            job = store.record_producer_job("run-1", "producer-1", {"phase": "SPEC"})
+
+            claimed = store.claim_producer_job("run-1", "producer-1", "agent-a", lease_seconds=900)
+            self.assertEqual(claimed["agent_status"], "RUNNING")
+            self.assertEqual(claimed["agent_id"], "agent-a")
+            with self.assertRaisesRegex(ValueError, "PRODUCER_JOB_CLAIMED"):
+                store.claim_producer_job("run-1", "producer-1", "agent-b", lease_seconds=900)
+
+            with store._connect() as connection:
+                connection.execute(
+                    "UPDATE producer_jobs SET agent_lease_expires_at = ? WHERE job_id = ?",
+                    ("2000-01-01T00:00:00+00:00", "producer-1"),
+                )
+            expired = store.expire_stale_producer_jobs("run-1")
+            self.assertEqual(expired[0]["agent_status"], "EXPIRED")
+            reclaimed = store.claim_producer_job("run-1", "producer-1", "agent-b", lease_seconds=900)
+            self.assertEqual(reclaimed["agent_id"], "agent-b")
+
+    def test_producer_agent_heartbeat_requires_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite")
+            store.record_producer_job("run-1", "producer-1", {"phase": "SPEC"})
+            store.claim_producer_job("run-1", "producer-1", "agent-a")
+            with self.assertRaisesRegex(ValueError, "PRODUCER_AGENT_NOT_OWNER"):
+                store.heartbeat_producer_job("run-1", "producer-1", "agent-b")
+            renewed = store.heartbeat_producer_job("run-1", "producer-1", "agent-a")
+            self.assertEqual(renewed["agent_status"], "RUNNING")
+
     def test_transition_is_append_only(self):
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite")

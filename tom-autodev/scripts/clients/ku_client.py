@@ -516,9 +516,20 @@ class KuClient:
             edit_key,
             self._edit_payload(doc_id, entry, entry_markdown),
         )
+        # `selectionByTitle` only accepts an actual heading.  The run-root
+        # document normally exposes the human-readable paragraph
+        # "每个阶段完成后在下面追加一条..." as the stable insertion anchor;
+        # passing that paragraph as a title makes KU reject the edit with a
+        # generic CLI_BUSINESS_FAILURE.  Keep title selection for real
+        # headings used by older/root-index documents, and use full-block
+        # content matching for ordinary paragraphs.
         operation = {
             "mode": "insert_after",
-            "selectionByTitle": anchor,
+            (
+                "selectionByTitle"
+                if anchor.lstrip().startswith("#")
+                else "selectionWithEllipsis"
+            ): anchor,
             "markdown": entry_markdown,
         }
         edited = self._invoke(

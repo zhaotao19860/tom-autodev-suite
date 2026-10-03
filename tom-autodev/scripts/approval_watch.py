@@ -412,9 +412,12 @@ class ApprovalWatcher:
         if stale and reason == "APPROVAL_TIMEOUT":
             # A card the run already left: its silence needs no notice and no new card.
             return outcome
-        if reason == "OK" and decision in {"APPROVE", "REJECT"}:
+        if reason == "OK" and decision in {"APPROVE", "REVISE", "REJECT"}:
             responder = self._responder(approval_id)
-            revised = self._revise(approval, responder) if decision == "REJECT" and not stale else None
+            revised = self._revise(approval, responder) if decision == "REVISE" and not stale else None
+            if decision == "REJECT" and not stale:
+                stopped = self.orchestrator.stop(run_id)
+                outcome["stopped_state"] = stopped.get("state")
             if revised is not None:
                 outcome["revised_event_id"] = revised.get("event_id")
             acknowledgement = self._acknowledge(
@@ -563,13 +566,23 @@ class ApprovalWatcher:
         from the reply journal). A click, or a REJECT without text, waits for the IDE.
         """
         if gate_of(approval.get("action") or "") not in workflow_spec.REVISABLE_GATES:
-            return None
+            return self.orchestrator.route_failure(
+                approval["run_id"],
+                "REVIEW_FAILED",
+                {
+                    "classification": "CONFIRMED",
+                    "approval_id": approval["approval_id"],
+                    "input_hash": approval.get("input_hash"),
+                    "reason": "审批人选择需修改，后置阶段进入 DIAGNOSE 走修复并重新提交。",
+                    "responder": responder,
+                },
+            )
         try:
             from run_change import revise
 
             result = revise(
                 self.orchestrator, approval["run_id"], approval["approval_id"],
-                feedback=None, actor=responder or "infoflow",
+                feedback="审批人选择需修改，请按审批重点修正当前阶段材料并重新提交。",
             )
         except Exception:  # noqa: BLE001 - the REJECT already landed; redo stays available in the IDE
             return None
@@ -674,9 +687,17 @@ def _nudge_markdown(
             "**同意请回复**",
             f"APPROVE {approval_id}",
             "",
+            *(
+                [
+                    "**需修改请回复**",
+                    f"REVISE {approval_id} <你的修改意见>",
+                    "",
+                ]
+                if gate_of(approval.get("action") or "") in workflow_spec.REVISABLE_GATES
+                else []
+            ),
             "**驳回请回复**",
-            f"REJECT {approval_id}"
-            + (" <你的修改意见>" if gate_of(approval.get("action") or "") in workflow_spec.REVISABLE_GATES else ""),
+            f"REJECT {approval_id}",
         ]
     )
 
@@ -782,18 +803,15 @@ def _ack_note(
     gate = gate_of(approval.get("action") or "")
     if stale:
         return "该卡已被之后的重做/回退取代，本决定不会被使用。"
-    if decision == "REJECT" and revised is not None:
+    if decision == "REVISE" and revised is not None:
         return (
             f"已按意见登记重做（{' '.join(str(revised.get('feedback') or '').split())[:200]}）；"
             "在 IDE 继续后，Comate 生成新版草案并重新发起本门。"
         )
-    if decision == "REJECT" and gate in workflow_spec.REVISABLE_GATES:
-        from run_change import FEEDBACK_PLACEHOLDER
-
-        return (
-            f"如需按意见修改，请回复 `REJECT {approval['approval_id']} <{FEEDBACK_PLACEHOLDER}>`，"
-            "或在 IDE 把意见告诉 Comate 执行 revise。"
-        )
+    if decision == "REVISE":
+        return "已选择需修改：保留 run 并重新进入当前阶段，Comate 将按审批重点生成新版材料并重新发起本门。"
+    if decision == "REJECT":
+        return "已驳回并停止 run，不会继续后续阶段。"
     if decision == "APPROVE" and gate == "CHANGE_REQUEST":
         return f"变更请求只授权回退本身：在 IDE 让 Comate 执行 `rewind --approval-id {approval['approval_id']}`。"
     return None
@@ -817,10 +835,12 @@ def _ack_markdown(
             lines += ["", "**整体进度**", render_progress(progress)]
         lines += ["", "> 需要重新发起审批；内容若已变更，会绑定新的 input_hash。"]
         return "\n".join(lines)
-    landed = "已同意" if decision == "APPROVE" else "已驳回"
-    following = (
-        "Comate 会在下一步继续该 run。" if decision == "APPROVE" else "Comate 不会继续该闸门之后的动作。"
-    )
+    landed = {"APPROVE": "已同意", "REVISE": "已标记需修改", "REJECT": "已驳回"}.get(decision, decision)
+    following = {
+        "APPROVE": "Comate 会在下一步继续该 run。",
+        "REVISE": "run 保留，Comate 按意见重做当前阶段并重新发起审批。",
+        "REJECT": "run 已停止，Comate 不会继续后续阶段。",
+    }.get(decision, "请以审批账本和 run 状态为准。")
     if note:
         following = note if decision == "APPROVE" or "取代" in note else following + note
     lines = [

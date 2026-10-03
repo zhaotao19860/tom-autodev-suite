@@ -131,7 +131,8 @@ class RunChangeTests(unittest.TestCase):
         self.assertIn("测试仓库改用新分支", rendered)
         self.assertIn("与上一版的差异", rendered)
         self.assertIn("（新分支）", rendered)
-        self.assertIn(f"REJECT {'a' * 32} <你的修改意见>", rendered)
+        self.assertIn(f"REVISE {'a' * 32} <你的修改意见>", rendered)
+        self.assertIn(f"REJECT {'a' * 32}", rendered)
 
         approved = self._approval(run_id, "G2", pending["approval_input_hash"])
         done = worker_driver.submit_draft(
@@ -296,10 +297,11 @@ class RunChangeTests(unittest.TestCase):
         change = {"approval_id": "c" * 32, "action": "CHANGE_REQUEST"}
         self.assertIn("rewind --approval-id", _ack_note(change, "APPROVE", False, None))
         gate = {"approval_id": "g" * 32, "action": "G2#retry-1"}
-        self.assertIn("revise", _ack_note(gate, "REJECT", False, None))
-        self.assertIn("已按意见登记重做", _ack_note(gate, "REJECT", False, {"feedback": "补回滚"}))
+        self.assertIn("需修改", _ack_note(gate, "REVISE", False, None))
+        self.assertIn("已按意见登记重做", _ack_note(gate, "REVISE", False, {"feedback": "补回滚"}))
+        self.assertIn("停止 run", _ack_note(gate, "REJECT", False, None))
         self.assertIn("取代", _ack_note(gate, "APPROVE", True, None))
-        self.assertIsNone(_ack_note({"approval_id": "x", "action": "G7"}, "REJECT", False, None))
+        self.assertIn("停止 run", _ack_note({"approval_id": "x", "action": "G7"}, "REJECT", False, None))
 
     def test_pending_change_request_is_listed_and_an_approved_one_says_apply(self):
         run_id, _knowledge, _job_id, pending_hash = self._at_g2()

@@ -178,7 +178,8 @@ assert.deepEqual(rendered.map(x => x.receiver), [
   { type: 'group', id: '123' }, { type: 'user', id: 'owner' },
 ]);
 assert.equal(rendered[0].card.components.length, 7);
-assert.equal(rendered[0].card.buttons.length, 2);
+assert.equal(rendered[0].card.buttons.length, 3);
+assert.equal(rendered[0].card.buttons[1].event_key, 'revise.' + request.approval_id);
 assert.equal(rendered[0].card.buttons[0].event_key, 'approve.' + request.approval_id);
 assert.equal(rendered[0].refresh_default_intermediate_state, false);
 """)
@@ -203,14 +204,14 @@ assert.equal(api.live.has(initial.card_id), false);
     def test_outsider_click_keeps_buttons_and_claims_no_decision(self):
         self._run(r"""
 const initial = await api.sendApprovalCard({ ...request, target_type: 'group', target_id: '123' });
-for (const button of ['approve', 'reject']) {
+for (const button of ['approve', 'revise', 'reject']) {
   await api.answerCard({
     cardId: initial.card_id, cardInstanceId: 'instance-group',
   }, button + '.' + request.approval_id, 'not-an-authorized-member');
   const card = rendered.at(-1);
   assert.match(card.question, /待权限和有效期校验/);
   assert.doesNotMatch(card.question, /已批准|已同意|已由.*处理/);
-  assert.equal(card.card.buttons.length, 2);
+  assert.equal(card.card.buttons.length, 3);
   assert.equal(card.card.components.length, 8);
   assert.deepEqual(Array.from(card.card.components.slice(0, 7), x => x.text), request.lines);
   assert.match(card.card.components.at(-1).text, /^点击待校验/);
@@ -252,7 +253,7 @@ await api.answerCard({
 }, 'approve.' + request.approval_id, 'owner');
 const card = rendered.at(-1);
 assert.match(card.question, /待权限和有效期校验/);
-assert.equal(card.card.buttons.length, 2);
+assert.equal(card.card.buttons.length, 3);
 """)
 
     def test_restart_refresh_removes_previous_click_status_and_keeps_target(self):
@@ -272,7 +273,7 @@ assert.deepEqual(card.receiver, { type: 'user', id: 'owner' });
 assert.equal(card.card.components.length, 2);
 assert.equal(card.card.components[0].text, '固定材料');
 assert.match(card.card.components[1].text, /点击待校验「同意」/);
-assert.equal(card.card.buttons.length, 2);
+assert.equal(card.card.buttons.length, 3);
 """)
 
     def test_component_limit_initial_and_repeated_clicks(self):
@@ -308,7 +309,7 @@ assert.equal(journal[0].sender, 'outsider'); // authorization belongs to the con
 assert.equal(journal[0].group_id, '123');
 assert.equal(journal[0].chat_type, 'group');
 assert.match(rendered.at(-1).question, /待权限和有效期校验/);
-assert.equal(rendered.at(-1).card.buttons.length, 2);
+assert.equal(rendered.at(-1).card.buttons.length, 3);
 """)
 
     def test_render_failure_is_not_retried_and_invalid_endpoint_does_not_send(self):

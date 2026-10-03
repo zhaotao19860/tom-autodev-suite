@@ -19,6 +19,7 @@ import { WSClient, LogLevel, Client } from '@baidu/infoflow-sdk-nodejs'
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 18791
 const DEFAULT_BASE_URL = 'https://api.im.baidu.com'
+const GATEWAY_VERSION = '0.1.1'
 const INTERNAL_WS_GATEWAY = 'infoflow-open-gateway.weiyun.baidu.com'
 const INTERNAL_WS_CONNECT_DOMAIN = 'infoflow-open-gateway.weiyun.baidu.com:8869'
 
@@ -406,7 +407,7 @@ const seen = new Set()
 // in gateway memory, so a restart between sending the card and the tap still yields a
 // readable decision.
 const CARD_CALLER = 'tom-autodev'
-const DECISION_BY_BUTTON = { approve: 'APPROVE', reject: 'REJECT' }
+const DECISION_BY_BUTTON = { approve: 'APPROVE', revise: 'REVISE', reject: 'REJECT' }
 
 function buttonEventKey(button, approvalId) {
   return `${button}.${approvalId}`
@@ -428,7 +429,7 @@ function approvalCardId(approvalId, targetType, targetId) {
 
 function parseDecision(eventKey) {
   const raw = readString(eventKey).trim()
-  const gate = /^(approve|reject)\.([0-9a-f]{32})$/.exec(raw)
+  const gate = /^(approve|revise|reject)\.([0-9a-f]{32})$/.exec(raw)
   if (gate) return { text: `${DECISION_BY_BUTTON[gate[1]]} ${gate[2]}`, subject: gate[2] }
   // A run also has to ask questions that are not gates ("continue into PLAN?"). Those
   // arrive as an opaque decision id plus the chosen option, so the asking side can
@@ -472,6 +473,7 @@ async function sendApprovalCard(request) {
     lines: request.lines.slice(0, 7),
     buttons: [
       { eventKey: buttonEventKey('approve', request.approval_id), text: '同意' },
+      { eventKey: buttonEventKey('revise', request.approval_id), text: '需修改' },
       { eventKey: buttonEventKey('reject', request.approval_id), text: '驳回' },
     ],
   })
@@ -588,7 +590,8 @@ async function answerCard(data, eventKey, sender) {
   const parsed = parseDecision(event)
   const label = known?.labels?.[event]
     || (parsed?.text?.startsWith('APPROVE ') ? '同意'
-      : parsed?.text?.startsWith('REJECT ') ? '驳回' : event)
+      : parsed?.text?.startsWith('REVISE ') ? '需修改'
+        : parsed?.text?.startsWith('REJECT ') ? '驳回' : event)
   // A group card is shared, so the tap may come from someone who cannot answer this
   // gate. Only an approver's tap may present the card as answered and drop the
   // buttons; anyone else's tap is recorded without taking the one-tap path away from
@@ -604,6 +607,7 @@ async function answerCard(data, eventKey, sender) {
     approvalIdOf(parsed, known, data)
       ? [
           { eventKey: buttonEventKey('approve', approvalIdOf(parsed, known, data)), text: '同意' },
+          { eventKey: buttonEventKey('revise', approvalIdOf(parsed, known, data)), text: '需修改' },
           { eventKey: buttonEventKey('reject', approvalIdOf(parsed, known, data)), text: '驳回' },
         ]
       : []
@@ -827,7 +831,9 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || '/', `http://${host}:${port}`)
     if (req.method === 'GET' && url.pathname === '/health') {
-      sendJson(res, 200, { ok: true, app_key: appKey, journal: journalPath() })
+      sendJson(res, 200, {
+        ok: true, app_key: appKey, journal: journalPath(), version: GATEWAY_VERSION,
+      })
       return
     }
     if (req.method === 'POST' && url.pathname === '/notify') {
