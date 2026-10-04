@@ -78,7 +78,7 @@ class RunChangeTests(unittest.TestCase):
         rejected = self._approval(run_id, "G2", rejected_hash, decision="REJECT")
         brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
         self.assertEqual(brief["status_label"], "已驳回待修改")
-        self.assertIn("revise", brief["next"]["text"])
+        self.assertIn("按意见重做", brief["next"]["text"])
 
         missing = run_change.revise(
             self.orchestrator, run_id, rejected["approval_id"], feedback=None, actor="owner@example.test"

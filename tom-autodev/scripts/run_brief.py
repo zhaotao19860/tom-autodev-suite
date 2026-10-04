@@ -375,7 +375,7 @@ def _next_step(
                 "owner": "你",
                 "text": (
                     f"{gate} 已驳回（审批 {approval_id}）。把修改意见告诉 Comate"
-                    f"（或在如流回复 `需修改 {approval_id} 修改意见`），Comate 用 revise 按意见重做草案"
+                    f"（或在如流回复 `需修改 {approval_id} 修改意见`），Comate 会按意见重做草案"
                     f"并重新发起 {gate}；要回到更早阶段用 rewind，放弃用 stop"
                 ),
             }

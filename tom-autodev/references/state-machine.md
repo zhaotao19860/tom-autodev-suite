@@ -34,7 +34,7 @@ KU holds an edit separately from what a query returns: `edit-content` and `edit-
 | `ENV_UNSATISFIED` | Stop code repair and wait for environment recovery. |
 | `ENV_TRANSIENT` | Run at most three read-only health rechecks. |
 | `REVISION_MISMATCH` | Stop; never reuse the pipeline result. |
-| `APPROVAL_REJECTED` / `APPROVAL_TIMEOUT` | Persist handoff and stop. On G1/G2/G3 a REJECT with feedback is redone in place via `revise`. |
+| `APPROVAL_REJECTED` / `APPROVAL_TIMEOUT` | Persist handoff and stop. On G1/G2/G3/G4 a “需修改”/historical REJECT with feedback is redone in place; the next `继续` re-enters the producer and requests a new hash-bound gate. |
 | Earlier phase must change | Approved `CHANGE_REQUEST` (`rewind`) re-enters `REWIND_TARGETS[state]`; ARCHITECTURE_REVIEW leaves only this way. |
 
 ## Recovery

@@ -9,7 +9,7 @@ way a workflow reset keeps the original history and continues from a chosen poin
 
 Two entry points, each authorized by a human decision that already exists:
 
-* ``revise`` — a REJECT of the current design-front gate (G1/G2/G3) plus the
+    * ``revise`` — a REVISE of the current producer gate (G1/G2/G3/G4) plus the
   reviewer's feedback. The same state is entered again with that feedback and the
   rejected draft as context, so the next draft is a response to the review rather
   than a fresh guess, and the gate shows what changed.
@@ -87,12 +87,18 @@ def _journal_feedback(orchestrator: Any, approval: dict[str, Any]) -> str:
     responders = {
         str(row.get("responder") or "").split("@", 1)[0]
         for row in orchestrator.approvals.responses(approval["approval_id"])
-        if row.get("effective") and row.get("decision") == "REJECT"
+        if row.get("effective") and row.get("decision") in {"REVISE", "REJECT"}
     }
     responders.discard("")
     if not responders:
         return ""
-    lead = re.compile(r"^\s*(?:驳回\s*)?REJECT\s*" + re.escape(approval["approval_id"]), re.IGNORECASE)
+    lead = re.compile(
+        r"^\s*(?:(?:驳回|需修改)\s*)?(?:REJECT|REVISE)\s*"
+        + re.escape(approval["approval_id"])
+        + r"|^\s*(?:驳回|需修改)\s*"
+        + re.escape(approval["approval_id"]),
+        re.IGNORECASE,
+    )
     found = []
     for message in InfoflowReplyJournal().messages():
         text = message.get("text") or ""
@@ -128,7 +134,7 @@ def revise(
     if state not in workflow_spec.REVISABLE_STATES:
         return _failure(
             "REVISE_NOT_SUPPORTED", run_id, state=state,
-            hint="只有 GRILL/SPEC/TASKS 可按驳回意见原地重做；更早阶段用 rewind，代码阶段走 DIAGNOSE",
+            hint="只有 GRILL/SPEC/TASKS/PLAN 可按修改意见原地重做；更早阶段用 rewind，代码阶段走 DIAGNOSE",
         )
     if not isinstance(actor, str) or not actor.strip():
         return _failure("ACTOR_REQUIRED", run_id)

@@ -207,11 +207,13 @@ FAILURE_TARGETS: dict[str, str] = {
 }
 _FAILURE_DEFAULT = "STOPPED"
 
-# Design-front states whose rejected draft can be redone in place: a REJECT carrying
+# Producer states whose rejected draft can be redone in place: a REVISE carrying
 # feedback re-enters the same state, so the producer drafts a new version against the
 # feedback and the same gate is asked again for the new hash (run_change.revise).
-REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS"})
-REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3"})
+# PLAN/G4 is included because the plan is itself a model-authored, hash-bound draft;
+# rejecting it must not strand the run or force the user to open a separate rewind.
+REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS", "PLAN"})
+REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3", "G4"})
 
 # Approved backward moves (run_change.rewind): the run re-enters the target and every
 # phase from there is produced again; nothing already recorded is rewritten. Later

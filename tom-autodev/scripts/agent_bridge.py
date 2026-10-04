@@ -208,6 +208,49 @@ class AgentBridge:
             if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
         ]
         options = self._worker_options(run_id)
+        # “需修改” is a settled human instruction, not a terminal stop.  Consume it
+        # before asking the worker for the next action so typing “继续” after a
+        # Chinese approval reply re-enters the producer and delivers a fresh card.
+        # The explicit approval id and current input hash keep this bounded to the
+        # exact rejected draft; no old approval is reused for the new content.
+        if not pending_approval_handoffs:
+            from approval_ledger import gate_of
+            import run_change
+
+            events = self.orchestrator.state.events(run_id)
+            current = events[-1] if events else {}
+            state = current.get("state")
+            if state in workflow_spec.REVISABLE_STATES:
+                candidates = [
+                    approval for approval in self.orchestrator.approvals.for_run(run_id)
+                    if (
+                        gate_of(approval.get("action")) == workflow_spec.STATES[state].output_gate
+                        and approval.get("effective_decision") == "REVISE"
+                        and approval.get("input_hash")
+                    )
+                ]
+                if candidates:
+                    approval = max(candidates, key=lambda item: item.get("resolved_at") or "")
+                    responses = self.orchestrator.approvals.responses(approval["approval_id"])
+                    actor = next(
+                        (
+                            response.get("responder")
+                            for response in responses
+                            if response.get("effective")
+                            and response.get("decision") == "REVISE"
+                            and response.get("responder")
+                        ),
+                        "comate",
+                    )
+                    revised = run_change.revise(
+                        self.orchestrator,
+                        run_id,
+                        approval["approval_id"],
+                        feedback=None,
+                        actor=actor,
+                    )
+                    if revised.get("reason_code") not in {"OK", "ALREADY_REVISED"}:
+                        return _json_safe(revised)
         if pending_approval_handoffs:
             result = worker_driver.resume(self.orchestrator, run_id, **options)
         else:

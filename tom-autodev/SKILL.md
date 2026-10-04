@@ -205,8 +205,12 @@ question/purpose/status/handoff, and current collaboration items. See
 [`references/phase-artifacts.md`](references/phase-artifacts.md) for the document map and
 artifact contract.
 
-When a reviewer rejects G1/G2/G3, do not tell them to restart and do not reissue the gate.
-Ask what must change, then run `scripts/cli.py revise RUN_ID --approval-id <rejected>
+When a reviewer selects “需修改” on G1/G2/G3/G4, do not tell them to restart and do not
+reissue the same gate manually. The next `/tom-autodev CARD 继续` consumes the
+hash-bound feedback, re-enters the producer phase, and delivers a new Chinese approval card
+for the new content hash. G4 is the PLAN producer gate and is revisable for the same reason
+as the earlier producer gates. Historical English `REJECT` replies remain compatible.
+For an explicit CLI recovery, run `scripts/cli.py revise RUN_ID --approval-id <rejected>
 --feedback <text> --actor <who>`; the producer is re-entered with
 `revision_context` (instruction plus the previous draft) from `context`, must address every
 point of the instruction, keep what was not objected to, and the new gate shows a diff. When

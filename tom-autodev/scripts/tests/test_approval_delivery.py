@@ -201,6 +201,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         self.assertEqual(at_users, ["owner", "qa"])
         self.assertIn("**待审批** @owner @qa", content)
         self.assertIn("同意 approval-1", content)
+        self.assertNotIn("APPROVE approval-1", content)
 
     def test_a_group_gate_also_gets_the_one_tap_button_card(self):
         notify = FakeCardClient()

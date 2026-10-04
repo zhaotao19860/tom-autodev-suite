@@ -4,13 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
-## 2026-10-04 · 审批工作流中文化
+## 2026-10-04 · G4 需修改自动续跑
 
-- 审批正文、按钮投递失败提示、超时提醒、审批回执和重发说明统一使用中文。
-- 新审批展示“同意 / 需修改 / 驳回”及对应中文回复格式；历史 `APPROVE / REVISE / REJECT`
-  回复继续兼容，内部仍保留英文枚举以保证旧审批账本可恢复。
-- 如流文字回复新增中文决策识别，并拒绝同时包含多个中文决策词的歧义消息。
-- 补充审批投递、审批回复解析和重做审批的中文回归测试。
+- G4/PLAN 纳入可按意见重做的 Producer 阶段；选择“需修改”后输入“继续”会自动消费
+  中文修改意见，重新生成新 hash 的计划并投递新的中文审批卡。
+- 保留上一版计划、审批和修改意见的审计链；旧英文 `REJECT` 回复继续兼容。
+- 更新状态提示、CLI 帮助、操作文档和 skill 规则，避免把 G4 误报为不可恢复。
 
 ## 2026-10-03 · KU 写入收敛与审批卡动作语义修复
 

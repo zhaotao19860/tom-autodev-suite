@@ -157,6 +157,10 @@ class InfoflowReplyConsumerTests(unittest.TestCase):
             },
         )
 
+    def test_the_request_id_also_binds_a_decision(self):
+        reply = self._resolve([_message("REJECT infoflow-req-1")])
+        self.assertEqual(reply["decision"], "REJECT")
+
     def test_chinese_approval_words_are_supported(self):
         for text, expected in (
             ("同意 approval-1", "APPROVE"),
@@ -169,10 +173,6 @@ class InfoflowReplyConsumerTests(unittest.TestCase):
 
     def test_mixed_chinese_decisions_are_ambiguous(self):
         self.assertIsNone(self._resolve([_message("同意或驳回 approval-1")]))
-
-    def test_the_request_id_also_binds_a_decision(self):
-        reply = self._resolve([_message("REJECT infoflow-req-1")])
-        self.assertEqual(reply["decision"], "REJECT")
 
     def test_a_decision_without_its_approval_id_is_ignored(self):
         self.assertIsNone(self._resolve([_message("APPROVE")]))

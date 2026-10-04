@@ -120,7 +120,7 @@ replies remain compatible.
 
 ### What a REJECT does
 
-A REJECT never reopens the same hash. On G1/G2/G3 it means "redo this draft": the
+A REJECT never reopens the same hash. On G1/G2/G3/G4 it means "redo this draft": the
 reviewer adds feedback (typed after `需修改 <approval_id>` in 如流, or given to Comate in the
 IDE), `revise` re-enters the same phase with that feedback and the rejected draft, and the
 same gate is asked again for the new hash with a "本次修改说明 / 与上一版的差异" section.
