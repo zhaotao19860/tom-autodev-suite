@@ -223,7 +223,7 @@ python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --approval-id
 仍要过各自的门。
 
 - **驳回后按意见重做（revise）**：G1/G2/G3 被驳回时，`status` 显示“已驳回待修改”。
-  把修改意见交给 Comate（或在如流回复 `REJECT <approval_id> 修改意见`），它以这条驳回为
+  把修改意见交给 Comate（或在如流回复 `需修改 <approval_id> 修改意见`），它以这条驳回为
   授权，带着意见和上一版草案重新进入同一阶段；新草案的审批消息附“本次修改说明”和
   “与上一版的差异”。驳回只对当前等待中的那一版草案有效。
 

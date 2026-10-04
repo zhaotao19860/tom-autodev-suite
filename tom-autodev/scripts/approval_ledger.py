@@ -14,6 +14,11 @@ from persistence_policy import ensure_persistable
 
 APPROVAL_CHANNELS = frozenset({"comate", "infoflow"})
 APPROVAL_DECISIONS = frozenset({"APPROVE", "REVISE", "REJECT"})
+_DECISION_ALIASES = {
+    "同意": "APPROVE",
+    "需修改": "REVISE",
+    "驳回": "REJECT",
+}
 
 # A timed-out/undeliverable approval is re-issued under a suffixed action
 # (e.g. "G7#retry-1") so the ledger's (run_id, action, input_hash) identity stays
@@ -82,6 +87,7 @@ class ApprovalLedger:
         return result
 
     def receive(self, approval_id: str, decision: str, input_hash: str, channel: str, responder: str | None, *, run_id: str | None = None, now: datetime | None = None, state_store: Any | None = None) -> dict[str, Any]:
+        decision = _DECISION_ALIASES.get(decision, decision)
         observed = now or datetime.now(timezone.utc)
         with self._connect() as c:
             c.execute("BEGIN IMMEDIATE"); row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()

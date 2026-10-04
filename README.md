@@ -78,10 +78,10 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 - 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G10 和 `PROFILE_REPIN` 都有各自的检查重点。
 - 自动草案审批会提供本次材料的本地 JSON 快照路径；这是阅读副本，不是已验收产物。路径只能在运行机器打开，已有 KU 文档才显示网页链接。缺少与 hash 匹配的材料会明确提示“请勿批准”。
 - 如流正文旁有“同意 / 需修改 / 驳回”按钮。有协作群时发群；G0 尚未建群时发给审批成员的机器人单聊。
-  “同意”对应 `APPROVE <approval_id>`，会继续当前 run；“需修改”对应
-  `REVISE <approval_id> <修改意见>`，会保留 run、按意见重做并重新发起本门；
-  “驳回”对应 `REJECT <approval_id>`，会停止 run。按钮未完整送达会单独提示，
-  可按审批详情中的文字命令回复，不能把 `REJECT` 当作修改入口。
+  后续审批正文和操作示例统一使用中文：“同意 <approval_id>”会继续当前 run；
+  “需修改 <approval_id> <修改意见>”会保留 run、按意见重做并重新发起本门；
+  “驳回 <approval_id>”会停止 run。按钮未完整送达会单独提示。
+  历史英文回复仍兼容，但新审批不再展示英文命令，也不能把“驳回”当作修改入口。
 - 审批卡网关可用 `GET /health` 检查，响应包含 `version`；卡片重发会使用新的
   `approval_id`、保留相同 `input_hash`，并重新投递完整的三个审批按钮。超时重发仍受
   审批台账、幂等和 retry 次数约束，不应直接调用底层卡片接口绕过控制器。
@@ -262,7 +262,7 @@ Worker 和 watcher 都采用单次 bounded poll：一次 `drive` 或一次 watch
 审批卡投递时，控制器会按需启动本地 Infoflow gateway；凭据从环境变量或 `~/.infoflow_config` 读取。gateway 和 watcher 都不是系统服务，重启或关机后需要由宿主重新拉起。由于如流没有补拉历史消息的统一接口，watcher 停止期间收到的回复可能需要人工用下面的绑定命令落账：
 
 ```bash
-python3 tom-autodev/scripts/cli.py approve APPROVAL_ID APPROVE INPUT_HASH infoflow RUN_ID RESPONDER
+python3 tom-autodev/scripts/cli.py approve APPROVAL_ID 同意 INPUT_HASH infoflow RUN_ID RESPONDER
 ```
 
 ## 日常操作

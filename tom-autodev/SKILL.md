@@ -105,6 +105,13 @@ not a fictitious runner. Status must distinguish `待生成` from `已批准待�
 
 Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; Comate and Infoflow share one `approval_id`, and the first valid response wins. Every approval card must identify the affected repository/module, target branch, and pinned revision; a multi-repository change lists one row per repository and revision. G7 cards must also state whether the operation creates a new CR or appends an existing one.
 
+All approval-facing text is Chinese by default: card titles, questions, material summaries,
+button labels, reply examples, timeout notices, resend notices, acknowledgements and
+error prompts. Display `同意 <approval_id>`, `需修改 <approval_id> <中文修改意见>` and
+`驳回 <approval_id>` for new approvals. Keep `APPROVE`, `REVISE` and `REJECT` only as
+internal ledger values and backward-compatible input aliases; never make new approvers
+translate an English command.
+
 When a run needs a human decision, use Comate's structured question interface first:
 show each blocking choice as a题目 with background, explicit options, recommendation,
 impact, evidence, and an `其他（请补充）` option when appropriate. Use multiple

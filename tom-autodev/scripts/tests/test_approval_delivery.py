@@ -111,8 +111,10 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         self.assertTrue(result["request_id"].startswith("infoflow-"))
         recipients, content = notify.sends[0]
         self.assertEqual(recipients, sorted(_POLICY["infoflow"]))
-        self.assertIn("APPROVE approval-1", content)
-        self.assertIn("REJECT approval-1", content)
+        self.assertIn("同意 approval-1", content)
+        self.assertIn("驳回 approval-1", content)
+        self.assertNotIn("APPROVE approval-1", content)
+        self.assertNotIn("REJECT approval-1", content)
         # The gateway sends JSON, so line breaks travel as real newlines.
         self.assertIn("\n", content)
         self.assertNotIn("\\n", content)
@@ -137,9 +139,10 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
             {"channel": "infoflow", "approval": envelope}
         )
         _, content = notify.sends[0]
-        self.assertIn("REVISE approval-1 <你的修改意见>", content)
-        self.assertIn("REJECT approval-1", content)
+        self.assertIn("需修改 approval-1 <你的修改意见>", content)
+        self.assertIn("驳回 approval-1", content)
         self.assertIn("需修改时把 <>", content)
+        self.assertNotIn("REVISE approval-1", content)
 
     def test_the_message_says_what_is_approved_and_what_approving_causes(self):
         notify = FakeNotifyClient()
@@ -172,7 +175,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         _, content = notify.sends[0]
         self.assertIn("**本次审批**", content)
         self.assertIn("材料的位置", content)
-        self.assertIn("APPROVE approval-1", content)
+        self.assertIn("同意 approval-1", content)
 
     def test_a_run_with_a_group_is_asked_in_the_group_and_mentions_the_approvers(self):
         notify = FakeNotifyClient()
@@ -197,7 +200,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         # both in the AT block and in the body tokens that make it read as a mention.
         self.assertEqual(at_users, ["owner", "qa"])
         self.assertIn("**待审批** @owner @qa", content)
-        self.assertIn("APPROVE approval-1", content)
+        self.assertIn("同意 approval-1", content)
 
     def test_a_group_gate_also_gets_the_one_tap_button_card(self):
         notify = FakeCardClient()
@@ -246,7 +249,10 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         warning = notify.group_sends[1][1]
         self.assertIn("不是新审批", warning)
         self.assertIn("这不表示审批已通过", warning)
-        self.assertIn("APPROVE / REVISE / REJECT", warning)
+        self.assertIn("同意", warning)
+        self.assertIn("需修改", warning)
+        self.assertIn("驳回", warning)
+        self.assertNotIn("APPROVE / REVISE / REJECT", warning)
 
     def test_card_type_error_does_not_replay_the_markdown_message(self):
         notify = FakeCardClient(error=TypeError("card signature mismatch"))

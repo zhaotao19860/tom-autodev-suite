@@ -9,6 +9,11 @@ from typing import Any
 
 _DECISIONS = ("APPROVE", "REVISE", "REJECT")
 _WORD = re.compile(r"[A-Za-z]+")
+_CHINESE_DECISIONS = (
+    ("同意", "APPROVE"),
+    ("需修改", "REVISE"),
+    ("驳回", "REJECT"),
+)
 _JOURNAL_ENV = "TOM_AUTODEV_INFOFLOW_REPLY_JOURNAL"
 
 
@@ -150,6 +155,10 @@ def _binds(text: str, record: dict[str, Any]) -> bool:
 def _decision(text: str) -> str | None:
     words = {word.upper() for word in _WORD.findall(text)}
     found = [decision for decision in _DECISIONS if decision in words]
+    for label, decision in _CHINESE_DECISIONS:
+        if label in text:
+            found.append(decision)
+    found = list(dict.fromkeys(found))
     return found[0] if len(found) == 1 else None
 
 

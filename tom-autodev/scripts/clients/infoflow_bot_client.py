@@ -167,7 +167,7 @@ class InfoflowBotClient:
         """Send the one-tap variant of a gate as an interactive card.
 
         The buttons carry the approval id, so a tap arrives in the reply journal as the
-        same `APPROVE <approval_id>` a person would otherwise have had to type — the
+        same `同意 <approval_id>` a person would otherwise have had to type — the
         decision is still authorized by `clients.infoflow_reply_client` against the
         stored request, nothing here decides anything.
         """

@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-04 · 审批工作流中文化
+
+- 审批正文、按钮投递失败提示、超时提醒、审批回执和重发说明统一使用中文。
+- 新审批展示“同意 / 需修改 / 驳回”及对应中文回复格式；历史 `APPROVE / REVISE / REJECT`
+  回复继续兼容，内部仍保留英文枚举以保证旧审批账本可恢复。
+- 如流文字回复新增中文决策识别，并拒绝同时包含多个中文决策词的歧义消息。
+- 补充审批投递、审批回复解析和重做审批的中文回归测试。
+
 ## 2026-10-03 · KU 写入收敛与审批卡动作语义修复
 
 - 修复 KU 根索引追加：普通说明段落不再误用 `selectionByTitle`，改用完整块内容锚点；

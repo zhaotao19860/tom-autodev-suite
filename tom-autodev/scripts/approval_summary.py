@@ -315,7 +315,16 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
         if gate_name == "G0":
             return _g0_context(orchestrator, run_id, input_hash)
         if gate_name == "G4":
-            return _workspace_context(orchestrator, run_id, input_hash)
+            # G4 is used twice in the durable flow: first for WORKSPACE
+            # ownership, then for the PLAN draft.  Once the PLAN producer has
+            # fulfilled its job, the read-only frontier is PLAN rather than
+            # WORKSPACE, so the workspace-binding reconstruction cannot match
+            # the new approval hash.  Keep the historical WORKSPACE path, but
+            # fall through to the current producer-draft path below when the
+            # run has already advanced.
+            workspace = _workspace_context(orchestrator, run_id, input_hash)
+            if workspace.get("material_status") == "PINNED":
+                return workspace
         if gate_name == "G10":
             proposal_reader = getattr(orchestrator.state, "optimization_proposal", None)
             if callable(proposal_reader):
@@ -383,7 +392,12 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
                 "_review_content": {"change_request": prepared},
             }
         action = _read_only_next(orchestrator, run_id)
-        if gate_name != "G9" and action.get("ok") and action.get("required_human_gate") == gate_name:
+        if (
+            gate_name != "G9"
+            and action.get("ok")
+            and action.get("required_human_gate") == gate_name
+            and (gate_name != "G4" or action.get("phase") == "PLAN")
+        ):
             job_id = f"producer:{action.get('action_id')}"
             job = orchestrator.state.producer_job(job_id)
             draft = job.get("draft") if isinstance(job, dict) and job.get("status") == "FULFILLED" else None

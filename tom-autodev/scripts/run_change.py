@@ -77,7 +77,7 @@ def _draft_approval_hash(action: dict[str, Any], draft: dict[str, Any]) -> str:
 
 
 def _journal_feedback(orchestrator: Any, approval: dict[str, Any]) -> str:
-    """The text a member typed after ``REJECT <id>`` in 如流, if the REJECT came that way.
+    """The text a member typed after ``需修改 <id>`` in 如流, if the revision came that way.
 
     Only the member who cast the effective REJECT is read, so another person's
     message cannot become the instruction the producer follows.
@@ -155,7 +155,7 @@ def revise(
     if not text:
         return _failure(
             "FEEDBACK_REQUIRED", run_id, approval_id=approval_id,
-            hint="说明需要修改什么；在如流可回复 `REJECT <审批ID> 修改意见`",
+            hint="说明需要修改什么；在如流可回复 `需修改 <审批ID> 修改意见`",
         )
     # Only the reason travels: a design-front action reads nothing else from its
     # event, and copying the entry payload (previous_state/artifact_id) would let

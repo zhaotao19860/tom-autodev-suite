@@ -360,7 +360,8 @@ class ApprovalWatcherTests(unittest.TestCase):
         _, content = self.notify.sends[0]
         self.assertIn("待回复", content)
         # The reminder repeats the exact card the approvers already got.
-        self.assertIn(f"APPROVE {approval_id}", content)
+        self.assertIn(f"同意 {approval_id}", content)
+        self.assertNotIn(f"APPROVE {approval_id}", content)
         self.assertIn("需求", content)
 
     def test_each_reminder_window_notifies_once(self):

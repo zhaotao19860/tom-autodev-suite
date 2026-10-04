@@ -401,7 +401,7 @@ async function sendGroupMarkdown(groupId, content, atUsers) {
 
 const seen = new Set()
 
-// A gate used to be answered by typing `APPROVE <32 hex>`, which on a phone means
+// A gate used to be answered by typing `同意 <32 hex>`, which on a phone means
 // pasting the id back out of the card. The bubble workflow card turns that into one
 // tap. The approval id is encoded into the button's own `eventKey` rather than kept
 // in gateway memory, so a restart between sending the card and the tap still yields a

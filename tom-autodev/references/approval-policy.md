@@ -36,14 +36,14 @@ No shell setup is required. `InfoflowBotClient` starts `infoflow-gateway/src/bot
 The gateway only journals messages. Every decision is authorized by `InfoflowReplyConsumer` against the stored request, so a reply is applied only when it:
 
 - quotes the `approval_id` or `request_id` (`approval_id` is unique per `run_id`/action/`input_hash`, so quoting it binds the answer to that content hash);
-- says exactly one of `APPROVE` or `REJECT`;
+- says exactly one of `同意`、`需修改` or `驳回` (historical English replies remain compatible);
 - comes from a sender whose uuap resolves to exactly one member of `member_policy["infoflow"]`;
 - was typed either in a private chat or in the run's own collaboration group — a group reply carries the `group_id` the gateway journalled, and the same words in another group are not a decision about this run;
 - arrives after the request was created and no later than its deadline.
 
 A group message from a robot carries no `fromuserid`, only a numeric robot id that resolves to nobody, so the gateway does not journal it as a sender at all.
 
-The applied decision is persisted under its own idempotency key, so the same reply can never resolve a gate twice and a later `await-approval` sees the stored answer instead of re-reading the journal. When the gateway cannot run at all, `tom-autodev approve <approval_id> APPROVE <input_hash> infoflow <run_id> <responder>` remains the fallback.
+The applied decision is persisted under its own idempotency key, so the same reply can never resolve a gate twice and a later `await-approval` sees the stored answer instead of re-reading the journal. When the gateway cannot run at all, `tom-autodev approve <approval_id> 同意 <input_hash> infoflow <run_id> <responder>` remains the fallback.
 
 ## Landing a decision without the CLI
 
@@ -57,7 +57,7 @@ Each round also protects the inbound path, because a reply only exists while the
 
 A failed reminder or acknowledgement is reported (`APPROVAL_REMINDER_FAILED`) but never raised: the decision is already in the ledger, and a watcher that died on a courtesy message would leave every later reply unread.
 
-Neither the gateway nor the watcher is a system service. The gateway is spawned detached and survives the CLI, the watcher lives with the shell that started it, and both stop at reboot. While no watcher runs, nothing revives the gateway and nothing reminds or reissues, so replies sent in that window can still be lost; the fallback stays `tom-autodev approve <approval_id> APPROVE <input_hash> infoflow <run_id> <responder>`.
+Neither the gateway nor the watcher is a system service. The gateway is spawned detached and survives the CLI, the watcher lives with the shell that started it, and both stop at reboot. While no watcher runs, nothing revives the gateway and nothing reminds or reissues, so replies sent in that window can still be lost; the fallback stays `tom-autodev approve <approval_id> 同意 <input_hash> infoflow <run_id> <responder>`.
 
 ## Knowing where a run stands
 
@@ -100,7 +100,7 @@ The first approval context is persisted for the run/action/input hash before del
 
 Next to the markdown detail, a one-tap button card carries `approve.<approval_id>` / `reject.<approval_id>`. With a collaboration group it goes there; before G0 creates one, each unique authorized member receives a private card. Each target has a distinct card ID and durable delivery outcome. Unknown outcomes are not blindly retried. A separate warning explains incomplete button delivery and the text-reply fallback; success of Markdown alone is not proof that buttons arrived.
 
-A tap is journalled as the same `APPROVE <approval_id>` a person could type. The card
+A tap is journalled as the same `同意 <approval_id>` a person could type. The card
 is delivered with the approvers' uuap names, so the refresh can tell whose tap it was —
 the gateway still authorizes nothing:
 
@@ -114,13 +114,14 @@ the gateway still authorizes nothing:
 
 The refresh reports a click, never its authorization. The ledger and watcher
 acknowledgement remain authoritative, and duplicate/stale/unauthorized taps cannot
-override the effective ledger decision. Replying `APPROVE <approval_id>` /
-`REJECT <approval_id>` as text stays available in every case.
+override the effective ledger decision. Replying `同意 <approval_id>` /
+`驳回 <approval_id>` as text stays available in every case; historical English
+replies remain compatible.
 
 ### What a REJECT does
 
 A REJECT never reopens the same hash. On G1/G2/G3 it means "redo this draft": the
-reviewer adds feedback (typed after `REJECT <approval_id>` in 如流, or given to Comate in the
+reviewer adds feedback (typed after `需修改 <approval_id>` in 如流, or given to Comate in the
 IDE), `revise` re-enters the same phase with that feedback and the rejected draft, and the
 same gate is asked again for the new hash with a "本次修改说明 / 与上一版的差异" section.
 Only the member who cast the effective REJECT can supply the 如流 feedback. A REJECT of

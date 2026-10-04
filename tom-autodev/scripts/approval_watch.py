@@ -685,19 +685,19 @@ def _nudge_markdown(
         [
             *head,
             "**同意请回复**",
-            f"APPROVE {approval_id}",
+            f"同意 {approval_id}",
             "",
             *(
                 [
                     "**需修改请回复**",
-                    f"REVISE {approval_id} <你的修改意见>",
+                    f"需修改 {approval_id} <你的中文修改意见>",
                     "",
                 ]
                 if gate_of(approval.get("action") or "") in workflow_spec.REVISABLE_GATES
                 else []
             ),
             "**驳回请回复**",
-            f"REJECT {approval_id}",
+            f"驳回 {approval_id}",
         ]
     )
 

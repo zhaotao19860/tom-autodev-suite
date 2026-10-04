@@ -131,8 +131,9 @@ class RunChangeTests(unittest.TestCase):
         self.assertIn("测试仓库改用新分支", rendered)
         self.assertIn("与上一版的差异", rendered)
         self.assertIn("（新分支）", rendered)
-        self.assertIn(f"REVISE {'a' * 32} <你的修改意见>", rendered)
-        self.assertIn(f"REJECT {'a' * 32}", rendered)
+        self.assertIn(f"需修改 {'a' * 32} <你的修改意见>", rendered)
+        self.assertIn(f"驳回 {'a' * 32}", rendered)
+        self.assertNotIn(f"REVISE {'a' * 32}", rendered)
 
         approved = self._approval(run_id, "G2", pending["approval_input_hash"])
         done = worker_driver.submit_draft(

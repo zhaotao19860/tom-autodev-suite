@@ -355,7 +355,7 @@ class InfoflowApprovalTransport:
             warning = (
                 f"## tom-autodev 审批操作提示（不是新审批）\n\n"
                 f"审批 {gateway_request['approval_id']} 的按钮未完整送达或结果未确认。"
-                "\n请先阅读审批详情；可使用其中的 APPROVE / REVISE / REJECT 回复，或在 IDE 处理。"
+                "\n请先阅读审批详情；可回复“同意”“需修改”或“驳回”，也可以在 IDE 处理。"
                 "\n这不表示审批已通过；不会自动重复发送结果不明的按钮。"
             )
             try:
@@ -545,22 +545,22 @@ def _approval_markdown(
     lines += [
         "",
         "**同意请回复**",
-        f"APPROVE {approval_id}",
+        f"同意 {approval_id}",
         "",
         *(
             [
                 "**需修改请回复**",
-                f"REVISE {approval_id} <{FEEDBACK_PLACEHOLDER}>",
+                f"需修改 {approval_id} <{FEEDBACK_PLACEHOLDER}>",
                 "",
             ]
             if gate_of(action) in _REVISABLE_GATES
             else []
         ),
         "**驳回请回复**",
-        f"REJECT {approval_id}",
+        f"驳回 {approval_id}",
         "",
-        *(["> 需修改时把 <> 换成修改意见（意见里不要再写 APPROVE/REVISE/REJECT），系统据此登记重做；"
-           "驳回则停止 run。点卡片选择需修改后，在 IDE 继续，Comate 会生成新版草案并重新发起本门。"]
+        *(["> 需修改时把 <> 换成中文修改意见，驳回则停止流程。点卡片选择“需修改”后，在 IDE 继续，Comate 会生成新版草案并重新发起本门。"
+           "历史英文回复仍兼容，但新审批不再展示英文命令。"]
           if gate_of(action) in _REVISABLE_GATES else []),
         "> 回复必须带 approval_id；它绑定本次内容，需求一变即失效。",
         f"> input_hash `{input_hash[:12]}…`",
