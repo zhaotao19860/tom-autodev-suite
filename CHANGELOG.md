@@ -4,6 +4,67 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-06 · 审批按钮补发、进度失败标记与工作流审查修复
+
+- 恢复 11:11 意外丢失的诊断审批中文化与 `correct_approval_message`（工作区文件被旧
+  版本覆盖，`orchestrator.py` 仍引用该函数，导致 `correct-approval-message` 导入失败）。
+- 审批按钮：纠正消息和截止前提醒只发 Markdown，按钮停在上方原卡片。现在两者都会在
+  下方补一张同一审批的按钮卡（网关 `/card/approval` 支持可选 `presentation`，生成独立
+  卡片 id）；审批人在任一张卡点击后关闭同审批的其它卡；同一卡的刷新串行执行，修复连点
+  两次时平台返回「刷新外层气泡卡失败」，并防止已处理卡片被重复点击重新画回按钮。
+- 进度路线：`progress_snapshot` 把事件链上所有到达过的阶段都标为完成，IMPLEMENT 被
+  producer-block 阻断进入 DIAGNOSE 时仍显示「代码实现✓」，回退 PLAN 后下游阶段也仍为 ✓。
+  改为按事件链正向重放：进入 DIAGNOSE/恢复分支的前驱标 ✗，回退会重置其后阶段。
+- `continue` 卡死：`_ensure_approval_resume_handoff` 会为当前闸门的任意历史 APPROVE
+  （更早任务或更早 PLAN 轮次）补建 resume handoff，多张无人完成的 handoff 使后续
+  `continue` 永久返回 `MULTIPLE_RESUME_HANDOFFS`。现在非本次落账的审批必须晚于当前状态事件。
+- G6 诊断展示：未知英文的词级替换会删除 not/no/must/only，`Do not remove …` 被显示成
+  「移除」。改为原样展示并标注「（未翻译原文）」；`tom-diagnose` 要求展示字段用中文书写。
+- producer-block：阻断报告之后提交的真实 Change Set 会被下一次 `drive` 以阻断报告
+  覆盖并转入 DIAGNOSE。现在仅在 job 仍为 PENDING 且无草案时消费阻断；同 job 有待消费
+  阻断时拒绝提交 Change Set（`PRODUCER_BLOCK_PENDING`）；`report-producer-block` 持有
+  worker lease；schema 要求 `workspace_state`。
+- workflow drift：旧 DIAGNOSE 兼容恢复不再接受 `WORKFLOW_SPEC_DRIFT`，避免漂移状态下先
+  认领 job、写模型回执后才被守卫拒绝；移除只用于绕过漂移守卫的 `allow_legacy_diagnose`。
+- 纠正消息：提醒优先重放最近一次已送达的纠正正文；网关发送前拒绝时撤回投递意图。
+- 运维：审批 watcher 原作为 agent 会话后台任务运行，10-05 23:10 随会话被终止，导致
+  BGW-1995 G6#retry-1 的按钮点击只写入回复日志。已改为 `nohup` + 自动重启循环运行
+  gateway 与 watcher，并补消费该点击（`ae62502d647f4286bde9b3b8f5f28d5d` 已 APPROVE）。
+- 文档更正：历史 DIAGNOSE job 兼容恢复也接受已 FULFILLED 且带诊断草案的 job。
+- 控制面全量回归 1207 项通过；未执行 BGW 本地编译或测试。
+
+## 2026-10-05 · 漂移迁移审批消费与诊断前驱兼容恢复
+
+- 明确 G5 路由边界：没有真实 IMPLEMENT Change Set 时，`PLAN_INCOMPLETE` 只能进入
+  DIAGNOSE/G6，不创建空的 G5；诊断批准后回到 PLAN/G4，真实改动集生成后才开启 G5。
+- 修复 G6 诊断审批的英文展示泄漏：摘要、诊断证据列表、根因、最小验证、修复计划、
+  操作提示和异常长文本统一使用中文展示；英文枚举和 canonical JSON 仅保留在审计材料。
+- 新增同一审批绑定下的受控消息纠正，复用原 `approval_id`、`input_hash`、审批期限和
+  delivery intent，不创建重复审批；未超时审批仍禁止普通 reissue，纠正操作具备幂等和
+  结果未知保护。
+- 修复 workflow drift 下迁移审批无法落账的死锁：`receive_infoflow_reply()` 不再让
+  方法级通用 drift 守卫先于审批 action 判断；仅对已核验的
+  `WORKFLOW_SPEC_MIGRATION` 放行消费，普通业务审批仍 fail-closed。
+- 迁移回复继续校验原 `approval_id`、run、input hash、审批成员、群组、时间窗口和送达
+  回执；重复消费保持幂等，旧 watcher 的 `WORKFLOW_SPEC_DRIFT` 缓存结果不会永久污染
+  同一回复 key。
+- 修复 `IMPLEMENT → DIAGNOSE` 对嵌套
+  `payload.evidence.producer_block_report_id` 的前驱查找；增加 run、task、source
+  revisions、报告 artifact 和 hash 的一致性校验，避免伪造或跨任务复用 producer-block。
+- 增加修复前已创建的合法 DIAGNOSE ProducerJob 的受限兼容恢复。仅当历史 job 仍为
+  pending（或已 FULFILLED 且带诊断草案），且 run、事件、task、父证据和 revisions 完全一致时复用；其它 action identity
+  冲突仍拒绝，不改写历史事件或数据库。
+- 修复兼容恢复后的诊断提交丢失证据问题：只把当前已核验 producer-block artifact
+  映射为精确 `artifact:<id>` evidence reference；历史空 refs、伪造 refs、错误 parent
+  或 revisions 均继续拒绝，避免以兼容逻辑绕过 `EVIDENCE_REQUIRED`。
+- 控制面定向回归：迁移/producer-block/执行守卫/审批通道 39 项通过，诊断前驱 10 项
+  通过，历史 DIAGNOSE job 兼容恢复 13 项通过，证据兼容提交及诊断合同合计 36 项通过，
+  `git diff --check` 通过。以上结果不代表 BGW 本地编译、单测或回归已执行；BGW 执行
+  证据仍必须来自 iPipe。
+- BGW-1995 已使用原 run 和真实诊断草案创建 G6 审批并停驻，未自动审批：
+  `approval_id=979cb6b5a13343c09482035081b9ba20`，
+  `approval_input_hash=6db6d754dbd92aca51a9af106e4809e686b166b94c03d0776eff277202c72918`。
+
 ## 2026-10-04 · G4 需修改自动续跑
 
 - G4/PLAN 纳入可按意见重做的 Producer 阶段；选择“需修改”后输入“继续”会自动消费
@@ -176,6 +237,7 @@ suite had no version control before then.
 - 通过持久化外部 intent 与 receipt 去重；未知投递结果阻止后续刷新并返回 `WORK_CARD_QUERY_REQUIRED`，避免跨重启重复发送。
 - 工作卡是只读展示，审批卡与 iPipe 通知仍保留原有独立语义；不自动推进阶段、不写业务发布证据。
 - 发布进度区分流水线成功与平台发布核验：只有 release checkpoint 成功或 run 达到 `RELEASE_SUCCESS` 才计入发布模块完成数。
+- 工作卡刷新同时接入审批 watcher 和 iPipe watcher，两个观察进程通过同一份 intent/receipt 账本协调，不因 watcher 重叠而重复渲染。
 - 阶段路线按当前事件的 predecessor 链展示；诊断回退会收起失效的下游分支，`RELEASE_SUCCESS` 才统一显示全路线完成。
 
 ## 2026-09-24 · 日常入口第二轮优化

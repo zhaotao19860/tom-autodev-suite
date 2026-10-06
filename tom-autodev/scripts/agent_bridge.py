@@ -166,6 +166,99 @@ def _revision_context(orchestrator: Any, action: Any) -> dict[str, Any] | None:
     return {key: value for key, value in context.items() if value is not None}
 
 
+def _consume_local_infoflow_replies(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
+    """Consume journalled replies before the worker classifies the next action.
+
+    The background watcher is deliberately optional.  A fresh CLI process must still
+    reconcile a reply already appended to ``infoflow-replies.jsonl``; otherwise the
+    approval ledger remains PENDING until somebody happens to run the watcher.  This
+    only reads and settles an already delivered, hash-bound Infoflow request.  It
+    never creates an approval and never chooses a decision.
+    """
+    from approval_contract import STRICT_APPROVAL_TIMEOUT_SECONDS
+    from orchestrator import _infoflow_approval_client
+
+    client = _infoflow_approval_client(orchestrator)
+    outcomes: list[dict[str, Any]] = []
+    for approval in orchestrator.approvals.pending():
+        if approval.get("run_id") != run_id:
+            continue
+        if not any(
+            isinstance(receipt, dict) and receipt.get("channel") == "infoflow"
+            for receipt in approval.get("delivery_receipts") or []
+        ):
+            continue
+        result = orchestrator.wait_infoflow_approval(
+            run_id,
+            approval["approval_id"],
+            approval["input_hash"],
+            client,
+            STRICT_APPROVAL_TIMEOUT_SECONDS,
+        )
+        if isinstance(result, dict):
+            outcomes.append(result)
+    return outcomes
+
+
+def _ensure_approval_resume_handoff(
+    orchestrator: Any, run_id: str, approval_ids: set[str]
+) -> None:
+    """Persist the continuation checkpoint for a newly landed approval.
+
+    This mirrors the watcher's handoff contract without sending a notification.  The
+    worker remains the only component that advances a phase; the handoff merely makes
+    ``continue`` idempotently choose the resume path after a CLI-side settlement.
+    """
+    events = orchestrator.state.events(run_id)
+    latest = events[-1] if events else None
+    if not isinstance(latest, dict):
+        return
+    from approval_ledger import gate_of
+    current_gate = None
+    state = latest.get("state")
+    if state in workflow_spec.STATES:
+        current_gate = workflow_spec.STATES[state].output_gate
+    existing = {
+        (item.get("payload") or {}).get("approval_id")
+        for item in orchestrator.state.incomplete_handoffs(run_id)
+        if (item.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
+    }
+    from approval_watch import _later
+    for approval in orchestrator.approvals.for_run(run_id):
+        if approval.get("effective_decision") != "APPROVE" or approval.get("approval_id") in existing:
+            continue
+        # Approvals settled by this call are fresh by definition. Any other approval of
+        # the current gate must postdate the current state event; an approval from an
+        # earlier task or PLAN round would otherwise leave a resume handoff nothing
+        # completes, and every later `continue` fails with MULTIPLE_RESUME_HANDOFFS.
+        if approval.get("approval_id") not in approval_ids and (
+            current_gate is None
+            or gate_of(approval.get("action")) != current_gate
+            or not _later(approval.get("resolved_at"), latest.get("created_at"))
+        ):
+            continue
+        handoff_id = f"approval-resume-{approval['approval_id']}"
+        try:
+            orchestrator.state.record_handoff(
+                run_id,
+                handoff_id,
+                {
+                    "kind": "APPROVAL_RESUME",
+                    "run_id": run_id,
+                    "event_id": latest.get("event_id"),
+                    "approval_id": approval["approval_id"],
+                    "input_hash": approval.get("input_hash"),
+                    "action": approval.get("action"),
+                },
+            )
+        except ValueError as error:
+            # A watcher may already have created the same handoff with an older
+            # source event.  The durable handoff id is the idempotency key; a
+            # completed/conflicting historical row must not make continue fail.
+            if str(error) != "HANDOFF_CONFLICT":
+                raise
+
+
 class AgentBridge:
     """Thin, stateless assembly boundary for agent-facing run operations."""
 
@@ -194,6 +287,16 @@ class AgentBridge:
         blocked = _binding_error(self.orchestrator, run_id)
         if blocked is not None:
             return blocked
+        settled = _consume_local_infoflow_replies(self.orchestrator, run_id)
+        _ensure_approval_resume_handoff(
+            self.orchestrator,
+            run_id,
+            {
+                item["approval_id"]
+                for item in settled
+                if item.get("effective_decision") == "APPROVE"
+            },
+        )
         result = worker_driver.advance(
             self.orchestrator, run_id, **self._worker_options(run_id)
         )
@@ -203,6 +306,16 @@ class AgentBridge:
         blocked = _binding_error(self.orchestrator, run_id)
         if blocked is not None:
             return blocked
+        settled = _consume_local_infoflow_replies(self.orchestrator, run_id)
+        _ensure_approval_resume_handoff(
+            self.orchestrator,
+            run_id,
+            {
+                item["approval_id"]
+                for item in settled
+                if item.get("effective_decision") == "APPROVE"
+            },
+        )
         pending_approval_handoffs = [
             handoff for handoff in self.orchestrator.state.incomplete_handoffs(run_id)
             if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
@@ -270,6 +383,15 @@ class AgentBridge:
             self.orchestrator, run_id, job_id, draft_content, locks=self.locks
         )
         return _json_safe(result)
+
+    def report_producer_block(
+        self, run_id: str, job_id: str, report: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _json_safe(
+            worker_driver.report_producer_block(
+                self.orchestrator, run_id, job_id, report, locks=self.locks
+            )
+        )
 
     def claim_producer(
         self, run_id: str, job_id: str, agent_id: str, lease_seconds: int = 900

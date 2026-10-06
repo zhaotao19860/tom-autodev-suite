@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from approval_contract import STRICT_APPROVAL_TIMEOUT_SECONDS
-from approval_delivery import deliver_markdown, mention_line
+from approval_delivery import _deliver_approval_card, corrected_content, deliver_markdown, mention_line
 from approval_ledger import gate_of
 
 
@@ -473,7 +473,10 @@ class ApprovalWatcher:
                 "run_id": approval["run_id"], "approval_id": approval_id,
                 "action": approval.get("action"), "reason_code": "APPROVAL_REMINDER_CONFLICT",
             }
-        card = _delivered_content(client, approval)
+        delivered = _delivered_payload(client, approval)
+        # A reminder must repeat what the approvers were last shown, so a delivered
+        # correction wins over the original message it corrected.
+        card = corrected_content(self.orchestrator.state, approval) or str(delivered.get("content") or "")
         progress = _progress_for(self.orchestrator, approval["run_id"])
         try:
             receipt = deliver_markdown(
@@ -494,12 +497,24 @@ class ApprovalWatcher:
                 "detail": str(error),
             }
         _record_action(self.orchestrator.state, claim, key, {"receipt": receipt})
+        # The reminder repeats "同意请回复 …"; without its own card the only buttons
+        # are on the original bubble far up the chat.
+        try:
+            buttons = _deliver_approval_card(
+                self.notify_client,
+                self.orchestrator.state,
+                {**approval, "evidence": delivered.get("evidence") or {}},
+                presentation=f"nudge-{bucket}",
+            )
+        except Exception as error:  # noqa: BLE001 - typed replies still work
+            buttons = {"status": "UNKNOWN", "reason_code": type(error).__name__}
         return {
             "run_id": approval["run_id"],
             "approval_id": approval_id,
             "action": approval.get("action"),
             "reason_code": "APPROVAL_REMINDED",
             "reminder": bucket,
+            "buttons": buttons.get("status"),
         }
 
     def _reissue(self, approval: dict[str, Any], client: Any) -> dict[str, Any] | None:

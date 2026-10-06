@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from orchestrator import Orchestrator
 from lock_manager import LockManager
+from agent_bridge import _consume_local_infoflow_replies, _ensure_approval_resume_handoff
 
 
 class AgentBridgeTests(unittest.TestCase):
@@ -48,6 +49,93 @@ class AgentBridgeTests(unittest.TestCase):
         self.assertIs(advance.call_args.kwargs["ipipe_api"], api)
         self.assertEqual(advance.call_args.kwargs["icode_skill"], "skill-path")
         json.dumps(got)
+
+    def test_drive_consumes_local_reply_before_worker_advances(self):
+        result = {"ok": True, "reason_code": "PARKED", "parked": "PRODUCER_WAIT"}
+        with patch(
+            "agent_bridge._consume_local_infoflow_replies",
+            return_value=[{"approval_id": "approval-1", "effective_decision": "APPROVE"}],
+        ) as consume, patch(
+            "agent_bridge._ensure_approval_resume_handoff"
+        ) as handoff, patch("worker_driver.advance", return_value=result):
+            got = self.bridge().drive(self.run_id)
+        self.assertEqual(got, result)
+        consume.assert_called_once_with(self.orch, self.run_id)
+        handoff.assert_called_once_with(self.orch, self.run_id, {"approval-1"})
+
+    def test_a_missing_local_reply_does_not_create_an_approval_or_handoff(self):
+        result = {"ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT"}
+        with patch(
+            "agent_bridge._consume_local_infoflow_replies", return_value=[]
+        ) as consume, patch(
+            "agent_bridge._ensure_approval_resume_handoff"
+        ) as handoff, patch("worker_driver.advance", return_value=result):
+            got = self.bridge().drive(self.run_id)
+        self.assertEqual(got, result)
+        consume.assert_called_once_with(self.orch, self.run_id)
+        handoff.assert_called_once_with(self.orch, self.run_id, set())
+
+    def test_local_reply_consumer_settles_only_delivered_infoflow_approvals(self):
+        approval = {
+            "approval_id": "approval-1",
+            "run_id": self.run_id,
+            "input_hash": "hash-a",
+            "delivery_receipts": [{"channel": "infoflow", "receipt": {"request_id": "r-1"}}],
+        }
+        self.orch.approvals.pending = Mock(return_value=[approval])
+        landed = {
+            "approval_id": "approval-1",
+            "effective_decision": "APPROVE",
+            "reason_code": "OK",
+        }
+        with patch("orchestrator._infoflow_approval_client", return_value=object()) as factory, \
+                patch.object(self.orch, "wait_infoflow_approval", return_value=landed) as wait:
+            self.assertEqual(_consume_local_infoflow_replies(self.orch, self.run_id), [landed])
+        factory.assert_called_once_with(self.orch)
+        wait.assert_called_once()
+
+    def test_local_reply_consumer_does_not_consume_comate_only_or_other_run(self):
+        approvals = [
+            {
+                "approval_id": "comate-only",
+                "run_id": self.run_id,
+                "input_hash": "hash-a",
+                "delivery_receipts": [{"channel": "comate"}],
+            },
+            {
+                "approval_id": "other-run",
+                "run_id": "other",
+                "input_hash": "hash-b",
+                "delivery_receipts": [{"channel": "infoflow"}],
+            },
+        ]
+        self.orch.approvals.pending = Mock(return_value=approvals)
+        with patch("orchestrator._infoflow_approval_client", return_value=object()), \
+                patch.object(self.orch, "wait_infoflow_approval") as wait:
+            self.assertEqual(_consume_local_infoflow_replies(self.orch, self.run_id), [])
+        wait.assert_not_called()
+
+    def test_only_fresh_current_gate_approvals_get_a_resume_handoff(self):
+        events = [{"state": "PLAN", "event_id": "e-plan", "created_at": "2026-10-06T10:00:00+00:00"}]
+        approvals = [
+            {"approval_id": "old-g4-a", "action": "G4", "effective_decision": "APPROVE",
+             "resolved_at": "2026-10-05T09:00:00+00:00", "input_hash": "h1"},
+            {"approval_id": "old-g4-b", "action": "G4", "effective_decision": "APPROVE",
+             "resolved_at": "2026-10-05T11:00:00+00:00", "input_hash": "h2"},
+            {"approval_id": "new-g4", "action": "G4", "effective_decision": "APPROVE",
+             "resolved_at": "2026-10-06T10:05:00+00:00", "input_hash": "h3"},
+        ]
+        recorded = []
+        orch = Mock()
+        orch.state.events.return_value = events
+        orch.state.incomplete_handoffs.return_value = []
+        orch.state.record_handoff.side_effect = lambda run_id, handoff_id, payload: recorded.append(payload)
+        orch.approvals.for_run.return_value = approvals
+        _ensure_approval_resume_handoff(orch, self.run_id, set())
+        self.assertEqual([item["approval_id"] for item in recorded], ["new-g4"])
+        recorded.clear()
+        _ensure_approval_resume_handoff(orch, self.run_id, {"old-g4-a"})
+        self.assertEqual([item["approval_id"] for item in recorded], ["old-g4-a", "new-g4"])
 
     def test_worker_parked_reasons_are_returned_without_reclassification(self):
         for parked in ("APPROVAL_WAIT", "PRODUCER_WAIT", "IPIPE_MONITOR"):

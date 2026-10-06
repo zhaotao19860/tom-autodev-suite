@@ -211,7 +211,51 @@ class ApprovalMaterialsTests(unittest.TestCase):
         for text in ("不调整网络配置", "产品测试覆盖畸形报文", "由 iPipe 管理"):
             self.assertIn(text, body)
         self.assertNotRegex(body, r"(?m)^## ")
-        self.assertLess(rendered.index("**审批正文"), rendered.index("APPROVE "))
+        self.assertLess(rendered.index("**审批正文"), rendered.index("同意 "))
+
+    def test_g6_diagnosis_approval_body_is_chinese_but_canonical_draft_is_unchanged(self):
+        from approval_delivery import _draft_lines
+
+        draft = {
+            "task_id": "T-1",
+            "classification": "PLAN_INCOMPLETE",
+            "evidence_state": "SUFFICIENT",
+            "failure_signature": "PLAN_INCOMPLETE: stale plan",
+            "hypothesis": (
+                "The pinned PLAN still requires exact global/VS c2s_mss index equality, "
+                "which contradicts the current conservative solution."
+            ),
+            "route": "REPAIR",
+            "repair_scope": "CODE_ONLY",
+            "repair_direction": "Do not patch code in DIAGNOSE. Re-enter PLAN.",
+            "comparison": [
+                "No iPipe build, stage, job, environment, or runtime failure evidence exists; "
+                "this is a planning-input mismatch."
+            ],
+            "minimal_verification": [
+                "Require the normal G4 approval for the new plan before returning to IMPLEMENT."
+            ],
+            "repair_plan": [
+                "Update the task plan and acceptance traceability to match the final "
+                "conservative cookie-validation decision."
+            ],
+        }
+        body = "\n".join(_draft_lines(draft))
+        self.assertIn("计划不完整", body)
+        self.assertIn("没有 iPipe 构建", body)
+        self.assertIn("（未翻译原文）The pinned PLAN", body)
+        self.assertIn("（未翻译原文）Do not patch code in DIAGNOSE", body)
+        self.assertEqual(draft["classification"], "PLAN_INCOMPLETE")
+
+    def test_untranslated_diagnosis_text_keeps_its_meaning(self):
+        from approval_summary import _diagnosis_text
+
+        for source in (
+            "Do not remove the current approval",
+            "Unexpected producer mismatch in runtime validation for cookie fields",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(_diagnosis_text(source), "（未翻译原文）" + source)
 
     def test_missing_material_never_attaches_a_review_body(self):
         orch, action, draft = self._draft_orchestrator(merged=True)

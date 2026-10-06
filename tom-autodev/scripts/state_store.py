@@ -167,6 +167,18 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS producer_attempts_job
                     ON producer_job_attempts(job_id, sequence);
+                CREATE TABLE IF NOT EXISTS producer_block_reports (
+                    report_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    consumed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS producer_block_reports_run
+                    ON producer_block_reports(run_id, status, created_at);
                 CREATE TABLE IF NOT EXISTS ipipe_monitoring (
                     run_id TEXT NOT NULL,
                     build_id TEXT NOT NULL,
@@ -560,6 +572,22 @@ class StateStore:
                 "DELETE FROM external_intents WHERE intent_id = ?", (row["intent_id"],)
             )
         return {"status": "WITHDRAWN", "intent_id": row["intent_id"]}
+
+    def latest_response(self, run_id: str, operation: str, key_prefix: str) -> dict[str, Any] | None:
+        """The newest receipted response for an operation whose key starts with ``key_prefix``."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT receipt.response_json
+                FROM external_intents AS intent
+                JOIN receipts AS receipt ON receipt.intent_id = intent.intent_id
+                WHERE intent.run_id = ? AND intent.operation = ?
+                  AND substr(intent.idempotency_key, 1, ?) = ?
+                ORDER BY intent.sequence DESC LIMIT 1
+                """,
+                (run_id, operation, len(key_prefix), key_prefix),
+            ).fetchone()
+        return None if row is None else json.loads(row["response_json"])
 
     def result_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1053,6 +1081,83 @@ class StateStore:
                 "SELECT * FROM producer_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
         return _producer_job_row(row) if row is not None else None
+
+    def record_producer_block(
+        self, run_id: str, report_id: str, job_id: str, report: dict[str, Any],
+        artifact_id: str,
+    ) -> dict[str, Any]:
+        """Persist a producer block without fulfilling or mutating the ProducerJob."""
+        encoded = _encode(report)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM producer_block_reports WHERE report_id = ?", (report_id,)
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["run_id"] != run_id
+                    or existing["job_id"] != job_id
+                    or existing["report_json"] != encoded
+                    or existing["artifact_id"] != artifact_id
+                ):
+                    raise ValueError("PRODUCER_BLOCK_CONFLICT")
+                return _producer_block_row(existing)
+            now = _now()
+            connection.execute(
+                """
+                INSERT INTO producer_block_reports(
+                    report_id, run_id, job_id, report_json, artifact_id, status,
+                    created_at, consumed_at
+                ) VALUES (?, ?, ?, ?, ?, 'PENDING', ?, NULL)
+                """,
+                (report_id, run_id, job_id, encoded, artifact_id, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM producer_block_reports WHERE report_id = ?", (report_id,)
+            ).fetchone()
+        return _producer_block_row(row)
+
+    def producer_block(self, report_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM producer_block_reports WHERE report_id = ?", (report_id,)
+            ).fetchone()
+        return _producer_block_row(row) if row is not None else None
+
+    def pending_producer_blocks(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM producer_block_reports
+                WHERE run_id = ? AND status = 'PENDING'
+                ORDER BY created_at, report_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [_producer_block_row(row) for row in rows]
+
+    def consume_producer_block(self, run_id: str, report_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM producer_block_reports WHERE report_id = ?", (report_id,)
+            ).fetchone()
+            if row is None or row["run_id"] != run_id:
+                raise ValueError("PRODUCER_BLOCK_NOT_FOUND")
+            if row["status"] == "CONSUMED":
+                return _producer_block_row(row)
+            connection.execute(
+                """
+                UPDATE producer_block_reports
+                SET status = 'CONSUMED', consumed_at = ?
+                WHERE report_id = ? AND status = 'PENDING'
+                """,
+                (_now(), report_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM producer_block_reports WHERE report_id = ?", (report_id,)
+            ).fetchone()
+        return _producer_block_row(row)
 
     def reopen_invalid_producer_job(
         self, run_id: str, job_id: str, expected: dict[str, Any],
@@ -1640,6 +1745,21 @@ def _handoff_row(row: sqlite3.Row) -> dict[str, Any]:
         "status": row["status"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+
+
+def _producer_block_row(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    return {
+        "report_id": row["report_id"],
+        "run_id": row["run_id"],
+        "job_id": row["job_id"],
+        "report": json.loads(row["report_json"]),
+        "artifact_id": row["artifact_id"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "consumed_at": row["consumed_at"],
     }
 
 

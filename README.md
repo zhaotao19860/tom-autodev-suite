@@ -87,6 +87,34 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
   审批台账、幂等和 retry 次数约束，不应直接调用底层卡片接口绕过控制器。
 - “进度通知（非审批）”只报告停驻位置，不请求批准，也不代表阶段完成。没有待审批账本记录时，不会让你处理一个尚未创建的审批。
 - 点击只表示收到选择。最终是否有效以权限、有效期、hash 和送达回执校验后的审批回执为准；审批本身不会推进业务阶段。
+- 当 run 因 `WORKFLOW_SPEC_DRIFT` 停驻时，`WORKFLOW_SPEC_MIGRATION` 是唯一允许在
+  drift 状态下消费的审批类型。迁移门会先按原 run、approval、input hash、审批成员、
+  群组和送达回执校验回复，再应用精确的旧/新 workflow hash；普通 G0–G10 审批仍会
+  被 drift 守卫阻断。迁移审批的重复消费必须复用原 approval 和 intent，不能手改账本或
+  创建第二张迁移卡。
+- `IMPLEMENT → DIAGNOSE` 的 producer-block 前驱证据可以位于 transition payload 的
+  `evidence` 对象中。控制器会同时校验 run、task、business/tests revisions、报告内容
+  和 artifact hash；缺失或不一致时 fail-closed。若修复前已创建合法的 DIAGNOSE
+  ProducerJob，控制器只允许按同一 run、事件、任务、producer-block 父证据，对仍为
+  pending 或已 FULFILLED 且带诊断草案的 job 做受限兼容恢复，不能按 action 前缀或最近
+  记录猜测 job。兼容恢复只处理 `ACTION_CONFLICT`；`WORKFLOW_SPEC_DRIFT` 必须先走
+  `WORKFLOW_SPEC_MIGRATION`，不会在漂移状态下认领 job 或写模型回执。兼容恢复提交时只会
+  使用当前已核验 producer-block artifact 的精确 `artifact:<id>` evidence reference；
+  不会从历史空 refs、外部输入或伪造路径补证据。
+- G5 只对应真实 IMPLEMENT Change Set 的审批。若 IMPLEMENT ProducerJob 因计划与
+  已确认方案不一致而进入 `DIAGNOSE`，此时没有代码改动，也不会创建 G5；应先完成
+  G6 诊断，再按修复路由重新生成 PLAN/G4，待真实 Change Set 产生后才申请 G5。
+- 审批展示层使用中文：枚举、固定提示、按钮和回复示例都有中文文案，诊断 skill 要求
+  `hypothesis`、`repair_plan` 等展示字段直接用中文书写。没有精确译文的英文长文本
+  原样展示并标注「（未翻译原文）」，不做词级替换，避免丢失否定词等导致审批人读到
+  与哈希绑定草案相反的含义。若已投递的待审批卡片展示异常，可使用同一 `approval_id`、
+  `input_hash` 和截止时间的受控消息纠正（`correct-approval-message`），不创建第二张
+  普通审批，也不改变审批绑定；网关发送前拒绝时撤回投递意图，结果不明时保留意图待核对。
+- 重复「同意请回复 …」的消息（截止前提醒、消息纠正）会在其下方补一张同一审批的按钮卡；
+  任一张卡被审批人点击后，网关会关闭同一审批的其它卡。同一张卡的连续点击串行刷新，
+  已处理的卡不会因重复点击重新出现按钮。提醒优先重放最近一次已送达的纠正正文。
+- 进度路线只把沿正常路线离开的阶段标为 ✓；进入 DIAGNOSE 或恢复分支的前驱阶段标为 ✗
+  （例如 IMPLEMENT 被 producer-block 阻断），回退到较早阶段时其后阶段全部重置为 ○。
 
 具体规则与门禁材料清单见 [Approval Policy](tom-autodev/references/approval-policy.md)，G0/G5/G9 与非审批通知的对照见 [消息示例](docs/APPROVAL_UX_EXAMPLES.md)。
 
@@ -259,7 +287,7 @@ cron、launchd 或其他外部调度器没有统一心跳接口，所以 watcher
 
 Worker 和 watcher 都采用单次 bounded poll：一次 `drive` 或一次 watcher tick 不会为了一个长时间运行的 build 持续占用 run lease。每次观察结果会写入 run 的 SQLite checkpoint，下一次 `continue` 或 watcher tick 根据同一个 build identity 继续观察。watcher 也可以交给 cron/launchd，使用 `--once` 单次执行。Stop-hook 只能把已批准的 handoff 交回仍存活的 Comate 会话，不能唤醒已经结束的会话。
 
-审批卡投递时，控制器会按需启动本地 Infoflow gateway；凭据从环境变量或 `~/.infoflow_config` 读取。gateway 和 watcher 都不是系统服务，重启或关机后需要由宿主重新拉起。由于如流没有补拉历史消息的统一接口，watcher 停止期间收到的回复可能需要人工用下面的绑定命令落账：
+审批卡投递时，控制器会按需启动本地 Infoflow gateway；凭据从环境变量或 `~/.infoflow_config` 读取。gateway 和 watcher 都不是系统服务，重启或关机后需要由宿主重新拉起。不要把 watcher 作为 Comate/agent 会话的后台任务启动：会话任务结束时进程会被一并终止，此后点击按钮只写入回复日志而无人落账。需要用 `nohup` 脱离会话并配合自动重启循环运行；由于本套件位于 `~/Desktop`，macOS 隐私保护会阻止 launchd 后台服务读取，除非为 `node`/`python3` 授予完整磁盘访问权限。由于如流没有补拉历史消息的统一接口，watcher 停止期间收到的回复可能需要人工用下面的绑定命令落账：
 
 ```bash
 python3 tom-autodev/scripts/cli.py approve APPROVAL_ID 同意 INPUT_HASH infoflow RUN_ID RESPONDER
@@ -306,7 +334,7 @@ python3 tom-autodev/scripts/cli.py context CARD_OR_RUN
 
 在 `IPIPE` 阶段，`status` 还会显示每个 run-owned build 最近一次 bounded poll 的 checkpoint，包括 build、当前状态、活动 stage 和最近检查时间。`MONITORING` 只是观察事实，不代表流水线成功；成功、失败或人工等待仍必须经过正常的 iPipe evidence ingest。
 
-审批初始消息、Comate 本地审批输出、协作失败路由、提醒、确认/超时、IDE 停靠和 iPipe watcher 通知也复用同一份进度快照，因此多仓 run 会在通知中同时显示当前阶段、阶段路线、各模块状态和发布等待项。审批与 iPipe watcher 都会在已有协作群里维护每个 run 一张只读如流工作卡：阶段、任务、模块、流水线、发布状态和下一步变化时重绘同一张卡；原审批卡及通知仍独立存在。工作卡投递和回执落在持久化 intent 中，结果未知时停止后续更新并提示查询，避免盲目重发。进入 `RELEASE` 后，iPipe watcher 按冻结的 pipeline plan 只读核验每个模块的发布状态；平台尚未发布时发送一次幂等的 `RELEASE_WAITING` 通知，并继续轮询，不重新申请 G9、不重复触发 iPipe。发布完成后发送成功通知，最终证据仍由 worker 摄取。状态快照只读，不新增审批或发布动作。
+审批初始消息、Comate 本地审批输出、协作失败路由、提醒、确认/超时、IDE 停靠和 iPipe watcher 通知也复用同一份进度快照，因此多仓 run 会在通知中同时显示当前阶段、阶段路线、各模块状态和发布等待项。审批与 iPipe watcher 都会在已有协作群里维护每个 run 一张只读如流工作卡：阶段、任务、模块、流水线、发布状态和下一步变化时重绘同一张卡；两个 watcher 共用持久化 intent/receipt，不会重复写卡；原审批卡及通知仍独立存在。工作卡投递和回执落在持久化 intent 中，结果未知时停止后续更新并提示查询，避免盲目重发。进入 `RELEASE` 后，iPipe watcher 按冻结的 pipeline plan 只读核验每个模块的发布状态；平台尚未发布时发送一次幂等的 `RELEASE_WAITING` 通知，并继续轮询，不重新申请 G9、不重复触发 iPipe。发布完成后发送成功通知，最终证据仍由 worker 摄取。状态快照只读，不新增审批或发布动作。
 
 工作卡的 `cardId` 固定为 `work-<run_id>`，每次刷新使用独立的 `cardInstanceId`。若网关明确在发送前拒绝，会撤回本次 intent 并允许重试；网络中断或服务端结果不明则保留 intent，不能盲目重发。核对远端卡片后可执行：
 

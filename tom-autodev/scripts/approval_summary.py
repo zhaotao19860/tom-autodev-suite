@@ -393,6 +393,39 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
             }
         action = _read_only_next(orchestrator, run_id)
         if (
+            not action.get("ok")
+            and gate_name == "G6"
+            and action.get("reason_code") == "ACTION_CONFLICT"
+            and action.get("state") == "DIAGNOSE"
+        ):
+            # A paused legacy DIAGNOSE action may differ only in the repaired,
+            # producer-block-derived source refs. Reuse the same bounded verifier
+            # as submission; never synthesize refs here.
+            from worker_driver import _recover_legacy_diagnose_action
+            candidates = [
+                item for item in orchestrator.state.pending_producer_jobs(run_id)
+                if (item.get("payload") or {}).get("phase") == "DIAGNOSE"
+            ]
+            repaired = orchestrator.phase_protocol().legacy_diagnose_action(run_id)
+            if isinstance(repaired, dict) and repaired.get("ok"):
+                historical_job = orchestrator.state.producer_job(
+                    f"producer:{repaired.get('action_id')}"
+                )
+                if (
+                    isinstance(historical_job, dict)
+                    and historical_job.get("run_id") == run_id
+                    and (historical_job.get("payload") or {}).get("phase") == "DIAGNOSE"
+                    and historical_job.get("job_id") not in {item.get("job_id") for item in candidates}
+                ):
+                    candidates.append(historical_job)
+            recovered = [
+                _recover_legacy_diagnose_action(orchestrator, run_id, item.get("job_id"))
+                for item in candidates
+            ]
+            recovered = [item for item in recovered if item is not None]
+            if len(recovered) == 1:
+                action = recovered[0]
+        if (
             gate_name != "G9"
             and action.get("ok")
             and action.get("required_human_gate") == gate_name
@@ -500,6 +533,8 @@ def content_summary(content: Any) -> list[str]:
         return _task_plan(content)
     if _is_submit_descriptor(content):
         return _submit_descriptor(content)
+    if _is_diagnosis(content):
+        return _diagnosis_summary(content)
     if "change_set_id" in content:
         return _change_set(content)
     return [f"字段 {name}：{_size(value)}" for name, value in sorted(content.items())][:8]
@@ -615,6 +650,120 @@ def _change_set(content: dict[str, Any]) -> list[str]:
     return lines + _named(content.get("deviations"), (), "reason", "偏离")
 
 
+def _is_diagnosis(content: dict[str, Any]) -> bool:
+    return "failure_signature" in content and (
+        "repair_plan" in content or "repair_direction" in content
+    )
+
+
+_DIAGNOSIS_ENUMS = {
+    "PLAN_INCOMPLETE": "计划不完整",
+    "SUFFICIENT": "证据充分",
+    "INSUFFICIENT": "证据不足",
+    "CODE_ONLY": "仅代码修复",
+    "SPEC_AMENDMENT": "规格修订",
+    "REPAIR": "修复",
+    "SPEC": "规格修订路线",
+    "PLAN": "计划修订路线",
+    "ARCHITECTURE_REVIEW": "架构复核路线",
+    "STOPPED": "停止流程",
+}
+
+_DIAGNOSIS_PHRASES = {
+    "Expected: the implementation plan must encode the currently approved cookie validation behavior before code generation.":
+        "预期：生成代码前，实现计划必须编码当前已批准的 Cookie 校验行为。",
+    "Observed: the pinned PLAN still requires exact global/VS c2s_mss index equality, which contradicts the current conservative solution.":
+        "观察：当前固定的实现计划仍要求全局与 VS 的 c2s_mss 索引严格相等，与当前保守方案冲突。",
+    "No iPipe build, stage, job, environment, or runtime failure evidence exists; this is a planning-input mismatch.":
+        "没有 iPipe 构建、阶段、作业、环境或运行时失败证据；本次属于计划输入不一致。",
+    "Regenerate the task PLAN from the approved behavior: preserve cookie layout, PAL encoder, MSS tables, signing priority, reserved-bit and wscale validation, MSS-index bounds/non-zero checks, and remove global/VS exact c2s_mss equality.":
+        "按已批准行为重新生成任务计划：保留 Cookie 布局、PAL 编码器、MSS 表、签名优先级、保留位与 wscale 校验、MSS 索引范围和非零校验，并移除全局与 VS 的 c2s_mss 严格相等要求。",
+    "Verify the new PLAN explicitly maps each accepted behavior to business and independent product-test work without introducing a new cookie layout or local execution evidence.":
+        "核对新计划是否将每项已接受行为明确映射到业务改动和独立产品测试，不引入新的 Cookie 布局，也不使用本地执行证据。",
+    "The implementation is blocked because the pinned PLAN was approved before the final cookie-validation decision and still contains the removed exact c2s_mss equality requirement. The correct repair is to revise the specification/plan contract before generating code.":
+        "当前实现被阻断，因为固定计划早于最终 Cookie 校验决策获批，仍包含已移除的 c2s_mss 严格相等要求。正确修复是在生成代码前修订规格与计划合同。",
+    "Run the IMPLEMENT producer against the pinned PLAN and source revisions.":
+        "基于固定计划和源码修订运行 IMPLEMENT 生产者。",
+    "The producer precheck detects the approved PLAN and current user decision are behaviorally inconsistent.":
+        "生产者前置检查发现已批准计划与当前用户决策在行为上不一致。",
+    "No code patch is generated; the controller records a producer-block report and routes to DIAGNOSE.":
+        "未生成代码补丁；控制器记录生产者阻断报告并路由到 DIAGNOSE。",
+    "IMPLEMENT ProducerJob producer:dace0d7ed7627e624f40d3fc73e496d153667663ae2e662e38c217d45d89475d produced no DraftContent and no business or test changes.":
+        "IMPLEMENT 生产任务未生成 DraftContent，也未产生业务或测试改动。",
+    "The approved PLAN requires exact c2s_mss configuration index equality, while the current approved user decision removes global/VS exact-index equality and retains only cookie-field and MSS-index legality checks.":
+        "已批准计划要求 c2s_mss 配置索引严格相等，而当前已批准用户决策移除了全局与 VS 的严格索引相等，仅保留 Cookie 字段和 MSS 索引合法性校验。",
+    "The producer-block report bb28c94fe5274208fcb0e6980de49422507040b051ad9f737b54f19e3c388b35 records PLAN_INCOMPLETE with workspace_state NO_CODE_CHANGES.":
+        "生产者阻断报告记录计划不完整，工作区状态为未产生代码改动。",
+    "Require the normal G4 approval for the new plan before returning to IMPLEMENT.":
+        "返回 IMPLEMENT 前，必须按正常流程取得新计划的 G4 审批。",
+    "Do not patch code in DIAGNOSE. Re-enter PLAN and replace the stale exact c2s_mss equality requirement with the approved conservative validation behavior.":
+        "不要在 DIAGNOSE 阶段直接修改代码。应重新进入 PLAN，用已批准的保守校验行为替换过时的 c2s_mss 严格相等要求。",
+    "Update the task plan and acceptance traceability to match the final conservative cookie-validation decision.":
+        "更新任务计划和验收追溯，使其符合最终的保守 Cookie 校验决策。",
+    "Keep the change bounded to dataplane cookie validation and the independent product-test cases already identified by the task.":
+        "将改动限制在数据面 Cookie 校验以及任务已识别的独立产品测试用例内。",
+    "After G4 approval, regenerate the IMPLEMENT change set and validate it through source review and iPipe evidence.":
+        "取得 G4 审批后，重新生成 IMPLEMENT 改动集，并通过源码评审和 iPipe 证据核验。",
+}
+
+_DISPLAY_ENUMS = {
+    "COMPLETE": "已完成",
+    "INCOMPLETE": "未完成",
+    "PENDING": "待处理",
+    "FULFILLED": "已生成",
+    "SUFFICIENT": "证据充分",
+    "INSUFFICIENT": "证据不足",
+    "CONTRACT_INPUT_MISSING": "缺少合同输入",
+    "NO_CODE_CHANGES": "未产生代码改动",
+    "CODE_ONLY": "仅代码修复",
+    "REPAIR": "修复",
+    "REPAIR_SCOPE": "修复范围",
+    "REVIEW": "评审",
+    "PLAN": "计划",
+    "SPEC": "规格说明",
+    "DIAGNOSE": "诊断",
+    "IMPLEMENT": "实现",
+}
+
+
+
+def _diagnosis_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return _text(value)
+    if value in _DIAGNOSIS_ENUMS:
+        return _DIAGNOSIS_ENUMS[value]
+    if value in _DIAGNOSIS_PHRASES:
+        return _DIAGNOSIS_PHRASES[value]
+    if value in _DISPLAY_ENUMS:
+        return _DISPLAY_ENUMS[value]
+    if value == "PLAN_INCOMPLETE: approved task plan requires removed global/VS c2s_mss exact-index equality":
+        return "计划不完整：已批准计划仍包含已移除的全局与 VS c2s_mss 严格索引相等要求"
+    if re.fullmatch(r"[A-Za-z0-9._:/@#-]+", value):
+        return value
+    if any("\u4e00" <= char <= "\u9fff" for char in value):
+        return value
+    # Word-level substitution dropped negations ("Do not remove" read as "移除"),
+    # so an approver could approve the opposite of the hash-bound draft. Without an
+    # exact translation, show the source verbatim and label it as untranslated.
+    return f"（未翻译原文）{value}"
+
+
+def _diagnosis_summary(content: dict[str, Any]) -> list[str]:
+    lines = [
+        f"诊断分类 {_diagnosis_text(content.get('classification'))}",
+        f"证据状态 {_diagnosis_text(content.get('evidence_state'))}",
+        f"修复范围 {_diagnosis_text(content.get('repair_scope'))}",
+        f"后续路线 {_diagnosis_text(content.get('route'))}",
+        f"失败签名 {_diagnosis_text(content.get('failure_signature'))}",
+    ]
+    if content.get("hypothesis") not in (None, ""):
+        lines.append(f"根因假设 {_diagnosis_text(content['hypothesis'])}")
+    for key, label in (("comparison", "对比证据"), ("repair_plan", "修复计划")):
+        if isinstance(content.get(key), list):
+            lines.append(f"{label} {len(content[key])} 条")
+    return lines
+
+
 def _is_submit_descriptor(content: dict[str, Any]) -> bool:
     """Distinguish the G7 submission descriptor from the G5 change-set artifact."""
     return all(
@@ -684,7 +833,9 @@ def _size(value: Any) -> str:
 
 
 def _text(value: Any) -> str:
-    return _clip(str(value)) if isinstance(value, (str, int, float)) else "-"
+    if not isinstance(value, (str, int, float)):
+        return "-"
+    return _clip(_diagnosis_text(str(value)))
 
 
 def _short(value: Any) -> str:

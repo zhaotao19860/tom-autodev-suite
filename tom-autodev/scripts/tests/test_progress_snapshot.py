@@ -59,6 +59,36 @@ class SnapshotTests(unittest.TestCase):
         )
         return orch
 
+    @staticmethod
+    def _chain(*states):
+        return [
+            {"state": state, "payload": {"previous_state": states[index - 1]} if index else {}}
+            for index, state in enumerate(states)
+        ]
+
+    def test_phase_that_routed_into_diagnose_is_failed_not_done(self):
+        events = self._chain("INTAKE", "GRILL", "SPEC", "TASKS", "WORKSPACE", "PLAN",
+                             "IMPLEMENT", "DIAGNOSE")
+        phases = progress_snapshot._phases_for_events("DIAGNOSE", events)
+        status = {item["state"]: item["status"] for item in phases}
+        self.assertEqual(status["PLAN"], "DONE")
+        self.assertEqual(status["IMPLEMENT"], "FAILED")
+        self.assertEqual(status["DIAGNOSE"], "CURRENT")
+        self.assertEqual(sum(item["status"] == "DONE" for item in phases), 6)
+        self.assertIn("代码实现✗→变更评审○", progress_snapshot.phase_route({"phases": phases}))
+
+    def test_rewind_from_diagnose_reopens_downstream_phases(self):
+        events = self._chain("INTAKE", "GRILL", "SPEC", "TASKS", "WORKSPACE", "PLAN",
+                             "IMPLEMENT", "DIAGNOSE", "PLAN")
+        status = {
+            item["state"]: item["status"]
+            for item in progress_snapshot._phases_for_events("PLAN", events)
+        }
+        self.assertEqual(status["WORKSPACE"], "DONE")
+        self.assertEqual(status["PLAN"], "CURRENT")
+        self.assertEqual(status["IMPLEMENT"], "PENDING")
+        self.assertEqual(status["DIAGNOSE"], "PENDING")
+
     def test_terminal_progress_and_task_frontier(self):
         orch = self._orchestrator(
             "RELEASE_SUCCESS",

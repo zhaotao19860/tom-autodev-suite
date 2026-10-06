@@ -26,6 +26,7 @@ from __future__ import annotations
 from execution_guard import guard_execution
 
 import copy
+import json
 import logging
 import os
 import subprocess
@@ -36,7 +37,8 @@ from typing import Any
 
 import workflow_spec
 from approval_ledger import gate_of
-from phase_protocol import _canonical_hash
+from phase_protocol import _action_key, _canonical_hash, _pinned_profile_hash
+from schema_validator import validate_named_schema
 
 _log = logging.getLogger(__name__)
 
@@ -83,6 +85,25 @@ def _gate_settled(orchestrator: Any, run_id: str, gate: str, input_hash: str | N
 def classify_next(orchestrator: Any, run_id: str, *, read_only: bool = False) -> dict[str, Any]:
     """Read-only: the single worker decision for the run's current frontier."""
     action = orchestrator.next(run_id, read_only=True) if read_only else orchestrator.next(run_id)
+    if (
+        not action.get("ok")
+        and action.get("reason_code") == "ACTION_CONFLICT"
+        and (
+            action.get("state") == "DIAGNOSE"
+            or orchestrator.status(run_id).get("state") == "DIAGNOSE"
+        )
+    ):
+        candidates = [
+            item for item in orchestrator.state.pending_producer_jobs(run_id)
+            if (item.get("payload") or {}).get("phase") == "DIAGNOSE"
+        ]
+        recovered = [
+            _recover_legacy_diagnose_action(orchestrator, run_id, item.get("job_id"))
+            for item in candidates
+        ]
+        recovered = [item for item in recovered if item is not None]
+        if len(recovered) == 1:
+            action = recovered[0]
     state = action.get("state")
     # The read-only oracle reports terminal runs as ``ok=False`` with
     # ``TERMINAL_STATE``. Terminal is a normal completed decision, not a
@@ -158,6 +179,84 @@ def build_envelope(
     }
 
 
+def _recover_legacy_diagnose_action(
+    orchestrator: Any, run_id: str, job_id: str,
+) -> dict[str, Any] | None:
+    """Recover one already-issued DIAGNOSE action after predecessor-ref repair.
+
+    No job or idempotency row is rewritten.  The old action is reusable only when the
+    current frontier is the same DIAGNOSE transition and the sole action-dict drift is
+    ``source_evidence_refs``.  The protocol's verifier additionally binds the pending
+    job to the current producer-block artifact and its nested evidence.
+    """
+    if not isinstance(job_id, str):
+        return None
+    job = orchestrator.state.producer_job(job_id)
+    if (
+        not isinstance(job, dict)
+        or job.get("run_id") != run_id
+        or job.get("status") not in {"PENDING", "FULFILLED"}
+        or (job.get("status") == "FULFILLED" and not isinstance(job.get("draft"), dict))
+    ):
+        return None
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    if payload.get("phase") != "DIAGNOSE":
+        return None
+    events = orchestrator.state.events(run_id)
+    current = events[-1] if events else {}
+    if current.get("state") != "DIAGNOSE" or payload.get("source_event_id") != current.get("event_id"):
+        return None
+    if payload.get("task_id") != (current.get("payload") or {}).get("task_id"):
+        return None
+    profile_hash = _pinned_profile_hash(events, orchestrator.phase_protocol()._repin(events))
+    key = _action_key(
+        run_id, current.get("event_id"), "DIAGNOSE", payload.get("task_id"), profile_hash,
+    )
+    historical = orchestrator.state.idempotency_result(key)
+    if not isinstance(historical, dict):
+        return None
+    if (
+        historical.get("run_id") != run_id
+        or historical.get("phase") != "DIAGNOSE"
+        or historical.get("source_event_id") != payload.get("source_event_id")
+        or historical.get("task_id") != payload.get("task_id")
+        or historical.get("action_id") != payload.get("action_id")
+        or job_id != f"producer:{historical.get('action_id')}"
+    ):
+        return None
+    repaired = orchestrator.phase_protocol().legacy_diagnose_action(run_id)
+    if not repaired.get("ok"):
+        return None
+    if not orchestrator.phase_protocol()._legacy_diagnose_binding_valid(run_id, historical):
+        return None
+    differing = {
+        key for key in set(historical) | set(repaired)
+        if historical.get(key) != repaired.get(key)
+    }
+    if differing != {"source_evidence_refs"}:
+        return None
+    evidence = (current.get("payload") or {}).get("evidence")
+    report_id = evidence.get("producer_block_report_id") if isinstance(evidence, dict) else None
+    if not isinstance(report_id, str) or not report_id:
+        return None
+    expected_evidence = [f"artifact:{report_id}"]
+    repaired_evidence = repaired.get("source_evidence_refs")
+    if repaired_evidence != expected_evidence:
+        return None
+    # Keep the historical action identity and all of its idempotency-bound fields,
+    # but use the refs computed by the read-only repaired action.  Returning the
+    # historical row here would rebuild an envelope with [] and make the
+    # producer-block evidence disappear at PhaseProtocol.  The verifier above
+    # proves the current run/task/revisions/parent artifact binding; the
+    # read-only action supplies the only permitted delta.
+    return {
+        **historical,
+        "source_evidence_refs": copy.deepcopy(
+            repaired.get("source_evidence_refs") or []
+        ),
+    }
+
+
 def _settled_approval_id(orchestrator: Any, run_id: str, gate: str, input_hash: str) -> str | None:
     for record in orchestrator.approvals.for_run(run_id):
         if (
@@ -184,6 +283,134 @@ def execute_auto(orchestrator: Any, run_id: str, knowledge_sync: Any | None = No
         return {"ok": False, "reason_code": "NOT_AUTO", "decision_kind": decision["kind"]}
     envelope = build_envelope(decision["action"])
     return orchestrator.complete_phase(run_id, envelope, knowledge_sync=knowledge_sync)
+
+
+def report_producer_block(
+    orchestrator: Any, run_id: str, job_id: str, report: dict[str, Any],
+    *, locks: Any | None = None,
+) -> dict[str, Any]:
+    """Record a truthful IMPLEMENT block without manufacturing a Change Set."""
+    if locks is not None:
+        token = uuid.uuid4().hex
+        key = f"{_WORKER_LEASE_PREFIX}{run_id}"
+        lease = locks.acquire(key, token, _WORKER_LEASE_TTL_SECONDS)
+        if not lease.get("acquired"):
+            return {"ok": False, "reason_code": "WORKER_LEASE_HELD", "run_id": run_id,
+                    "owner_pid": lease.get("owner_pid")}
+        try:
+            return report_producer_block(orchestrator, run_id, job_id, report)
+        finally:
+            released = locks.release(key, token)
+            if isinstance(released, dict) and not released.get("released"):
+                _log.warning("worker lease %s not released by producer block %s", key, token)
+    decision = classify_next(orchestrator, run_id, read_only=True)
+    if decision.get("kind") != PRODUCER_WAIT:
+        return {"ok": False, "reason_code": "NOT_PRODUCER", "run_id": run_id}
+    action = decision.get("action") or {}
+    expected_job = f"producer:{action.get('action_id')}"
+    if action.get("phase") != "IMPLEMENT":
+        return {"ok": False, "reason_code": "PRODUCER_BLOCK_PHASE_INVALID", "run_id": run_id}
+    if job_id != expected_job:
+        return {"ok": False, "reason_code": "STALE_PRODUCER_JOB", "expected_job_id": expected_job}
+    job = orchestrator.state.producer_job(job_id)
+    if not isinstance(job, dict) or job.get("run_id") != run_id:
+        return {"ok": False, "reason_code": "PRODUCER_JOB_NOT_FOUND", "run_id": run_id}
+    if job.get("status") == "FULFILLED":
+        return {"ok": False, "reason_code": "PRODUCER_CANDIDATE_ALREADY_FULFILLED", "run_id": run_id}
+    if job.get("status") != "PENDING":
+        return {"ok": False, "reason_code": "PRODUCER_JOB_NOT_PENDING", "run_id": run_id}
+    issues = validate_named_schema(report, "producer-block")
+    if issues:
+        return {"ok": False, "reason_code": "PRODUCER_BLOCK_SCHEMA_INVALID",
+                "issues": [issue.__dict__ for issue in issues]}
+    events = orchestrator.state.events(run_id)
+    current = events[-1] if events else {}
+    payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+    plan = orchestrator.artifacts.phase_artifact(report["plan_artifact_id"])
+    envelope = plan.get("envelope") if plan.get("valid") else None
+    if (
+        report.get("run_id") != run_id
+        or report.get("job_id") != job_id
+        or report.get("action_id") != action.get("action_id")
+        or report.get("source_event_id") != action.get("source_event_id")
+        or report.get("task_id") != action.get("task_id")
+        or report.get("input_hash") != action.get("input_hash")
+        or report.get("plan_artifact_id") != payload.get("plan_artifact_id")
+        or not isinstance(envelope, dict)
+        or envelope.get("phase") != "PLAN"
+        or envelope.get("run_id") != run_id
+        or envelope.get("task_id") != action.get("task_id")
+        or envelope.get("content_hash") != report.get("plan_content_hash")
+        or envelope.get("source_revisions") != report.get("source_revisions")
+        or envelope.get("approval_id") != report.get("plan_approval_id")
+        or envelope.get("approval_input_hash") != report.get("plan_approval_input_hash")
+        or action.get("source_revisions") != report.get("source_revisions")
+    ):
+        return {"ok": False, "reason_code": "PRODUCER_BLOCK_BINDING_MISMATCH", "run_id": run_id}
+    approval = orchestrator.approvals.get(report["plan_approval_id"])
+    if (
+        not isinstance(approval, dict)
+        or gate_of(approval.get("action")) != "G4"
+        or approval.get("run_id") != run_id
+        or approval.get("input_hash") != report["plan_approval_input_hash"]
+        or approval.get("effective_decision") != "APPROVE"
+    ):
+        return {"ok": False, "reason_code": "APPROVED_PLAN_REQUIRED", "run_id": run_id}
+    canonical = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    report_id = _canonical_hash(report)
+    stored = orchestrator.artifacts.put(
+        run_id, "producer-block-report", canonical,
+        {"report_id": report_id, "job_id": job_id, "action_id": action["action_id"],
+         "source_event_id": action["source_event_id"], "task_id": action["task_id"],
+         "plan_artifact_id": report["plan_artifact_id"]},
+    )
+    saved = orchestrator.state.record_producer_block(
+        run_id, report_id, job_id, report, stored["artifact_id"]
+    )
+    return {"ok": True, "reason_code": "PLAN_INCOMPLETE_REPORTED", "run_id": run_id,
+            "report_id": report_id, "artifact_id": stored["artifact_id"],
+            "status": saved["status"], "worker_transition": "PENDING"}
+
+
+def _consume_producer_block(orchestrator: Any, run_id: str, decision: dict[str, Any]) -> dict[str, Any] | None:
+    action = decision.get("action") or {}
+    if action.get("phase") != "IMPLEMENT":
+        return None
+    job_id = f"producer:{action.get('action_id')}"
+    blocks = [
+        item for item in orchestrator.state.pending_producer_blocks(run_id)
+        if item.get("job_id") == job_id
+        and item.get("report", {}).get("action_id") == action.get("action_id")
+        and item.get("report", {}).get("source_event_id") == action.get("source_event_id")
+    ]
+    if not blocks:
+        return None
+    if len(blocks) != 1:
+        return {"ok": False, "reason_code": "MULTIPLE_PRODUCER_BLOCKS", "run_id": run_id}
+    job = orchestrator.state.producer_job(job_id)
+    if not isinstance(job, dict) or job.get("status") != "PENDING" or job.get("draft"):
+        # A real Change Set submitted after the block supersedes it; routing to
+        # DIAGNOSE here would discard that draft and orphan its G5 request.
+        return None
+    block = blocks[0]
+    report = block["report"]
+    result = orchestrator.advance(run_id, "DIAGNOSE", {
+        "input_hash": report["input_hash"],
+        "approved_input_hash": report["input_hash"],
+        "artifacts": ["producer-block-report", "task-plan"],
+        "producer_block_report_id": block["artifact_id"],
+        "producer_block_report_hash": _canonical_hash(report),
+        "plan_artifact_id": report["plan_artifact_id"],
+        "plan_content_hash": report["plan_content_hash"],
+        "task_id": report["task_id"],
+        "source_revisions": dict(report["source_revisions"]),
+        "reason_code": "PLAN_INCOMPLETE",
+        "classification": report.get("classification"),
+        "evidence": report["evidence"],
+    })
+    if result.get("state") == "DIAGNOSE" and result.get("reason_code") == "OK":
+        orchestrator.state.consume_producer_block(run_id, block["report_id"])
+    return result
 
 
 def _record_model_receipt(
@@ -276,7 +503,17 @@ def submit_draft(
             released = locks.release(key, token)
             if isinstance(released, dict) and not released.get("released"):
                 _log.warning("worker lease %s not released by producer %s", key, token)
+    if any(item.get("job_id") == job_id for item in orchestrator.state.pending_producer_blocks(run_id)):
+        return {"ok": False, "reason_code": "PRODUCER_BLOCK_PENDING", "run_id": run_id,
+                "job_id": job_id}
     decision = classify_next(orchestrator, run_id)
+    # Workflow drift is not recoverable here: it must go through
+    # WORKFLOW_SPEC_MIGRATION before any job is claimed or a receipt is written.
+    if decision["kind"] == BLOCKED and decision.get("reason_code") == "ACTION_CONFLICT":
+        recovered = _recover_legacy_diagnose_action(orchestrator, run_id, job_id)
+        if recovered is not None:
+            decision = {"kind": PRODUCER_WAIT, "skill": recovered.get("child_skill"),
+                        "action": recovered}
     if decision["kind"] != PRODUCER_WAIT:
         return {"ok": False, "reason_code": "NOT_PRODUCER", "decision_kind": decision["kind"]}
     action = decision["action"]
@@ -1249,6 +1486,13 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             continue
         if kind == PRODUCER_WAIT:
             action = decision["action"]
+            blocked = _consume_producer_block(orchestrator, run_id, decision)
+            if blocked is not None:
+                if blocked.get("reason_code") == "OK":
+                    steps.append({"phase": "IMPLEMENT", "result": blocked, "source": "producer-block"})
+                    continue
+                return {"ok": False, "reason_code": "PRODUCER_BLOCK_TRANSITION_FAILED",
+                        "run_id": run_id, "detail": blocked, "auto_completed": steps}
             job_id = f"producer:{action['action_id']}"
             recovered = _recover_invalid_producer_draft(
                 orchestrator, run_id, job_id, action, knowledge_sync)

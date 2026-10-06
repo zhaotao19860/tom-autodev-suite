@@ -201,6 +201,36 @@ assert.equal(card.card_instance_id, 'instance-owner');
 assert.equal(api.live.has(initial.card_id), false);
 """)
 
+    def test_reminder_card_is_a_new_bubble_and_closes_with_the_original(self):
+        self._run(r"""
+const original = await post('/card/approval', request);
+const reminder = await post('/card/approval', { ...request, presentation: 'nudge-1' });
+const bad = await post('/card/approval', { ...request, presentation: 'Bad Value' });
+assert.equal(reminder.status, 200);
+assert.equal(bad.status, 400);
+assert.equal(reminder.payload.card_id, original.payload.card_id + '-nudge-1');
+assert.equal(rendered.at(-1).card.buttons.length, 3);
+await api.answerCard({ cardId: reminder.payload.card_id }, 'approve.' + request.approval_id, 'owner');
+const closed = rendered.at(-1);
+assert.equal(closed.card_id, original.payload.card_id);
+assert.equal(closed.card.buttons.length, 0);
+assert.equal(closed.question, '已由 owner 在另一张卡片处理：同意');
+assert.equal(api.live.size, 0);
+""")
+
+    def test_double_tap_is_serialized_and_never_redraws_buttons(self):
+        self._run(r"""
+const initial = await api.sendApprovalCard(request);
+const before = rendered.length;
+await Promise.all([
+  api.answerCard({ cardId: initial.card_id }, 'approve.' + request.approval_id, 'owner'),
+  api.answerCard({ cardId: initial.card_id }, 'approve.' + request.approval_id, 'owner'),
+]);
+assert.equal(rendered.length, before + 1);
+assert.equal(rendered.at(-1).card.buttons.length, 0);
+assert.equal(rendered.at(-1).question, '已由 owner 处理：同意');
+""")
+
     def test_outsider_click_keeps_buttons_and_claims_no_decision(self):
         self._run(r"""
 const initial = await api.sendApprovalCard({ ...request, target_type: 'group', target_id: '123' });

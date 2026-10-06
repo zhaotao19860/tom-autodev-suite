@@ -2,6 +2,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "clients"))
@@ -344,6 +345,23 @@ class IpipeWatcherTests(unittest.TestCase):
         self.assertEqual(len(outcomes), 2)
         self.assertEqual({outcome["reason_code"] for outcome in outcomes}, {"OK"})
         self.assertEqual(len(notify.sent), 2)
+
+    def test_ipipe_watcher_refreshes_work_cards_without_owning_card_semantics(self):
+        state = _State()
+        notify = _Notify()
+        watcher, _state, _notify = self._watcher(
+            {"ok": True, "status": "MONITORING", "build_id": "b-1"},
+            state=state,
+            notify=notify,
+        )
+        notify.send_work_card = lambda **_payload: {"card_id": "work-run-1"}
+        with patch("work_card.refresh_all", return_value=[
+            {"ok": True, "reason_code": "WORK_CARD_UPDATED", "run_id": "run-1"},
+        ]) as refresh_all:
+            outcomes = watcher.tick()
+
+        refresh_all.assert_called_once_with(watcher.orchestrator, notify)
+        self.assertIn("WORK_CARD_UPDATED", {item["reason_code"] for item in outcomes})
 
     def test_release_waiting_notifies_once_without_reasking_g9(self):
         target = {

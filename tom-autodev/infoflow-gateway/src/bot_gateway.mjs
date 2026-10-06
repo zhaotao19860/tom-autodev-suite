@@ -420,11 +420,14 @@ function targetCardKey(targetType, targetId) {
     .slice(0, 16)
 }
 
-function approvalCardId(approvalId, targetType, targetId) {
+function approvalCardId(approvalId, targetType, targetId, presentation) {
   // The same approval may be delivered to a group and to several private
   // reviewers. Card identity is global on the platform, so the recipient must
   // participate in the identity or one target overwrites another target.
-  return `approval-${approvalId}-${targetCardKey(targetType, targetId)}`
+  // A reminder re-posts the buttons under its own message; re-rendering the
+  // original id would only refresh the bubble further up the chat.
+  const base = `approval-${approvalId}-${targetCardKey(targetType, targetId)}`
+  return presentation ? `${base}-${presentation}` : base
 }
 
 function parseDecision(eventKey) {
@@ -459,7 +462,9 @@ async function interactiveCards() {
 
 async function sendApprovalCard(request) {
   return await renderCard({
-    card_id: approvalCardId(request.approval_id, request.target_type, request.target_id),
+    card_id: approvalCardId(
+      request.approval_id, request.target_type, request.target_id, request.presentation,
+    ),
     request_id: request.approval_id,
     target_type: request.target_type,
     target_id: request.target_id,
@@ -566,10 +571,28 @@ async function renderCard(request) {
 }
 
 const live = new Map()
+// Cards an approver already answered. A double tap must not redraw the buttons
+// once the first tap removed the card from `live`.
+const settled = new Set()
+// Refreshes of one card run one at a time: two concurrent renders of the same
+// bubble make the platform reject one with `刷新外层气泡卡失败`.
+const refreshing = new Map()
+
+function serialRefresh(cardId, task) {
+  const next = (refreshing.get(cardId) || Promise.resolve()).catch(() => {}).then(task)
+  refreshing.set(cardId, next)
+  next.finally(() => { if (refreshing.get(cardId) === next) refreshing.delete(cardId) }).catch(() => {})
+  return next
+}
 
 async function answerCard(data, eventKey, sender) {
   const cardId = readString(data.cardId)
   if (!cardId) return
+  return await serialRefresh(cardId, () => refreshAnsweredCard(cardId, data, eventKey, sender))
+}
+
+async function refreshAnsweredCard(cardId, data, eventKey, sender) {
+  if (settled.has(cardId)) return
   const known = live.get(cardId)
   const receiver = isRecord(data.receiver) ? data.receiver : {}
   const targetType = known?.target_type || readString(receiver.type)
@@ -637,7 +660,40 @@ async function answerCard(data, eventKey, sender) {
     }],
     base_lines: [...baseLines.slice(0, 7)],
   })
-  if (answered) live.delete(cardId)
+  if (answered) {
+    live.delete(cardId)
+    settled.add(cardId)
+    if (!choice) await closeSiblingCards(cardId, approvalIdOf(parsed, known, data), sender, label)
+  }
+}
+
+// A reminder posts a second card for the same approval. Once an approver answers
+// on one of them, the others must not keep offering buttons for a settled gate.
+async function closeSiblingCards(cardId, approvalId, sender, label) {
+  if (!approvalId) return
+  for (const [otherId, other] of [...live.entries()]) {
+    if (otherId === cardId || other.request_id !== approvalId || !otherId.startsWith('approval-')) continue
+    live.delete(otherId)
+    settled.add(otherId)
+    await renderCard({
+      card_id: otherId,
+      request_id: other.request_id,
+      target_type: other.target_type,
+      target_id: other.target_id,
+      title: other.title,
+      question: `已由 ${sender} 在另一张卡片处理：${label}`,
+      buttons: [],
+      lines: [...other.base_lines.slice(0, 7), {
+        componentId: 'click-status',
+        type: 'text',
+        text: `已选择「${label}」· ${sender} · ${nowIso()}`,
+      }],
+      base_lines: [...other.base_lines.slice(0, 7)],
+    }).catch((err) => log('sibling card refresh failed', {
+      card_id: otherId,
+      error: err instanceof Error ? err.message : String(err),
+    }))
+  }
 }
 
 function approvalIdOf(parsed, known, data) {
@@ -955,15 +1011,17 @@ const server = createServer(async (req, res) => {
       const approvers = Array.isArray(body.approvers)
         ? body.approvers.map((item) => readString(item).trim()).filter(Boolean)
         : null
+      const presentation = readString(body.presentation).trim()
       if (
         !/^[0-9a-f]{32}$/.test(approvalId)
         || !['group', 'user'].includes(targetType)
         || !targetId
         || !title
+        || (presentation && !/^[a-z0-9-]{1,32}$/.test(presentation))
       ) {
         sendJson(res, 400, {
           ok: false,
-          error: 'approval_id (32 hex), target_type (group|user), target_id and title are required',
+          error: 'approval_id (32 hex), target_type (group|user), target_id and title are required; presentation must match [a-z0-9-]{1,32}',
         })
         return
       }
@@ -975,6 +1033,7 @@ const server = createServer(async (req, res) => {
         question,
         lines,
         approvers,
+        presentation: presentation || undefined,
       })
       sendJson(res, 200, { ok: true, approval_id: approvalId, ...receipt })
       return

@@ -109,6 +109,21 @@ class PhaseProtocol:
         except Exception as error:
             return _failure(_exception_reason(error, "PHASE_PROTOCOL_INVALID"), run_id=run_id)
 
+    def legacy_diagnose_action(self, run_id: str) -> dict[str, Any]:
+        """Recompute a DIAGNOSE action without overwriting its idempotency record.
+
+        This is a read-only compatibility seam for a paused legacy ProducerJob.  The
+        caller must still prove the job/report binding before using the returned action;
+        this method deliberately does not save anything and is not a general workflow
+        bypass.
+        """
+        try:
+            return self._next(
+                run_id, read_only=True, ignore_idempotency_conflict=True,
+            )
+        except Exception as error:
+            return _failure(_exception_reason(error, "PHASE_PROTOCOL_INVALID"), run_id=run_id)
+
     def _repin(self, events: list[dict[str, Any]]) -> Any:
         """The approved profile re-pin for the run these events belong to, if any."""
         from profile_repin import record_for
@@ -163,7 +178,10 @@ class PhaseProtocol:
                 return pending
         return None
 
-    def _next(self, run_id: str, *, read_only: bool = False) -> dict[str, Any]:
+    def _next(
+        self, run_id: str, *, read_only: bool = False,
+        ignore_idempotency_conflict: bool = False,
+    ) -> dict[str, Any]:
         if not isinstance(run_id, str) or not run_id:
             return _failure("INVALID_INPUT")
         events = self.state.events(run_id)
@@ -218,7 +236,7 @@ class PhaseProtocol:
             return _failure("PIPELINE_PLAN_REQUIRED", run_id=run_id)
         if selected.get("predecessor") and predecessor is None:
             return _failure("PREDECESSOR_REQUIRED", run_id=run_id, state=state, task_id=task_id)
-        source_revisions = self._source_revisions(current, predecessor)
+        source_revisions = self._source_revisions(run_id, current, predecessor, state, task_id)
         if selected.get("revisions") and not _valid_revisions(source_revisions):
             return _failure("SOURCE_REVISION_REQUIRED", run_id=run_id, state=state, task_id=task_id)
         target = selected.get("target")
@@ -307,7 +325,29 @@ class PhaseProtocol:
         key = _action_key(run_id, current["event_id"], state, task_id,
                           _pinned_profile_hash(events, self._repin(events)))
         existing = self.state.idempotency_result(key)
-        if existing is not None:
+        if existing is not None and not ignore_idempotency_conflict:
+            # Presentation evidence was missing from old producer-block actions.
+            # It is not an action-hash input. Reconcile only this exact delta,
+            # against the unique cached action/job and the verified predecessor;
+            # never rewrite the historical action or mint a replacement job.
+            if (
+                state == "DIAGNOSE"
+                and isinstance(existing, dict)
+                and existing.get("source_evidence_refs") == []
+                and {k for k in set(existing) | set(action)
+                     if existing.get(k) != action.get(k)} == {"source_evidence_refs"}
+                and action.get("source_evidence_refs") == [
+                    f"artifact:{_payload_value(current.get('payload') or {}, 'producer_block_report_id')}"
+                ]
+                and self._legacy_diagnose_binding_valid(run_id, existing)
+            ):
+                job = self.state.producer_job(f"producer:{existing['action_id']}")
+                job_payload = job.get("payload") or {}
+                if all(job_payload.get(k) == existing.get(k) for k in (
+                    "action_id", "input_hash", "phase", "source_event_id", "task_id",
+                    "result_schema", "required_human_gate",
+                )):
+                    return action
             return existing if existing == action else _failure("ACTION_CONFLICT", run_id=run_id, state=state)
         if not read_only:
             self.state.save_idempotency_result(key, action)
@@ -364,7 +404,26 @@ class PhaseProtocol:
             action.get("task_id"), _pinned_profile_hash(events, self._repin(events)),
         )
         issued = self.state.idempotency_result(action_key)
-        if issued is None or issued != action:
+        action_matches_legacy = False
+        if (
+            issued is not None
+            and isinstance(action, dict)
+            and action.get("phase") == "DIAGNOSE"
+            and isinstance(issued, dict)
+        ):
+            differing = {
+                key for key in set(issued) | set(action)
+                if issued.get(key) != action.get(key)
+            }
+            action_matches_legacy = (
+                differing == {"source_evidence_refs"}
+                and self._legacy_diagnose_binding_valid(action["run_id"], issued)
+                and action.get("source_evidence_refs")
+                == _source_evidence_refs(events, self._predecessor(
+                    action["run_id"], ("REVIEW", "IPIPE", "IMPLEMENT"), action.get("task_id")
+                ))
+            )
+        if issued is None or (issued != action and not action_matches_legacy):
             return _failure("ACTION_ID_MISMATCH")
         if result.get("action_id") != action.get("action_id"):
             return _failure("ACTION_ID_MISMATCH")
@@ -654,6 +713,53 @@ class PhaseProtocol:
         if self.state.idempotency_result(result_key) is not None:
             return None
         return execution_guard(self.state, run_id)
+
+    def _legacy_diagnose_binding_valid(
+        self, run_id: str, envelope: dict[str, Any] | None,
+    ) -> bool:
+        """Allow only the narrowly scoped completion of a paused old DIAGNOSE job.
+
+        This is intentionally a verifier, not a migration.  It accepts no new action,
+        event, artifact or database rebinding: the current event, pending job, and the
+        immutable producer-block artifact must already agree.
+        """
+        if not isinstance(envelope, dict) or envelope.get("phase") != "DIAGNOSE":
+            return False
+        events = self.state.events(run_id)
+        current = events[-1] if events else {}
+        payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+        if current.get("state") != "DIAGNOSE" or envelope.get("source_event_id") != current.get("event_id"):
+            return False
+        task_id = payload.get("task_id")
+        if envelope.get("task_id") != task_id or envelope.get("run_id") != run_id:
+            return False
+        job = self.state.producer_job(f"producer:{envelope.get('action_id')}")
+        if (
+            not isinstance(job, dict)
+            or job.get("run_id") != run_id
+            or job.get("status") not in {"PENDING", "FULFILLED"}
+            or (job.get("status") == "FULFILLED" and not isinstance(job.get("draft"), dict))
+        ):
+            return False
+        report_id = _payload_value(payload, "producer_block_report_id")
+        artifact = self.artifacts.get(report_id) if isinstance(report_id, str) else {}
+        if not artifact.get("valid") or envelope.get("parent_artifact_hash") != artifact.get("sha256"):
+            return False
+        try:
+            report = json.loads(artifact.get("content", ""))
+        except (TypeError, json.JSONDecodeError):
+            return False
+        evidence = payload.get("evidence")
+        return (
+            isinstance(report, dict)
+            and report.get("run_id") == run_id
+            and report.get("task_id") == task_id
+            and report.get("source_revisions") == envelope.get("source_revisions")
+            and isinstance(evidence, dict)
+            and evidence.get("run_id") == run_id
+            and evidence.get("task_id") == task_id
+            and evidence.get("source_revisions") == report.get("source_revisions")
+        )
 
     def complete(self, run_id: str, envelope: dict[str, Any]) -> dict[str, Any]:
         action_id = envelope.get("action_id") if isinstance(envelope, dict) else None
@@ -1141,6 +1247,55 @@ class PhaseProtocol:
     ) -> dict[str, Any] | None:
         if phase is None:
             return None
+        if isinstance(phase, tuple) and "IMPLEMENT" in phase:
+            events = self.state.events(run_id)
+            current = events[-1] if events else {}
+            payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+            if (
+                current.get("state") == "DIAGNOSE"
+                and _payload_value(payload, "reason_code") == "PLAN_INCOMPLETE"
+            ):
+                artifact_id = _payload_value(payload, "producer_block_report_id")
+                evidence = payload.get("evidence")
+                report_artifact = (
+                    self.artifacts.get(artifact_id)
+                    if isinstance(artifact_id, str) else {}
+                )
+                if report_artifact.get("valid"):
+                    try:
+                        report = json.loads(report_artifact["content"])
+                    except (TypeError, json.JSONDecodeError):
+                        report = None
+                    if (
+                        isinstance(report, dict)
+                        and report.get("run_id") == run_id
+                        and report.get("task_id") == task_id
+                        and _valid_revisions(report.get("source_revisions"))
+                        and isinstance(evidence, dict)
+                        and evidence.get("run_id") == run_id
+                        and evidence.get("task_id") == task_id
+                        and _valid_revisions(evidence.get("source_revisions"))
+                        and report.get("source_revisions") == evidence.get("source_revisions")
+                    ):
+                        return {
+                            "valid": True,
+                            "artifact_id": artifact_id,
+                            "sha256": report_artifact.get("sha256"),
+                            "envelope": {
+                                "phase": "IMPLEMENT",
+                                "run_id": run_id,
+                                "task_id": task_id,
+                                "content_hash": report_artifact.get("sha256"),
+                                "source_revisions": report.get("source_revisions"),
+                                "content": {
+                                    "build_id": None,
+                                    "stage_id": None,
+                                    "job_id": None,
+                                    "environment_fingerprint": None,
+                                    "failure_signature": _canonical_hash(report),
+                                },
+                            },
+                        }
         if isinstance(phase, tuple):
             for artifact in reversed(self.artifacts.phase_artifacts(run_id)):
                 envelope = artifact.get("envelope", {})
@@ -1182,13 +1337,17 @@ class PhaseProtocol:
         return artifact
 
     def _source_revisions(
-        self, current: dict[str, Any], predecessor: dict[str, Any] | None
+        self, run_id: str, current: dict[str, Any], predecessor: dict[str, Any] | None,
+        state: str, task_id: str | None,
     ) -> dict[str, str]:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
         for key in ("source_revisions", "repo_revisions"):
             value = payload.get(key)
             if isinstance(value, dict):
                 return dict(value)
+        recovered = self._validated_reentry_revisions(run_id, current, state, task_id)
+        if recovered is not None:
+            return recovered
         plan_artifact_id = payload.get("plan_artifact_id")
         if isinstance(plan_artifact_id, str):
             plan = self.artifacts.phase_artifact(plan_artifact_id)
@@ -1201,6 +1360,94 @@ class PhaseProtocol:
             if isinstance(value, dict):
                 return dict(value)
         return {}
+
+    def _validated_reentry_revisions(
+        self, run_id: str, current: dict[str, Any], state: str, task_id: str | None
+    ) -> dict[str, str] | None:
+        """Recover only a legacy PLAN REVISE pin backed by its old action and approval.
+
+        Older REVISE events stored only ``reentry``.  TASKS cannot provide a revision,
+        so blindly continuing such an event would either lose the pin or fall back to
+        the mutable profile.  Recovery is deliberately narrow and read-only: the
+        previous ProducerJob, its historical PLAN action, the rejected draft, and the
+        bound G4 approval must all agree before the old action's revisions are reused.
+        """
+        if state != "PLAN" or not isinstance(task_id, str):
+            return None
+        reentry = (current.get("payload") or {}).get("reentry")
+        if (not isinstance(reentry, dict) or reentry.get("kind") != "REVISE"
+                or reentry.get("from_state") != "PLAN"):
+            return None
+        job_id = reentry.get("previous_job_id")
+        approval_id = reentry.get("approval_id")
+        rejected_hash = reentry.get("rejected_input_hash")
+        if not all(isinstance(value, str) and value for value in (job_id, approval_id, rejected_hash)):
+            return None
+        job = self.state.producer_job(job_id)
+        if (not isinstance(job, dict) or job.get("run_id") != run_id
+                or job.get("status") != "FULFILLED"):
+            return None
+        job_payload = job.get("payload")
+        draft = job.get("draft")
+        if (
+            not isinstance(job_payload, dict)
+            or job_payload.get("phase") != "PLAN"
+            or job_payload.get("task_id") != task_id
+            or not isinstance(draft, dict)
+        ):
+            return None
+        source_event_id = job_payload.get("source_event_id")
+        action_id = job_payload.get("action_id")
+        if (not isinstance(source_event_id, str) or not isinstance(action_id, str)
+                or job_id != f"producer:{action_id}"):
+            return None
+        events = self.state.events(run_id)
+        current_index = next(
+            (i for i, event in enumerate(events) if event.get("event_id") == current.get("event_id")), -1)
+        if current_index < 1 or events[current_index - 1].get("event_id") != source_event_id:
+            return None
+        historical = next(
+            (event for event in self.state.events(run_id)
+             if event.get("event_id") == source_event_id),
+            None,
+        )
+        if (
+            not isinstance(historical, dict)
+            or historical.get("state") != "PLAN"
+            or (historical.get("payload") or {}).get("task_id") != task_id
+        ):
+            return None
+        profile_hash = _pinned_profile_hash(
+            self.state.events(run_id), self._repin(self.state.events(run_id))
+        )
+        action = self.state.idempotency_result(
+            _action_key(run_id, source_event_id, "PLAN", task_id, profile_hash)
+        )
+        if (
+            not isinstance(action, dict)
+            or action.get("action_id") != action_id
+            or action.get("run_id") != run_id
+            or action.get("source_event_id") != source_event_id
+            or action.get("phase") != "PLAN"
+            or action.get("task_id") != task_id
+            or action.get("required_human_gate") != "G4"
+            or action.get("input_hash") != job_payload.get("input_hash")
+            or not _valid_revisions(action.get("source_revisions"))
+        ):
+            return None
+        approval = self.approvals.get(approval_id) if self.approvals is not None else None
+        if (
+            not isinstance(approval, dict)
+            or approval.get("run_id") != run_id
+            or gate_of(approval.get("action") or "") != "G4"
+            or approval.get("input_hash") != rejected_hash
+            or approval.get("effective_decision") not in {"REVISE", "REJECT"}
+        ):
+            return None
+        from worker_driver import build_envelope
+        if build_envelope(action, draft)["approval_input_hash"] != rejected_hash:
+            return None
+        return dict(action["source_revisions"])
 
     def _approval_error(self, action: dict[str, Any], result: dict[str, Any]) -> str | None:
         gate = action.get("required_human_gate")
@@ -2273,6 +2520,21 @@ def _valid_revisions(value: Any) -> bool:
     )
 
 
+def _payload_value(payload: dict[str, Any], key: str) -> Any:
+    """Read transition fields from the canonical payload or its evidence block.
+
+    Older worker transitions put producer-block routing metadata under
+    ``payload["evidence"]``.  Keep the top-level form authoritative when both
+    exist, but support the persisted nested form without weakening the
+    run/task/revision checks performed by the caller.
+    """
+    value = payload.get(key)
+    if value is not None:
+        return value
+    evidence = payload.get("evidence")
+    return evidence.get(key) if isinstance(evidence, dict) else None
+
+
 def _canonical_ku_url(value: Any, doc_id: Any) -> bool:
     if not isinstance(value, str) or not isinstance(doc_id, str) or not doc_id:
         return False
@@ -2436,7 +2698,12 @@ def _source_evidence_refs(
 ) -> list[str]:
     if predecessor is not None:
         references = predecessor.get("envelope", {}).get("evidence_refs")
-        return list(references) if isinstance(references, list) else []
+        if isinstance(references, list) and references:
+            return list(references)
+        artifact_id = predecessor.get("artifact_id")
+        if isinstance(artifact_id, str) and artifact_id:
+            return [f"artifact:{artifact_id}"]
+        return []
     payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
     references = payload.get("evidence_refs")
     return list(references) if isinstance(references, list) else []

@@ -93,6 +93,15 @@ class KnowledgeSync:
             for repo in (profile.get("business_repos") or [])
             if isinstance(repo, dict) and repo.get("path")
         ] if isinstance(profile, dict) else []
+        # A live Comate turn may not export BAIDU_CC_USERNAME.  The profile is
+        # already an approved, immutable operator binding, so use its confirmer
+        # as the identity fallback before relying on repository git config.
+        profile_user = None
+        confirmation = profile.get("profile_confirmation") if isinstance(profile, dict) else None
+        if isinstance(confirmation, dict):
+            profile_user = confirmation.get("confirmed_by")
+        if not username and isinstance(profile_user, str) and profile_user:
+            username = profile_user.split("@", 1)[0]
         root_title = run_root_title or f"{card_id}-{run_id[:12]}-研发测试协作"
         return cls(
             state_store=state_store,

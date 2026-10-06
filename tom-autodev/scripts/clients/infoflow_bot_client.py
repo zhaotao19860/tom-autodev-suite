@@ -163,6 +163,7 @@ class InfoflowBotClient:
         question: str,
         lines: list[str],
         approvers: list[str] | None = None,
+        presentation: str | None = None,
     ) -> dict[str, Any]:
         """Send the one-tap variant of a gate as an interactive card.
 
@@ -171,20 +172,22 @@ class InfoflowBotClient:
         decision is still authorized by `clients.infoflow_reply_client` against the
         stored request, nothing here decides anything.
         """
-        response = self._post(
-            "/card/approval",
-            {
-                "approval_id": approval_id,
-                "target_type": target_type,
-                "target_id": target_id,
-                "title": title,
-                "question": question,
-                "lines": list(lines),
-                # The gateway authorizes nothing; it only needs to know whose tap may
-                # render the card as answered, so an onlooker cannot blank the buttons.
-                "approvers": sorted({str(item) for item in approvers or [] if str(item)}),
-            },
-        )
+        body = {
+            "approval_id": approval_id,
+            "target_type": target_type,
+            "target_id": target_id,
+            "title": title,
+            "question": question,
+            "lines": list(lines),
+            # The gateway authorizes nothing; it only needs to know whose tap may
+            # render the card as answered, so an onlooker cannot blank the buttons.
+            "approvers": sorted({str(item) for item in approvers or [] if str(item)}),
+        }
+        if presentation:
+            # A follow-up card (reminder) for the same approval, posted as its own
+            # bubble instead of refreshing the original one up the chat.
+            body["presentation"] = presentation
+        response = self._post("/card/approval", body)
         identity = response.get("card_id")
         if not isinstance(identity, str) or not identity:
             raise ValueError("CARD_RESPONSE_INVALID")

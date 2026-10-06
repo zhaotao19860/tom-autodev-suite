@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import yaml
 
@@ -156,6 +156,48 @@ class RunChangeTests(unittest.TestCase):
         self.assertEqual(run_change.revise(
             self.orchestrator, run_id, wrong_gate["approval_id"], feedback="x", actor="a",
         )["reason_code"], "APPROVAL_GATE_MISMATCH")
+
+    def test_plan_revise_preserves_only_the_validated_action_revisions(self):
+        run_id = "plan-revise"
+        approval_id = "approval-plan"
+        current = {"event_id": "bad-revise-event", "state": "PLAN", "payload": {
+            "source_revisions": {"business": "malicious", "tests": "malicious"},
+        }}
+        action = {
+            "ok": True, "phase": "PLAN", "state": "PLAN",
+            "source_event_id": current["event_id"], "source_revisions": {
+                "business": "validated-business", "tests": "validated-tests",
+            },
+        }
+        draft = {"task_id": "T1"}
+        approval = {"run_id": run_id, "action": "G4", "approval_id": approval_id,
+                    "effective_decision": "REVISE", "input_hash": "h" * 64}
+        fake = MagicMock()
+        fake.state.events.return_value = [current]
+        fake.approvals.get.return_value = approval
+        fake.state.commit_transition_result.return_value = {
+            "status": "COMMITTED", "result": {"ok": True, "state": "PLAN"}
+        }
+        with patch.object(
+            run_change, "_current_draft", return_value=(action, "producer:old", draft)
+        ), patch.object(run_change, "_draft_approval_hash", return_value="h" * 64):
+            revised = run_change.revise(
+                fake, run_id, approval_id, feedback="只中文化卡片", actor="owner"
+            )
+        self.assertTrue(revised["ok"], revised)
+        payload = fake.state.commit_transition_result.call_args.args[3]
+        self.assertEqual(payload["source_revisions"], action["source_revisions"])
+        self.assertEqual(set(payload), {"source_revisions", "reentry"})
+
+    def test_plan_revise_rejects_unvalidated_legacy_reentry_pin(self):
+        protocol = self.orchestrator.phase_protocol()
+        current = {"event_id": "legacy-revise", "payload": {"reentry": {
+            "kind": "REVISE", "previous_job_id": "producer:missing",
+            "approval_id": "missing", "rejected_input_hash": "f" * 64,
+        }}}
+        self.assertIsNone(protocol._validated_reentry_revisions(
+            "run", current, "PLAN", "T1"
+        ))
 
     def test_feedback_typed_after_reject_in_infoflow_is_used(self):
         run_id, _knowledge, _job_id, rejected_hash = self._at_g2()

@@ -2050,8 +2050,20 @@ class Orchestrator:
         self.state.save_idempotency_result(response_key, result)
         return result
 
-    @guard_execution
     def receive_infoflow_reply(self, run_id: str, approval_id: str, input_hash: str, response: Any) -> dict[str, Any]:
+        # The migration gate is the one approval that must be answerable while
+        # the run is drifted. A method-level guard cannot see the approval action,
+        # so the old decorator rejected a verified migration reply before it
+        # reached the ledger. Ordinary gates remain guarded per approval.
+        approval = self.approvals.get(approval_id)
+        if (
+            isinstance(approval, dict)
+            and approval.get("run_id") == run_id
+            and not migration_exempt(approval.get("action"))
+        ):
+            blocked = execution_guard(self.state, run_id)
+            if blocked is not None:
+                return blocked
         if not isinstance(response, dict) or any(response.get(key) != value for key, value in {"run_id": run_id, "approval_id": approval_id, "input_hash": input_hash, "channel": "infoflow"}.items()):
             return self.approvals.reject_envelope(
                 approval_id, input_hash, "infoflow", run_id=run_id,
@@ -2881,6 +2893,12 @@ def main(argv: list[str] | None = None) -> int:
     submit_draft.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
     submit_draft.add_argument("job_id")
     submit_draft.add_argument("draft_json")
+    block_producer = subparsers.add_parser(
+        "report-producer-block", help="报告 ProducerJob 无法真实产出并保留固定绑定证据"
+    )
+    block_producer.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
+    block_producer.add_argument("job_id")
+    block_producer.add_argument("report_json")
 
     stop = subparsers.add_parser("stop")
     stop.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
@@ -3014,6 +3032,13 @@ def main(argv: list[str] | None = None) -> int:
     reissue.add_argument("run_id")
     reissue.add_argument("action")
     reissue.add_argument("input_hash")
+
+    correction = subparsers.add_parser("correct-approval-message", help="纠正同一待审批诊断的中文展示，不重开审批或延长截止时间")
+    correction.add_argument("run_id")
+    correction.add_argument("approval_id")
+    correction.add_argument("input_hash")
+    correction.add_argument("--actor", required=True)
+    correction.add_argument("--reason", required=True)
 
     redelivery = subparsers.add_parser(
         "confirm-approval-redelivery",
@@ -3216,7 +3241,7 @@ def main(argv: list[str] | None = None) -> int:
         result = orchestrator.approve(args.approval_id, args.decision, args.input_hash, args.channel, args.run_id, args.responder)
     elif args.command == "resume":
         result = orchestrator.resume(args.run_id)
-    elif args.command in {"drive", "continue", "submit-draft"}:
+    elif args.command in {"drive", "continue", "submit-draft", "report-producer-block"}:
         from agent_bridge import AgentBridge, resolve_run_target
 
         bridge = AgentBridge(
@@ -3234,12 +3259,17 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "continue":
             result = bridge.continue_run(resolved["run_id"])
             result = _deliver_worker_approval(orchestrator, result)
-        else:
+        elif args.command == "submit-draft":
             draft = _draft_content_file(args.draft_json)
             result = draft if draft.get("ok") is False else bridge.submit_draft(
                 resolved["run_id"], args.job_id, draft
             )
             result = _deliver_worker_approval(orchestrator, {**result, "run_id": resolved["run_id"]})
+        else:
+            report = _json_file(args.report_json)
+            result = report if report.get("ok") is False else bridge.report_producer_block(
+                resolved["run_id"], args.job_id, report
+            )
     elif args.command == "stop":
         from agent_bridge import resolve_run_target
         resolved = resolve_run_target(orchestrator, args.target)
@@ -3375,6 +3405,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "reissue-approval":
         result = _reissue_approval(orchestrator, args.run_id, args.action, args.input_hash)
+    elif args.command == "correct-approval-message":
+        from approval_delivery import correct_approval_message
+        result = correct_approval_message(
+            orchestrator, args.run_id, args.approval_id, args.input_hash,
+            actor=args.actor, reason=args.reason,
+            client=_infoflow_notify_client(orchestrator),
+        )
     elif args.command == "confirm-approval-redelivery":
         result = _confirm_approval_redelivery(
             orchestrator,

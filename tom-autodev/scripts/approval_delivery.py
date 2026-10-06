@@ -19,6 +19,93 @@ from approval_summary import gate_intent, references
 _RECORD_KEY = "approval.gateway.infoflow"
 _REPLY_KEY = "approval.gateway.infoflow.reply"
 
+def correct_approval_message(orchestrator, run_id, approval_id, input_hash, *, actor, reason, client):
+    """Append a presentation correction, never replace a gate or its old receipt."""
+    from approval_summary import _hash, pinned_context, _is_diagnosis
+    from run_change import superseded
+    blocked = execution_guard(orchestrator.state, run_id)
+    if blocked:
+        return blocked
+    def refuse(code, message):
+        return {"ok": False, "reason_code": code, "message": message}
+    approval = orchestrator.approvals.get(approval_id)
+    if not approval or approval.get("run_id") != run_id or approval.get("input_hash") != input_hash:
+        return refuse("APPROVAL_BINDING_MISMATCH", "审批编号、运行或输入哈希不匹配，未发送纠正消息。")
+    if not actor or not reason or actor not in sum(approval["member_policy"].values(), []):
+        return refuse("CORRECTION_ACTOR_REQUIRED", "请由审批成员提供操作者身份和纠正原因。")
+    if (approval.get("status") != "PENDING" or approval.get("effective_decision")
+            or _deadline(approval["deadline_at"]) <= datetime.now(timezone.utc)
+            or superseded(orchestrator.state, run_id, approval)):
+        return refuse("APPROVAL_NOT_PENDING", "审批已处理、过期或失效；中文纠正不能重开审批或延长截止时间。")
+    if gate_of(approval["action"]) != "G6":
+        return refuse("CORRECTION_GATE_UNSUPPORTED", "此纠正入口仅支持诊断审批。")
+    if orchestrator.state.pending_intents(run_id):
+        # Existing correction below is safe to replay only with its durable receipt.
+        pending = orchestrator.state.pending_intents(run_id)
+        if any(p.get("operation") != "approval.message-correction" for p in pending):
+            return refuse("QUERY_REQUIRED", "存在结果未确认的操作，须先核对原投递记录，不能盲目重发。")
+    request_id = _request_id(approval)
+    original = orchestrator.state.idempotency_result(f"{_RECORD_KEY}:{request_id}")
+    if not original or not original.get("content"):
+        return refuse("QUERY_REQUIRED", "缺少原消息送达凭据，须先核对原投递。")
+    detail = pinned_context(orchestrator, run_id, "G6", input_hash)
+    material = detail.get("_review_content") or {}
+    if detail.get("material_status") != "PINNED" or not _is_diagnosis(material.get("draft") or {}):
+        return refuse("APPROVAL_CONTENT_MISMATCH", "未取得与原审批哈希一致的诊断草案，未发送纠正消息。")
+    request = {**approval, "evidence": {"gate": detail}}
+    recipients = approval["member_policy"]["infoflow"]
+    content = ("## 诊断审批中文说明纠正\n\n"
+               "本消息仅纠正原审批展示，不创建新审批、不改变审批内容或截止时间；"
+               "仍请使用原审批编号回复。原消息保留供审计。\n\n"
+               + _approval_markdown(request, recipients, mention=True))
+    # One correction per exact presentation. Claim before send; unknown sends
+    # require reconciliation, not abandonment or a second ordinary approval.
+    key = f"approval.message-correction:{approval_id}:{_hash(content)}"
+    saved = orchestrator.state.result_by_idempotency_key(key)
+    if saved:
+        return {"ok": True, "reason_code": "CORRECTION_ALREADY_DELIVERED",
+                "approval_id": approval_id, "input_hash": input_hash, "content": content}
+    payload = {"approval_id": approval_id, "input_hash": input_hash,
+               "deadline_at": approval["deadline_at"], "actor": actor, "reason": reason,
+               "original_content_hash": _hash(original["content"]),
+               "content_hash": _hash(content), "content": content}
+    claim = orchestrator.state.claim_intent(run_id, "approval.message-correction", key, payload)
+    if claim["status"] != "CLAIMED":
+        return refuse("QUERY_REQUIRED", "纠正消息已有投递意图但结果未确认；禁止重复发送，请核对该意图。")
+    try:
+        receipt = deliver_markdown(client, orchestrator.state, run_id, recipients, lambda _: content)
+        if not isinstance(receipt, dict) or not receipt.get("message_key"):
+            raise ValueError("CORRECTION_RECEIPT_MISSING")
+        orchestrator.state.receipt(claim["intent"]["intent_id"], {
+            **payload, "receipt": receipt, "channel": "infoflow",
+        }, [])
+    except Exception as error:
+        if getattr(error, "outcome", None) == "REJECTED_BEFORE_SEND" or isinstance(error, TypeError):
+            orchestrator.state.withdraw_intent(run_id, "approval.message-correction", key, payload)
+            return refuse("CORRECTION_REJECTED", "网关在发送前拒绝了纠正消息，未送达；已撤回投递意图，可修正后重试。")
+        return refuse("QUERY_REQUIRED", "纠正消息发送结果未确认，保留投递意图；请核对，勿重复发送。")
+    # The correction repeats "同意请回复 …"; give it buttons right under it.
+    try:
+        buttons = _deliver_approval_card(
+            client, orchestrator.state, request, presentation=f"fix-{_hash(content)[:12]}",
+        )
+    except Exception as error:  # noqa: BLE001 - typed replies still work
+        buttons = {"status": "UNKNOWN", "reason_code": type(error).__name__}
+    return {"ok": True, "reason_code": "CORRECTION_DELIVERED",
+            "approval_id": approval_id, "input_hash": input_hash,
+            "deadline_at": approval["deadline_at"], "content": content, "receipt": receipt,
+            "buttons": buttons.get("status")}
+
+
+def corrected_content(state_store: Any, approval: dict[str, Any]) -> str | None:
+    """The latest delivered correction of a pending approval's message, if any."""
+    latest = state_store.latest_response(
+        approval.get("run_id"), "approval.message-correction",
+        f"approval.message-correction:{approval.get('approval_id')}:",
+    )
+    content = latest.get("content") if isinstance(latest, dict) else None
+    return content if isinstance(content, str) and content else None
+
 
 def _delivery_guard(state: Any, run_id: Any, action: Any) -> dict[str, Any] | None:
     """Guard delivery, except for the gate that authorizes the migration itself.
@@ -63,6 +150,22 @@ def mention_line(recipients: list[str]) -> str:
 def _review_gate(request: dict[str, Any]) -> dict[str, Any]:
     evidence = request.get("evidence") or {}
     gate = {**gate_intent(request.get("action")), **(evidence.get("gate") or {})}
+    # Retry evidence contains the originally persisted English field summary.
+    # Rebuild presentation from that exact draft, not a latest artifact, while
+    # preserving all canonical material and approval identities.
+    from approval_summary import _is_diagnosis, _diagnosis_summary
+    material = gate.get("_review_content")
+    draft = material.get("draft") if isinstance(material, dict) else None
+    if isinstance(draft, dict) and _is_diagnosis(draft):
+        gate["summary"] = _diagnosis_summary(draft)
+        gate["checklist"] = [
+            "失败证据、根因、修复范围、预算与回退路径",
+            "失败证据包、诊断结论、修复范围、拟议改动与证据引用",
+        ]
+        gate["effect"] = (
+            "按诊断路线返回任务计划、规格说明、架构复核或停止；"
+            "后续代码改动与提交审批仍须分别通过"
+        )
     if not gate.get("references"):
         gate["references"] = references({
             key: value for key, value in evidence.items()
@@ -88,12 +191,17 @@ def _reading_lines(gate: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(lines))
 
 
-def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[str, Any]) -> Any:
+def _deliver_approval_card(
+    client: Any, state_store: Any, gateway_request: dict[str, Any],
+    *, presentation: str | None = None,
+) -> Any:
     """Send to the collaboration group, or each authorized private recipient.
 
     Persist each target's outcome separately. An exception can mean remote delivery
     is unknown; a replay must not resend successful OR uncertain targets blindly.
     Markdown remains the reply fallback, and degraded button delivery is explicit.
+    ``presentation`` names a follow-up card for an already delivered approval, so a
+    reminder that repeats the reply instructions also carries its own buttons.
     """
     group_id = group_id_for_run(state_store, gateway_request["run_id"])
     if not hasattr(client, "send_approval_card"):
@@ -121,6 +229,8 @@ def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[
     outcomes = []
     for target_type, target_id in targets:
         key = f"approval.button:{_request_id(gateway_request)}:{target_type}:{target_id}"
+        if presentation:
+            key += f":{presentation}"
         saved = state_store.idempotency_result(key)
         if saved is None:
             try:
@@ -145,6 +255,7 @@ def _deliver_approval_card(client: Any, state_store: Any, gateway_request: dict[
                         _uuap(member)
                         for member in gateway_request["member_policy"]["infoflow"]
                     }),
+                    **({"presentation": presentation} if presentation else {}),
                 )
                 if (not isinstance(receipt, dict)
                         or not isinstance(receipt.get("card_id"), str)
@@ -639,12 +750,25 @@ def _revision_lines(gate: dict[str, Any]) -> list[str]:
 
 def _draft_lines(draft: dict[str, Any]) -> list[str]:
     from phase_document import content_lines
+    from approval_summary import _diagnosis_summary, _diagnosis_text, _is_diagnosis
 
     if isinstance(draft.get("spec"), dict):
         lines = content_lines(draft["spec"], "SPEC")
         if isinstance(draft.get("dag"), dict):
             lines += ["", "## 关联 DAG（任务覆盖，随 Spec 一并核对，不单独审批）", "",
                       *content_lines(draft["dag"], "TASKS")]
+    elif _is_diagnosis(draft):
+        lines = ["## 诊断摘要", ""]
+        lines += [f"- {item}" for item in _diagnosis_summary(draft)]
+        for key, label in (("hypothesis", "根因假设"), ("repair_direction", "修复方向")):
+            if draft.get(key) not in (None, ""):
+                lines += ["", f"### {label}", "", f"- {_diagnosis_text(draft[key])}"]
+        for key, label in (("comparison", "对比证据"), ("log_evidence", "日志证据"),
+                           ("reproduction", "复现步骤"), ("minimal_verification", "最小验证"), ("repair_plan", "修复计划")):
+            values = draft.get(key)
+            if isinstance(values, list) and values:
+                lines += ["", f"### {label}", ""]
+                lines += [f"- {_diagnosis_text(item)}" for item in values]
     else:
         lines = content_lines(draft, "TASKS" if {"nodes", "edges"} <= set(draft) else None)
     return lines

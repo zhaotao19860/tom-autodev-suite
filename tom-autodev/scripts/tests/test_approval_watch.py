@@ -364,6 +364,35 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertNotIn(f"APPROVE {approval_id}", content)
         self.assertIn("需求", content)
 
+    def test_a_reminder_posts_its_own_button_card_once_per_window(self):
+        approval_id = self._request()
+        self.notify = FakeCardNotifyClient()
+        self.watcher.notify_client = self.notify
+        self.now = datetime.fromisoformat(self.deadline) - timedelta(hours=5)
+        settled = self.watcher.tick()
+        self.watcher.tick()
+        self.assertEqual(settled[0]["reason_code"], "APPROVAL_REMINDED")
+        self.assertEqual(settled[0]["buttons"], "DELIVERED")
+        self.assertEqual(len(self.notify.cards), 1)
+        card = self.notify.cards[0]
+        self.assertEqual(card["approval_id"], approval_id)
+        self.assertEqual(card["presentation"], "nudge-1")
+        self.now = datetime.fromisoformat(self.deadline) - timedelta(hours=1)
+        self.watcher.tick()
+        self.assertEqual([item["presentation"] for item in self.notify.cards], ["nudge-1", "nudge-2"])
+
+    def test_a_reminder_repeats_the_delivered_correction(self):
+        approval_id = self._request()
+        key = f"approval.message-correction:{approval_id}:abc"
+        claim = self.orchestrator.state.claim_intent("run-1", "approval.message-correction", key, {"x": 1})
+        self.orchestrator.state.receipt(
+            claim["intent"]["intent_id"], {"content": "## 中文纠正正文\n同意 " + approval_id}, []
+        )
+        self.now = datetime.fromisoformat(self.deadline) - timedelta(hours=5)
+        self.watcher.tick()
+        _, content = self.notify.sends[0]
+        self.assertIn("## 中文纠正正文", content)
+
     def test_each_reminder_window_notifies_once(self):
         self._request()
         self.now = datetime.fromisoformat(self.deadline) - timedelta(hours=5)

@@ -43,6 +43,9 @@ _PHASE_SHORT_TITLES = {
 # should be shown only when the run is actually in one of them; appending them
 # to every progress bar made the route look as if it always had two extra phases.
 _RECOVERY_STATES = frozenset({"ARCHITECTURE_REVIEW", "ENVIRONMENT_BLOCKED"})
+# Entering one of these means the predecessor did not finish: IMPLEMENT can be
+# blocked before producing any Change Set, REVIEW/IPIPE/RELEASE can fail.
+_FAILURE_TARGETS = frozenset({"DIAGNOSE"}) | _RECOVERY_STATES
 
 
 def build(orchestrator: Any, run_id: str, *, next_step: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -160,7 +163,7 @@ def phase_route(snapshot: dict[str, Any], *, max_chars: int = 220) -> str:
         state = str(item.get("state") or "-")
         label = _PHASE_SHORT_TITLES.get(state, str(item.get("title") or state))
         status = item.get("status")
-        marker = "✓" if status == "DONE" else ("●" if status == "CURRENT" else "○")
+        marker = {"DONE": "✓", "CURRENT": "●", "FAILED": "✗"}.get(status, "○")
         parts.append(f"{label}{marker}")
     route = "→".join(parts) or "-"
     if len(route) <= max_chars:
@@ -212,23 +215,21 @@ def _phases(current: str) -> list[dict[str, Any]]:
 
 
 def _phases_for_events(current: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    visited = _active_path_states(events, current)
+    outcomes = _path_outcomes(_active_path(events, current))
     completed_terminal = current == "RELEASE_SUCCESS"
     phases = []
     for state in _PHASE_ORDER:
         spec = workflow_spec.STATES[state]
         if spec.terminal:
             continue
-        if state in _RECOVERY_STATES and state != current and state not in visited:
+        if state in _RECOVERY_STATES and state != current and state not in outcomes:
             continue
         if completed_terminal:
             status = "DONE"
         elif state == current:
             status = "CURRENT"
-        elif state in visited:
-            status = "DONE"
         else:
-            status = "PENDING"
+            status = outcomes.get(state, "PENDING")
         phases.append({
             "state": state,
             "title": _PHASE_TITLES.get(state, state),
@@ -241,25 +242,43 @@ def _phases_for_events(current: str, events: list[dict[str, Any]]) -> list[dict[
     return phases
 
 
-def _active_path_states(events: list[dict[str, Any]], current: str) -> set[str]:
-    """Return the states on the latest predecessor chain.
+def _path_outcomes(path: list[str]) -> dict[str, str]:
+    """Replay the active path forward into a DONE/FAILED status per phase.
+
+    Reaching a phase is not completing it.  A phase is DONE only when the run left
+    it along the normal route; leaving it for DIAGNOSE or another recovery state
+    means it FAILED.  Moving back to an earlier phase (DIAGNOSE -> PLAN) reopens
+    that phase and everything after it on the declared route.
+    """
+    outcomes: dict[str, str] = {}
+    for source, target in zip(path, path[1:]):
+        outcomes[source] = "FAILED" if target in _FAILURE_TARGETS else "DONE"
+        target_index = _PHASE_ORDER.index(target)
+        if target_index < _PHASE_ORDER.index(source):
+            for state in _PHASE_ORDER[target_index:]:
+                outcomes.pop(state, None)
+    return outcomes
+
+
+def _active_path(events: list[dict[str, Any]], current: str) -> list[str]:
+    """Return the latest predecessor chain, oldest state first.
 
     A run can go from IPIPE or RELEASE to DIAGNOSE and then back to PLAN.  A plain
     set of every historically visited state would leave the failed downstream
     branch marked complete after that rollback.  Transition payloads carry the
-    predecessor, so follow that chain backwards and mark only the active route.
+    predecessor, so follow that chain backwards and keep only the active route.
     Older hand-built records may omit the predecessor; for those, the event order is
     the safest compatibility fallback.
     """
     if not isinstance(events, list) or not events:
-        return set()
+        return [current] if current in _PHASE_ORDER else []
     index = len(events) - 1
-    states: set[str] = set()
+    states: list[str] = []
     while index >= 0:
         event = events[index]
         state = event.get("state") if isinstance(event, dict) else None
-        if state in _PHASE_ORDER:
-            states.add(str(state))
+        if state in _PHASE_ORDER and (not states or states[-1] != state):
+            states.append(str(state))
         payload = event.get("payload") if isinstance(event, dict) else None
         previous = payload.get("previous_state") if isinstance(payload, dict) else None
         if previous in _PHASE_ORDER:
@@ -279,8 +298,9 @@ def _active_path_states(events: list[dict[str, Any]], current: str) -> set[str]:
         # Compatibility for legacy/synthetic events that did not persist
         # previous_state.  Production transitions use the branch-aware path above.
         index -= 1
-    if current in _PHASE_ORDER:
-        states.add(current)
+    states.reverse()
+    if current in _PHASE_ORDER and (not states or states[-1] != current):
+        states.append(current)
     return states
 
 

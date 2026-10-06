@@ -167,6 +167,13 @@ def revise(
     # event, and copying the entry payload (previous_state/artifact_id) would let
     # crash recovery mistake the redo for the original SPEC->TASKS hand-off.
     payload: dict[str, Any] = {}
+    # PLAN is the only revisable phase whose predecessor (TASKS) has no revisions.
+    # Use the already validated action as the source of truth.  Do not copy arbitrary
+    # fields from the event: a REVISE event must not become an alternate version pin.
+    if state == "PLAN":
+        source_revisions = action.get("source_revisions")
+        if isinstance(source_revisions, dict) and source_revisions:
+            payload["source_revisions"] = dict(source_revisions)
     payload["reentry"] = {
         "kind": "REVISE",
         "from_state": state,

@@ -25,7 +25,7 @@ Environment, transport, revision and stale-artifact failures do not justify busi
 
 ## Workflow output and limits
 
-Use the action's [diagnosis schema](../tom-autodev/schemas/diagnosis.schema.json) and [phase-specific mapping](references/phase-contract.md). Preserve the authoritative failure signature and repair history. The controller owns retry budgets, G6, routing and durable case updates; the model supplies evidence, not a new counter or replacement signature. Two no-progress rounds, three failed fixes and five-round limits must be checked against durable history, not recalled conversation.
+Use the action's [diagnosis schema](../tom-autodev/schemas/diagnosis.schema.json) and [phase-specific mapping](references/phase-contract.md). Write the human-readable fields that G6 shows to approvers (`hypothesis`, `repair_direction`, `comparison`, `log_evidence`, `reproduction`, `minimal_verification`, `repair_plan`) in Chinese; keep enums, identifiers, file paths and the authoritative failure signature verbatim. The approval card shows any untranslated English as labeled source text instead of guessing a translation. Preserve the authoritative failure signature and repair history. The controller owns retry budgets, G6, routing and durable case updates; the model supplies evidence, not a new counter or replacement signature. Two no-progress rounds, three failed fixes and five-round limits must be checked against durable history, not recalled conversation.
 
 If root cause or verification is absent, use `DIAGNOSIS_INCOMPLETE` with explicit missing evidence. If a required controller/schema field cannot be truthfully represented, return a contract blocker; never manufacture a repair diff, identity or remote receipt to make validation pass.
 

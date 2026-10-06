@@ -42,6 +42,7 @@ _NAMED_SCHEMAS = frozenset(
         # already the IMPLEMENT phase content, and the descriptor is a different
         # document stored under an artifact kind that happens to reuse the word.
         "submit-descriptor",
+        "producer-block",
     }
 )
 
@@ -102,7 +103,7 @@ STRUCTURAL_ONLY_SCHEMAS = frozenset({
     # release-evidence and submit-descriptor bind cross-artifact at ingestion
     # (phase_protocol._release_binding_error / _submission_controller_binding); run-summary
     # is a terminal report whose shape the schema fully pins.
-    "run-summary", "submit-descriptor", "release-evidence",
+    "run-summary", "submit-descriptor", "release-evidence", "producer-block",
 })
 
 

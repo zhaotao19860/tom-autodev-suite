@@ -118,7 +118,7 @@ STATES: dict[str, StateSpec] = {
         entry_gate="G4", output_gate="G5", target="REVIEW", predecessor="PLAN",
         envelope_revisions=True, title="05-change-set", task_scoped=True,
         side_effects=_SKILL_SIDE_EFFECTS, entry_artifacts=("task-plan",),
-        transitions=frozenset({"REVIEW"}),
+        transitions=frozenset({"REVIEW", "DIAGNOSE"}),
     ),
     # more-states
     "REVIEW": StateSpec(
@@ -173,6 +173,7 @@ TRANSITION_REQUIREMENTS: dict[tuple[str, str], tuple[tuple[str, ...], str | None
     ("REVIEW", "STOPPED"): (("review",), None),
     ("DIAGNOSE", "SPEC"): (("failure-bundle",), "G6"),
     ("DIAGNOSE", "ARCHITECTURE_REVIEW"): (("failure-bundle",), "G6"),
+    ("IMPLEMENT", "DIAGNOSE"): (("producer-block-report", "task-plan"), None),
     ("ENVIRONMENT_BLOCKED", "IPIPE"): (("submission",), "G8"),
 }
 
@@ -204,6 +205,7 @@ FAILURE_TARGETS: dict[str, str] = {
     "TEST_FAILURE": "DIAGNOSE",
     "REVIEW_FAILED": "DIAGNOSE",
     "RELEASE_FAILED": "DIAGNOSE",
+    "PLAN_INCOMPLETE": "DIAGNOSE",
 }
 _FAILURE_DEFAULT = "STOPPED"
 
