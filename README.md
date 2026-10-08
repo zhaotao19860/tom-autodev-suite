@@ -32,6 +32,16 @@ python3 tom-autodev/scripts/cli.py submit-draft CARD_OR_RUN JOB_ID draft.json
 
 `submit-draft` 只接收当前 schema 要求的 `DraftContent`，不接收 `ArtifactEnvelope`。需要审批时，CLI 会自动发起绑定当前草案和 `approval_input_hash` 的审批；成功返回 `PARKED / APPROVAL_WAIT`，不会自动批准。
 
+IMPLEMENT 的 Change Set 不手工拼 patch 或哈希，而是由控制面从任务自有、已提交的干净 HEAD 只读提取：
+
+```bash
+python3 tom-autodev/scripts/cli.py prepare-change-set CARD_OR_RUN JOB_ID metadata.json --output change-set.json
+```
+
+`metadata.json` 只含 `change_set_id`、`task_id`、`test_ids`、`traceability_delta`、`deviations`。`--output` 只独占创建新文件，已存在则拒绝覆盖。schema 要求 `business_patch` / `test_patch` 是完整 Git patch，空字符串只允许配合 `patch_kinds` 的 `no-op`；SHA、路径、摘要或占位文本会被拒绝。
+
+PLAN 阶段发现计划与已批准 Spec 冲突时，用 `report-producer-conflict CARD_OR_RUN JOB_ID report.json` 上报（schema 见 `producer-conflict.schema.json`，报告的 `job_id` 必须与当前 job 一致）；控制器以 `SPEC_CONFLICT` 转入 DIAGNOSE，不会伪造任务计划。
+
 在 Comate 中可以直接使用卡片动作，不必手写 Python CLI：
 
 ```text
@@ -115,6 +125,9 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
   已处理的卡不会因重复点击重新出现按钮。提醒优先重放最近一次已送达的纠正正文。
 - 进度路线只把沿正常路线离开的阶段标为 ✓；进入 DIAGNOSE 或恢复分支的前驱阶段标为 ✗
   （例如 IMPLEMENT 被 producer-block 阻断），回退到较早阶段时其后阶段全部重置为 ○。
+- 如流已回复并落账精确的 `WORKFLOW_SPEC_MIGRATION` 批准时，`continue` 会按当前 run 与
+  当前迁移计划的 `input_hash` 消费该批准并应用迁移，再交给 worker 恢复；它不会自动批准或
+  重开审批。`status` 只读显示「迁移已批准待应用」。
 
 具体规则与门禁材料清单见 [Approval Policy](tom-autodev/references/approval-policy.md)，G0/G5/G9 与非审批通知的对照见 [消息示例](docs/APPROVAL_UX_EXAMPLES.md)。
 

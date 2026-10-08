@@ -4,6 +4,25 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-08 · Change Set 受控生成、PLAN 冲突上报与已批准迁移续跑
+
+- 新增 `prepare-change-set`：校验当前 IMPLEMENT action/job、Plan 前驱、baseline、worktree
+  所有权与干净 HEAD 后，只读提取确定性的完整 Git diff 并计算哈希；`--output` 独占创建。
+- change-set schema 新增 `patch_kinds`（`git-diff-v1` / `no-op`），校验器用
+  `git apply --numstat` 解析 patch，拒绝 SHA、路径、摘要和占位文本；IMPLEMENT 草案额外
+  校验 traceability 与 Plan 验收点、测试 ID 一致。
+- 新增 `report-producer-conflict` 与 `producer-conflict` schema：PLAN 与前序契约冲突时以
+  `SPEC_CONFLICT` 转入 DIAGNOSE（`PLAN → DIAGNOSE` 需 producer-conflict 与 task-dag）。
+- `continue` 可消费精确匹配当前 run 与迁移计划 `input_hash` 的 `WORKFLOW_SPEC_MIGRATION`
+  批准并应用迁移；`status` 显示「迁移已批准待应用」。不需要人工门的已保存草案显示「待处理」。
+- KU：索引发布意图记录编辑意图链字段，新增外部只读观测表 `external_observations`；
+  KU 意图未决时 `drive` 自动持有 worker lease；旧版无链字段的 publish 意图仅在同 run
+  存在更早的精确 marker 编辑时才恢复。
+- 修复：`_publish_matches_edit` 误声明为 `staticmethod` 却引用 `self`，旧版 publish 意图
+  恢复分支必现 `NameError`；`report-producer-conflict` 未校验报告 `job_id` 与当前 job 一致。
+- `tom-implement` 要求通过 `prepare-change-set` 生成候选，不手工拼 patch 或哈希。
+- 控制面全量回归 1224 项通过；未执行 BGW 本地编译或测试。
+
 ## 2026-10-06 · 审批按钮补发、进度失败标记与工作流审查修复
 
 - 恢复 11:11 意外丢失的诊断审批中文化与 `correct_approval_message`（工作区文件被旧
