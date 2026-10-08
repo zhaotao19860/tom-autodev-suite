@@ -313,12 +313,15 @@ class RunChangeTests(unittest.TestCase):
             ("owner", "g1", "去掉 c2s_mss 严格等值"),
             ("owner", "g1", "覆盖 NAT64/NAT66"),
             ("owner", "g1", "同意 other-approval"),
+            ("owner", "g1", "合法连接不得被拒"),
+            ("owner", "g1", "需修改 other-approval"),
             ("owner", "g1", "之后的闲聊"),
         )
         revised = run_change.revise(
             self.orchestrator, run_id, approval_id, feedback=None, actor="owner",
         )
-        self.assertEqual(revised["feedback"], "去掉 c2s_mss 严格等值；覆盖 NAT64/NAT66")
+        self.assertEqual(revised["feedback"],
+                         "去掉 c2s_mss 严格等值；覆盖 NAT64/NAT66；合法连接不得被拒")
 
     def test_a_tap_with_no_follow_up_still_requires_feedback(self):
         run_id, _knowledge, _job_id, rejected_hash = self._at_g2()
