@@ -108,9 +108,12 @@ Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan,
 All approval-facing text is Chinese by default: card titles, questions, material summaries,
 button labels, reply examples, timeout notices, resend notices, acknowledgements and
 error prompts. Display `同意 <approval_id>`, `需修改 <approval_id> <中文修改意见>` and
-`驳回 <approval_id>` for new approvals. Keep `APPROVE`, `REVISE` and `REJECT` only as
-internal ledger values and backward-compatible input aliases; never make new approvers
-translate an English command.
+`停止 <approval_id>` for new approvals; the reject button reads `停止run`. Keep `APPROVE`,
+`REVISE`, `REJECT` and the historical `驳回` label only as internal ledger values and
+backward-compatible input aliases; never make new approvers translate an English command.
+A reviewer may also give the feedback to Comate directly with
+`/tom-autodev CARD 需修改 <意见>`, which settles a still-pending gate as a REVISE on the
+comate channel and re-enters the phase in one step — no 如流 tap first.
 
 When a run needs a human decision, use Comate's structured question interface first:
 show each blocking choice as a题目 with background, explicit options, recommendation,
@@ -205,7 +208,7 @@ question/purpose/status/handoff, and current collaboration items. See
 [`references/phase-artifacts.md`](references/phase-artifacts.md) for the document map and
 artifact contract.
 
-When a reviewer selects “需修改” on G1/G2/G3/G4/G5, do not tell them to restart and do not
+When a reviewer selects “需修改” on G1–G6, do not tell them to restart and do not
 reissue the same gate manually. The next `/tom-autodev CARD 继续` consumes the
 hash-bound feedback, re-enters the producer phase, and delivers a new Chinese approval card
 for the new content hash. G4 is the PLAN producer gate and is revisable for the same reason

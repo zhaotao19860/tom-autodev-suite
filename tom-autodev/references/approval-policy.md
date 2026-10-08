@@ -36,7 +36,7 @@ No shell setup is required. `InfoflowBotClient` starts `infoflow-gateway/src/bot
 The gateway only journals messages. Every decision is authorized by `InfoflowReplyConsumer` against the stored request, so a reply is applied only when it:
 
 - quotes the `approval_id` or `request_id` (`approval_id` is unique per `run_id`/action/`input_hash`, so quoting it binds the answer to that content hash);
-- says exactly one of `同意`、`需修改` or `驳回` (historical English replies remain compatible);
+- says exactly one of `同意`、`需修改` or `停止`（历史 `驳回` 与英文 `APPROVE/REVISE/REJECT` 仍兼容）;
 - comes from a sender whose uuap resolves to exactly one member of `member_policy["infoflow"]`;
 - was typed either in a private chat or in the run's own collaboration group — a group reply carries the `group_id` the gateway journalled, and the same words in another group are not a decision about this run;
 - arrives after the request was created and no later than its deadline.
@@ -115,14 +115,18 @@ the gateway still authorizes nothing:
 The refresh reports a click, never its authorization. The ledger and watcher
 acknowledgement remain authoritative, and duplicate/stale/unauthorized taps cannot
 override the effective ledger decision. Replying `同意 <approval_id>` /
-`驳回 <approval_id>` as text stays available in every case; historical English
-replies remain compatible.
+`停止 <approval_id>` as text stays available in every case; the gateway also gives an
+immediate visual receipt when an approver types plain feedback after a 需修改 tap, by
+refreshing that one awaiting card — a courtesy, never a decision. Historical `驳回` and
+English replies remain compatible.
 
 ### What a REJECT does
 
-A REJECT never reopens the same hash. On G1/G2/G3/G4 it means "redo this draft": the
-reviewer adds feedback (typed after `需修改 <approval_id>` in 如流, or given to Comate in the
-IDE), `revise` re-enters the same phase with that feedback and the rejected draft, and the
+A REJECT never reopens the same hash. On G1–G6 it means "redo this draft": the
+reviewer adds feedback (typed after `需修改 <approval_id>` in 如流, tapped 需修改 then replied
+plainly in the group, or given to Comate as `/tom-autodev CARD 需修改 <意见>` which also
+settles a still-pending gate), `revise` re-enters the same phase with that feedback and the
+rejected draft, and the
 same gate is asked again for the new hash with a "本次修改说明 / 与上一版的差异" section.
 Only the member who cast the effective REJECT can supply the 如流 feedback. A REJECT of
 any other gate stays a stop; code-phase rework goes through DIAGNOSE.

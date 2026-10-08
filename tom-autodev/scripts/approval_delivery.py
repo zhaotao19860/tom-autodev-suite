@@ -174,6 +174,9 @@ def _review_gate(request: dict[str, Any]) -> dict[str, Any]:
     return gate
 
 
+_MATERIAL_LABELS = ("本次审批材料包", "本次审批可读预览", "已保存草案")
+
+
 def _reading_lines(gate: dict[str, Any]) -> list[str]:
     lines = []
     for item in gate.get("references") or []:
@@ -247,7 +250,7 @@ def _deliver_approval_card(
                     approval_id=gateway_request["approval_id"],
                     target_type=target_type, target_id=target_id,
                     title=f"tom-autodev {action} 审批",
-                    question="待你审批：请先核对材料和重点，再选择「同意」「需修改」或「驳回」。",
+                    question="待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。",
                     lines=[line for line in lines if line],
                     # Who may answer, so a shared group card only reads as answered
                     # when the tap came from an approver. The ledger still decides.
@@ -466,7 +469,7 @@ class InfoflowApprovalTransport:
             warning = (
                 f"## tom-autodev 审批操作提示（不是新审批）\n\n"
                 f"审批 {gateway_request['approval_id']} 的按钮未完整送达或结果未确认。"
-                "\n请先阅读审批详情；可回复“同意”“需修改”或“驳回”，也可以在 IDE 处理。"
+                "\n请先阅读审批详情；可回复“同意”“需修改”或“停止run”，也可以在 IDE 处理。"
                 "\n这不表示审批已通过；不会自动重复发送结果不明的按钮。"
             )
             try:
@@ -627,18 +630,23 @@ def _approval_markdown(
               "", *(f"- {_line(item)}" for item in gate.get("checklist") or []),
               "", "**请先查看这些文件 / 证据**", ""]
     body = _review_body(gate) if gate.get("material_status") != "MISSING" else []
-    if body:
-        lines += ["- 本次审批的完整内容见下方「审批正文」；下列本机路径和账本 ID 仅供在 IDE 中核对。"]
     reads = _reading_lines(gate)
-    lines += [f"- {item}" for item in reads] if reads else [
-        "- 未提供本次固定版本材料的位置，请先在 IDE 补齐；需求背景链接不能替代审批产物。"
-    ]
+    if body:
+        # Every card keeps the readable content in 「审批正文」; the reading list then
+        # only points at the material pack, never a wall of raw artifact ids/hashes that
+        # just repeat what the body and pack already carry. This applies to all gates.
+        lines.append("- 完整内容见下方「审批正文」，其余固定版本与证据标识见材料包。")
+        lines += [f"- {item}" for item in reads if item.startswith(_MATERIAL_LABELS)]
+    elif reads:
+        lines += [f"- {item}" for item in reads]
+    else:
+        lines.append("- 未提供本次固定版本材料的位置，请先在 IDE 补齐；需求背景链接不能替代审批产物。")
     if gate.get("material_status") == "MISSING":
         lines += ["", "**材料缺口：未取得与本次 hash 匹配的产物，请勿批准。**"]
     lines += ["", f"**决定边界** {_line(gate.get('decision'))}"]
     summary = [_line(item) for item in gate.get("summary") or []]
     summary = [item for item in summary if item]
-    if summary:
+    if summary and not (body and all(f"- {item}" in body for item in summary)):
         lines += ["", "**内容摘要**", *(f"- {item}" for item in summary)]
     documents = _documents(_evidence(evidence, "documents"))
     if documents:
@@ -667,13 +675,15 @@ def _approval_markdown(
             if gate_of(action) in _REVISABLE_GATES
             else []
         ),
-        "**驳回请回复**",
-        f"驳回 {approval_id}",
+        "**停止 run 请回复**",
+        f"停止 {approval_id}",
         "",
-        *(["> 点卡片“需修改”后直接在本群回复修改意见即可（不用带审批 ID）；也可按上面格式一次回复。驳回则停止流程。收到意见后自动登记重做，在 IDE 继续即生成新版草案并重新发起本门。"
-           "历史英文回复仍兼容，但新审批不再展示英文命令。"]
+        *(["> 点卡片“需修改”后直接在本群回复修改意见即可（不用带审批 ID）；也可按上面格式一次回复。"
+           "也可以在 Comate 里直接说“/tom-autodev <卡片> 需修改 <意见>”，一步提意见并继续。"
+           "“停止”则结束本 run。收到意见后自动登记重做，在 IDE 继续即生成新版草案并重新发起本门。"
+           "历史“驳回”“REJECT”等回复仍兼容。"]
           if gate_of(action) in _REVISABLE_GATES else []),
-        "> 文字回复的同意/驳回/需修改必须带 approval_id；它绑定本次内容，需求一变即失效。",
+        "> 文字回复的同意/停止/需修改必须带 approval_id；它绑定本次内容，需求一变即失效。",
         f"> input_hash `{input_hash[:12]}…`",
         f"> run_id `{run_id[:12]}…`",
     ]
@@ -770,12 +780,19 @@ def _draft_lines(draft: dict[str, Any]) -> list[str]:
         for key, label in (("hypothesis", "根因假设"), ("repair_direction", "修复方向")):
             if draft.get(key) not in (None, ""):
                 lines += ["", f"### {label}", "", f"- {_diagnosis_text(draft[key])}"]
-        for key, label in (("comparison", "对比证据"), ("log_evidence", "日志证据"),
-                           ("reproduction", "复现步骤"), ("minimal_verification", "最小验证"), ("repair_plan", "修复计划")):
+        for key, label in (("repair_plan", "修复计划"), ("comparison", "对比证据")):
             values = draft.get(key)
             if isinstance(values, list) and values:
                 lines += ["", f"### {label}", ""]
                 lines += [f"- {_diagnosis_text(item)}" for item in values]
+        supporting = [
+            f"{label} {len(draft[key])} 条"
+            for key, label in (("log_evidence", "日志证据"), ("reproduction", "复现步骤"),
+                               ("minimal_verification", "最小验证"))
+            if isinstance(draft.get(key), list) and draft[key]
+        ]
+        if supporting:
+            lines += ["", f"- 另有{'、'.join(supporting)}，原文见材料包"]
     else:
         lines = content_lines(draft, "TASKS" if {"nodes", "edges"} <= set(draft) else None)
     return lines

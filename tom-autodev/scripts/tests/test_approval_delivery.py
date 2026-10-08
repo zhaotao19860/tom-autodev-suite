@@ -112,7 +112,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         recipients, content = notify.sends[0]
         self.assertEqual(recipients, sorted(_POLICY["infoflow"]))
         self.assertIn("同意 approval-1", content)
-        self.assertIn("驳回 approval-1", content)
+        self.assertIn("停止 approval-1", content)
         self.assertNotIn("APPROVE approval-1", content)
         self.assertNotIn("REJECT approval-1", content)
         # The gateway sends JSON, so line breaks travel as real newlines.
@@ -140,7 +140,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         )
         _, content = notify.sends[0]
         self.assertIn("需修改 approval-1 <你的修改意见>", content)
-        self.assertIn("驳回 approval-1", content)
+        self.assertIn("停止 approval-1", content)
         self.assertIn("直接在本群回复修改意见", content)
         self.assertNotIn("REVISE approval-1", content)
 
@@ -252,7 +252,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         self.assertIn("这不表示审批已通过", warning)
         self.assertIn("同意", warning)
         self.assertIn("需修改", warning)
-        self.assertIn("驳回", warning)
+        self.assertIn("停止", warning)
         self.assertNotIn("APPROVE / REVISE / REJECT", warning)
 
     def test_card_type_error_does_not_replay_the_markdown_message(self):

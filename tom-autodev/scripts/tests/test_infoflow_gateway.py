@@ -322,7 +322,7 @@ for (let i = 0; i < 3; i++) {
 }
 await api.answerCard({ cardId: short.card_id }, 'reject.' + request.approval_id, 'qa');
 assert.equal(rendered.at(-1).card.components.length, 2);
-assert.equal(rendered.at(-1).question, '已由 qa 处理：驳回');
+assert.equal(rendered.at(-1).question, '已由 qa 处理：停止run');
 """)
 
     def test_journal_callback_records_untrusted_click_without_approving(self):

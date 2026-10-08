@@ -12,6 +12,10 @@ _WORD = re.compile(r"[A-Za-z]+")
 _CHINESE_DECISIONS = (
     ("同意", "APPROVE"),
     ("需修改", "REVISE"),
+    # "停止" is the current label; "驳回" stays a backward-compatible alias.
+    ("停止run", "REJECT"),
+    ("停止 run", "REJECT"),
+    ("停止", "REJECT"),
     ("驳回", "REJECT"),
 )
 _JOURNAL_ENV = "TOM_AUTODEV_INFOFLOW_REPLY_JOURNAL"

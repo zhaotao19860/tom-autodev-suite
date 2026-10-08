@@ -77,7 +77,7 @@ class RunChangeTests(unittest.TestCase):
         run_id, knowledge, job_id, rejected_hash = self._at_g2()
         rejected = self._approval(run_id, "G2", rejected_hash, decision="REJECT")
         brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
-        self.assertEqual(brief["status_label"], "已驳回待修改")
+        self.assertEqual(brief["status_label"], "需修改待重做")
         self.assertIn("按意见重做", brief["next"]["text"])
 
         missing = run_change.revise(
@@ -132,7 +132,7 @@ class RunChangeTests(unittest.TestCase):
         self.assertIn("与上一版的差异", rendered)
         self.assertIn("（新分支）", rendered)
         self.assertIn(f"需修改 {'a' * 32} <你的修改意见>", rendered)
-        self.assertIn(f"驳回 {'a' * 32}", rendered)
+        self.assertIn(f"停止 {'a' * 32}", rendered)
         self.assertNotIn(f"REVISE {'a' * 32}", rendered)
 
         approved = self._approval(run_id, "G2", pending["approval_input_hash"])

@@ -223,8 +223,10 @@ _FAILURE_DEFAULT = "STOPPED"
 # IMPLEMENT/G5 likewise: a "需修改" on the Change Set re-enters IMPLEMENT with the
 # feedback; a requirement change found there leaves via a USER_REQUIREMENT_CHANGED
 # producer block -> DIAGNOSE -> GRILL rather than being absorbed into code.
-REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT"})
-REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3", "G4", "G5"})
+# DIAGNOSE/G6 too: a diagnosis is a model draft, and "需修改" on it is feedback on that
+# draft, not a reason to stop the run.
+REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "DIAGNOSE"})
+REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3", "G4", "G5", "G6"})
 
 # Approved backward moves (run_change.rewind): the run re-enters the target and every
 # phase from there is produced again; nothing already recorded is rewritten. Later

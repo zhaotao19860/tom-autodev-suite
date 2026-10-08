@@ -754,8 +754,8 @@ def _nudge_markdown(
                 if gate_of(approval.get("action") or "") in workflow_spec.REVISABLE_GATES
                 else []
             ),
-            "**驳回请回复**",
-            f"驳回 {approval_id}",
+            "**停止 run 请回复**",
+            f"停止 {approval_id}",
         ]
     )
 
@@ -874,7 +874,7 @@ def _ack_note(
     if decision == "REVISE":
         return "已选择需修改：保留 run 并重新进入当前阶段，Comate 将按审批重点生成新版材料并重新发起本门。"
     if decision == "REJECT":
-        return "已驳回并停止 run，不会继续后续阶段。"
+        return "已停止 run，不会继续后续阶段。"
     if decision == "APPROVE" and gate == "CHANGE_REQUEST":
         return f"变更请求只授权回退本身：在 IDE 让 Comate 执行 `rewind --approval-id {approval['approval_id']}`。"
     return None
@@ -899,13 +899,13 @@ def _ack_markdown(
         lines += ["", "> 需要重新发起审批；内容若已变更，会绑定新的 input_hash。"]
         return "\n".join(lines)
     landed = {
-        "APPROVE": "已同意", "REVISE": "已标记需修改", "REJECT": "已驳回",
+        "APPROVE": "已同意", "REVISE": "已标记需修改", "REJECT": "已停止 run",
         "REVISE_FEEDBACK": "已收到修改意见",
     }.get(decision, decision)
     following = {
         "APPROVE": "Comate 会在下一步继续该 run。",
         "REVISE": "run 保留，Comate 按意见重做当前阶段并重新发起审批。",
-        "REJECT": "run 已停止，Comate 不会继续后续阶段。",
+        "REJECT": "run 已停止，不会继续后续阶段。",
     }.get(decision, "请以审批账本和 run 状态为准。")
     if note:
         replaces = decision in {"APPROVE", "REVISE_FEEDBACK"} or "取代" in note or "回复修改意见" in note

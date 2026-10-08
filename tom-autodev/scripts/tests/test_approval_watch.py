@@ -324,7 +324,7 @@ class ApprovalWatcherTests(unittest.TestCase):
         )
         self.watcher.tick()
         _, content = self.notify.sends[0]
-        self.assertIn("已驳回", content)
+        self.assertIn("已停止", content)
         self.assertIn("不会继续", content)
 
     def test_an_expired_approval_is_reported_as_a_timeout(self):
@@ -482,7 +482,7 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertEqual(retry_card["title"], "tom-autodev G0#retry-1 审批")
         self.assertEqual(
             retry_card["question"],
-            "待你审批：请先核对材料和重点，再选择「同意」「需修改」或「驳回」。",
+            "待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。",
         )
 
     def test_reissue_is_refused_while_the_gate_is_still_open(self):

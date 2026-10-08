@@ -32,7 +32,7 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
     if approved:
         return "已批准待提交"
     if rejected:
-        return "已驳回待修改"
+        return "需修改待重做"
     if state == "ARCHITECTURE_REVIEW":
         return "待决定回退"
     if producer_job and producer_job.get("awaiting_answers"):
@@ -212,7 +212,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
     rejected = None if terminal or open_gates or approved else next((
         row for row in reversed(approvals)
         if current_gate and gate_of(row.get("action")) == current_gate
-        and row.get("effective_decision") == "REJECT"
+        and row.get("effective_decision") in {"REVISE", "REJECT"}
         and row.get("created_at") and current.get("created_at")
         and row["created_at"] >= current["created_at"]
     ), None)

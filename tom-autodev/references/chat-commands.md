@@ -13,6 +13,7 @@
 | `/tom-autodev CARD 状态` | `cli.py status CARD_OR_RUN` | 读取紧凑进度摘要；无活动 run 时可查看唯一终态 run；多个候选时列出候选 |
 | `/tom-autodev CARD 当成状态` | `cli.py status CARD_OR_RUN` | “当成状态”按状态查询处理，等同于“状态” |
 | `/tom-autodev CARD 继续` | `cli.py continue CARD_OR_RUN` | 消费有效 handoff，或从持久化检查点继续驱动唯一活动 run |
+| `/tom-autodev CARD 需修改 <意见>` | `cli.py revise RUN --approval-id <当前门> --feedback <意见> --actor <你>` → `continue` | 对当前待审批/已选需修改的门直接提意见并原地重做，一步代替“如流点需修改＋回复意见” |
 | `/tom-autodev CARD 重新开始` | `stop`（如有活动 run）→ `cli.py start --fresh CARD PROJECT` → `drive` | 显式创建新的审计 run；旧 run 不删除，新的 run 驱动到下一个动作 |
 
 ## 与 CLI 的区别
@@ -43,9 +44,14 @@
 /tom-autodev BGW-1995 开始
 /tom-autodev BGW-1995 状态
 /tom-autodev BGW-1995 继续
+/tom-autodev BGW-1995 需修改 去掉 c2s_mss 严格等值，覆盖 NAT44/NAT64/NAT66
 /tom-autodev BGW-1995 结束
 /tom-autodev BGW-1995 重新开始
 ```
+
+`需修改 <意见>` 会定位该 run 当前唯一可修改的门（G1–G6），把意见作为该门的
+“需修改”决策记在 comate 渠道并原地重做本阶段，再 `continue` 投递新版审批卡；
+无需先在如流点按钮。门已同意或已超时则不能再改，会提示重新发起。
 
 `开始`、`继续`、`重新开始`返回 `PARKED / APPROVAL_WAIT` 时，只创建或投递审批，
 不会替用户批准；`状态`和进度通知也不会伪装成审批卡。

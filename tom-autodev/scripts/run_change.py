@@ -9,7 +9,7 @@ way a workflow reset keeps the original history and continues from a chosen poin
 
 Two entry points, each authorized by a human decision that already exists:
 
-    * ``revise`` — a REVISE of the current producer gate (G1/G2/G3/G4/G5) plus the
+    * ``revise`` — a REVISE of the current producer gate (G1–G6) plus the
   reviewer's feedback. The same state is entered again with that feedback and the
   rejected draft as context, so the next draft is a response to the review rather
   than a fresh guess, and the gate shows what changed.
@@ -158,7 +158,7 @@ def revise(
     if state not in workflow_spec.REVISABLE_STATES:
         return _failure(
             "REVISE_NOT_SUPPORTED", run_id, state=state,
-            hint="只有 GRILL/SPEC/TASKS/PLAN/IMPLEMENT 可按修改意见原地重做；更早阶段用 rewind，"
+            hint="只有 GRILL/SPEC/TASKS/PLAN/IMPLEMENT/DIAGNOSE 可按修改意见原地重做；更早阶段用 rewind，"
                  "需求变更由 IMPLEMENT/PLAN 上报 USER_REQUIREMENT_CHANGED 经 DIAGNOSE 回到 GRILL",
         )
     if not isinstance(actor, str) or not actor.strip():
@@ -171,9 +171,6 @@ def revise(
     gate = workflow_spec.STATES[state].output_gate
     if gate_of(approval.get("action") or "") != gate:
         return _failure("APPROVAL_GATE_MISMATCH", run_id, approval_id=approval_id, expected_gate=gate)
-    if approval.get("effective_decision") not in {"REVISE", "REJECT"}:
-        return _failure("APPROVAL_NOT_REJECTED", run_id, approval_id=approval_id,
-                        decision=approval.get("effective_decision"))
     action, job_id, draft = _current_draft(orchestrator, run_id)
     if (
         draft is None
@@ -182,11 +179,30 @@ def revise(
     ):
         # Only the REJECT of the draft the run is waiting on can send that phase back.
         return _failure("APPROVAL_STALE", run_id, approval_id=approval_id)
+    decision = approval.get("effective_decision")
     text = (feedback or "").strip() or _journal_feedback(orchestrator, approval)
+    if decision not in {"REVISE", "REJECT"}:
+        # Comate path: giving feedback here IS the 需修改 decision. Settle the still
+        # PENDING gate as a REVISE on the comate channel (the ledger checks the actor
+        # against the member policy and the input hash) so the user does not have to
+        # tap the 如流 card first. A gate already APPROVED/TIMED-OUT cannot be revised.
+        if decision is not None or not text:
+            return _failure("APPROVAL_NOT_REJECTED", run_id, approval_id=approval_id,
+                            decision=decision,
+                            hint="先在如流点「需修改」并回复意见，或在 Comate 用 `--feedback` 直接提意见")
+        settled = orchestrator.approvals.receive(
+            approval_id, "REVISE", approval.get("input_hash"), "comate", actor.strip(),
+            run_id=run_id, state_store=orchestrator.state,
+        )
+        if settled.get("reason_code") not in {None, "OK"}:
+            return _failure(settled.get("reason_code", "APPROVAL_NOT_REJECTED"),
+                            run_id, approval_id=approval_id)
+        approval = orchestrator.approvals.get(approval_id)
     if not text:
         return _failure(
             "FEEDBACK_REQUIRED", run_id, approval_id=approval_id,
-            hint="说明需要修改什么；在如流点「需修改」后直接回复意见，或回复 `需修改 <审批ID> 修改意见`",
+            hint="说明需要修改什么；在如流点「需修改」后直接回复意见，回复 `需修改 <审批ID> 修改意见`，"
+                 "或在 Comate 用 `/tom-autodev <卡片> 需修改 <意见>`",
         )
     # Only the reason travels: a design-front action reads nothing else from its
     # event, and copying the entry payload (previous_state/artifact_id) would let
@@ -199,6 +215,11 @@ def revise(
         source_revisions = action.get("source_revisions")
         if isinstance(source_revisions, dict) and source_revisions:
             payload["source_revisions"] = dict(source_revisions)
+    if state == "DIAGNOSE":
+        # The diagnosis predecessor (failure, producer block) is bound by the entry
+        # event, so the redo carries that binding unchanged.
+        payload.update({key: value for key, value in (current.get("payload") or {}).items()
+                        if key != "reentry"})
     if state == "IMPLEMENT":
         # Keep the redo on the approved plan the rejected Change Set was built from.
         plan = next((item for item in action.get("input_artifacts") or []

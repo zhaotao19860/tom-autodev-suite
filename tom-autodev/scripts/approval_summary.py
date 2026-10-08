@@ -35,8 +35,8 @@ _REVIEW = {
            "WORKSPACE receipts/binding 或当前任务 Task Plan；不可互相替代"),
     "G5": ("业务与测试完整 diff、基线/候选修订、验收追溯及每一项计划偏离",
            "Change Set 的 business_patch / test_patch / full_diff_hash / deviations；不是只看摘要"),
-    "G6": ("失败证据、根因、修复范围、预算与回退路径",
-           "Failure Bundle、Diagnosis 的 repair_scope / proposed_changes / evidence_refs"),
+    "G6": ("分类与路线是否成立，根因、修复方向与修复计划是否对应",
+           "诊断的 classification / route / hypothesis / repair_direction / repair_plan；其余证据见材料包"),
     "G7": ("区分 iCode 提交与 iPipe 首次触发；精确版本、目标分支、模块和参数",
            "已归档 submit descriptor + Review，或当前模块 trigger binding；两者 hash 不通用"),
     "G8": ("失败重跑或人工阶段继续；build/stage、真实失败原因及脱敏参数",
@@ -61,7 +61,7 @@ _EFFECTS = {
     "G2": "发布 Spec；按当前 change_class 处理 TASKS（合并路由不另开 G3），再进入 WORKSPACE",
     "G3": "发布 DAG，进入 WORKSPACE 准备绑定；尚未批准 Task Plan",
     "G4": "WORKSPACE 绑定获批仅进入 PLAN；Task Plan 获批才进入 IMPLEMENT（以本次对象为准）",
-    "G6": "按诊断路由回 PLAN / SPEC / ARCHITECTURE_REVIEW 或 STOPPED；后续代码/提交门仍须分别通过",
+    "G6": "按诊断路由回 GRILL / SPEC / PLAN / ARCHITECTURE_REVIEW 或 STOPPED；后续各门仍须分别通过",
     "G7": "仅执行本次 hash 绑定的 iCode 提交或单模块 iPipe 触发；不是两种操作的通用授权",
     "G8": "仅重跑或继续本次 build/stage 和参数绑定的阶段，不批准新代码或发布",
     "G9": "只读核验平台发布并记录匹配证据；全部模块通过才进入 RELEASE_SUCCESS，未发布则等待，不强制发布",
@@ -663,6 +663,8 @@ _DIAGNOSIS_ENUMS = {
     "CODE_ONLY": "仅代码修复",
     "SPEC_AMENDMENT": "规格修订",
     "REPAIR": "修复",
+    "GRILL": "回到需求研判（GRILL）修订决策日志",
+    "USER_REQUIREMENT_CHANGED": "需求变更",
     "SPEC": "规格修订路线",
     "PLAN": "计划修订路线",
     "ARCHITECTURE_REVIEW": "架构复核路线",
@@ -880,12 +882,16 @@ _DIAGNOSIS_INLINE_IDENTIFIERS = re.compile(
 )
 
 _TECHNICAL_TOKEN = re.compile(
-    r"`[^`\n]+`|(?<![A-Za-z0-9_])/(?:[^ \t\n,;，；。]+)"
+    r"`[^`\n]+`|(?<![A-Za-z0-9_\u4e00-\u9fff])/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*"
     r"|(?<![A-Za-z0-9_])[0-9a-f]{7,64}(?![A-Za-z0-9_])"
     r"|(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+"
     r"|(?<![A-Za-z0-9_])[A-Z]+-\d+(?![A-Za-z0-9_])"
-    r"|(?<![A-Za-z0-9_])[A-Za-z0-9_.-]+/[A-Za-z0-9_./:-]+"
+    r"|(?<![A-Za-z0-9_])[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.:-]+)+"
 )
+
+# Four or more English words in a row is a sentence an approver would have to read in
+# English; fewer is an identifier or a term inside Chinese prose.
+_ENGLISH_PROSE = re.compile(r"[A-Za-z][a-z]+(?:[\s,;:.'()-]+[A-Za-z][a-z]+){3,}")
 
 _DISPLAY_ENUMS = {
     "COMPLETE": "已完成",
@@ -939,16 +945,19 @@ def _diagnosis_text(value: Any) -> str:
         parts = re.split(r"(`[^`\n]+`|/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)", value)
         value = "".join(
             part if index % 2 else _MIXED_DIAGNOSIS_PATTERN.sub(
-                lambda match: _MIXED_DIAGNOSIS_LOOKUP[match.group().lower()], part
+                # PLAN/SPEC/IMPLEMENT in capitals name a phase and stay as written.
+                lambda match: match.group() if match.group().isupper()
+                else _MIXED_DIAGNOSIS_LOOKUP[match.group().lower()], part
             )
             for index, part in enumerate(parts)
         )
-    # A Chinese character must not let a whole English sentence bypass the guard.
+    # A Chinese character must not let a whole English sentence bypass the guard, but
+    # identifiers inside Chinese prose (NAT64, PLAN, nortt, G5) are not a sentence.
     # Explicit code spans are treated as opaque technical material, not translated.
     remainder = _TECHNICAL_TOKEN.sub("", value)
     if re.search(r"[\u4e00-\u9fff]", value):
         remainder = _DIAGNOSIS_INLINE_IDENTIFIERS.sub("", remainder)
-    if not re.search(r"[A-Za-z]", remainder):
+    if not _ENGLISH_PROSE.search(remainder):
         return _TECHNICAL_TOKEN.sub(
             lambda match: "`" + match.group().strip("`") + "`", value
         )
@@ -961,19 +970,24 @@ def _diagnosis_text(value: Any) -> str:
     return f"材料待翻译：该诊断文本尚无安全的中文译文，请补齐中文说明后再审批；原文保留在材料包中。{suffix}"
 
 
+def _signature_text(value: Any) -> str:
+    """A failure signature is an identity to compare, not prose to translate."""
+    if not isinstance(value, str) or not value.strip():
+        return "-"
+    for table in (_DIAGNOSIS_ENUMS, _DIAGNOSIS_PHRASES, _BGW_1995_DIAGNOSIS_TRANSLATIONS):
+        if value in table:
+            return table[value]
+    return "`" + " ".join(value.split()).replace("`", "")[:300] + "`"
+
+
 def _diagnosis_summary(content: dict[str, Any]) -> list[str]:
     lines = [
         f"诊断分类 {_diagnosis_text(content.get('classification'))}",
         f"证据状态 {_diagnosis_text(content.get('evidence_state'))}",
-        f"修复范围 {_diagnosis_text(content.get('repair_scope'))}",
+        *([f"修复范围 {_diagnosis_text(content['repair_scope'])}"] if content.get("repair_scope") else []),
         f"后续路线 {_diagnosis_text(content.get('route'))}",
-        f"失败签名 {_diagnosis_text(content.get('failure_signature'))}",
+        f"失败签名 {_signature_text(content.get('failure_signature'))}",
     ]
-    if content.get("hypothesis") not in (None, ""):
-        lines.append(f"根因假设 {_diagnosis_text(content['hypothesis'])}")
-    for key, label in (("comparison", "对比证据"), ("repair_plan", "修复计划")):
-        if isinstance(content.get(key), list):
-            lines.append(f"{label} {len(content[key])} 条")
     return lines
 
 

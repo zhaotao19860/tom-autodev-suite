@@ -4,6 +4,23 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-08 · 停止run 改名、Comate 直接提意见、如流即时回执、G6 卡精简
+
+- 「驳回」更名为「停止run」：按钮、回复指引、回执文案统一为“停止run/停止”，语义仍是停止本 run；
+  如流回复解析新增 `停止run`/`停止` 别名，`驳回`/`REJECT` 继续兼容。
+- Comate 直接提意见通路：`/tom-autodev CARD 需修改 <意见>` → `revise --feedback` 可对仍为
+  PENDING 的门以 comate 渠道登记“需修改”并原地重做，无需先在如流点按钮；门已同意/超时则拒绝。
+- 如流即时可视化回执：网关在收到“需修改”后同群审批人发来的普通意见时，立即把该审批卡刷新为
+  “已收到修改意见…”，不改变决策（决策仍由 watcher 按绑定登记）。
+- 审批卡精简（所有门，非仅 G6）：“请先查看”区只保留“完整内容见审批正文＋材料包”指针，不再罗列
+  input_artifacts / source_evidence_refs / 各类哈希等与正文重复的原始标识；内容摘要与正文重复时
+  不再重复；正文有内容时不再同时出现“未提供材料位置”的矛盾兜底。
+- 修复 G6“材料待翻译”根因（诊断卡专有渲染）：翻译守卫原来把含标识符的中文整段判为未翻译，现以
+  “连续 4 个及以上英文单词才算需翻译的句子”为界；失败签名按标识符原样展示；诊断支撑证据
+  （日志/复现/最小验证）改为计数并指向材料包。
+- G6（DIAGNOSE）纳入可原地重做的门：诊断是模型草案，对它“需修改”是对草案提意见而非停止 run。
+- 控制面全量回归通过；tom-review、autodebug 回归通过；未执行 BGW 本地编译或测试。
+
 ## 2026-10-08 · 「需修改」按钮后直接回复意见
 
 - 修复：watcher 处理“需修改”时调用 `revise` 缺少必填 `actor`，`TypeError` 被吞掉，点按钮

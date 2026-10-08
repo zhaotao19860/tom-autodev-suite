@@ -34,7 +34,7 @@ KU holds an edit separately from what a query returns: `edit-content` and `edit-
 | `ENV_UNSATISFIED` | Stop code repair and wait for environment recovery. |
 | `ENV_TRANSIENT` | Run at most three read-only health rechecks. |
 | `REVISION_MISMATCH` | Stop; never reuse the pipeline result. |
-| `APPROVAL_REJECTED` / `APPROVAL_TIMEOUT` | Persist handoff and stop. On G1/G2/G3/G4/G5 a “需修改”/historical REJECT with feedback is redone in place; the next `继续` re-enters the producer and requests a new hash-bound gate. |
+| `APPROVAL_REJECTED` / `APPROVAL_TIMEOUT` | Persist handoff and stop. On G1–G6 a “需修改”/historical REJECT with feedback is redone in place; the next `继续` re-enters the producer and requests a new hash-bound gate. |
 | `USER_REQUIREMENT_CHANGED` after G1 | PLAN reports `report-producer-conflict`, IMPLEMENT reports `report-producer-block`; the diagnosis must keep that classification and route `GRILL` (or `STOPPED`), and G6 sends the run to `GRILL` so the decision log itself is amended. SPEC/PLAN cannot absorb it: they derive from the decision log and would restore the old rule. |
 | Earlier phase must change | Approved `CHANGE_REQUEST` (`rewind`) re-enters `REWIND_TARGETS[state]`; ARCHITECTURE_REVIEW leaves only this way. |
 

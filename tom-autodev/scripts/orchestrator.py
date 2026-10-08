@@ -3085,7 +3085,7 @@ def main(argv: list[str] | None = None) -> int:
 
     revise = subparsers.add_parser(
         "revise",
-        help="G1/G2/G3/G4 选择需修改后，按修改意见重做本阶段草案并重新发起该门",
+        help="G1–G6 选择需修改后，按修改意见重做本阶段草案并重新发起该门",
     )
     revise.add_argument("run_id")
     revise.add_argument("--approval-id", required=True, help="被驳回的那条审批")

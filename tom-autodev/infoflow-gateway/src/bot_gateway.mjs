@@ -479,7 +479,7 @@ async function sendApprovalCard(request) {
     buttons: [
       { eventKey: buttonEventKey('approve', request.approval_id), text: '同意' },
       { eventKey: buttonEventKey('revise', request.approval_id), text: '需修改' },
-      { eventKey: buttonEventKey('reject', request.approval_id), text: '驳回' },
+      { eventKey: buttonEventKey('reject', request.approval_id), text: '停止run' },
     ],
   })
 }
@@ -614,7 +614,7 @@ async function refreshAnsweredCard(cardId, data, eventKey, sender) {
   const label = known?.labels?.[event]
     || (parsed?.text?.startsWith('APPROVE ') ? '同意'
       : parsed?.text?.startsWith('REVISE ') ? '需修改'
-        : parsed?.text?.startsWith('REJECT ') ? '驳回' : event)
+        : parsed?.text?.startsWith('REJECT ') ? '停止run' : event)
   // A group card is shared, so the tap may come from someone who cannot answer this
   // gate. Only an approver's tap may present the card as answered and drop the
   // buttons; anyone else's tap is recorded without taking the one-tap path away from
@@ -631,7 +631,7 @@ async function refreshAnsweredCard(cardId, data, eventKey, sender) {
       ? [
           { eventKey: buttonEventKey('approve', approvalIdOf(parsed, known, data)), text: '同意' },
           { eventKey: buttonEventKey('revise', approvalIdOf(parsed, known, data)), text: '需修改' },
-          { eventKey: buttonEventKey('reject', approvalIdOf(parsed, known, data)), text: '驳回' },
+          { eventKey: buttonEventKey('reject', approvalIdOf(parsed, known, data)), text: '停止run' },
         ]
       : []
   )
@@ -703,6 +703,57 @@ function approvalIdOf(parsed, known, data) {
     isRecord(data.caller) ? data.caller.requestId : '',
   )
 }
+
+// A plain group message after a 需修改 tap is the modification feedback. The gateway
+// authorizes nothing, but it can give the person an immediate visual receipt by
+// updating the one live approval card awaiting an approver's reply in that group.
+// It never settles a decision; the Python watcher binds the feedback to the gate.
+async function acknowledgeFeedback(normalized) {
+  if (!isRecord(normalized)) return
+  const groupId = readString(normalized.group_id)
+  const sender = readString(normalized.sender)
+  const text = readString(normalized.text).trim()
+  if (!groupId || !sender || !text) return
+  // A decision command is handled by its own button/parsing path, not echoed here.
+  if (/^\s*(同意|需修改|停止\s*run|停止|驳回|APPROVE|REVISE|REJECT|CHOICE)(\s|$)/i.test(text)) return
+  const matches = [...live.entries()].filter(([cardId, known]) =>
+    cardId.startsWith('approval-')
+    && known?.target_type === 'group'
+    && readString(known?.target_id) === groupId
+    && Array.isArray(known?.approvers) && known.approvers.includes(sender))
+  // Only an unambiguous single awaiting card is echoed; otherwise the Python watcher
+  // still acknowledges per bound approval and nothing misleading is drawn.
+  if (matches.length !== 1) return
+  const [cardId, known] = matches[0]
+  const approvalId = known.request_id
+  await serialRefresh(cardId, async () => {
+    if (settled.has(cardId) || !live.has(cardId)) return
+    const snippet = text.replace(/\s+/g, ' ').slice(0, 120)
+    await renderCard({
+      card_id: cardId,
+      request_id: approvalId,
+      target_type: known.target_type,
+      target_id: known.target_id,
+      title: known.title || '',
+      approvers: Array.isArray(known.approvers) ? [...known.approvers] : undefined,
+      question: `已收到 ${sender} 的修改意见，将按意见重做并重新发起本门（在 IDE 继续后生效）`,
+      buttons: approvalId
+        ? [
+            { eventKey: buttonEventKey('approve', approvalId), text: '同意' },
+            { eventKey: buttonEventKey('revise', approvalId), text: '需修改' },
+            { eventKey: buttonEventKey('reject', approvalId), text: '停止run' },
+          ]
+        : [],
+      lines: [...(known.base_lines || []).slice(0, 7), {
+        componentId: 'click-status',
+        type: 'text',
+        text: `已收到修改意见「${snippet}」· ${sender} · ${nowIso()}`,
+      }],
+      base_lines: [...(known.base_lines || []).slice(0, 7)],
+    })
+  })
+}
+
 
 function journalInteraction(data) {
   if (!isRecord(data)) return
@@ -873,7 +924,11 @@ wsClient.on('group.*', (event) => {
   const raw = event?.data?.raw
   if (!isRecord(raw)) return
   if (readString(raw.eventtype ?? raw.eventType) !== 'MESSAGE_RECEIVE') return
-  journal(raw, normalizeGroupMessage(raw))
+  const normalized = normalizeGroupMessage(raw)
+  journal(raw, normalized)
+  acknowledgeFeedback(normalized).catch((err) => log('feedback ack failed', {
+    error: err instanceof Error ? err.message : String(err),
+  }))
 })
 
 wsClient.on('event.interaction_submit', (event) => {
