@@ -247,6 +247,40 @@ class ApprovalLedgerChannelTests(unittest.TestCase):
         self.assertTrue(late["conflict"])
         self.assertEqual([(row["effective"], row["late"], row["responder"]) for row in audit], [(True, False, "dev@example.test"), (False, True, "owner@example.test")])
 
+    def test_revise_is_refused_on_a_non_revisable_gate_and_leaves_it_pending(self):
+        # A 需修改 tap/reply on a migration (or any non G1-G6) gate has nothing to redo,
+        # so the ledger must not resolve the gate; APPROVE then still works.
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")
+            request = ledger.request(
+                "WORKFLOW_SPEC_MIGRATION", "hash-a", ["comate", "infoflow"],
+                member_policy={"comate": ["dev@example.test"], "infoflow": ["owner@example.test"]},
+            )
+            revise = ledger.receive(
+                request["approval_id"], "REVISE", "hash-a", "infoflow", "owner@example.test"
+            )
+            still_pending = ledger.get(request["approval_id"])["status"]
+            approved = ledger.resolve(
+                request["approval_id"], "APPROVE", "hash-a", "comate", responder="dev@example.test"
+            )
+
+        self.assertEqual(revise["reason_code"], "APPROVAL_REVISE_NOT_SUPPORTED")
+        self.assertEqual(still_pending, "PENDING")
+        self.assertEqual(approved["effective_decision"], "APPROVE")
+
+    def test_revise_is_accepted_on_a_producer_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")
+            request = ledger.request(
+                "G6", "hash-a", ["comate", "infoflow"],
+                member_policy={"comate": ["dev@example.test"], "infoflow": ["owner@example.test"]},
+            )
+            revise = ledger.receive(
+                request["approval_id"], "REVISE", "hash-a", "comate", "dev@example.test"
+            )
+        self.assertEqual(revise["reason_code"], "OK")
+        self.assertEqual(revise["effective_decision"], "REVISE")
+
     def test_channel_member_and_malformed_decision_are_rejected_and_audited(self):
         with tempfile.TemporaryDirectory() as directory:
             ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")

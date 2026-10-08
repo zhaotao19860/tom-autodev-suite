@@ -17,8 +17,17 @@ APPROVAL_DECISIONS = frozenset({"APPROVE", "REVISE", "REJECT"})
 _DECISION_ALIASES = {
     "同意": "APPROVE",
     "需修改": "REVISE",
+    # "停止"/"停止run" is the current label for the stop decision; "驳回" stays an alias.
+    "停止run": "REJECT",
+    "停止 run": "REJECT",
+    "停止": "REJECT",
     "驳回": "REJECT",
 }
+# Only producer gates (G1–G6) carry revisable content; a "需修改" on any other gate
+# (migration, change request, profile repin, submit/pipeline/release) has nothing to
+# redo, so it must not resolve the gate. Kept here as a small stable fact to avoid a
+# workflow_spec import cycle; workflow_spec.REVISABLE_GATES is the authority.
+_REVISABLE_GATES = frozenset({"G1", "G2", "G3", "G4", "G5", "G6"})
 
 # A timed-out/undeliverable approval is re-issued under a suffixed action
 # (e.g. "G7#retry-1") so the ledger's (run_id, action, input_hash) identity stays
@@ -257,6 +266,7 @@ def _reject(row:sqlite3.Row,decision:str,input_hash:str,channel:str,responder:st
     if row["input_hash"] != input_hash:return "APPROVAL_INPUT_MISMATCH"
     if channel not in APPROVAL_CHANNELS:return "APPROVAL_CHANNEL_NOT_CONFIGURED"
     if decision not in APPROVAL_DECISIONS:return "APPROVAL_DECISION_INVALID"
+    if decision=="REVISE" and gate_of(row["action"]) not in _REVISABLE_GATES:return "APPROVAL_REVISE_NOT_SUPPORTED"
     policy=json.loads(row["member_policy_json"])
     if policy.get(channel) and (not isinstance(responder,str) or responder not in policy.get(channel,[])):return "APPROVAL_RESPONDER_UNAUTHORIZED"
     if row["run_id"] != "legacy":

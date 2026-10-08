@@ -184,6 +184,19 @@ assert.equal(rendered[0].card.buttons[0].event_key, 'approve.' + request.approva
 assert.equal(rendered[0].refresh_default_intermediate_state, false);
 """)
 
+    def test_non_revisable_gate_card_has_no_revise_button(self):
+        self._run(r"""
+const card = await api.sendApprovalCard({ ...request, revisable: false });
+const buttons = rendered.at(-1).card.buttons;
+assert.equal(buttons.length, 2);
+assert.equal(buttons[0].event_key, 'approve.' + request.approval_id);
+assert.equal(buttons[1].event_key, 'reject.' + request.approval_id);
+assert.equal(buttons.some(b => b.event_key.startsWith('revise.')), false);
+// An onlooker tap must not resurrect a 需修改 button on refresh either.
+await api.answerCard({ cardId: card.card_id, cardInstanceId: 'i' }, 'approve.' + request.approval_id, 'outsider');
+assert.equal(rendered.at(-1).card.buttons.some(b => b.event_key.startsWith('revise.')), false);
+""")
+
     def test_approver_click_locks_card_as_selected_and_keeps_seven_materials(self):
         self._run(r"""
 const initial = await api.sendApprovalCard(request);

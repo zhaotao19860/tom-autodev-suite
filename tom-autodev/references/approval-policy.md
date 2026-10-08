@@ -37,6 +37,8 @@ The gateway only journals messages. Every decision is authorized by `InfoflowRep
 
 - quotes the `approval_id` or `request_id` (`approval_id` is unique per `run_id`/action/`input_hash`, so quoting it binds the answer to that content hash);
 - says exactly one of `同意`、`需修改` or `停止`（历史 `驳回` 与英文 `APPROVE/REVISE/REJECT` 仍兼容）;
+  `需修改` is only valid on a producer gate (G1–G6); on any other gate the ledger returns
+  `APPROVAL_REVISE_NOT_SUPPORTED` and the gate stays pending, and such cards never draw a 需修改 button;
 - comes from a sender whose uuap resolves to exactly one member of `member_policy["infoflow"]`;
 - was typed either in a private chat or in the run's own collaboration group — a group reply carries the `group_id` the gateway journalled, and the same words in another group are not a decision about this run;
 - arrives after the request was created and no later than its deadline.

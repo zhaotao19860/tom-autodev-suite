@@ -476,12 +476,20 @@ async function sendApprovalCard(request) {
     approvers: request.approvers,
     // Reserve one component for the pending-validation status after a tap.
     lines: request.lines.slice(0, 7),
-    buttons: [
-      { eventKey: buttonEventKey('approve', request.approval_id), text: '同意' },
-      { eventKey: buttonEventKey('revise', request.approval_id), text: '需修改' },
-      { eventKey: buttonEventKey('reject', request.approval_id), text: '停止run' },
-    ],
+    buttons: approvalButtons(request.approval_id, request.revisable !== false),
+    revisable: request.revisable !== false,
   })
+}
+
+// A 需修改 button only on producer gates (G1–G6); other gates (migration, change
+// request, profile repin, submit/pipeline/release) have nothing to redo, so offering
+// it would resolve the gate into an unusable REVISE.
+function approvalButtons(approvalId, revisable) {
+  return [
+    { eventKey: buttonEventKey('approve', approvalId), text: '同意' },
+    ...(revisable ? [{ eventKey: buttonEventKey('revise', approvalId), text: '需修改' }] : []),
+    { eventKey: buttonEventKey('reject', approvalId), text: '停止run' },
+  ]
 }
 
 async function sendChoiceCard(request) {
@@ -561,6 +569,7 @@ async function renderCard(request) {
       lines: [...(request.base_lines || request.lines)],
       labels: Object.fromEntries(request.buttons.map((button) => [button.eventKey, button.text])),
       approvers: Array.isArray(request.approvers) ? [...request.approvers] : null,
+      revisable: request.revisable !== false,
     })
   }
   return {
@@ -626,15 +635,10 @@ async function refreshAnsweredCard(cardId, data, eventKey, sender) {
   // since its 16-hex decision id is not an approval id and those taps would be dropped.
   const choice = parsed?.text?.startsWith('CHOICE ') === true || cardId.startsWith('choice-')
   const answered = choice || (approvers !== null && approvers.includes(sender))
-  const buttons = answered ? [] : (
-    approvalIdOf(parsed, known, data)
-      ? [
-          { eventKey: buttonEventKey('approve', approvalIdOf(parsed, known, data)), text: '同意' },
-          { eventKey: buttonEventKey('revise', approvalIdOf(parsed, known, data)), text: '需修改' },
-          { eventKey: buttonEventKey('reject', approvalIdOf(parsed, known, data)), text: '停止run' },
-        ]
-      : []
-  )
+  const refreshId = approvalIdOf(parsed, known, data)
+  // Default to revisable when the card predates this field (restart), so an older
+  // producer-gate card is not stripped of its 需修改 button on refresh.
+  const buttons = answered || !refreshId ? [] : approvalButtons(refreshId, known?.revisable !== false)
   await renderCard({
     card_id: cardId,
     request_id: known?.request_id || readString(isRecord(data.caller) ? data.caller.requestId : ''),
@@ -737,13 +741,7 @@ async function acknowledgeFeedback(normalized) {
       title: known.title || '',
       approvers: Array.isArray(known.approvers) ? [...known.approvers] : undefined,
       question: `已收到 ${sender} 的修改意见，将按意见重做并重新发起本门（在 IDE 继续后生效）`,
-      buttons: approvalId
-        ? [
-            { eventKey: buttonEventKey('approve', approvalId), text: '同意' },
-            { eventKey: buttonEventKey('revise', approvalId), text: '需修改' },
-            { eventKey: buttonEventKey('reject', approvalId), text: '停止run' },
-          ]
-        : [],
+      buttons: approvalId ? approvalButtons(approvalId, known?.revisable !== false) : [],
       lines: [...(known.base_lines || []).slice(0, 7), {
         componentId: 'click-status',
         type: 'text',
@@ -1069,6 +1067,8 @@ const server = createServer(async (req, res) => {
         ? body.approvers.map((item) => readString(item).trim()).filter(Boolean)
         : null
       const presentation = readString(body.presentation).trim()
+      // Default true so an older caller that omits the field keeps the 需修改 button.
+      const revisable = body.revisable !== false
       if (
         !/^[0-9a-f]{32}$/.test(approvalId)
         || !['group', 'user'].includes(targetType)
@@ -1091,6 +1091,7 @@ const server = createServer(async (req, res) => {
         lines,
         approvers,
         presentation: presentation || undefined,
+        revisable,
       })
       sendJson(res, 200, { ok: true, approval_id: approvalId, ...receipt })
       return

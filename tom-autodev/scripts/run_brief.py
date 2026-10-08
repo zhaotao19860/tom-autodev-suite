@@ -395,9 +395,9 @@ def _next_step(
             return {
                 "owner": "你",
                 "text": (
-                    f"{gate} 已驳回（审批 {approval_id}）。把修改意见告诉 Comate"
-                    f"（或在如流回复 `需修改 {approval_id} 修改意见`），Comate 会按意见重做草案"
-                    f"并重新发起 {gate}；要回到更早阶段用 rewind，放弃用 stop"
+                    f"{gate} 已标记需修改（审批 {approval_id}）。把修改意见告诉 Comate"
+                    f"（`/tom-autodev <卡片> 需修改 <意见>`，或在如流点「需修改」后直接回复意见），"
+                    f"Comate 会按意见重做草案并重新发起 {gate}；要回到更早阶段用 rewind，停止用 stop"
                 ),
             }
         from run_change import rewind_available
@@ -409,7 +409,7 @@ def _next_step(
         return {
             "owner": "你",
             "text": (
-                f"{gate} 已驳回（审批 {approval_id}），该门不会原地重发{way_back}；"
+                f"{gate} 已标记需修改（审批 {approval_id}），该门不会原地重发{way_back}；"
                 "否则 stop 结束本运行"
             ),
         }

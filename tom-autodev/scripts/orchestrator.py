@@ -3088,7 +3088,7 @@ def main(argv: list[str] | None = None) -> int:
         help="G1–G6 选择需修改后，按修改意见重做本阶段草案并重新发起该门",
     )
     revise.add_argument("run_id")
-    revise.add_argument("--approval-id", required=True, help="被驳回的那条审批")
+    revise.add_argument("--approval-id", required=True, help="要重做的那道门的审批（需修改/历史驳回）")
     revise.add_argument("--feedback", help="修改意见；省略则读取如流里 `需修改 <id> 意见` 的文字")
     revise.add_argument("--actor", required=True, help="提出修改意见的人")
 

@@ -221,7 +221,9 @@ def _deliver_approval_card(
          if gate.get("material_status") == "MISSING"
          else "请先查看 " + ("；".join(reads[:2]) if reads else "材料未齐，请先在 IDE 补齐，勿盲批")),
         f"批准后 {_line(gate.get('effect'))}" if _line(gate.get("effect")) else "",
-        "按钮含义：同意=继续 run；需修改=保留 run、按意见重做并重发；驳回=停止 run。",
+        ("按钮含义：同意=继续 run；需修改=保留 run、按意见重做并重发；停止run=停止本 run。"
+         if gate_of(action) in _REVISABLE_GATES
+         else "按钮含义：同意=执行本操作；停止run=停止本 run。"),
         f"版本 {gateway_request['input_hash'][:12]}…；截止 {_moment(gateway_request['deadline_at'])}；完整材料及本地文件位置见同一审批详情",
     ]
     targets = [("group", group_id)] if group_id is not None else [
@@ -250,8 +252,11 @@ def _deliver_approval_card(
                     approval_id=gateway_request["approval_id"],
                     target_type=target_type, target_id=target_id,
                     title=f"tom-autodev {action} 审批",
-                    question="待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。",
+                    question=("待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。"
+                              if gate_of(action) in _REVISABLE_GATES
+                              else "待你审批：请先核对材料和重点，再选择「同意」或「停止run」。"),
                     lines=[line for line in lines if line],
+                    revisable=gate_of(action) in _REVISABLE_GATES,
                     # Who may answer, so a shared group card only reads as answered
                     # when the tap came from an approver. The ledger still decides.
                     approvers=sorted({
@@ -733,7 +738,7 @@ def _revision_lines(gate: dict[str, Any]) -> list[str]:
     if not isinstance(reentry, dict):
         return []
     kind = {
-        "REVISE": "驳回后按意见重做",
+        "REVISE": "需修改后按意见重做",
         "DIAGNOSIS": "按已批准诊断的修复方向重做",
     }.get(reentry.get("kind"), "变更请求回退后重做")
     note = reentry.get("feedback") or reentry.get("reason")

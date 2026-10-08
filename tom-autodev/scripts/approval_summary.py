@@ -96,7 +96,7 @@ def gate_intent(action: Any) -> dict[str, Any]:
                 ("Comate 选择已经完成；本卡只审批已生成的 Decision Log，不替用户答题。"
                  "本次授权仍只绑定 input_hash，内容变化须重新审批。" if name == "G1" else
                  "同意仅授权本次 input_hash；内容变化须重新审批，审批本身不推进阶段。")
-                + "同意继续当前 run；需修改保留 run、按意见重做并重发；驳回停止 run。"
+                + "同意继续当前 run；需修改保留 run、按意见重做并重发；停止run 停止本 run。"
             )}
 
 

@@ -164,6 +164,7 @@ class InfoflowBotClient:
         lines: list[str],
         approvers: list[str] | None = None,
         presentation: str | None = None,
+        revisable: bool = True,
     ) -> dict[str, Any]:
         """Send the one-tap variant of a gate as an interactive card.
 
@@ -182,6 +183,8 @@ class InfoflowBotClient:
             # The gateway authorizes nothing; it only needs to know whose tap may
             # render the card as answered, so an onlooker cannot blank the buttons.
             "approvers": sorted({str(item) for item in approvers or [] if str(item)}),
+            # Whether this gate offers a 需修改 button: only producer gates (G1–G6) do.
+            "revisable": bool(revisable),
         }
         if presentation:
             # A follow-up card (reminder) for the same approval, posted as its own

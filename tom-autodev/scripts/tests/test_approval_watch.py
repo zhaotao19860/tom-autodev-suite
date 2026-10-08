@@ -482,7 +482,7 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertEqual(retry_card["title"], "tom-autodev G0#retry-1 审批")
         self.assertEqual(
             retry_card["question"],
-            "待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。",
+            "待你审批：请先核对材料和重点，再选择「同意」或「停止run」。",
         )
 
     def test_reissue_is_refused_while_the_gate_is_still_open(self):

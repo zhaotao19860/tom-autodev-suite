@@ -41,7 +41,7 @@ _CODE_STATES = frozenset({"PLAN", "IMPLEMENT", "REVIEW", "SUBMIT", "IPIPE", "DIA
 # The reply template shows this in place of the feedback; copied verbatim it is no feedback.
 FEEDBACK_PLACEHOLDER = "你的修改意见"
 FEEDBACK_PLACEHOLDERS = frozenset({FEEDBACK_PLACEHOLDER, "修改意见"})
-_DECISION_COMMAND = re.compile(r"^\s*(同意|需修改|驳回|APPROVE|REVISE|REJECT|CHOICE)(?:\s|$)", re.IGNORECASE)
+_DECISION_COMMAND = re.compile(r"^\s*(同意|需修改|停止run|停止|驳回|APPROVE|REVISE|REJECT|CHOICE)(?:\s|$)", re.IGNORECASE)
 
 
 def _now() -> str:
