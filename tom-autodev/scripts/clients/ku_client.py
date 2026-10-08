@@ -112,6 +112,8 @@ class KuClient:
         self.settle_attempts = max(1, settle_attempts)
         self.settle_wait_seconds = max(0.0, settle_wait_seconds)
         self.sleeper = sleeper
+        self._active_intent: dict[str, Any] | None = None
+        self._last_settle_reason = "KU_CREATE_READBACK_UNKNOWN"
 
     @staticmethod
     def marked_markdown(parent_doc_id: str, title: str, markdown: str) -> str:
@@ -244,11 +246,37 @@ class KuClient:
         # repositoryGuid, canonical URL, and the marker verified by the
         # read-back below; requiring title here made a successful remote write
         # look like KU_RUN_ROOT_VERIFICATION_FAILED.
-        if not self._valid_remote_info(info):
-            return _failure("KU_RUN_ROOT_VERIFICATION_FAILED", intent_id=intent["intent_id"])
+        response_reason = self._remote_info_reason(info)
+        if response_reason is not None:
+            self._observe(
+                intent,
+                self._observation(
+                    "create-response",
+                    response_reason,
+                    doc_id=info.get("docGuid") if isinstance(info, dict) else None,
+                    url=info.get("url") if isinstance(info, dict) else None,
+                ),
+            )
+            return _failure(response_reason, intent_id=intent["intent_id"])
+        self._observe(
+            intent,
+            self._observation(
+                "create-response",
+                "KU_CREATE_DISPATCHED",
+                doc_id=info["docGuid"],
+                url=info["url"],
+            ),
+        )
+        self._active_intent = intent
         remote = self._settled_child(info["docGuid"], initial, info["url"])
+        self._active_intent = None
         if remote is None:
-            return _failure("KU_RUN_ROOT_VERIFICATION_FAILED", intent_id=intent["intent_id"])
+            return _failure(
+                self._last_settle_reason,
+                intent_id=intent["intent_id"],
+                retry_allowed=self._last_settle_reason
+                in {"KU_CREATE_CONTENT_UNSETTLED", "KU_CREATE_VERSION_UNSETTLED"},
+            )
         created = self._persist_create_receipt(intent, remote, _content_hash(initial))
         publish = self._publish(
             created["doc_id"],
@@ -286,16 +314,20 @@ class KuClient:
 
         intent = self.state.intent_by_idempotency_key(create_key)
         if intent is not None:
-            reconciled = self._discover_child(parent_doc_id, title, marked)
+            reconciled = self._reconcile_create(intent, parent_doc_id, title, marked)
             if not reconciled["ok"]:
                 if reconciled["reason_code"] in {"KU_CHILD_NOT_FOUND", "KU_QUERY_UNKNOWN"}:
                     return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-                if reconciled["reason_code"] == "KU_CHILD_CONTENT_UNSETTLED":
+                if reconciled["reason_code"] in {
+                    "KU_CHILD_CONTENT_UNSETTLED",
+                    "KU_CREATE_CONTENT_UNSETTLED",
+                    "KU_CREATE_VERSION_UNSETTLED",
+                }:
                     # The write landed; only the read-back is behind. Retrying this same
                     # call is the whole recovery, so it stays retryable and the intent
                     # stays open.
                     return _failure(
-                        "KU_CHILD_CONTENT_UNSETTLED",
+                        reconciled["reason_code"],
                         intent_id=intent["intent_id"],
                         retry_allowed=True,
                     )
@@ -331,11 +363,32 @@ class KuClient:
         # As with run roots, title is optional in the create response when KU
         # receives content through --md-file. The later marker read-back binds
         # this response to the requested parent/title/content identity.
-        if not self._valid_remote_info(info):
-            return _failure("KU_CREATE_VERIFICATION_FAILED", intent_id=intent["intent_id"])
+        response_reason = self._remote_info_reason(info, allow_missing_repository=True)
+        if response_reason is not None:
+            self._observe(
+                intent,
+                self._observation(
+                    "create-response",
+                    response_reason,
+                    doc_id=info.get("docGuid") if isinstance(info, dict) else None,
+                    url=info.get("url") if isinstance(info, dict) else None,
+                ),
+            )
+            return _failure(response_reason, intent_id=intent["intent_id"])
+        self._observe(intent, self._observation(
+            "create-response", "KU_CREATE_DISPATCHED",
+            doc_id=info["docGuid"], url=info["url"]))
+        self._active_intent = intent
         verified = self._settled_child(info["docGuid"], marked, info["url"])
+        self._active_intent = None
         if verified is None:
-            return _failure("KU_CREATE_VERIFICATION_FAILED", intent_id=intent["intent_id"])
+            failure = _failure(
+                self._last_settle_reason,
+                intent_id=intent["intent_id"],
+                retry_allowed=self._last_settle_reason
+                in {"KU_CREATE_CONTENT_UNSETTLED", "KU_CREATE_VERSION_UNSETTLED"},
+            )
+            return failure
         created = self._persist_create_receipt(intent, verified, content_hash)
         return self._complete_artifact(created, verified, content_hash, marked)
 
@@ -379,6 +432,59 @@ class KuClient:
             except OSError:
                 pass
 
+    def _reconcile_create(
+        self, intent: dict[str, Any], parent: str, title: str, marked: str,
+    ) -> dict[str, Any]:
+        """Query only. Never replace a dispatched document with a same-title document."""
+        history = self.state.external_observations(self.run_id, intent_id=intent["intent_id"])
+        identities = {
+            row["observation"]["doc_id"] for row in history
+            if row["observation"].get("stage") in {"create-response", "readback", "reconcile"}
+            and row["observation"].get("doc_id")
+        }
+        doc_id = next(iter(identities)) if len(identities) == 1 else None
+        create_observations = [
+            row["observation"] for row in history
+            if row["observation"].get("stage") == "create-response"
+        ]
+        rejected = next((
+            observation["reason_code"] for observation in create_observations
+            if observation.get("reason_code") in {
+                "KU_CREATE_RESPONSE_REPOSITORY_MISMATCH",
+                "KU_CREATE_RESPONSE_URL_MISMATCH",
+                "KU_CREATE_RESPONSE_MISSING_URL",
+            }
+        ), None)
+        urls = {observation["url"] for observation in create_observations if observation.get("url")}
+        if rejected:
+            result = _failure(rejected)
+        elif len(identities) > 1 or len(urls) > 1:
+            result = _failure("KU_CREATE_IDENTITY_MISMATCH")
+        elif doc_id and urls:
+            # The create response is only a locator, never repository evidence.
+            # Read that exact ID; listing lag or a same-title sibling must not
+            # replace it. Historical missing-repository observations use this too.
+            expected_url = next(iter(urls))
+            if not _canonical_ku_url(expected_url, self.repo_id, doc_id):
+                result = _failure("KU_CREATE_IDENTITY_MISMATCH")
+            else:
+                self._active_intent = intent
+                try:
+                    verified = self._settled_child(doc_id, marked, expected_url)
+                finally:
+                    self._active_intent = None
+                result = verified if verified is not None else _failure(self._last_settle_reason)
+        else:
+            # Legacy intents without observations require a unique exact title plus
+            # the original parent/title/content marker; absence never permits create.
+            result = self._discover_child(parent, title, marked, expected_doc_id=doc_id)
+        self._observe(intent, self._observation(
+            "reconcile", result["reason_code"],
+            doc_id=doc_id or result.get("doc_id"), url=result.get("url"),
+            version=result.get("version"), version_reason=result.get("version_reason"),
+        ))
+        return {**result, "intent_id": intent["intent_id"]}
+
     def _settled_child(
         self, doc_id: str, marked: str, expected_url: Any
     ) -> dict[str, Any] | None:
@@ -388,13 +494,33 @@ class KuClient:
         only evidence about propagation. Re-reading a bounded number of times is the
         difference between a phase that lands and a phase that needs a manual retry.
         """
+        self._last_settle_reason = "KU_CREATE_READBACK_UNKNOWN"
         for attempt in range(1, self.settle_attempts + 1):
             verified = self._query_document(doc_id)
-            if (
-                self._matching_child(verified, marked, expected_url)
-                and verified.get("version") is not None
-            ):
+            reason = self._readback_reason(verified, marked, expected_url)
+            self._last_settle_reason = reason
+            self._observe(
+                self._active_intent,
+                self._observation(
+                    "readback",
+                    reason,
+                    attempt=attempt,
+                    doc_id=doc_id,
+                    url=verified.get("url") if isinstance(verified, dict) else expected_url,
+                    version=verified.get("version") if isinstance(verified, dict) else None,
+                    version_reason=verified.get("version_reason")
+                    if isinstance(verified, dict)
+                    else None,
+                    marker_present=(
+                        _carries_marker(verified.get("text", ""), marked)
+                        if verified.get("ok") else None
+                    ),
+                ),
+            )
+            if reason == "OK":
                 return verified
+            if reason == "KU_CREATE_IDENTITY_MISMATCH":
+                return None
             if attempt < self.settle_attempts and self.settle_wait_seconds:
                 self.sleeper(self.settle_wait_seconds)
         return None
@@ -493,7 +619,7 @@ class KuClient:
                 if not _unknown_result(edited["reason_code"]):
                     return self._persist_failure(intent, edited["reason_code"])
                 return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-            settled = self._publish_index(doc_id, marker)
+            settled = self._publish_index(doc_id, marker, edit_intent=intent)
             if not settled["ok"]:
                 return settled["failure"]
             self._persist_edit_receipt(intent, settled["verified"], entry_markdown)
@@ -502,7 +628,7 @@ class KuClient:
         if pending is not None:
             # An mdsl edit lands in KU's edit state, so the preview text a query returns
             # cannot say whether the claimed insert happened. Publish first, then judge.
-            settled = self._publish_index(doc_id, marker)
+            settled = self._publish_index(doc_id, marker, edit_intent=pending)
             if not settled["ok"]:
                 return settled["failure"]
             self._persist_edit_receipt(pending, settled["verified"], entry_markdown)
@@ -550,11 +676,92 @@ class KuClient:
             if not _unknown_result(edited["reason_code"]):
                 return self._persist_failure(intent, edited["reason_code"])
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-        settled = self._publish_index(doc_id, marker)
+        settled = self._publish_index(doc_id, marker, edit_intent=intent)
         if not settled["ok"]:
             return settled["failure"]
         self._persist_edit_receipt(intent, settled["verified"], entry_markdown)
         return settled["publish"]
+
+    @guard_execution
+    def reconcile_index_publish(
+        self, doc_id: str, entry: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Settle an older root publish intent by document and exact index marker."""
+        persistence = self._persistence()
+        if persistence is not None:
+            return persistence
+        invalid = self._validate_entry(entry)
+        if invalid is not None:
+            return invalid
+        marker = self.index_marker(
+            doc_id, entry["title"], entry["doc_id"], entry["content_hash"]
+        )
+        pending = next(
+            (
+                candidate
+                for candidate in self.state.pending_intents(self.run_id)
+                if candidate.get("operation") == "ku.document.publish"
+            ),
+            None,
+        )
+        if pending is None:
+            return {"ok": True, "reason_code": "NO_PENDING_PUBLISH", "doc_id": doc_id}
+        payload = pending.get("payload") or {}
+        if payload.get("doc_id") != doc_id:
+            return _failure(
+                "QUERY_REQUIRED",
+                intent_id=pending["intent_id"],
+                retry_allowed=False,
+            )
+        edit = self._exact_index_edit_for_publish(doc_id, entry, pending)
+        if edit is None:
+            return _failure(
+                "QUERY_REQUIRED",
+                intent_id=pending["intent_id"],
+                retry_allowed=False,
+            )
+        settled = self._settled_publish(doc_id, None, marker, pending)
+        if settled is None:
+            return _failure(
+                "QUERY_REQUIRED",
+                intent_id=pending["intent_id"],
+                retry_allowed=False,
+            )
+        content_hash = (pending.get("payload") or {}).get("content_hash")
+        if not isinstance(content_hash, str) or not content_hash:
+            return _failure("KU_PUBLISH_INTENT_INVALID", intent_id=pending["intent_id"])
+        return self._persist_publish_receipt(
+            pending, doc_id, content_hash, settled["version"]
+        )
+
+    def _exact_index_edit_for_publish(
+        self, doc_id: str, entry: dict[str, Any], publish: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Return only the durable edit that can authorize a legacy publish.
+
+        Old publish intents have no chain fields. They are recoverable only when
+        this run contains the exact index edit, for this entry and root, before
+        the publish intent in the durable sequence. A document id alone is not
+        an authorization boundary.
+        """
+        marker = self.index_marker(doc_id, entry["title"], entry["doc_id"], entry["content_hash"])
+        publish_sequence = publish.get("sequence")
+        candidates = []
+        for candidate in self.state.all_intents(self.run_id):
+            if candidate.get("operation") != "ku.index.edit":
+                continue
+            payload = candidate.get("payload") or {}
+            if (
+                payload.get("doc_id") == doc_id
+                and payload.get("child_doc_id") == entry["doc_id"]
+                and payload.get("content_hash") == entry["content_hash"]
+                and payload.get("index_marker") == marker
+                and isinstance(publish_sequence, int)
+                and isinstance(candidate.get("sequence"), int)
+                and candidate["sequence"] < publish_sequence
+            ):
+                candidates.append(candidate)
+        return candidates[-1] if candidates else None
 
     def _republish(
         self,
@@ -593,14 +800,20 @@ class KuClient:
                 if not _unknown_result(published["reason_code"]):
                     return self._persist_failure(intent, published["reason_code"])
                 return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-        remote = self._query_document(doc_id)
-        if not self._publish_verifies(remote, expected_text, required_entry):
+        remote = self._settled_publish(doc_id, expected_text, required_entry, intent)
+        if remote is None:
             return _failure("KU_PUBLISH_VERIFICATION_FAILED", intent_id=intent["intent_id"])
         if completed is not None:
             return completed["receipt"]["response"]
         return self._persist_publish_receipt(intent, doc_id, content_hash, remote["version"])
 
-    def _publish_index(self, doc_id: str, marker: str) -> dict[str, Any]:
+    def _publish_index(
+        self,
+        doc_id: str,
+        marker: str,
+        *,
+        edit_intent: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Publish the index and confirm it carries the entry exactly once.
 
         KU keeps `edit-content` results in a draft: until the document is published,
@@ -612,7 +825,11 @@ class KuClient:
         if not current["ok"]:
             return {"ok": False, "failure": current}
         publish = self._publish(
-            doc_id, current["content_hash"], verified=current, required_entry=marker
+            doc_id,
+            current["content_hash"],
+            verified=current,
+            required_entry=marker,
+            edit_intent=edit_intent,
         )
         if not publish["ok"]:
             return {"ok": False, "failure": publish}
@@ -657,7 +874,9 @@ class KuClient:
         verified: dict[str, Any] | None = None,
         expected_text: str | None = None,
         required_entry: str | None = None,
+        edit_intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._last_settle_reason = "KU_PUBLISH_VERIFICATION_FAILED"
         key = f"ku-publish:{doc_id}:{content_hash}"
         completed = self.state.result_by_idempotency_key(key)
         if completed is not None:
@@ -689,12 +908,59 @@ class KuClient:
             return response
 
         pending = self.state.intent_by_idempotency_key(key)
+        if pending is None:
+            # A changed preview hash is not sufficient to identify an older
+            # publish. Only the exact durable index-edit chain can authorize it.
+            pending = next(
+                (
+                    candidate
+                    for candidate in self.state.pending_intents(self.run_id)
+                    if candidate.get("operation") == "ku.document.publish"
+                    and self._publish_matches_edit(
+                        candidate, doc_id, required_entry, edit_intent
+                    )
+                ),
+                None,
+            )
+        if pending is None and required_entry is not None:
+            legacy = next(
+                (
+                    candidate
+                    for candidate in self.state.pending_intents(self.run_id)
+                    if candidate.get("operation") == "ku.document.publish"
+                    and (candidate.get("payload") or {}).get("doc_id") == doc_id
+                ),
+                None,
+            )
+            if legacy is not None:
+                return _failure(
+                    "QUERY_REQUIRED",
+                    intent_id=legacy["intent_id"],
+                    retry_allowed=False,
+                )
         if pending is not None:
-            if verified is None:
-                verified = self._query_document(doc_id)
-            if self._publish_verifies(verified, expected_text, required_entry):
+            self._observe(
+                pending,
+                self._observation(
+                    "publish-reconcile",
+                    "PENDING_MATCH",
+                    doc_id=doc_id,
+                ),
+            )
+            if verified is not None and self._publish_verifies(
+                verified, expected_text, required_entry
+            ):
+                settled = verified
+            else:
+                settled = self._settled_publish(
+                    doc_id, expected_text, required_entry, pending
+                )
+            if settled is not None:
+                original_hash = (pending.get("payload") or {}).get(
+                    "content_hash", content_hash
+                )
                 return self._persist_publish_receipt(
-                    pending, doc_id, content_hash, verified["version"]
+                    pending, doc_id, original_hash, settled["version"]
                 )
             return _failure("QUERY_REQUIRED", intent_id=pending["intent_id"], retry_allowed=False)
 
@@ -705,7 +971,11 @@ class KuClient:
                 self.run_id,
                 "ku.document.publish.reconcile",
                 key,
-                {"doc_id": doc_id, "content_hash": content_hash},
+                {
+                    "doc_id": doc_id,
+                    "content_hash": content_hash,
+                    **self._publish_chain_payload(doc_id, required_entry, edit_intent),
+                },
             )
             return self._persist_publish_receipt(
                 reconciled, doc_id, content_hash, verified["version"]
@@ -714,7 +984,11 @@ class KuClient:
             self.run_id,
             "ku.document.publish",
             key,
-            {"doc_id": doc_id, "content_hash": content_hash},
+            {
+                "doc_id": doc_id,
+                "content_hash": content_hash,
+                **self._publish_chain_payload(doc_id, required_entry, edit_intent),
+            },
         )
         published = self._invoke(
             [
@@ -730,18 +1004,143 @@ class KuClient:
             if not _unknown_result(published["reason_code"]):
                 return self._persist_failure(intent, published["reason_code"])
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-        remote = self._query_document(doc_id)
-        if not self._publish_verifies(remote, expected_text, required_entry):
-            return _failure("KU_PUBLISH_VERIFICATION_FAILED", intent_id=intent["intent_id"])
+        remote = self._settled_publish(doc_id, expected_text, required_entry, intent)
+        if remote is None:
+            return _failure(
+                self._last_settle_reason,
+                intent_id=intent["intent_id"],
+                retry_allowed=False,
+            )
         return self._persist_publish_receipt(intent, doc_id, content_hash, remote["version"])
 
-    def _discover_child(self, parent_doc_id: str, title: str, marked: str) -> dict[str, Any]:
+    @staticmethod
+    def _publish_chain_payload(
+        doc_id: str,
+        marker: str | None,
+        edit_intent: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if marker is None or edit_intent is None:
+            return {}
+        payload = edit_intent.get("payload") or {}
+        return {
+            "index_root_doc_id": doc_id,
+            "index_marker": marker,
+            "index_edit_intent_id": edit_intent.get("intent_id"),
+            "index_edit_sequence": edit_intent.get("sequence"),
+            "index_child_doc_id": payload.get("child_doc_id"),
+            "index_entry_hash": payload.get("entry_hash"),
+        }
+
+    def _publish_matches_edit(
+        self,
+        publish: dict[str, Any],
+        doc_id: str,
+        marker: str | None,
+        edit_intent: dict[str, Any] | None,
+    ) -> bool:
+        payload = publish.get("payload") or {}
+        if marker is None or payload.get("doc_id") != doc_id:
+            return False
+        if edit_intent is not None:
+            return bool(
+                payload.get("index_root_doc_id") == doc_id
+                and payload.get("index_marker") == marker
+                and payload.get("index_edit_intent_id") == edit_intent.get("intent_id")
+                and payload.get("index_edit_sequence") == edit_intent.get("sequence")
+            )
+        # Legacy publish intents have no chain fields. Recover only when the
+        # durable run history contains the exact marker edit before this
+        # publish. A doc_id match alone is deliberately insufficient.
+        publish_sequence = publish.get("sequence")
+        return any(
+            candidate.get("operation") == "ku.index.edit"
+            and (candidate.get("payload") or {}).get("doc_id") == doc_id
+            and (candidate.get("payload") or {}).get("index_marker") == marker
+            and isinstance(candidate.get("sequence"), int)
+            and isinstance(publish_sequence, int)
+            and candidate["sequence"] < publish_sequence
+            for candidate in self.state.all_intents(self.run_id)
+        )
+
+    def _settled_publish(
+        self,
+        doc_id: str,
+        expected_text: str | None,
+        required_entry: str | None,
+        intent: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Read a published document until its body and formal version converge.
+
+        KU exposes the edited body and the version list through separate eventually
+        consistent paths. A successful publish can therefore be observable first as
+        old content, a draft version, or a missing version. Treat those states as
+        propagation lag and retry the read, while keeping the original write intent
+        bound to the exact operation.
+        """
+        for attempt in range(1, self.settle_attempts + 1):
+            remote = self._query_document(doc_id)
+            blocking = self._publish_readback_blocking_reason(remote)
+            verified = self._publish_verifies(remote, expected_text, required_entry)
+            self._observe(
+                intent,
+                self._observation(
+                    "publish-readback",
+                    "OK" if verified else (
+                        remote.get("reason_code", "KU_PUBLISH_VERIFICATION_FAILED")
+                        if isinstance(remote, dict) else "KU_PUBLISH_VERIFICATION_FAILED"
+                    ),
+                    attempt=attempt,
+                    doc_id=doc_id,
+                    url=remote.get("url") if isinstance(remote, dict) else None,
+                    version=remote.get("version") if isinstance(remote, dict) else None,
+                    version_reason=remote.get("version_reason")
+                    if isinstance(remote, dict)
+                    else None,
+                    marker_present=(
+                        _carries_marker(remote.get("text", ""), expected_text)
+                        if isinstance(remote, dict) and remote.get("ok") and expected_text
+                        else None
+                    ),
+                ),
+            )
+            if blocking is not None:
+                self._last_settle_reason = blocking
+                return None
+            if verified:
+                return remote
+            if attempt < self.settle_attempts and self.settle_wait_seconds:
+                self.sleeper(self.settle_wait_seconds)
+        return None
+
+    @staticmethod
+    def _publish_readback_blocking_reason(remote: Any) -> str | None:
+        if not isinstance(remote, dict):
+            return "KU_PUBLISH_VERIFICATION_FAILED"
+        reason = remote.get("reason_code")
+        if reason in {
+            "AUTH_REQUIRED",
+            "PERMISSION_DENIED",
+            "KU_CREATE_IDENTITY_MISMATCH",
+            "REPOSITORY_MISMATCH",
+            "KU_QUERY_VERIFICATION_FAILED",
+        }:
+            return reason
+        return None
+
+    def _discover_child(
+        self, parent_doc_id: str, title: str, marked: str,
+        *, expected_doc_id: str | None = None,
+    ) -> dict[str, Any]:
         listing = self._query_repo(parent_doc_id)
         if not listing["ok"]:
             return listing
         candidates = [document for document in listing["documents"] if document["title"] == title]
         if not candidates:
             return _failure("KU_CHILD_NOT_FOUND")
+        if expected_doc_id is not None and (
+            len(candidates) != 1 or candidates[0]["doc_id"] != expected_doc_id
+        ):
+            return _failure("KU_CREATE_IDENTITY_MISMATCH")
         remotes: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for candidate in candidates:
             remote = self._query_document(candidate["doc_id"])
@@ -751,7 +1150,9 @@ class KuClient:
         matches = [
             remote
             for candidate, remote in remotes
-            if _carries_marker(remote["text"], marked) and remote["url"] == candidate["url"]
+            if remote.get("version") is not None
+            and _carries_marker(remote["text"], marked)
+            and _same_ku_document_url(remote.get("url"), candidate["url"])
         ]
         if len(candidates) == 1 and len(matches) == 1:
             return matches[0]
@@ -761,8 +1162,18 @@ class KuClient:
         # that reason as "nothing was written" and closes the intent, which no later
         # retry can undo. Only a marker that names this document with a different
         # content hash is a real conflict.
-        if len(candidates) == 1 and not _conflicting_marker(remotes[0][1]["text"], marked):
-            return _failure("KU_CHILD_CONTENT_UNSETTLED")
+        if len(candidates) == 1:
+            remote = remotes[0][1]
+            if remote.get("repo_id") != self.repo_id or not _same_ku_document_url(
+                remote.get("url"), candidates[0]["url"]
+            ):
+                return _failure("KU_CREATE_IDENTITY_MISMATCH")
+            if _conflicting_marker(remote.get("text", ""), marked):
+                return _failure("KU_IMMUTABLE_CONFLICT")
+            if not _carries_marker(remote.get("text", ""), marked):
+                return _failure("KU_CREATE_MARKER_MISSING")
+            if remote.get("version") is None:
+                return _failure("KU_CREATE_VERSION_UNSETTLED")
         return _failure("KU_IMMUTABLE_CONFLICT")
 
     def _discover_run_root(
@@ -917,6 +1328,14 @@ class KuClient:
         info = result.get("docInfo") if isinstance(result, dict) else None
         identity = info if isinstance(info, dict) else result
         if not self._valid_remote_info(identity, expected_doc_id=doc_id, name_field="name"):
+            reason = self._remote_info_reason(identity)
+            if reason in {
+                "KU_CREATE_RESPONSE_MISSING_REPOSITORY",
+                "KU_CREATE_RESPONSE_MISSING_URL",
+                "KU_CREATE_RESPONSE_REPOSITORY_MISMATCH",
+                "KU_CREATE_RESPONSE_URL_MISMATCH",
+            }:
+                return _failure("KU_QUERY_IDENTITY_MISMATCH")
             return _failure("KU_QUERY_VERIFICATION_FAILED")
         text = result.get("text")
         if not isinstance(text, str):
@@ -1028,6 +1447,93 @@ class KuClient:
             and (expected_title is None or title == expected_title)
         )
 
+    def _remote_info_reason(
+        self, value: Any, *, allow_missing_repository: bool = False,
+    ) -> str | None:
+        if not isinstance(value, dict):
+            return "KU_CREATE_RESPONSE_INVALID"
+        if not isinstance(value.get("docGuid"), str) or not value["docGuid"]:
+            return "KU_CREATE_RESPONSE_MISSING_DOC_ID"
+        # Observed create-doc responses may omit repositoryGuid. Only create
+        # callers may defer this check to authoritative query-content metadata;
+        # a present but wrong/null repository and every read remain strict.
+        if "repositoryGuid" not in value and not allow_missing_repository:
+            return "KU_CREATE_RESPONSE_MISSING_REPOSITORY"
+        if "repositoryGuid" in value and value["repositoryGuid"] != self.repo_id:
+            return "KU_CREATE_RESPONSE_REPOSITORY_MISMATCH"
+        if "url" not in value:
+            return "KU_CREATE_RESPONSE_MISSING_URL"
+        if not _canonical_ku_url(value.get("url"), self.repo_id, value["docGuid"]):
+            return "KU_CREATE_RESPONSE_URL_MISMATCH"
+        return None
+
+    def _readback_reason(
+        self, remote: dict[str, Any], marked: str, expected_url: Any
+    ) -> str:
+        if not isinstance(remote, dict) or not remote.get("ok"):
+            reason = str(remote.get("reason_code", "KU_CREATE_READBACK_UNKNOWN"))
+            if reason == "KU_QUERY_IDENTITY_MISMATCH":
+                return "KU_CREATE_IDENTITY_MISMATCH"
+            return reason
+        if remote.get("repo_id") != self.repo_id or not _same_ku_document_url(
+            remote.get("url"), expected_url
+        ):
+            return "KU_CREATE_IDENTITY_MISMATCH"
+        marker_present = _carries_marker(remote.get("text", ""), marked)
+        version_present = remote.get("version") is not None
+        if marker_present and version_present:
+            return "OK"
+        if not marker_present and not version_present:
+            return "KU_CREATE_CONTENT_UNSETTLED"
+        if not marker_present:
+            return "KU_CREATE_MARKER_MISSING"
+        return "KU_CREATE_VERSION_UNSETTLED"
+
+    @staticmethod
+    def _observation(
+        stage: str,
+        reason_code: str,
+        *,
+        attempt: int | None = None,
+        doc_id: Any = None,
+        url: Any = None,
+        version: Any = None,
+        version_reason: Any = None,
+        marker_present: bool | None = None,
+    ) -> dict[str, Any]:
+        observation: dict[str, Any] = {
+            "stage": stage,
+            "reason_code": reason_code,
+        }
+        for key, value in (
+            ("attempt", attempt),
+            ("doc_id", doc_id),
+            ("url", url),
+            ("version", version),
+            ("version_reason", version_reason),
+            ("marker_present", marker_present),
+        ):
+            if value is not None:
+                observation[key] = value
+        return observation
+
+    def _observe(self, intent: dict[str, Any] | None, observation: dict[str, Any]) -> None:
+        if intent is not None and self.state is not None:
+            # No raw response fields: bound identifiers, strip URL query/fragment,
+            # reject arbitrary strings in identity/reason fields.
+            safe = {"repo_id": self.repo_id}
+            for key, value in observation.items():
+                if key == "url":
+                    if isinstance(value, str):
+                        parsed = urlsplit(value)
+                        if parsed.scheme == "https" and parsed.netloc:
+                            safe[key] = f"https://{parsed.netloc}{parsed.path}"
+                elif isinstance(value, (bool, int)):
+                    safe[key] = value
+                elif isinstance(value, str) and re.fullmatch(_COMPONENT, value) and len(value) <= 128:
+                    safe[key] = value
+            self.state.record_external_observation(intent["intent_id"], safe)
+
     def _persist_create_receipt(
         self,
         intent: dict[str, Any],
@@ -1115,6 +1621,9 @@ class KuClient:
             "child_doc_id": entry["doc_id"],
             "entry_hash": _content_hash(entry_markdown),
             "content_hash": entry["content_hash"],
+            "index_marker": KuClient.index_marker(
+                doc_id, entry["title"], entry["doc_id"], entry["content_hash"]
+            ),
         }
 
     @staticmethod

@@ -36,6 +36,25 @@ class BriefFixture:
 
 
 class RunBriefTests(unittest.TestCase):
+    def test_fulfilled_review_is_saved_not_waiting_for_nonexistent_approval(self):
+        for gate in (None, "G2"):
+            with self.subTest(gate=gate):
+                phase = "REVIEW" if gate is None else "SPEC"
+                action = {"ok": True, "phase": phase, "action_id": "saved",
+                          "child_skill": "tom-review" if gate is None else "tom-spec",
+                          "required_human_gate": gate}
+                orch = BriefFixture(phase, action, producer_jobs={
+                    "producer:saved": {"status": "FULFILLED", "payload": {"phase": phase},
+                                       "draft": {}},
+                })
+                brief = run_brief.build(orch, "run-1")
+                expected = "已保存待处理" if gate is None else "已保存待审批"
+                self.assertEqual(brief["status_label"], "草案" + expected)
+                self.assertIn(expected, run_brief.render(brief))
+                if gate is None:
+                    self.assertNotIn("待审批", brief["status_label"])
+                    self.assertNotIn("审批", brief["next"]["text"])
+
     def test_status_exposes_latest_ipipe_monitoring_checkpoint(self):
         orch = BriefFixture(
             "IPIPE", {"ok": True, "phase": "IPIPE"},

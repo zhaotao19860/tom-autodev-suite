@@ -43,6 +43,7 @@ _NAMED_SCHEMAS = frozenset(
         # document stored under an artifact kind that happens to reuse the word.
         "submit-descriptor",
         "producer-block",
+        "producer-conflict",
     }
 )
 
@@ -104,6 +105,7 @@ STRUCTURAL_ONLY_SCHEMAS = frozenset({
     # (phase_protocol._release_binding_error / _submission_controller_binding); run-summary
     # is a terminal report whose shape the schema fully pins.
     "run-summary", "submit-descriptor", "release-evidence", "producer-block",
+    "producer-conflict",
 })
 
 
@@ -376,6 +378,19 @@ def _validate_task_plan(instance: dict[str, Any]) -> list[SchemaIssue]:
 
 def _validate_change_set(instance: dict[str, Any]) -> list[SchemaIssue]:
     issues: list[SchemaIssue] = []
+    patch_kinds = instance.get("patch_kinds")
+    for role, field in (("business", "business_patch"), ("tests", "test_patch")):
+        patch = instance.get(field)
+        kind = patch_kinds.get(role) if isinstance(patch_kinds, dict) else None
+        if not isinstance(patch, str):
+            continue
+        if kind == "no-op":
+            if patch != "":
+                issues.append(SchemaIssue(field, "no_op_must_be_empty"))
+        elif not _valid_git_patch(patch):
+            issues.append(SchemaIssue(field, "patch_payload_required"))
+        if _looks_like_placeholder_patch(patch):
+            issues.append(SchemaIssue(field, "patch_payload_required"))
     if all(isinstance(instance.get(field), str) for field in ("business_patch", "test_patch")):
         expected_diff = _canonical_hash({
             "business_patch": instance["business_patch"],
@@ -389,6 +404,44 @@ def _validate_change_set(instance: dict[str, Any]) -> list[SchemaIssue]:
     if instance.get("candidate_hash") != expected_candidate:
         issues.append(SchemaIssue("candidate_hash", "mismatch"))
     return issues
+
+
+def _valid_git_patch(patch: str) -> bool:
+    """Parse Git patches in statistics-only mode; never apply or write an index."""
+    import subprocess
+    if not patch.startswith("diff --git ") or not patch.endswith("\n"):
+        return False
+    blocks = re.split(r"(?m)^diff --git ", patch)[1:]
+    for block in blocks:
+        # Header-only and --stat/--summary output are not complete patches.
+        if not any(re.search(pattern, block, re.M) for pattern in (
+            r"^@@ -\d", r"^GIT binary patch$",
+            r"^old mode [0-7]{6}\nnew mode [0-7]{6}$",
+            r"^similarity index 100%\nrename from .+\nrename to .+$",
+            r"^(?:new file|deleted file) mode [0-7]{6}$",
+        )):
+            return False
+    try:
+        result = subprocess.run(
+            ["git", "apply", "--numstat", "--binary", "-"],
+            input=patch.encode("utf-8"), capture_output=True, cwd="/", check=False,
+        )
+        return result.returncode == 0 and bool(result.stdout)
+    except (OSError, UnicodeError):
+        return False
+
+
+def _looks_like_placeholder_patch(value: str) -> bool:
+    """Reject values that are identifiers or descriptions masquerading as diffs."""
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{7,64}", stripped):
+        return True
+    lower = stripped.lower()
+    return lower.startswith(("sha:", "commit:", "path:", "summary:", "placeholder")) or (
+        "\n" not in stripped and not stripped.startswith("diff --git ")
+    )
 
 
 def _validate_review(instance: dict[str, Any]) -> list[SchemaIssue]:

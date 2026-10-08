@@ -206,6 +206,19 @@ class KnowledgeSync:
             index_error = self._verify_index(index, root_doc_id)
             if index_error is not None:
                 return index_error
+            lower_publish = self._pending_lower_intent(
+                bound_run_id, intent["intent_id"]
+            )
+            if (
+                lower_publish is not None
+                and lower_publish.get("operation") == "ku.document.publish"
+                and hasattr(self.ku, "reconcile_index_publish")
+            ):
+                reconciled = self.ku.reconcile_index_publish(root_doc_id, entry)
+                if not reconciled.get("ok") and reconciled.get("reason_code") not in {
+                    "QUERY_REQUIRED",
+                }:
+                    return reconciled
 
         if do_icafe:
             body = (

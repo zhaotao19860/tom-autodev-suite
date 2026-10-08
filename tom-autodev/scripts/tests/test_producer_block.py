@@ -100,7 +100,11 @@ class ProducerBlockTests(unittest.TestCase):
             workflow_spec.TRANSITION_REQUIREMENTS[("IMPLEMENT", "DIAGNOSE")],
             (("producer-block-report", "task-plan"), None),
         )
-        self.assertNotIn("DIAGNOSE", workflow_spec.allowed_transitions()["PLAN"])
+        self.assertIn("DIAGNOSE", workflow_spec.allowed_transitions()["PLAN"])
+        self.assertEqual(
+            workflow_spec.TRANSITION_REQUIREMENTS[("PLAN", "DIAGNOSE")],
+            (("producer-conflict", "task-dag"), None),
+        )
 
     def test_nested_evidence_finds_matching_producer_block_predecessor(self):
         root = Path(self.temp.name) / "orchestrator"

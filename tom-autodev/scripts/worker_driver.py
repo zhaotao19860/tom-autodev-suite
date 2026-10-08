@@ -372,9 +372,62 @@ def report_producer_block(
             "status": saved["status"], "worker_transition": "PENDING"}
 
 
+def report_producer_conflict(
+    orchestrator: Any, run_id: str, job_id: str, report: dict[str, Any],
+    *, locks: Any | None = None,
+) -> dict[str, Any]:
+    """Record a PLAN conflict without manufacturing a task plan."""
+    if locks is not None:
+        token = uuid.uuid4().hex
+        key = f"{_WORKER_LEASE_PREFIX}{run_id}"
+        lease = locks.acquire(key, token, _WORKER_LEASE_TTL_SECONDS)
+        if not lease.get("acquired"):
+            return {"ok": False, "reason_code": "WORKER_LEASE_HELD", "run_id": run_id}
+        try:
+            return report_producer_conflict(orchestrator, run_id, job_id, report)
+        finally:
+            locks.release(key, token)
+    decision = classify_next(orchestrator, run_id, read_only=True)
+    action = decision.get("action") or {}
+    if decision.get("kind") != PRODUCER_WAIT or action.get("phase") != "PLAN":
+        return {"ok": False, "reason_code": "PRODUCER_CONFLICT_PHASE_INVALID", "run_id": run_id}
+    if job_id != f"producer:{action.get('action_id')}":
+        return {"ok": False, "reason_code": "STALE_PRODUCER_JOB", "run_id": run_id}
+    job = orchestrator.state.producer_job(job_id)
+    if not isinstance(job, dict) or job.get("status") != "PENDING":
+        return {"ok": False, "reason_code": "PRODUCER_JOB_NOT_PENDING", "run_id": run_id}
+    issues = validate_named_schema(report, "producer-conflict")
+    if issues:
+        return {"ok": False, "reason_code": "PRODUCER_CONFLICT_SCHEMA_INVALID",
+                "issues": [issue.__dict__ for issue in issues]}
+    if report.get("job_id") != job_id or any(report.get(key) != action.get(key) for key in (
+        "run_id", "action_id", "source_event_id", "task_id", "input_hash", "source_revisions"
+    )):
+        return {"ok": False, "reason_code": "PRODUCER_CONFLICT_BINDING_MISMATCH", "run_id": run_id}
+    predecessor = orchestrator.artifacts.phase_artifact(report["predecessor_artifact_id"])
+    envelope = predecessor.get("envelope") if predecessor.get("valid") else {}
+    if (
+        not predecessor.get("valid")
+        or envelope.get("content_hash") != report["predecessor_content_hash"]
+        or envelope.get("phase") != "TASKS"
+    ):
+        return {"ok": False, "reason_code": "PRODUCER_CONFLICT_PREDECESSOR_MISMATCH", "run_id": run_id}
+    canonical = json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    report_id = _canonical_hash(report)
+    stored = orchestrator.artifacts.put(
+        run_id, "producer-conflict", canonical,
+        {"report_id": report_id, "job_id": job_id, "action_id": action["action_id"],
+         "source_event_id": action["source_event_id"], "task_id": action["task_id"],
+         "predecessor_artifact_id": report["predecessor_artifact_id"]},
+    )
+    saved = orchestrator.state.record_producer_block(run_id, report_id, job_id, report, stored["artifact_id"])
+    return {"ok": True, "reason_code": "SPEC_CONFLICT_REPORTED", "run_id": run_id,
+            "report_id": report_id, "artifact_id": stored["artifact_id"], "status": saved["status"]}
+
+
 def _consume_producer_block(orchestrator: Any, run_id: str, decision: dict[str, Any]) -> dict[str, Any] | None:
     action = decision.get("action") or {}
-    if action.get("phase") != "IMPLEMENT":
+    if action.get("phase") not in {"IMPLEMENT", "PLAN"}:
         return None
     job_id = f"producer:{action.get('action_id')}"
     blocks = [
@@ -394,17 +447,18 @@ def _consume_producer_block(orchestrator: Any, run_id: str, decision: dict[str, 
         return None
     block = blocks[0]
     report = block["report"]
+    is_conflict = action.get("phase") == "PLAN"
     result = orchestrator.advance(run_id, "DIAGNOSE", {
         "input_hash": report["input_hash"],
         "approved_input_hash": report["input_hash"],
-        "artifacts": ["producer-block-report", "task-plan"],
+        "artifacts": ["producer-conflict", "task-dag"] if is_conflict else ["producer-block-report", "task-plan"],
         "producer_block_report_id": block["artifact_id"],
         "producer_block_report_hash": _canonical_hash(report),
-        "plan_artifact_id": report["plan_artifact_id"],
-        "plan_content_hash": report["plan_content_hash"],
+        "plan_artifact_id": report.get("plan_artifact_id") or report.get("predecessor_artifact_id"),
+        "plan_content_hash": report.get("plan_content_hash") or report.get("predecessor_content_hash"),
         "task_id": report["task_id"],
         "source_revisions": dict(report["source_revisions"]),
-        "reason_code": "PLAN_INCOMPLETE",
+        "reason_code": "SPEC_CONFLICT" if is_conflict else "PLAN_INCOMPLETE",
         "classification": report.get("classification"),
         "evidence": report["evidence"],
     })
@@ -1411,6 +1465,11 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
     `locks` means no lease — the established single-process behavior — so existing callers
     are unaffected.
     """
+    if locks is None and any(
+        str(item.get("operation", "")).startswith("ku.")
+        for item in orchestrator.state.pending_intents(run_id)
+    ):
+        locks = orchestrator.recovery.locks
     if locks is None:
         return _drive(orchestrator, run_id, knowledge_sync, max_steps, icode_skill,
                       icode_runtime, ipipe_api, collaboration_client)
@@ -1480,8 +1539,13 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         if kind == AUTO_COMPLETE:
             result = execute_auto(orchestrator, run_id, knowledge_sync=knowledge_sync)
             if not result.get("ok"):
-                return {"ok": False, "reason_code": "AUTO_COMPLETE_FAILED", "run_id": run_id,
-                        "detail": result, "auto_completed": steps}
+                return {
+                    "ok": False,
+                    "reason_code": result.get("reason_code", "AUTO_COMPLETE_FAILED"),
+                    "run_id": run_id,
+                    "detail": result,
+                    "auto_completed": steps,
+                }
             steps.append({"phase": decision["action"].get("phase"), "result": result})
             continue
         if kind == PRODUCER_WAIT:
@@ -1522,7 +1586,7 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                             "parked": APPROVAL_WAIT, "gate": result.get("gate"),
                             "approval_input_hash": result.get("approval_input_hash"),
                             "auto_completed": steps}
-                return {"ok": False, "reason_code": "PRODUCER_COMPLETE_FAILED", "run_id": run_id,
+                return {"ok": False, "reason_code": result.get("reason_code", "PRODUCER_COMPLETE_FAILED"), "run_id": run_id,
                         "detail": result, "auto_completed": steps}
             job = _enqueue_producer_job(orchestrator, run_id, decision)
             return {"ok": True, "reason_code": "PARKED", "run_id": run_id,

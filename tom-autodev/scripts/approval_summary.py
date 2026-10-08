@@ -706,6 +706,187 @@ _DIAGNOSIS_PHRASES = {
         "取得 G4 审批后，重新生成 IMPLEMENT 改动集，并通过源码评审和 iPipe 证据核验。",
 }
 
+# Exact translations for the diagnosis currently delivered by BGW-1995 G6.
+# Keep this table presentation-only: the canonical DraftContent and its hashes
+# must continue to contain the producer's original evidence.
+_BGW_1995_DIAGNOSIS_TRANSLATIONS = {
+    "REVIEW:R1:undeclared svc in synproxy_should_reuse_session call path;R2:approved T1 malformed-cookie/lower MSS-index negative test deliverable absent":
+        "评审问题：R1，synproxy_should_reuse_session 调用路径中的 svc 未声明；R2，已批准的 T1 畸形 Cookie 与较低 MSS 索引负向测试交付物缺失。",
+    "The current Review rejection has two independently evidenced causes. R1: adapting the shared cookie validator to require service context without propagating bgw_svc_t *svc through synproxy_should_reuse_session leaves the reuse-path expression outside the identifier's scope, causing a deterministic compilation defect. A declaration supplying the intended service in that exact pinned scope would refute this explanation; the Review's scope/caller searches found none. R2: the approved negative acceptance matrix was not converted into a runnable independent QA fixture and assertions; ordinary curl positives, comments and arbitrary ACK rejection cannot isolate the new constraints. Finding those actual assertions and a valid fresh-cookie fixture in the frozen QA revision would refute this explanation; the complete Review found no such implementation. Evidence is sufficient for a complete source diagnosis and bounded repair proposal, not for a passing compile/test or release claim.":
+        "当前评审被拒有两个分别得到证据支持的原因。R1：共享 Cookie 校验器新增服务上下文要求后，没有将 bgw_svc_t *svc 贯穿传入 synproxy_should_reuse_session，导致复用路径中的表达式超出该标识符的作用域，形成确定性的编译缺陷。若在当前固定作用域找到提供目标服务的声明，即可推翻这一解释；评审对作用域和调用方的搜索没有找到该声明。R2：已批准的负向验收矩阵没有转换为可运行的独立 QA fixture 和断言；普通 curl 正向流量、注释以及任意 ACK 拒绝无法隔离新增约束。若在固定 QA 修订中找到这些实际断言和有效的新鲜 Cookie fixture，即可推翻这一解释；完整评审没有找到相关实现。现有证据足以完成源码诊断并提出有界修复方案，但不足以声称编译、测试通过或可以发布。",
+    "Keep the approved T1 behavior and use CODE_ONLY repair through parent-controlled PLAN/IMPLEMENT. In the business file, add an explicit borrowed bgw_svc_t *svc parameter to the private reuse helper, pass the existing service pointer from synproxy_session_process_in, and forward it to syn_proxy_cookie_check. In the independent QA repository, implement the missing deterministic fresh-cookie fixture and T1 negative assertions while retaining existing positives. Do not change cookie layout, signer, MSS tables, strict-index policy, public ABI, ownership or configuration synchronization to work around these findings. Diagnosis is complete with sufficient evidence; repair execution and verification remain pending.":
+        "保留已批准的 T1 行为，并由父流程控制 PLAN/IMPLEMENT，按 CODE_ONLY 范围修复。业务文件中，为私有复用 helper 增加显式借用的 bgw_svc_t *svc 参数，从 synproxy_session_process_in 传入现有服务指针，再转发给 syn_proxy_cookie_check。独立 QA 仓库中，实现缺失的确定性新鲜 Cookie fixture 和 T1 负向断言，同时保留已有正向用例。不得为绕过这些问题而修改 Cookie 布局、签名器、MSS 表、严格索引策略、公共 ABI、所有权或配置同步。诊断已有充分证据并已完成；修复执行和验证仍待进行。",
+    "OBSERVED — Current context binds DIAGNOSE action 240ddeed018ccbe6ac998bbf6d5cd74e297fb0f57c1197feeca00fe61a7ad8e0, input hash f569b12435e9b3a3b8809abaa2ae8a23c79b17ce166cad6e4fa64b1fc437b2eb, and source event 43f1ae5bf6aa471ea7fe8b95590b7573 to task BGW-1995-T1 in run 81a91c0842c74cbc910fcce375982e33. The producer job is PENDING with no draft present.":
+        "实际观察：当前上下文将 DIAGNOSE action `240ddeed018ccbe6ac998bbf6d5cd74e297fb0f57c1197feeca00fe61a7ad8e0`、input hash `f569b12435e9b3a3b8809abaa2ae8a23c79b17ce166cad6e4fa64b1fc437b2eb` 和 source event `43f1ae5bf6aa471ea7fe8b95590b7573` 绑定到 run `81a91c0842c74cbc910fcce375982e33` 中的任务 BGW-1995-T1。生产任务状态为待处理，当前没有草稿。",
+    "OBSERVED — The artifact reader reports pinned Review d44c15537f7cca7889bb39613aa8f8a886af8e7a7152f92b17d607ce4f14d581 as valid, with content hash 326878914344a2438fd0a845aba9e64f17ec2134344576ee6c58e192cc9a396d and the frozen revisions above. Its verdict is REJECT and completeness_state is COMPLETE. Only R1 and R2 are confirmed blocking findings. Supporting local records are /Users/tom/.tom-autodev/BGW-1995-T1-review-20261007.json and /Users/tom/.tom-autodev/BGW-1995-T1-review-20261007-evidence.md.":
+        "实际观察：artifact reader 报告固定 Review `d44c15537f7cca7889bb39613aa8f8a886af8e7a7152f92b17d607ce4f14d581` 有效，content hash 为 `326878914344a2438fd0a845aba9e64f17ec2134344576ee6c58e192cc9a396d`，固定修订如上。评审结论为拒绝，完整性状态为已完成。只有 R1 和 R2 被确认是阻断问题。支持性本地记录为 `/Users/tom/.tom-autodev/BGW-1995-T1-review-20261007.json` 和 `/Users/tom/.tom-autodev/BGW-1995-T1-review-20261007-evidence.md`。",
+    "OBSERVED — R1, P1: /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/0a140c2f8ada3e5b/dataplane/bgw_synproxy.c:1977-1995,2126-2144. The changed expression is syn_proxy_cookie_check(ctx, skb, th, cookie, opt, svc), but synproxy_should_reuse_session accepts only ctx, cp, skb and opt. Its caller remains synproxy_should_reuse_session(ctx, cp, skb, &opt). The pinned Review records no local, file-scope or macro declaration supplying svc; synproxy_session_process_in already has the required service pointer. The initial-ACK call at lines 1618-1619 was adapted.":
+        "实际观察：R1、P1：`/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/0a140c2f8ada3e5b/dataplane/bgw_synproxy.c:1977-1995,2126-2144`。改动后的表达式是 `syn_proxy_cookie_check(ctx, skb, th, cookie, opt, svc)`，但 synproxy_should_reuse_session 只接收 ctx、cp、skb 和 opt。调用方仍为 `synproxy_should_reuse_session(ctx, cp, skb, &opt)`。固定评审没有记录提供 svc 的局部、文件作用域或宏声明；synproxy_session_process_in 已经拥有所需的服务指针。第 1618-1619 行的初始 ACK 调用已完成适配。",
+    "OBSERVED — R2, P2: /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/case_dataflow_serial/test_dataflow_NAT44_tcp_040.py:45-126 exercises ordinary curl traffic with global C2S_MSS 536/1452/0. Lines 117-123 document the missing rejection fixture rather than implementing it. Reviewed delegates do not construct the required fresh-cookie rejection pairs or a controlled below-selected-index client case.":
+        "实际观察：R2、P2：`/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/case_dataflow_serial/test_dataflow_NAT44_tcp_040.py:45-126` 只执行全局 C2S_MSS 为 536/1452/0 的普通 curl 流量。第 117-123 行记录了缺失的拒绝 fixture，但没有实现它。已评审的委托内容没有构造所需的新鲜 Cookie 拒绝对以及受控的低于选定索引的客户端用例。",
+    "OBSERVED — Approved Plan cfa9536952dd0abfb806ff4542f5b6d7bf05b86d4890626f7b23d65d7e9c2e7c, content hash ec4e28df006dbe2714c6144e131e00ea5bc33bacb69055f537401aa5547971cd, explicitly requires malformed-cookie rejection, lower configured MSS-index rejection, non-RTT reserved-bit versus RTT-data distinction, and equivalent new-session/reuse results. It describes fixture inputs but supplies no concrete fixture identifier. Review evidence sections 4-5 establish the delivered QA fixture/assertion gap.":
+        "实际观察：已批准计划 `cfa9536952dd0abfb806ff4542f5b6d7bf05b86d4890626f7b23d65d7e9c2e7c`、content hash `ec4e28df006dbe2714c6144e131e00ea5bc33bacb69055f537401aa5547971cd` 明确要求拒绝畸形 Cookie、拒绝低于配置的 MSS 索引、区分非 RTT 保留位与 RTT 数据含义，并要求新会话与复用得到等价结果。计划描述了 fixture 输入，但没有提供具体 fixture 标识。评审证据第 4-5 节确认已交付 QA fixture/断言存在缺口。",
+    "OBSERVED — /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/packet_abnormal.py:650-663 uses arbitrary ack=222 without a fresh signed SYN/ACK. Rejection can therefore precede the newly added constraints and cannot serve as their discriminating oracle.":
+        "实际观察：`/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/packet_abnormal.py:650-663` 使用任意 ack=222，没有新鲜的已签名 SYN/ACK。因此拒绝可能早于新增约束发生，不能作为区分这些约束的判定依据。",
+    "HISTORY — One earlier persisted diagnosis exists in /Users/tom/.tom-autodev/artifacts/81a91c0842c74cbc910fcce375982e33/diagnose/ed4323423257bf51494685b97d88da99068728fac59d755e5cfe44b4ecfb45a2/content.bin. It records attempt 1, classification PLAN_INCOMPLETE, and the verbatim signature: PLAN_INCOMPLETE: approved task plan requires removed global/VS c2s_mss exact-index equality. It concerns an earlier planning-input conflict at different source revisions, not the current R1/R2 source Review. This draft uses attempt 2 without erasing that history, declaring the earlier case resolved, or resetting controller budgets.":
+        "历史记录：`/Users/tom/.tom-autodev/artifacts/81a91c0842c74cbc910fcce375982e33/diagnose/ed4323423257bf51494685b97d88da99068728fac59d755e5cfe44b4ecfb45a2/content.bin` 中存在一份较早的持久化诊断。它记录第 1 次尝试、分类 PLAN_INCOMPLETE，以及原样签名：计划不完整：已批准任务计划要求已移除的全局与 VS c2s_mss 严格索引相等。该记录涉及不同源码修订下较早的计划输入冲突，不是当前 R1/R2 源码评审。本草稿使用第 2 次尝试，没有删除历史、宣称早期问题已解决或重置控制器预算。",
+    "OBSERVED — This is a source-only Review occurrence recorded on 2026-10-07, not an observed compiler or product-test execution. No build/stage/job identity, runner fingerprint, first runtime failure timestamp or runtime log window exists in the current failure bundle; the corresponding execution fields are null.":
+        "实际观察：这是 2026-10-07 记录的仅源码评审事件，不是已观察到的编译器或产品测试执行。当前失败材料中没有 build/stage/job 标识、runner 指纹、首次运行时失败时间或运行时日志窗口；对应执行字段均为 null。",
+    "SOURCE REPRODUCTION — At the frozen business revision, trace synproxy_session_process_in → synproxy_should_reuse_session → syn_proxy_cookie_check. The first divergent boundary is the reuse caller/helper interface: the service context required by the newly changed validator call is not passed into the helper's scope.":
+        "源码复现：在固定业务修订上跟踪 synproxy_session_process_in → synproxy_should_reuse_session → syn_proxy_cookie_check。第一个分歧边界是复用调用方/helper 接口：新增校验器调用所需的服务上下文没有传入 helper 作用域。",
+    "SOURCE REPRODUCTION — Compare approved Plan checklist 5 and S1/S2 with the frozen QA entry and its reviewed delegates. The first divergent delivery boundary is approved negative-test requirement → runnable fixture/assertions: positive dataflow observations and comments were delivered, but the targeted rejection matrix was not.":
+        "源码复现：将已批准计划检查项 5 及 S1/S2 与固定 QA 条目和已评审委托内容对照。第一个分歧交付边界是已批准负向测试要求 → 可运行 fixture/断言：已交付正向数据流观察和注释，但没有交付目标拒绝矩阵。",
+    "NOT EXECUTED — No project compilation, tests, packet injection, remote commands, iCode/iPipe operations, draft submission or G6 approval were performed. No files were created or modified; this response is DraftContent only.":
+        "未执行：没有进行项目编译、测试、报文注入、远程命令、iCode/iPipe 操作、草稿提交或 G6 审批。没有创建或修改文件；本响应仅为 DraftContent。",
+    "EXPECTED versus OBSERVED — Both initial-ACK and reuse paths must pass the actual service context to the shared validator. The initial path does; the reuse helper references an undeclared svc. INFERENCE: compiling this translation unit as represented by the pinned source fails identifier resolution. This is a deterministic source defect, not a quoted compiler diagnostic or proof of runner reproduction.":
+        "预期与实际对比：初始 ACK 和复用路径都必须将实际服务上下文传给共享校验器。初始路径已经传入；复用 helper 引用了未声明的 svc。推断：按固定源码编译该翻译单元会因标识符解析失败。这是确定性的源码缺陷，不是引用的编译器诊断，也不是 runner 已复现的证明。",
+    "EXPECTED versus OBSERVED — T1 must deliver runnable external assertions for malformed cookies and below-selected MSS indices. The frozen QA change does not. INFERENCE: running that unchanged QA revision in iPipe cannot establish assertions absent from its source. This is a companion TEST_FAILURE in test delivery, not a failure caused by refusing local execution.":
+        "预期与实际对比：T1 必须为畸形 Cookie 和低于选定值的 MSS 索引交付可运行的外部断言。固定 QA 改动没有做到。推断：在 iPipe 中运行未改变的 QA 修订，无法建立其源码中不存在的断言。这是测试交付上的伴随 TEST_FAILURE，不是拒绝本地执行导致的失败。",
+    "BASELINE — Review compares business 4ff735f42187a596619858df2d4dfa64c4a69801 and tests 879cec4c3b46a2efaff199ca7a9d2f55e4e85bc8 with the frozen candidates. Those are source baselines, not demonstrated passing executions. No comparable passing occurrence with identical fixture, toolchain, configuration and topology was supplied.":
+        "基线：评审将业务 `4ff735f42187a596619858df2d4dfa64c4a69801` 和测试 `879cec4c3b46a2efaff199ca7a9d2f55e4e85bc8` 与固定候选进行对比。它们是源码基线，不是已证明通过的执行。没有提供 fixture、工具链、配置和拓扑完全相同的可比通过记录。",
+    "COUNTER-EVIDENCE — R3-R5 refute the suspected MSS-table off-by-one, persistent DSR/configuration mismatch, and QA type/unpacking/capture-contract defects. Last valid MSS indices remain 15 and 3; non-RTT zero-valued entries 0/1 differ from valid RTT index 0. Existing NAT44/NAT66 MSS, WSCALE/DSR and RTT-positive coverage must be retained rather than described as absent.":
+        "反证：R3-R5 排除了疑似 MSS 表下标偏移、持久化 DSR/配置不一致以及 QA 类型/解包/抓包合同缺陷。最后有效 MSS 索引仍为 15 和 3；非 RTT 的零值条目 0/1 与有效 RTT 索引 0 不同。已有 NAT44/NAT66 MSS、WSCALE/DSR 和 RTT 正向覆盖必须保留，不能描述为缺失。",
+    "SCOPE — R6 excludes S3 offsets, MSS=1344/offset=5376 and HTTP-400 regression from T1. The earlier PLAN_INCOMPLETE diagnosis is retained as history but does not override the currently pinned approved Plan and confirmed Review. Removing strict configured-index rejection would require an explicit parent-owned behavioral decision, not this CODE_ONLY repair.":
+        "范围：R6 将 S3 偏移、MSS=1344/offset=5376 以及 HTTP-400 回归排除在 T1 外。较早的 PLAN_INCOMPLETE 诊断作为历史保留，但不覆盖当前固定的已批准计划和已确认评审。移除严格配置索引拒绝需要父流程明确作出行为决策，不属于本次 CODE_ONLY 修复。",
+    "UNKNOWN — Actual compiler diagnostics, runner/toolchain availability, runtime rejection results, concrete negative-fixture implementation and its hash remain unobserved. Configuration-transition behavior is an acknowledged risk, not a newly confirmed root cause. These limitations prevent claiming a verified fix but do not prevent complete diagnosis of the two established source/delivery defects.":
+        "未知：实际编译器诊断、runner/工具链可用性、运行时拒绝结果、具体负向 fixture 实现及其哈希仍未观察到。配置切换行为是已知风险，不是新确认的根因。这些限制使我们不能声称修复已验证，但不妨碍完成对两个已确定源码/交付缺陷的诊断。",
+    "Before execution, perform source Review of the repaired candidate: verify all reuse-helper declarations/callers forward the same valid service pointer, preserve ownership/lifetime and public ABI, and map every approved T1 rejection clause to an executable QA assertion with a pinned fixture identity. This inspection is not project build/test evidence.":
+        "执行前，对修复候选进行源码评审：核对所有复用 helper 声明和调用方都转发同一个有效服务指针，保持所有权、生命周期和公共 ABI 不变，并将每条已批准的 T1 拒绝条款映射到带固定 fixture 标识的可执行 QA 断言。该检查不是项目构建/测试证据。",
+    "R1 discriminating verification: require complete compile logs for the repaired translation unit, followed by external initial-ACK and session-reuse positive/negative cases. A compile-only pass does not establish correct service selection or reuse behavior.":
+        "R1 区分性验证：要求修复后翻译单元的完整编译日志，然后执行外部初始 ACK 和会话复用正向/负向用例。仅编译通过不能证明服务选择或复用行为正确。",
+    "R2 discriminating verification: use controlled fresh SYN/SYN-ACK/ACK exchanges and one changed condition per paired case. Establish a successful control first, then show malformed reserved bits, invalid wscale pairs/configuration, non-RTT zero MSS entries and below-selected MSS index are rejected for the intended constraint rather than stale time, bad sequence or unrelated hash failure. Include a naturally signed lower-client-MSS case. If the fixture cannot isolate the constraint, report the fixture limitation instead of counting any dropped ACK as success.":
+        "R2 区分性验证：使用受控的新鲜 SYN/SYN-ACK/ACK 交换，每对用例只改变一个条件。先建立成功控制组，再证明畸形保留位、无效 wscale 对/配置、非 RTT 零 MSS 条目和低于选定值的 MSS 索引是因目标约束被拒绝，而不是因过期时间、错误序列号或无关哈希失败被拒绝。加入自然签名的低客户端 MSS 用例。若 fixture 无法隔离约束，应报告 fixture 限制，不要把任意丢弃的 ACK 计为成功。",
+    "Retain correlated packets, configuration snapshots and externally observed handshake/session outcomes. Invalid initial ACKs must not create a successful session; invalid reuse attempts must not establish replacement dataflow or corrupt the existing session. Record case IDs, timestamps, topology, toolchain/image identity, exact server and QA revisions, stage/job IDs and complete logs. Treat environment or revision mismatch as collection/environment failure rather than product rejection.":
+        "保留关联报文、配置快照以及外部观察到的握手/会话结果。无效初始 ACK 不得建立成功会话；无效复用尝试不得建立替代数据流或损坏现有会话。记录用例 ID、时间戳、拓扑、工具链/镜像标识、准确的服务端和 QA 修订、stage/job ID 及完整日志。将环境或修订不一致视为采集/环境失败，而不是产品拒绝。",
+    "If the parent uses P0新case回归, bind get_bgw_test_case to the exact repaired QA product and get_bgwagent to the compatible dependency product, and verify both are actually consumed. Earlier stages must supply the matching server binary; the manual case stage updates client artifacts only. Stop on an invalid positive control or widespread valid-handshake rejection; do not use blind reruns or a local build as substitute evidence.":
+        "如果父流程使用 P0新case回归，将 get_bgw_test_case 绑定到准确的修复后 QA 产品，将 get_bgwagent 绑定到兼容的依赖产品，并核对两者确实被使用。前置阶段必须提供匹配的服务端二进制；手工用例阶段只更新客户端产物。若正向控制无效或大量有效握手被拒绝，应停止；不得用盲目重跑或本地构建替代证据。",
+    "After the parent obtains the required approvals, execute only in the approved iPipe bindings: business baidu/sysip/x86bgw, branch x86bgw-dpdk-2011-syncookie, pipeline 348102 for compile/scan/unit/regression; independent QA baidu/nsiqa/x86bgw, branch syncookie-bugfix, pipeline 504074 for the repaired test product; compatible bgwagent dependency from pipeline 348142 without agent source changes. Bind exact repaired revisions, products and fixture/test-plan hashes. No pipeline call is authorized by this draft.":
+        "父流程取得所需审批后，只能在已批准的 iPipe 绑定中执行：业务为 baidu/sysip/x86bgw，分支为 x86bgw-dpdk-2011-syncookie，pipeline 348102 用于 compile/scan/unit/regression；独立 QA 为 baidu/nsiqa/x86bgw，分支为 syncookie-bugfix，pipeline 504074 用于修复后的测试产品；兼容的 bgwagent 依赖来自 pipeline 348142，不修改 agent 源码。绑定准确的修复后修订、产品以及 fixture/测试计划哈希。本草稿不授权任何 pipeline 调用。",
+    "Bound the product matrix to approved T1 behavior: RTT/non-RTT, initial session/reuse, IPv4/IPv6, nonzero VS override/global fallback, selected-index equality versus lower index, legal highest indices, valid RTT index 0, c2s_mss=0 and existing WSCALE/DSR positive regressions. Confirm non-RTT bits 12-13 are reserved while RTT high bits retain their RTT-data meaning. Exclude S3 offset and HTTP-400 acceptance.":
+        "将产品矩阵限定为已批准的 T1 行为：RTT/非 RTT、初始会话/复用、IPv4/IPv6、非零 VS 覆盖/全局回退、选定索引相等与较低索引、合法最高索引、有效 RTT 索引 0、c2s_mss=0 以及现有 WSCALE/DSR 正向回归。确认非 RTT 的第 12-13 位为保留位，而 RTT 高位保留 RTT 数据含义。排除 S3 偏移和 HTTP-400 验收。",
+    "PLAN — Preserve AC-GRILL-1 and AC-GRILL-3 and explicitly account for R1/R2. Specify fixture construction, external oracles, fresh-cookie timing, controlled reuse state, configuration isolation, case IDs, packet/session evidence and cleanup ownership. If a required negative cannot be constructed reliably, surface that bounded fixture blocker rather than silently deleting the approved requirement.":
+        "计划：保留 AC-GRILL-1 和 AC-GRILL-3，并明确处理 R1/R2。规定 fixture 构造、外部判定、fresh-cookie 时序、受控复用状态、配置隔离、用例 ID、报文/会话证据和清理责任。若某项必需负向用例无法可靠构造，应暴露该有界 fixture 阻塞，不得静默删除已批准要求。",
+    "BUSINESS SCOPE — Modify /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/0a140c2f8ada3e5b/dataplane/bgw_synproxy.c at synproxy_should_reuse_session and its caller. Preserve the existing service lifetime supplied through /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/0a140c2f8ada3e5b/dataplane/bgw_tcp.c; no allocation, reference transfer or public-header change is expected.":
+        "业务范围：修改 `/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/0a140c2f8ada3e5b/dataplane/bgw_synproxy.c` 中的 synproxy_should_reuse_session 及其调用方。保留通过 `/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/0a140c2f8ada3e5b/dataplane/bgw_tcp.c` 提供的现有服务生命周期；不应需要分配、引用转移或公共头文件变更。",
+    "QA SCOPE — Extend /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/case_dataflow_serial/test_dataflow_NAT44_tcp_040.py and, only where necessary, existing helpers in /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/check.py. Inspect and reuse /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/packet_abnormal.py and /Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/scapy_op.py only as justified by the fixture design; arbitrary ack=222 is not an adequate replacement. Any additional family/RTT case-file edits must be explicitly bounded in the approved repair plan.":
+        "QA 范围：扩展 `/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/case_dataflow_serial/test_dataflow_NAT44_tcp_040.py`，仅在必要时修改 `/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/check.py` 中已有 helper。仅按 fixture 设计需要检查和复用 `/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/packet_abnormal.py` 和 `/Users/tom/.tom-autodev/worktrees/81a91c0842c74cbc910fcce375982e33/BGW-1995-T1/db6e4d76d569f9e6/bgw_auto/lib/scapy_op.py`；任意 ack=222 不是合适替代。任何额外 family/RTT 用例文件改动都必须在已批准修复计划中明确限定。",
+    "HANDOFF — The parent owns G6, retry-budget decisions and routing. After approval, PLAN/IMPLEMENT produces coordinated business/QA patches, followed by fresh source Review and G5 binding of the actual candidate. Only subsequent authorized iPipe evidence can close the repair. No repair diff currently exists, so repair_diff_hash remains null.":
+        "交接：父流程负责 G6、重试预算决策和路由。审批后，PLAN/IMPLEMENT 生成协调的业务/QA 补丁，随后进行新的源码评审并对实际候选绑定 G5。只有之后获得授权的 iPipe 证据才能关闭修复。当前不存在修复 diff，因此 repair_diff_hash 仍为 null。",
+    "ROLLBACK — If the repair is unsuitable, revert only its coordinated business/QA patch to the frozen candidate revisions for investigation; those candidates remain blocked and must not be released. If T1 must be abandoned or broad handshake rejection occurs, use the approved controlled rollback to business 4ff735f42187a596619858df2d4dfa64c4a69801 and tests 879cec4c3b46a2efaff199ca7a9d2f55e4e85bc8, retaining failure evidence and restoring test configuration through fixture teardown. Do not rewrite pipeline templates, replace a server binary manually, alter PAL wire semantics or bypass gateway validation. Deployment rollback remains parent-authorized and iPipe-only.":
+        "回滚：若修复不合适，仅将协调的业务/QA 补丁回退到固定候选修订以便调查；这些候选仍被阻断，不得发布。若必须放弃 T1 或出现大范围握手拒绝，使用已批准的受控回滚，业务回到 `4ff735f42187a596619858df2d4dfa64c4a69801`，测试回到 `879cec4c3b46a2efaff199ca7a9d2f55e4e85bc8`，保留失败证据，并通过 fixture teardown 恢复测试配置。不得重写 pipeline 模板、手工替换服务端二进制、改变 PAL 线协议语义或绕过网关校验。部署回滚仍由父流程授权且只能通过 iPipe 执行。",
+}
+
+_DIAGNOSIS_STRUCTURAL_LABELS = {
+    "OBSERVED": "实际观察",
+    "EXPECTED": "预期结果",
+    "EXPECTED versus OBSERVED": "预期与实际对比",
+    "SOURCE REPRODUCTION": "源码复现",
+    "LOG EVIDENCE": "日志证据",
+    "REPRODUCTION": "复现步骤",
+    "MINIMAL VERIFICATION": "最小验证",
+    "REPAIR PLAN": "修复计划",
+}
+
+_DIAGNOSIS_SAFE_PATTERNS = (
+    (
+        re.compile(
+            r"^The pinned PLAN still requires exact global/VS c2s_mss index equality"
+            r", which contradicts the current conservative solution\.$"
+        ),
+        "当前固定计划仍要求全局与 VS 的 c2s_mss 索引严格相等，"
+        "与当前保守方案冲突。",
+    ),
+    (
+        re.compile(
+            r"^No iPipe build, stage, job, environment, or runtime failure evidence exists; "
+            r"this is a planning-input mismatch\.$"
+        ),
+        "没有 iPipe 构建、阶段、作业、环境或运行时失败证据；"
+        "本次属于计划输入不一致。",
+    ),
+    (
+        re.compile(
+            r"^Do not patch code in DIAGNOSE\. Re-enter PLAN and replace the stale "
+            r"exact c2s_mss equality requirement with the approved conservative validation behavior\.$"
+        ),
+        "不要在 DIAGNOSE 阶段直接修改代码。应重新进入 PLAN，"
+        "用已批准的保守校验行为替换过时的 c2s_mss 严格相等要求。",
+    ),
+    (
+        re.compile(r"^Do not patch code in DIAGNOSE\. Re-enter PLAN\.$"),
+        "不要在 DIAGNOSE 阶段直接修改代码，应重新进入 PLAN。",
+    ),
+)
+
+_DIAGNOSIS_TECHNICAL_TRANSLATIONS = (
+    # Mixed Chinese/technical diagnostic prose is safe to render once the
+    # bounded English vocabulary is translated. Keep protocol names and code
+    # identifiers unchanged for auditability.
+    (re.compile(r"\bfresh signed\b", re.IGNORECASE), "新鲜签名的"),
+    (re.compile(r"\bsigned\b", re.IGNORECASE), "已签名的"),
+    (re.compile(r"\bfixture(s)?\b", re.IGNORECASE), "测试夹具"),
+    (re.compile(r"\btuple\b", re.IGNORECASE), "连接四元组"),
+    (re.compile(r"\bhash\b", re.IGNORECASE), "哈希"),
+    (re.compile(r"\btime-window\b", re.IGNORECASE), "时间窗口"),
+    (re.compile(r"\bsequence-low\b", re.IGNORECASE), "序列号低位"),
+    (re.compile(r"\barbitrary\b", re.IGNORECASE), "任意构造的"),
+    (re.compile(r"\bcontrol\b", re.IGNORECASE), "对照"),
+    (re.compile(r"\bnegative\b", re.IGNORECASE), "负向"),
+    (re.compile(r"\bpositive\b", re.IGNORECASE), "正向"),
+    (re.compile(r"\bvalidator\b", re.IGNORECASE), "校验器"),
+    (re.compile(r"\bhelper surface\b", re.IGNORECASE), "辅助接口"),
+    (re.compile(r"\bhelper\b", re.IGNORECASE), "辅助函数"),
+    (re.compile(r"\bpacket/session\b", re.IGNORECASE), "报文/会话"),
+    (re.compile(r"\bACK\b", re.IGNORECASE), "ACK"),
+    (re.compile(r"\bSYN-ACK\b", re.IGNORECASE), "SYN-ACK"),
+    (re.compile(r"\bSYN\b", re.IGNORECASE), "SYN"),
+)
+
+_MIXED_DIAGNOSIS_TERMS = {
+    "fresh signed": "新鲜签名的", "Change Set": "变更集",
+    "Plan artifact": "任务计划产物", "Plan content hash": "任务计划内容哈希",
+    "action": "动作",
+    "source event": "来源事件", "source": "来源",
+    "source Review": "源码评审",
+    "source event": "来源事件", "source revisions": "来源修订",
+    "IMPLEMENT ProducerJob": "实现阶段生成任务",
+    "source event": "来源事件", "content hash": "内容哈希",
+    "helper surface": "辅助接口", "helper/interface": "辅助函数/接口",
+    "reserved bits": "保留位", "lower configured MSS index": "低于配置的 MSS 索引",
+    "initial ACK": "首次 ACK", "session reuse": "会话复用",
+    "iCode/iPipe": "代码提交/流水线验证",
+    "producer-block": "生成任务阻塞", "ProducerJob": "生成任务",
+    "WorkerDriver": "工作流驱动器", "IMPLEMENT": "实现阶段",
+    "Plan": "任务计划", "patch": "补丁", "commit": "提交",
+    "artifact": "产物", "borrowed": "借用的", "reuse": "复用",
+    "fixture": "测试夹具", "helper": "辅助函数", "interface": "接口",
+    "validator rejection": "校验器拒绝", "validator": "校验器",
+    "positive control": "正向对照", "negative fixture": "负向测试夹具",
+    "control": "对照", "negative": "负向", "positive": "正向",
+    "cookie layout": "Cookie 布局", "cookie": "Cookie",
+    "stale": "过期", "sequence": "序列号", "hash": "哈希",
+    "tuple": "连接元组", "time-window": "时间窗口",
+    "sequence-low": "序列号低位", "arbitrary": "任意构造的",
+}
+_MIXED_DIAGNOSIS_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    + "|".join(re.escape(term) for term in sorted(_MIXED_DIAGNOSIS_TERMS, key=len, reverse=True))
+    + r")(?![A-Za-z0-9_])", re.IGNORECASE
+)
+_MIXED_DIAGNOSIS_LOOKUP = {key.lower(): value for key, value in _MIXED_DIAGNOSIS_TERMS.items()}
+_DIAGNOSIS_INLINE_IDENTIFIERS = re.compile(
+    r"(?<![A-Za-z0-9_])(?:R[0-9]+|G[0-9]+|QA|MSS|RTT|ACK|SYN|"
+    r"Cookie|wscale|svc|ack|iPipe|iCode)(?![A-Za-z0-9_])"
+)
+
+_TECHNICAL_TOKEN = re.compile(
+    r"`[^`\n]+`|(?<![A-Za-z0-9_])/(?:[^ \t\n,;，；。]+)"
+    r"|(?<![A-Za-z0-9_])[0-9a-f]{7,64}(?![A-Za-z0-9_])"
+    r"|(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+"
+    r"|(?<![A-Za-z0-9_])[A-Z]+-\d+(?![A-Za-z0-9_])"
+    r"|(?<![A-Za-z0-9_])[A-Za-z0-9_.-]+/[A-Za-z0-9_./:-]+"
+)
+
 _DISPLAY_ENUMS = {
     "COMPLETE": "已完成",
     "INCOMPLETE": "未完成",
@@ -729,23 +910,55 @@ _DISPLAY_ENUMS = {
 
 def _diagnosis_text(value: Any) -> str:
     if not isinstance(value, str):
-        return _text(value)
+        return str(value) if isinstance(value, (int, float)) else "-"
     if value in _DIAGNOSIS_ENUMS:
         return _DIAGNOSIS_ENUMS[value]
     if value in _DIAGNOSIS_PHRASES:
         return _DIAGNOSIS_PHRASES[value]
+    if value in _BGW_1995_DIAGNOSIS_TRANSLATIONS:
+        return _BGW_1995_DIAGNOSIS_TRANSLATIONS[value]
     if value in _DISPLAY_ENUMS:
         return _DISPLAY_ENUMS[value]
     if value == "PLAN_INCOMPLETE: approved task plan requires removed global/VS c2s_mss exact-index equality":
         return "计划不完整：已批准计划仍包含已移除的全局与 VS c2s_mss 严格索引相等要求"
-    if re.fullmatch(r"[A-Za-z0-9._:/@#-]+", value):
-        return value
-    if any("\u4e00" <= char <= "\u9fff" for char in value):
-        return value
-    # Word-level substitution dropped negations ("Do not remove" read as "移除"),
-    # so an approver could approve the opposite of the hash-bound draft. Without an
-    # exact translation, show the source verbatim and label it as untranslated.
-    return f"（未翻译原文）{value}"
+    for pattern, translation in _DIAGNOSIS_SAFE_PATTERNS:
+        if pattern.fullmatch(value):
+            return translation
+    structural = re.match(
+        r"^(EXPECTED versus OBSERVED|SOURCE REPRODUCTION|LOG EVIDENCE|"
+        r"MINIMAL VERIFICATION|REPAIR PLAN|REPRODUCTION|OBSERVED|EXPECTED)\s*[:：]\s*(.+)$",
+        value,
+        flags=re.DOTALL,
+    )
+    if structural:
+        label = _DIAGNOSIS_STRUCTURAL_LABELS[structural.group(1)]
+        translated = _diagnosis_text(structural.group(2).strip())
+        return f"{label}：{translated}"
+    if re.search(r"[\u4e00-\u9fff]", value):
+        # Translate only prose; never rewrite code spans, paths or hashes.
+        parts = re.split(r"(`[^`\n]+`|/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)", value)
+        value = "".join(
+            part if index % 2 else _MIXED_DIAGNOSIS_PATTERN.sub(
+                lambda match: _MIXED_DIAGNOSIS_LOOKUP[match.group().lower()], part
+            )
+            for index, part in enumerate(parts)
+        )
+    # A Chinese character must not let a whole English sentence bypass the guard.
+    # Explicit code spans are treated as opaque technical material, not translated.
+    remainder = _TECHNICAL_TOKEN.sub("", value)
+    if re.search(r"[\u4e00-\u9fff]", value):
+        remainder = _DIAGNOSIS_INLINE_IDENTIFIERS.sub("", remainder)
+    if not re.search(r"[A-Za-z]", remainder):
+        return _TECHNICAL_TOKEN.sub(
+            lambda match: "`" + match.group().strip("`") + "`", value
+        )
+    # Never put unknown English in an approval body.  Keep only unambiguous technical
+    # tokens so paths, hashes, commands and symbols remain auditable without guessing
+    # at the meaning of the surrounding prose.
+    tokens = list(dict.fromkeys(_TECHNICAL_TOKEN.findall(value)))
+    token_text = "、".join("`" + token.strip("`") + "`" for token in tokens)
+    suffix = f" 技术标识：{token_text}" if token_text else ""
+    return f"材料待翻译：该诊断文本尚无安全的中文译文，请补齐中文说明后再审批；原文保留在材料包中。{suffix}"
 
 
 def _diagnosis_summary(content: dict[str, Any]) -> list[str]:
@@ -835,7 +1048,10 @@ def _size(value: Any) -> str:
 def _text(value: Any) -> str:
     if not isinstance(value, (str, int, float)):
         return "-"
-    return _clip(_diagnosis_text(str(value)))
+    # Generic artifact summaries also use this helper. Diagnosis fail-closed
+    # rendering is deliberately scoped to _diagnosis_text, not unrelated gates.
+    text = str(value)
+    return _clip(_DIAGNOSIS_ENUMS.get(text, _DISPLAY_ENUMS.get(text, text)))
 
 
 def _short(value: Any) -> str:

@@ -76,6 +76,15 @@ class StateStore:
                     evidence_refs_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS external_observations (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    intent_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    observation_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS external_observations_intent_sequence
+                    ON external_observations(intent_id, sequence);
                 CREATE TABLE IF NOT EXISTS external_results (
                     intent_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -500,6 +509,14 @@ class StateStore:
             ).fetchone()
         return _intent_row(row) if row is not None else None
 
+    def all_intents(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM external_intents WHERE run_id = ? ORDER BY sequence",
+                (run_id,),
+            ).fetchall()
+        return [_intent_row(row) for row in rows]
+
     def intent_by_id(self, intent_id: str) -> dict[str, Any] | None:
         """Return one durable external intent without exposing its response."""
         with self._connect() as connection:
@@ -764,6 +781,64 @@ class StateStore:
                 (run_id,),
             ).fetchall()
         return [_intent_row(row) for row in rows]
+
+    def record_external_observation(
+        self, intent_id: str, observation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Append one bounded, redacted observation to an external intent.
+
+        Observations are deliberately separate from receipts: a failed read-back is
+        evidence about an unresolved write, not a terminal result. Callers must pass
+        hashes/identities and bounded reason data, never document bodies or diffs.
+        """
+        ensure_persistable(observation)
+        with self._connect() as connection:
+            intent = connection.execute(
+                "SELECT run_id FROM external_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if intent is None:
+                raise ValueError("INTENT_NOT_FOUND")
+            created_at = _now()
+            connection.execute(
+                """
+                INSERT INTO external_observations(
+                    intent_id, run_id, observation_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    intent_id,
+                    intent["run_id"],
+                    _encode(observation),
+                    created_at,
+                ),
+            )
+        return {
+            "intent_id": intent_id,
+            "run_id": intent["run_id"],
+            "observation": observation,
+            "created_at": created_at,
+        }
+
+    def external_observations(
+        self, run_id: str, *, intent_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT * FROM external_observations WHERE run_id = ?"
+            + (" AND intent_id = ?" if intent_id is not None else "")
+            + " ORDER BY sequence"
+        )
+        params: tuple[Any, ...] = (run_id,) if intent_id is None else (run_id, intent_id)
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [
+            {
+                "intent_id": row["intent_id"],
+                "run_id": row["run_id"],
+                "observation": json.loads(row["observation_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
 
     def external_results(self, run_id: str) -> list[dict[str, Any]]:
         """Return durable, verified side-effect evidence in intent order."""
@@ -1724,6 +1799,7 @@ def _intent_row(row: sqlite3.Row) -> dict[str, Any]:
         "operation": row["operation"],
         "idempotency_key": row["idempotency_key"],
         "payload": json.loads(row["payload_json"]),
+        "sequence": row["sequence"],
         "created_at": row["created_at"],
     }
 

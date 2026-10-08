@@ -212,6 +212,12 @@ python3 tom-autodev/scripts/cli.py confirm-approval-redelivery "$RUN_ID" APPROVA
 精确的 `approval_id` 应用迁移；迁移只移动策略 pin，不重写阶段事件、不改既有审批绑定。
 只有迁移获批并应用之后，其它门的未知投递才可以走上面的受控重发。
 
+如流已经回复并落账了精确的 `WORKFLOW_SPEC_MIGRATION` 批准，`continue` 会消费当前
+run、当前 workflow_spec_migration.plan 生成的相同 `input_hash`，调用现有迁移 apply，
+然后再交给 worker 恢复。它不会自动批准、重新开门、重开审批或直接修改 pin；未批准、
+驳回、旧 hash、跨 run 的审批仍保持 `WORKFLOW_SPEC_DRIFT`。`status` 只读展示“迁移已批准
+待应用”，并提示调用 `continue`，不会在查看状态时执行迁移。
+
 ```bash
 python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --request
 python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --approval-id APPROVAL_ID

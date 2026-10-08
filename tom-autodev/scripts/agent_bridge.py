@@ -259,6 +259,43 @@ def _ensure_approval_resume_handoff(
                 raise
 
 
+def _apply_approved_workflow_spec_migration(
+    orchestrator: Any, run_id: str
+) -> dict[str, Any] | None:
+    """Apply only the exact, already-approved migration for this run.
+
+    Drift intentionally blocks the worker before it can advance.  ``continue`` is
+    the narrow recovery path for a migration that has already been approved, so
+    it may consume the existing approval but must not create, approve, or
+    re-open one.  Recomputing the current plan also binds the apply to the
+    current run, old pin, new pin and exact input hash.
+    """
+    from workflow_spec_migration import ACTION, apply, plan
+
+    prepared = plan(orchestrator, run_id)
+    if not prepared.get("ok"):
+        return None
+    expected_hash = prepared.get("input_hash")
+    if not isinstance(expected_hash, str):
+        return None
+    candidates = [
+        approval
+        for approval in orchestrator.approvals.for_run(run_id)
+        if (
+            isinstance(approval, dict)
+            and approval.get("run_id") == run_id
+            and approval.get("action") == ACTION
+            and approval.get("input_hash") == expected_hash
+            and approval.get("effective_decision") == "APPROVE"
+            and approval.get("approval_id")
+        )
+    ]
+    if not candidates:
+        return None
+    approval = max(candidates, key=lambda item: item.get("resolved_at") or "")
+    return apply(orchestrator, run_id, approval["approval_id"])
+
+
 class AgentBridge:
     """Thin, stateless assembly boundary for agent-facing run operations."""
 
@@ -307,6 +344,9 @@ class AgentBridge:
         if blocked is not None:
             return blocked
         settled = _consume_local_infoflow_replies(self.orchestrator, run_id)
+        migration = _apply_approved_workflow_spec_migration(self.orchestrator, run_id)
+        if isinstance(migration, dict) and not migration.get("ok"):
+            return _json_safe(migration)
         _ensure_approval_resume_handoff(
             self.orchestrator,
             run_id,
@@ -389,6 +429,15 @@ class AgentBridge:
     ) -> dict[str, Any]:
         return _json_safe(
             worker_driver.report_producer_block(
+                self.orchestrator, run_id, job_id, report, locks=self.locks
+            )
+        )
+
+    def report_producer_conflict(
+        self, run_id: str, job_id: str, report: dict[str, Any]
+    ) -> dict[str, Any]:
+        return _json_safe(
+            worker_driver.report_producer_conflict(
                 self.orchestrator, run_id, job_id, report, locks=self.locks
             )
         )

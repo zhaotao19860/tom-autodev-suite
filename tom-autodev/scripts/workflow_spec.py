@@ -111,7 +111,7 @@ STATES: dict[str, StateSpec] = {
         entry_gate="G4", output_gate="G4", target="IMPLEMENT", predecessor="TASKS",
         envelope_revisions=True, title="04-task-plan", task_scoped=True,
         side_effects=_SKILL_SIDE_EFFECTS, entry_artifacts=("workspace", "task-plan"),
-        transitions=frozenset({"IMPLEMENT"}),
+        transitions=frozenset({"IMPLEMENT", "DIAGNOSE"}),
     ),
     "IMPLEMENT": StateSpec(
         registry="phase", skill="tom-implement", schema="change-set",
@@ -143,7 +143,7 @@ STATES: dict[str, StateSpec] = {
     ),
     "DIAGNOSE": StateSpec(
         registry="phase", skill="tom-diagnose", schema="diagnosis", output_gate="G6",
-        predecessor=("REVIEW", "IPIPE", "IMPLEMENT"), envelope_revisions=True,
+        predecessor=("REVIEW", "IPIPE", "IMPLEMENT", "PLAN"), envelope_revisions=True,
         title="07-diagnosis", side_effects=_SKILL_SIDE_EFFECTS,
         transitions=frozenset({"SPEC", "PLAN", "ARCHITECTURE_REVIEW", "STOPPED"}),
     ),
@@ -174,6 +174,7 @@ TRANSITION_REQUIREMENTS: dict[tuple[str, str], tuple[tuple[str, ...], str | None
     ("DIAGNOSE", "SPEC"): (("failure-bundle",), "G6"),
     ("DIAGNOSE", "ARCHITECTURE_REVIEW"): (("failure-bundle",), "G6"),
     ("IMPLEMENT", "DIAGNOSE"): (("producer-block-report", "task-plan"), None),
+    ("PLAN", "DIAGNOSE"): (("producer-conflict", "task-dag"), None),
     ("ENVIRONMENT_BLOCKED", "IPIPE"): (("submission",), "G8"),
 }
 
@@ -206,6 +207,7 @@ FAILURE_TARGETS: dict[str, str] = {
     "REVIEW_FAILED": "DIAGNOSE",
     "RELEASE_FAILED": "DIAGNOSE",
     "PLAN_INCOMPLETE": "DIAGNOSE",
+    "SPEC_CONFLICT": "DIAGNOSE",
 }
 _FAILURE_DEFAULT = "STOPPED"
 

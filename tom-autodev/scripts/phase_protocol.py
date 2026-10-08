@@ -679,6 +679,15 @@ class PhaseProtocol:
             }
             if set(content.get("test_ids", [])) != expected_tests:
                 return _failure("CHANGE_SET_MISMATCH", content_invalid=True)
+            traces = content.get("traceability_delta", [])
+            points = [item.get("acceptance_point_id") for item in traces]
+            traced_tests = {test for item in traces for test in item.get("test_ids", [])}
+            if (set(points) != set(predecessor_content.get("acceptance_point_ids", []))
+                    or len(points) != len(set(points))
+                    or traced_tests != expected_tests
+                    or any(not set(item.get("test_ids", [])).issubset(expected_tests)
+                           for item in traces)):
+                return _failure("TRACEABILITY_MISMATCH", content_invalid=True)
 
         if phase == "REVIEW" and isinstance(predecessor_content, dict):
             if (
@@ -1247,13 +1256,13 @@ class PhaseProtocol:
     ) -> dict[str, Any] | None:
         if phase is None:
             return None
-        if isinstance(phase, tuple) and "IMPLEMENT" in phase:
+        if isinstance(phase, tuple) and ("IMPLEMENT" in phase or "PLAN" in phase):
             events = self.state.events(run_id)
             current = events[-1] if events else {}
             payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
             if (
                 current.get("state") == "DIAGNOSE"
-                and _payload_value(payload, "reason_code") == "PLAN_INCOMPLETE"
+                and _payload_value(payload, "reason_code") in {"PLAN_INCOMPLETE", "SPEC_CONFLICT"}
             ):
                 artifact_id = _payload_value(payload, "producer_block_report_id")
                 evidence = payload.get("evidence")
@@ -1282,7 +1291,11 @@ class PhaseProtocol:
                             "artifact_id": artifact_id,
                             "sha256": report_artifact.get("sha256"),
                             "envelope": {
-                                "phase": "IMPLEMENT",
+                                "phase": (
+                                    "PLAN"
+                                    if _payload_value(payload, "reason_code") == "SPEC_CONFLICT"
+                                    else "IMPLEMENT"
+                                ),
                                 "run_id": run_id,
                                 "task_id": task_id,
                                 "content_hash": report_artifact.get("sha256"),

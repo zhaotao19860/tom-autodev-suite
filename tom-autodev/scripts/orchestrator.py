@@ -2893,12 +2893,25 @@ def main(argv: list[str] | None = None) -> int:
     submit_draft.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
     submit_draft.add_argument("job_id")
     submit_draft.add_argument("draft_json")
+    prepare_change = subparsers.add_parser(
+        "prepare-change-set", help="只读提取当前 IMPLEMENT 自有干净 HEAD 的完整 diff 并返回 JSON"
+    )
+    prepare_change.add_argument("target")
+    prepare_change.add_argument("job_id")
+    prepare_change.add_argument("metadata_json")
+    prepare_change.add_argument("--output", help="将 content 独占创建为新 JSON 文件；已存在则拒绝覆盖")
     block_producer = subparsers.add_parser(
         "report-producer-block", help="报告 ProducerJob 无法真实产出并保留固定绑定证据"
     )
     block_producer.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
     block_producer.add_argument("job_id")
     block_producer.add_argument("report_json")
+    conflict_producer = subparsers.add_parser(
+        "report-producer-conflict", help="报告 ProducerJob 与前序行为契约冲突"
+    )
+    conflict_producer.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
+    conflict_producer.add_argument("job_id")
+    conflict_producer.add_argument("report_json")
 
     stop = subparsers.add_parser("stop")
     stop.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
@@ -3237,11 +3250,36 @@ def main(argv: list[str] | None = None) -> int:
             ipipe_api_factory=lambda run_id: _cli_ipipe_transport(orchestrator, run_id),
         )
         result = bridge.context(args.target)
+    elif args.command == "prepare-change-set":
+        from agent_bridge import resolve_run_target
+        from prepare_change_set import prepare
+
+        resolved = resolve_run_target(orchestrator, args.target)
+        metadata = _json_file(args.metadata_json)
+        if not resolved.get("ok"):
+            result = resolved
+        elif metadata.get("ok") is False:
+            result = metadata
+        else:
+            result = prepare(orchestrator, resolved["run_id"], args.job_id, metadata)
+            if result.get("ok") and args.output:
+                # Serialize before opening; x-mode refuses existing files and symlinks.
+                encoded = json.dumps(result["content"], ensure_ascii=False, sort_keys=True) + "\n"
+                output = Path(args.output).expanduser().absolute()
+                try:
+                    with output.open("x", encoding="utf-8") as stream:
+                        stream.write(encoded)
+                except FileExistsError:
+                    result = {"ok": False, "reason_code": "OUTPUT_EXISTS", "output": str(output)}
+                except OSError:
+                    result = {"ok": False, "reason_code": "OUTPUT_WRITE_FAILED", "output": str(output)}
+                else:
+                    result = {**result, "output": str(output)}
     elif args.command == "approve":
         result = orchestrator.approve(args.approval_id, args.decision, args.input_hash, args.channel, args.run_id, args.responder)
     elif args.command == "resume":
         result = orchestrator.resume(args.run_id)
-    elif args.command in {"drive", "continue", "submit-draft", "report-producer-block"}:
+    elif args.command in {"drive", "continue", "submit-draft", "report-producer-block", "report-producer-conflict"}:
         from agent_bridge import AgentBridge, resolve_run_target
 
         bridge = AgentBridge(
@@ -3265,9 +3303,14 @@ def main(argv: list[str] | None = None) -> int:
                 resolved["run_id"], args.job_id, draft
             )
             result = _deliver_worker_approval(orchestrator, {**result, "run_id": resolved["run_id"]})
-        else:
+        elif args.command == "report-producer-block":
             report = _json_file(args.report_json)
             result = report if report.get("ok") is False else bridge.report_producer_block(
+                resolved["run_id"], args.job_id, report
+            )
+        else:
+            report = _json_file(args.report_json)
+            result = report if report.get("ok") is False else bridge.report_producer_conflict(
                 resolved["run_id"], args.job_id, report
             )
     elif args.command == "stop":
@@ -3623,6 +3666,7 @@ def _cli_exit_code(result: Any) -> int:
         None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
         "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT",
         "PARKED", "WORK_CARD_RECONCILED", "WORK_CARD_ABANDONED",
+        "CHANGE_SET_PREPARED",
     } else 1
 
 

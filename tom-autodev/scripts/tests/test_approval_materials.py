@@ -243,11 +243,14 @@ class ApprovalMaterialsTests(unittest.TestCase):
         body = "\n".join(_draft_lines(draft))
         self.assertIn("计划不完整", body)
         self.assertIn("没有 iPipe 构建", body)
-        self.assertIn("（未翻译原文）The pinned PLAN", body)
-        self.assertIn("（未翻译原文）Do not patch code in DIAGNOSE", body)
+        self.assertIn("当前固定计划仍要求", body)
+        self.assertIn("不要在 DIAGNOSE 阶段直接修改代码", body)
+        for prefix in ("OBSERVED", "EXPECTED versus OBSERVED", "SOURCE REPRODUCTION",
+                       "The ", "No ", "Add "):
+            self.assertNotIn(prefix, body)
         self.assertEqual(draft["classification"], "PLAN_INCOMPLETE")
 
-    def test_untranslated_diagnosis_text_keeps_its_meaning(self):
+    def test_unknown_diagnosis_text_fails_closed_without_raw_english(self):
         from approval_summary import _diagnosis_text
 
         for source in (
@@ -255,7 +258,45 @@ class ApprovalMaterialsTests(unittest.TestCase):
             "Unexpected producer mismatch in runtime validation for cookie fields",
         ):
             with self.subTest(source=source):
-                self.assertEqual(_diagnosis_text(source), "（未翻译原文）" + source)
+                rendered = _diagnosis_text(source)
+                self.assertIn("尚无安全的中文译文", rendered)
+                self.assertNotIn(source, rendered)
+
+    def test_structural_diagnosis_labels_are_chinese_and_technical_tokens_survive(self):
+        from approval_summary import _diagnosis_text
+
+        rendered = _diagnosis_text(
+            "OBSERVED: source /Users/tom/bgw/main.c at revision "
+            + "a" * 64
+        )
+        self.assertIn("实际观察：", rendered)
+        self.assertIn("`/Users/tom/bgw/main.c`", rendered)
+        self.assertIn("`" + "a" * 64 + "`", rendered)
+        self.assertNotIn("OBSERVED", rendered)
+
+    def test_current_bgw1995_diagnosis_has_no_translation_placeholders(self):
+        from approval_summary import _diagnosis_text
+
+        path = Path("/Users/tom/.tom-autodev/BGW-1995-T1-diagnosis-20261007.json")
+        diagnosis = json.loads(path.read_text())
+        canonical = json.dumps(diagnosis, ensure_ascii=False, sort_keys=True)
+        fields = (
+            "hypothesis", "repair_direction", "failure_signature",
+            "comparison", "log_evidence", "reproduction",
+            "minimal_verification", "repair_plan",
+        )
+        rendered = []
+        for field in fields:
+            value = diagnosis.get(field)
+            values = value if isinstance(value, list) else [value]
+            rendered.extend(_diagnosis_text(item) for item in values if item not in (None, ""))
+
+        self.assertTrue(rendered)
+        self.assertTrue(all("材料待翻译" not in item for item in rendered))
+        self.assertTrue(all("尚无安全的中文译文" not in item for item in rendered))
+        self.assertTrue(all(not item.startswith(("The ", "No ", "OBSERVED", "EXPECTED"))
+                            for item in rendered))
+        self.assertEqual(json.dumps(diagnosis, ensure_ascii=False, sort_keys=True), canonical)
 
     def test_missing_material_never_attaches_a_review_body(self):
         orch, action, draft = self._draft_orchestrator(merged=True)

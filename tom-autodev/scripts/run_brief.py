@@ -23,6 +23,8 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
         return "已停止"
     if pending or blocked == "RECOVERY_REQUIRED":
         return "待恢复"
+    if approved and approved.get("action") == "WORKFLOW_SPEC_MIGRATION":
+        return "迁移已批准待应用"
     if approved and gate_of(approved.get("action") or "") == "CHANGE_REQUEST":
         return "变更已批准待执行"
     if open_gates:
@@ -36,7 +38,7 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
     if producer_job and producer_job.get("awaiting_answers"):
         return "待答题"
     if producer_job and producer_job.get("status") == "FULFILLED":
-        return "草案已保存待审批"
+        return "草案已保存待审批" if action.get("required_human_gate") else "草案已保存待处理"
     if action.get("child_skill") is not None:
         return "待生成"
     if pending or blocked == "RECOVERY_REQUIRED":
@@ -192,6 +194,19 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         and row["created_at"] >= current["created_at"]
         and row.get("resolved_at")
     ), None)
+    if not terminal and action.get("reason_code") == "WORKFLOW_SPEC_DRIFT":
+        from workflow_spec_migration import ACTION, plan as migration_plan
+
+        prepared = migration_plan(orchestrator, run_id)
+        if prepared.get("ok"):
+            approved = next((
+                row for row in reversed(approvals)
+                if row.get("run_id") == run_id
+                and row.get("action") == ACTION
+                and row.get("input_hash") == prepared.get("input_hash")
+                and row.get("effective_decision") == "APPROVE"
+                and row.get("resolved_at")
+            ), approved)
     # A REJECT of the draft this attempt produced: the run waits on a person, not on
     # `continue`, which would only find the gate already answered.
     rejected = None if terminal or open_gates or approved else next((
@@ -272,7 +287,8 @@ def _producer_context(orchestrator: Any, run_id: str, action: dict[str, Any], te
     )
     draft_state = (
         "待答题" if awaiting_answers
-        else "已保存待审批" if status == "FULFILLED"
+        else ("已保存待审批" if action.get("required_human_gate") else "已保存待处理")
+        if status == "FULFILLED"
         else "待生成"
     )
     return {
@@ -341,6 +357,11 @@ def _next_step(
         return {
             "owner": "Comate",
             "text": f"变更请求已批准；执行 rewind --approval-id {approved.get('approval_id')} 回到目标阶段",
+        }
+    if approved and approved.get("action") == "WORKFLOW_SPEC_MIGRATION":
+        return {
+            "owner": "Comate",
+            "text": "当前 workflow 迁移已批准待应用；调用 continue，由 worker 应用精确迁移后恢复",
         }
     if open_gates:
         gate = open_gates[0]
@@ -416,7 +437,12 @@ def _next_step(
             ),
         }
     if producer_job and producer_job.get("status") == "FULFILLED":
-        return {"owner": "Comate", "text": "草案已保存；调用 continue 补发对应审批并等待审批结果"}
+        text = (
+            "草案已保存；调用 continue 补发对应审批并等待审批结果"
+            if action.get("required_human_gate")
+            else "草案已保存；调用 continue，由控制器核验持久化结果并按阶段规则处理"
+        )
+        return {"owner": "Comate", "text": text}
     if action.get("child_skill") is not None:
         work = _WORK.get(state, state)
         skill = action.get("child_skill")

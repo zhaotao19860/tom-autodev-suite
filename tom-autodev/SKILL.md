@@ -221,7 +221,11 @@ human `CHANGE_REQUEST` approval, then apply it with `--approval-id`. Never move 
 If a paused run returns `WORKFLOW_SPEC_DRIFT`, do not edit its event or hash in place and do
 not use ordinary `continue` to bypass the guard. Use the dedicated
 `scripts/cli.py migrate-workflow-spec RUN_ID --request` gate, then apply the exact approved
-`approval_id` with `--approval-id`. This appends an auditable workflow-pin migration receipt
+`approval_id` with `--approval-id`, or call `continue` to consume an existing APPROVE whose
+run, action and input_hash exactly match the current migration plan. `continue` never
+approves or reopens the gate; stale, rejected or cross-run approvals still cannot pass
+drift. `status` remains read-only and shows “迁移已批准待应用”, with `continue` as the
+next step. This appends an auditable workflow-pin migration receipt
 and preserves the run's phase artifacts, existing approval bindings, and external intent
 records. Only after that migration is approved may an unknown approval delivery use
 `confirm-approval-redelivery`; that command still reuses the original approval_id/input_hash

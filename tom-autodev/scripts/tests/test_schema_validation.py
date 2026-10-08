@@ -77,9 +77,12 @@ def specialized_examples():
         "change-set": {
             "change_set_id": "CS-1", "task_id": "T-1",
             "baseline_revisions": {"business": "r1", "tests": "t1"},
-            "revisions": {"business": "r2", "tests": "t2"}, "business_patch": "diff --git a b",
-            "test_patch": "diff --git a t", "full_diff_hash": "", "test_ids": ["resolver.answer"],
+            "revisions": {"business": "r2", "tests": "t2"},
+            "business_patch": "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n",
+            "test_patch": "diff --git a/t b/t\n--- a/t\n+++ b/t\n@@ -1 +1 @@\n-old\n+new\n",
+            "full_diff_hash": "", "test_ids": ["resolver.answer"],
             "traceability_delta": [{"acceptance_point_id": "AC-1", "test_ids": ["resolver.answer"]}],
+            "patch_kinds": {"business": "git-diff-v1", "tests": "git-diff-v1"},
             "deviations": [],
             "candidate_hash": "",
         },
@@ -419,6 +422,33 @@ class NamedSchemaValidationTests(unittest.TestCase):
                     (field, "mismatch"),
                     [(issue.path, issue.kind) for issue in validate_named_schema(change, "change-set")],
                 )
+
+    def test_change_set_rejects_sha_path_summary_and_implicit_noop_patches(self):
+        change = specialized_examples()["change-set"]
+        for value in ("a" * 64, "src/foo.cc", "summary: changed foo"):
+            invalid = copy.deepcopy(change)
+            invalid["business_patch"] = value
+            invalid["full_diff_hash"] = canonical_hash({
+                "business_patch": value, "test_patch": invalid["test_patch"],
+            })
+            invalid["candidate_hash"] = canonical_hash({
+                key: item for key, item in invalid.items() if key != "candidate_hash"
+            })
+            with self.subTest(value=value):
+                self.assertIn(
+                    ("business_patch", "patch_payload_required"),
+                    [(issue.path, issue.kind) for issue in validate_named_schema(invalid, "change-set")],
+                )
+        noop = copy.deepcopy(change)
+        noop["business_patch"] = ""
+        noop["patch_kinds"]["business"] = "no-op"
+        noop["full_diff_hash"] = canonical_hash({
+            "business_patch": "", "test_patch": noop["test_patch"],
+        })
+        noop["candidate_hash"] = canonical_hash({
+            key: item for key, item in noop.items() if key != "candidate_hash"
+        })
+        self.assertEqual(validate_named_schema(noop, "change-set"), [])
 
     def test_a_findings_disposition_has_to_answer_for_itself(self):
         """`tom-autodev` says not to implement an unverified suggestion; this is where it is said.

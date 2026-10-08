@@ -918,6 +918,108 @@ class CliTransportTests(unittest.TestCase):
 
 
 class KuClientTests(unittest.TestCase):
+    def test_minimal_create_exact_readback_and_single_create_on_resume(self):
+        marked = KuClient.marked_markdown("root-1", "01-spec", "# Spec")
+        for resume in (False, True, "legacy"):
+            with self.subTest(resume=resume), tempfile.TemporaryDirectory() as directory:
+                state = StateStore(Path(directory) / "state.sqlite")
+                transport = FakeTransport([])
+                options = dict(transport=transport, state_store=state, run_id="minimal",
+                               repo_id="repo-1", username="tester", settle_attempts=1)
+                client = KuClient(**options)
+                if resume == "legacy":
+                    content_hash = hashlib.sha256(b"# Spec").hexdigest()
+                    intent = state.intent(
+                        "minimal", "ku.document.create",
+                        client._create_key("root-1", "01-spec", content_hash),
+                        client._create_payload("root-1", "01-spec", content_hash))
+                    client._observe(intent, client._observation(
+                        "create-response", "KU_CREATE_RESPONSE_MISSING_REPOSITORY",
+                        doc_id="child-1", url=ku_url("child-1")))
+                else:
+                    transport.responses.extend([
+                        ku_repo(), {"returnCode": 200, "result": {
+                            "docGuid": "child-1", "url": ku_url("child-1")}},
+                    ])
+                    if resume:
+                        transport.responses.append(transport_error())
+                        first = client.create_artifact("root-1", "01-spec", "# Spec")
+                        self.assertFalse(first["ok"])
+                        self.assertEqual(len(state.pending_intents("minimal")), 1)
+                        client = KuClient(**options)  # new worker, same durable intent
+                content = ku_content("child-1", marked)
+                content["result"]["docInfo"] = ku_repo_document("child-1", "01-spec")
+                transport.responses.extend([
+                    content, ku_version("child-1", 1, 1),
+                    {"returnCode": 200, "result": {"docGuid": "child-1"}},
+                    content, ku_version("child-1", 2, 0),
+                ])
+                result = client.create_artifact("root-1", "01-spec", "# Spec")
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["url"], ku_url("child-1"))
+                self.assertEqual(state.pending_intents("minimal"), [])
+                commands = [call[0][1] for call in transport.calls]
+                self.assertEqual(commands.count("create-doc"), 0 if resume == "legacy" else 1)
+                self.assertEqual(commands.count("query-repo"), 0 if resume == "legacy" else 1)
+
+    def test_minimal_create_readback_fails_closed_for_missing_or_wrong_identity_marker_version(self):
+        marked = KuClient.marked_markdown("root-1", "01-spec", "# Spec")
+        for fault in ("repository-missing", "repository-wrong", "url-missing", "url-wrong",
+                      "doc-wrong", "marker", "version"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                state = StateStore(Path(directory) / "state.sqlite")
+                content = ku_content("child-1", marked)
+                info = content["result"]
+                if fault == "repository-missing":
+                    del info["repositoryGuid"]
+                elif fault == "repository-wrong":
+                    info["repositoryGuid"] = "other"
+                elif fault == "url-missing":
+                    del info["url"]
+                elif fault == "url-wrong":
+                    info["url"] = ku_url("other")
+                elif fault == "doc-wrong":
+                    info["docGuid"] = "other"
+                elif fault == "marker":
+                    info["text"] = "# Spec"
+                responses = [content]
+                if fault in ("marker", "version"):
+                    responses.append(ku_version("other" if fault == "version" else "child-1", 1, 1))
+                transport = FakeTransport([
+                    ku_repo(), {"returnCode": 200, "result": {
+                        "docGuid": "child-1", "url": ku_url("child-1")}},
+                    *responses, *responses,
+                ])
+                options = dict(transport=transport, state_store=state, run_id="invalid-read",
+                               repo_id="repo-1", username="tester", settle_attempts=1)
+                for _ in range(2):
+                    result = KuClient(**options).create_artifact("root-1", "01-spec", "# Spec")
+                    self.assertFalse(result["ok"], result)
+                    self.assertEqual(len(state.pending_intents("invalid-read")), 1)
+                commands = [call[0][1] for call in transport.calls]
+                self.assertEqual(commands.count("create-doc"), 1)
+                self.assertNotIn("publish-doc", commands)
+
+    def test_create_response_mismatches_and_unproven_url_omission_stay_closed_on_resume(self):
+        for fields, reason in (
+            ({"repositoryGuid": "other", "url": ku_url("child-1")}, "REPOSITORY_MISMATCH"),
+            ({"repositoryGuid": None, "url": ku_url("child-1")}, "REPOSITORY_MISMATCH"),
+            ({"url": ku_url("other")}, "URL_MISMATCH"),
+            ({}, "MISSING_URL"),
+        ):
+            with self.subTest(reason=reason, fields=fields), tempfile.TemporaryDirectory() as directory:
+                state = StateStore(Path(directory) / "state.sqlite")
+                transport = FakeTransport([
+                    ku_repo(), {"returnCode": 200, "result": {"docGuid": "child-1", **fields}},
+                ])
+                for _ in range(2):
+                    client = KuClient(transport=transport, state_store=state, run_id="bad-create",
+                                      repo_id="repo-1", username="tester", settle_attempts=1)
+                    result = client.create_artifact("root-1", "01-spec", "# Spec")
+                    self.assertEqual(result["reason_code"], "KU_CREATE_RESPONSE_" + reason)
+                self.assertEqual(len(transport.calls), 2)
+                self.assertEqual(len(state.pending_intents("bad-create")), 1)
+
     def test_create_requires_state_and_never_writes_without_it(self):
         if KuClient is None:
             self.fail("KuClient is not implemented")
@@ -1235,6 +1337,73 @@ class KuClientTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "PERMISSION_DENIED")
         self.assertEqual(pending, [])
 
+    def test_create_response_missing_identity_is_fine_grained_and_observed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            client = KuClient(
+                transport=FakeTransport(
+                    [
+                        ku_repo(),
+                        {
+                            "returnCode": 200,
+                            "success": True,
+                            "result": {
+                                "repositoryGuid": "repo-1",
+                                "url": ku_url("child-1"),
+                            },
+                        },
+                    ]
+                ),
+                state_store=state,
+                run_id="run-response-missing",
+                repo_id="repo-1",
+                username="tester",
+            )
+
+            result = client.create_artifact("root-1", "01-spec", "# Spec")
+            pending = state.pending_intents("run-response-missing")
+            observations = state.external_observations("run-response-missing")
+
+        self.assertEqual(result["reason_code"], "KU_CREATE_RESPONSE_MISSING_DOC_ID")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(observations[-1]["observation"]["stage"], "create-response")
+        self.assertNotIn("# Spec", json.dumps(observations))
+
+    def test_marker_missing_after_bounded_settle_stays_pending_not_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            client = KuClient(
+                transport=FakeTransport(
+                    [
+                        ku_repo(),
+                        {
+                            "returnCode": 200,
+                            "success": True,
+                            "result": {
+                                "docGuid": "child-1",
+                                "repositoryGuid": "repo-1",
+                                "url": ku_url("child-1"),
+                            },
+                        },
+                        ku_content("child-1", "# 01-spec"),
+                        ku_version("child-1", 1, 0),
+                    ]
+                ),
+                state_store=state,
+                run_id="run-marker-terminal",
+                repo_id="repo-1",
+                username="tester",
+                settle_attempts=1,
+            )
+
+            result = client.create_artifact("root-1", "01-spec", "# Spec")
+            pending = state.pending_intents("run-marker-terminal")
+            observations = state.external_observations("run-marker-terminal")
+
+        self.assertEqual(result["reason_code"], "KU_CREATE_MARKER_MISSING")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(observations[-1]["observation"]["reason_code"], "KU_CREATE_MARKER_MISSING")
+
     def test_create_verification_rejects_queried_repo_or_canonical_url_mismatch(self):
         markdown = "# Spec"
         marked = KuClient.marked_markdown("root-1", "01-spec", markdown)
@@ -1270,7 +1439,7 @@ class KuClientTests(unittest.TestCase):
 
             result = client.create_artifact("root-1", "01-spec", markdown)
 
-        self.assertEqual(result["reason_code"], "KU_CREATE_VERIFICATION_FAILED")
+        self.assertEqual(result["reason_code"], "KU_CREATE_IDENTITY_MISMATCH")
 
     def test_a_create_read_back_without_the_marker_yet_settles_on_a_re_read(self):
         markdown = "# Spec"
@@ -1431,7 +1600,7 @@ class KuClientTests(unittest.TestCase):
 
             result = client.create_artifact("root-1", "01-spec", "new content")
 
-        self.assertEqual(result["reason_code"], "KU_CHILD_CONTENT_UNSETTLED")
+        self.assertEqual(result["reason_code"], "KU_CREATE_MARKER_MISSING")
 
     def test_root_index_uses_exact_mdsl_append_then_publishes_and_verifies(self):
         if KuClient is None:
@@ -1730,6 +1899,7 @@ class KuClientTests(unittest.TestCase):
                 run_id="run-draft",
                 repo_id="repo-1",
                 username="tester",
+                settle_attempts=1,
             )
 
             result = client.update_index("root-1", entry)
@@ -1740,6 +1910,171 @@ class KuClientTests(unittest.TestCase):
             [item["operation"] for item in pending],
             ["ku.index.edit", "ku.document.publish"],
         )
+
+    def test_publish_readback_retries_until_body_and_formal_version_converge(self):
+        entry = {
+            "title": "01-spec",
+            "doc_id": "child-1",
+            "url": ku_url("child-1"),
+            "content_hash": "a" * 64,
+        }
+        indexed = KuClient.index_entry_markdown("root-1", entry)
+        text = f"# Run index\n\n{indexed}"
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            client = KuClient(
+                transport=FakeTransport(
+                    [
+                        ku_content("root-1", "# Run index"),
+                        ku_version("root-1", 7, 0),
+                        {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                        ku_content("root-1", text),
+                        ku_version("root-1", 8, 4),
+                        {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                        ku_content("root-1", text),
+                        ku_version("root-1", 8, 4),
+                        ku_content("root-1", text),
+                        ku_version("root-1", 9, 0),
+                    ]
+                ),
+                state_store=state,
+                run_id="run-publish-settle",
+                repo_id="repo-1",
+                username="tester",
+                settle_attempts=2,
+                sleeper=lambda _: None,
+            )
+
+            result = client.update_index("root-1", entry)
+            pending = state.pending_intents("run-publish-settle")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["version"], "9")
+        self.assertEqual(pending, [])
+
+    def test_pending_publish_recovery_retries_readback_without_republishing(self):
+        entry = {
+            "title": "01-spec",
+            "doc_id": "child-1",
+            "url": ku_url("child-1"),
+            "content_hash": "a" * 64,
+        }
+        indexed = KuClient.index_entry_markdown("root-1", entry)
+        text = f"# Run index\n\n{indexed}"
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            first_transport = FakeTransport(
+                [
+                    ku_content("root-1", "# Run index"),
+                    ku_version("root-1", 7, 0),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", text),
+                    ku_version("root-1", 8, 4),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", text),
+                    ku_version("root-1", 8, 4),
+                ]
+            )
+            first = KuClient(
+                transport=first_transport,
+                state_store=state,
+                run_id="run-publish-recovery",
+                repo_id="repo-1",
+                username="tester",
+                settle_attempts=1,
+            )
+            failed = first.update_index("root-1", entry)
+            self.assertEqual(failed["reason_code"], "KU_PUBLISH_VERIFICATION_FAILED")
+            self.assertEqual(
+                [item["operation"] for item in state.pending_intents("run-publish-recovery")],
+                ["ku.index.edit", "ku.document.publish"],
+            )
+
+            second_transport = FakeTransport(
+                [
+                    ku_content("root-1", text),
+                    ku_version("root-1", 9, 0),
+                    ku_content("root-1", text),
+                    ku_version("root-1", 9, 0),
+                ]
+            )
+            second = KuClient(
+                transport=second_transport,
+                state_store=state,
+                run_id="run-publish-recovery",
+                repo_id="repo-1",
+                username="tester",
+                settle_attempts=1,
+            )
+            recovered = second.update_index("root-1", entry)
+            pending = state.pending_intents("run-publish-recovery")
+
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["version"], "9")
+        self.assertEqual(pending, [])
+        self.assertNotIn(
+            "publish-doc",
+            [call[0][1] for call in second_transport.calls],
+        )
+
+    def test_legacy_publish_matches_only_after_exact_marker_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            run_id = "run-legacy-publish-chain"
+            state.intent(run_id, "ku.index.edit", "edit-1",
+                         {"doc_id": "root-1", "index_marker": "marker-1"})
+            state.intent(run_id, "ku.document.publish", "ku-publish:root-1:old",
+                         {"doc_id": "root-1", "content_hash": "old"})
+            publish = next(item for item in state.all_intents(run_id)
+                           if item["operation"] == "ku.document.publish")
+            client = KuClient(transport=FakeTransport([]), state_store=state, run_id=run_id,
+                              repo_id="repo-1", username="tester")
+
+            self.assertTrue(client._publish_matches_edit(publish, "root-1", "marker-1", None))
+            self.assertFalse(client._publish_matches_edit(publish, "root-1", "marker-2", None))
+            self.assertFalse(client._publish_matches_edit(publish, "root-2", "marker-1", None))
+
+    def test_publish_recovery_rejects_legacy_document_only_intent_when_preview_hash_changes(self):
+        entry = {
+            "title": "01-spec",
+            "doc_id": "child-1",
+            "url": ku_url("child-1"),
+            "content_hash": "a" * 64,
+        }
+        indexed = KuClient.index_entry_markdown("root-1", entry)
+        text = f"# Run index\n\n{indexed}"
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            state.intent(
+                "run-publish-key-drift",
+                "ku.document.publish",
+                "ku-publish:root-1:old-preview-hash",
+                {"doc_id": "root-1", "content_hash": "old-preview-hash"},
+            )
+            transport = FakeTransport(
+                [
+                    ku_content("root-1", "# Run index"),
+                    ku_version("root-1", 7, 0),
+                    {"returnCode": 200, "success": True, "result": {"docGuid": "root-1"}},
+                    ku_content("root-1", text),
+                    ku_version("root-1", 9, 0),
+                ]
+            )
+            client = KuClient(
+                transport=transport,
+                state_store=state,
+                run_id="run-publish-key-drift",
+                repo_id="repo-1",
+                username="tester",
+                settle_attempts=1,
+            )
+            result = client.update_index("root-1", entry)
+            pending = state.pending_intents("run-publish-key-drift")
+
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(len(pending), 2)
+        self.assertNotIn("publish-doc", [call[0][1] for call in transport.calls])
 
     def test_run_root_replay_keeps_the_query_reason_when_readback_fails(self):
         # BGW-1956 T3 REVIEW: complete-phase replayed ensure_run_root against a

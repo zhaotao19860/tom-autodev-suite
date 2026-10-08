@@ -15,6 +15,7 @@ Follow the [producer contract](../tom-autodev/references/producer-contract.md), 
 
 1. Read only the approved plan and its cited Spec, decisions, knowledge, impact, and test precedents.
 2. Work in the task-owned business and product-test worktrees. Preserve all user changes and reference the recorded baseline.
+   Use the control-plane `prepare-change-set` producer for the candidate. It consumes the current IMPLEMENT action/job and metadata, verifies the Plan, revisions, ownership and clean HEAD, and extracts the complete deterministic Git diff. Never manually assemble either patch or either hash, and never provide an arbitrary repository path.
 3. Compare each planned step with the actual owned-worktree diff and existing candidate before editing. On resume, keep completed edits, finish only missing work and stop on unexplained user/conflicting changes. Do not replay a patch or commit just because a checklist lacks a completion mark. Generate the smallest business and product-test changes for the same behavior and `change_set_id`.
 4. Commit dirty owned worktrees only through `submit_descriptor._commit_if_dirty(worktree, message)`. That helper uses the repository `user.name` / `user.email` and writes a `Change-Id` trailer. Do not invent a bot identity such as `tom-autodev@local`, and do not leave a dirty or unpushable HEAD for Review. Pin `revisions` to the resulting commits.
 5. Produce a complete diff, file list, traceability delta, test IDs, and input/content hashes.

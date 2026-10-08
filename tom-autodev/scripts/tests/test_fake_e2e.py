@@ -932,6 +932,100 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(self.orchestrator.next(run_id)["controller"], "submit")
         return run_id, knowledge
 
+    def test_continue_reconciles_g5_saved_draft_through_real_ku_client(self):
+        from agent_bridge import AgentBridge
+        from clients.ku_client import KuClient
+
+        run_id, knowledge = self._run_to_workspace("BGW-591", "bgw", "I15ClP2KW4ZGAK")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+        self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"], "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"], "workspace_receipts": receipts,
+        })
+        requirement = snapshot("BGW-591")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job = parked["producer_job"]
+        action = self.orchestrator.next(run_id)
+        draft = self._phase_content(action, requirement, None)
+        need = worker_driver.submit_draft(
+            self.orchestrator, run_id, job["job_id"], draft, knowledge_sync=knowledge)
+        self._approval(run_id, "G4", need["approval_input_hash"])
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        action = self.orchestrator.next(run_id)
+        self.assertEqual(action["phase"], "IMPLEMENT")
+        job_id = parked["producer_job"]["job_id"]
+        revisions = self._commit_reviewed_worktrees(receipts)
+        draft = self._phase_content(action, requirement, revisions)
+        need = worker_driver.submit_draft(
+            self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertEqual(need["gate"], "G5")
+        self._approval(run_id, "G5", need["approval_input_hash"])
+
+        class DelayedKu(StatefulKuTransport):
+            mode = "missing"
+
+            def run(inner, argv, **options):
+                # Every remote call must happen under the real worker run lease.
+                self.assertTrue(self.orchestrator.recovery.locks.records()["active"])
+                response = super().run(argv, **options)
+                if argv[1] == "query-content" and "fake-doc" in argv[argv.index("--doc-id") + 1]:
+                    if inner.mode == "missing":
+                        response["result"]["text"] = "# delayed"
+                    elif inner.mode == "identity":
+                        response["result"]["repositoryGuid"] = "other-repo"
+                return response
+
+        transport = DelayedKu()
+        transport.docs["root"] = {
+            "parent": "parent", "title": "root", "text": "# index",
+            "version": 1, "published": True,
+        }
+        ku = KuClient(transport=transport, state_store=self.orchestrator.state,
+                      run_id=run_id, repo_id=transport.repo_id, username="tester",
+                      settle_attempts=1, settle_wait_seconds=0)
+        sync = KnowledgeSync(state_store=self.orchestrator.state, ku_client=ku,
+                             cafe_client=FakeCafeBoundary(), parent_doc_id="root",
+                             card_id="BGW-591", run_id=run_id)
+
+        class TestBridge(AgentBridge):
+            def _worker_options(inner, bound_run):
+                return {**super()._worker_options(bound_run), "knowledge_sync": sync}
+
+        bridge = TestBridge(self.orchestrator, locks=self.orchestrator.recovery.locks)
+        before_draft = self.orchestrator.state.producer_job(job_id)
+        before_approvals = self.orchestrator.approvals.for_run(run_id)
+        first = bridge.continue_run(run_id)
+        self.assertFalse(first["ok"], first)
+        self.assertEqual(first["reason_code"], "KU_CREATE_MARKER_MISSING")
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "IMPLEMENT")
+        pending = self.orchestrator.state.pending_intents(run_id)
+        create_intent = next(i for i in pending if i["operation"] == "ku.document.create")
+        observations = self.orchestrator.state.external_observations(
+            run_id, intent_id=create_intent["intent_id"])
+        self.assertEqual(observations[0]["observation"]["doc_id"], "fake-doc-1")
+        self.assertEqual(observations[0]["observation"]["stage"], "create-response")
+
+        transport.mode = "identity"
+        blocked = bridge.continue_run(run_id)
+        self.assertFalse(blocked["ok"], blocked)
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "IMPLEMENT")
+        self.assertIsNone(self.orchestrator.state.result_by_idempotency_key(
+            create_intent["idempotency_key"]))
+        transport.mode = "ready"
+        done = bridge.continue_run(run_id)
+        self.assertTrue(done["ok"], done)
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "REVIEW")
+        self.assertEqual(sum(c[0][1] == "create-doc" for c in transport.calls), 1)
+        self.assertEqual(before_draft, self.orchestrator.state.producer_job(job_id))
+        self.assertEqual(before_approvals, self.orchestrator.approvals.for_run(run_id))
+        stored = self.orchestrator.artifacts.latest_phase(run_id, "IMPLEMENT", "T-1")
+        self.assertEqual(stored["envelope"]["knowledge_doc_id"], "fake-doc-1")
+        self.assertEqual(stored["envelope"]["knowledge_version"], "2")
+        self.assertIn("ku:fake-doc-1/2", stored["envelope"]["evidence_refs"])
+        self.assertEqual(self.orchestrator.state.pending_intents(run_id), [])
+
     def test_worker_submits_to_icode_under_g7(self):
         # A run parked at SUBMIT: the worker derives the reviewed descriptor and, since G7
         # is not yet APPROVE for that descriptor, returns the exact hash to approve — it
