@@ -527,7 +527,7 @@ class InfoflowApprovalTransport:
         blocked = _delivery_guard(self.state, record.get("run_id"), action)
         if blocked is not None:
             return blocked
-        record = self._with_reply(record)
+        record = self._with_reply(record, action)
         observed = self.clock()
         if record["status"] == "PENDING" and observed >= _deadline(record["deadline_at"]):
             handoff_id = f"approval-timeout-{record['approval_id']}"
@@ -552,7 +552,7 @@ class InfoflowApprovalTransport:
             raise RuntimeError("APPROVAL_GATEWAY_RESULT_INVALID")
         return result
 
-    def _with_reply(self, record: dict[str, Any]) -> dict[str, Any]:
+    def _with_reply(self, record: dict[str, Any], action: Any = None) -> dict[str, Any]:
         """Apply the decision that the reply consumer already bound to this request.
 
         The decision is stored once under its own key: the pending record is
@@ -566,7 +566,10 @@ class InfoflowApprovalTransport:
         if stored is None:
             if self.reply_consumer is None:
                 return record
-            reply = self.reply_consumer.resolve(record)
+            # The gate (action) decides whether a 需修改 reply is even a valid
+            # decision; without it the consumer could cache a REVISE on a
+            # non-revisable gate that the ledger then rejects, wedging the gate.
+            reply = self.reply_consumer.resolve({**record, "action": action} if action else record)
             if reply is None:
                 return record
             stored = self.state.save_idempotency_result(key, {"reply": reply})

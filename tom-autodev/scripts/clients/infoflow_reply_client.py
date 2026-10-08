@@ -89,6 +89,7 @@ class InfoflowReplyConsumer:
         if opened is None or deadline is None:
             return None
         group_id = self._group_id(record["run_id"])
+        revisable = _gate_revisable(record.get("action"))
         for message in self.journal.messages():
             received = _instant(message["received_at"])
             if received is None or received < opened or received > deadline:
@@ -100,6 +101,11 @@ class InfoflowReplyConsumer:
             responder = _responder(message["sender"], members)
             decision = _decision(message["text"])
             if responder is None or decision is None:
+                continue
+            # A "需修改" on a non-producer gate (migration/change request/…) is not a
+            # valid decision for it, so it must not shadow a later, applicable reply
+            # (e.g. a 同意 that follows a mis-tapped 需修改). Skip and keep scanning.
+            if decision == "REVISE" and not revisable:
                 continue
             return {
                 "reply_id": f"infoflow-{message['message_id']}",
@@ -150,6 +156,15 @@ def _message(line: str) -> dict[str, Any] | None:
         "chat_type": payload.get("chat_type"),
         "group_id": group_id if isinstance(group_id, str) and group_id else None,
     }
+
+
+def _gate_revisable(action: Any) -> bool:
+    """Whether this gate offers 需修改. Unknown/missing action is treated as revisable
+    so an ordinary producer gate is never wrongly stripped of a valid REVISE."""
+    if action is None:
+        return True
+    from approval_ledger import gate_of, _REVISABLE_GATES
+    return gate_of(action) in _REVISABLE_GATES
 
 
 def _binds(text: str, record: dict[str, Any]) -> bool:

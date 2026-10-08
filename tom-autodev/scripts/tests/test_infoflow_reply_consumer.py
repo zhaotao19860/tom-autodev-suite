@@ -171,6 +171,24 @@ class InfoflowReplyConsumerTests(unittest.TestCase):
                 reply = self._resolve([_message(text)])
                 self.assertEqual(reply["decision"], expected)
 
+    def test_revise_on_a_non_revisable_gate_is_skipped_for_a_later_approve(self):
+        # A mis-tapped 需修改 on a migration gate must not shadow a later 同意.
+        reply = self._resolve(
+            [
+                _message("REVISE approval-1", message_id="m-rev",
+                         received_at="2026-08-28T11:00:00+00:00"),
+                _message("同意 approval-1", message_id="m-app",
+                         received_at="2026-08-28T11:05:00+00:00"),
+            ],
+            record=_record(action="WORKFLOW_SPEC_MIGRATION"),
+        )
+        self.assertEqual(reply["decision"], "APPROVE")
+
+    def test_revise_on_a_producer_gate_is_still_honoured(self):
+        reply = self._resolve([_message("需修改 approval-1 请补充")],
+                              record=_record(action="G5"))
+        self.assertEqual(reply["decision"], "REVISE")
+
     def test_mixed_chinese_decisions_are_ambiguous(self):
         self.assertIsNone(self._resolve([_message("同意或驳回 approval-1")]))
 
