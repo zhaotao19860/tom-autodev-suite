@@ -293,6 +293,67 @@ class RunChangeTests(unittest.TestCase):
         )
         self.assertEqual(revised["feedback"], "补回滚场景；环境要求写清楚")
 
+    def _group_journal(self, *messages):
+        import json
+
+        journal = Path(os.environ["TOM_AUTODEV_INFOFLOW_REPLY_JOURNAL"])
+        journal.write_text("\n".join(json.dumps({
+            "message_id": f"g{index}", "sender": sender, "group_id": group, "text": text,
+            "received_at": f"2026-09-30T00:00:0{index}+00:00",
+        }, ensure_ascii=False) for index, (sender, group, text) in enumerate(messages)), encoding="utf-8")
+
+    def test_plain_message_after_a_button_tap_is_the_feedback(self):
+        run_id, _knowledge, _job_id, rejected_hash = self._at_g2()
+        rejected = self._approval(run_id, "G2", rejected_hash, decision="REVISE")
+        approval_id = rejected["approval_id"]
+        self._group_journal(
+            ("owner", "g1", f"REVISE {approval_id}"),
+            ("someone-else", "g1", "别人的话"),
+            ("owner", "g2", "另一个群的消息"),
+            ("owner", "g1", "去掉 c2s_mss 严格等值"),
+            ("owner", "g1", "覆盖 NAT64/NAT66"),
+            ("owner", "g1", "同意 other-approval"),
+            ("owner", "g1", "之后的闲聊"),
+        )
+        revised = run_change.revise(
+            self.orchestrator, run_id, approval_id, feedback=None, actor="owner",
+        )
+        self.assertEqual(revised["feedback"], "去掉 c2s_mss 严格等值；覆盖 NAT64/NAT66")
+
+    def test_a_tap_with_no_follow_up_still_requires_feedback(self):
+        run_id, _knowledge, _job_id, rejected_hash = self._at_g2()
+        rejected = self._approval(run_id, "G2", rejected_hash, decision="REVISE")
+        self._group_journal(("owner", "g1", f"REVISE {rejected['approval_id']}"))
+        self.assertEqual(run_change.revise(
+            self.orchestrator, run_id, rejected["approval_id"], feedback=None, actor="owner",
+        )["reason_code"], "FEEDBACK_REQUIRED")
+
+    def test_watcher_asks_for_feedback_then_records_the_redo_when_it_arrives(self):
+        from approval_watch import ApprovalWatcher, _ack_note
+
+        run_id, _knowledge, _job_id, rejected_hash = self._at_g2()
+        approval_id = self._approval(run_id, "G2", rejected_hash, decision="REVISE")["approval_id"]
+        rejected = self.orchestrator.approvals.get(approval_id)
+        notify = MagicMock()
+        notify.send_markdown.return_value = {"message_key": "ack"}
+        watcher = ApprovalWatcher(self.orchestrator, lambda: None, notify,
+                                  sleeper=lambda _s: None)
+
+        self._group_journal(("owner", "g1", f"REVISE {approval_id}"))
+        asked = watcher._revise(rejected, "owner")
+        self.assertEqual(asked["reason_code"], "FEEDBACK_REQUIRED")
+        self.assertIn("直接在本群回复修改意见", _ack_note(rejected, "REVISE", False, asked))
+        self.assertEqual(watcher._awaiting_feedback(), [])
+
+        self._group_journal(("owner", "g1", f"REVISE {approval_id}"),
+                            ("owner", "g1", "去掉严格等值"))
+        landed = watcher._awaiting_feedback()
+        self.assertEqual([item["reason_code"] for item in landed], ["REVISE_FEEDBACK_RECEIVED"])
+        action = self.orchestrator.next(run_id, read_only=True)
+        self.assertEqual(action["reentry"]["feedback"], "去掉严格等值")
+        self.assertEqual(action["reentry"]["actor"], "owner@example.test")
+        self.assertEqual(watcher._awaiting_feedback(), [])
+
     def test_extra_results_conflict_writes_nothing(self):
         run_id, _knowledge, _job_id, _hash = self._at_g2()
         state = self.orchestrator.state

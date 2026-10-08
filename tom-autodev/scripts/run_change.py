@@ -41,6 +41,7 @@ _CODE_STATES = frozenset({"PLAN", "IMPLEMENT", "REVIEW", "SUBMIT", "IPIPE", "DIA
 # The reply template shows this in place of the feedback; copied verbatim it is no feedback.
 FEEDBACK_PLACEHOLDER = "你的修改意见"
 FEEDBACK_PLACEHOLDERS = frozenset({FEEDBACK_PLACEHOLDER, "修改意见"})
+_DECISION_COMMAND = re.compile(r"^\s*(?:同意|需修改|驳回|APPROVE|REVISE|REJECT|CHOICE)(?:\s|$)", re.IGNORECASE)
 
 
 def _now() -> str:
@@ -100,14 +101,31 @@ def _journal_feedback(orchestrator: Any, approval: dict[str, Any]) -> str:
         re.IGNORECASE,
     )
     found = []
+    # A button tap (or a bare reply) carries no text, so the same member's next plain
+    # messages in that chat are the feedback, up to their next decision command.
+    awaiting: dict[str, Any] = {}
     for message in InfoflowReplyJournal().messages():
         text = message.get("text") or ""
-        if message.get("sender") not in responders:
+        sender = message.get("sender")
+        if sender not in responders:
             continue
         matched = lead.match(text)
-        if matched is None:
+        if matched is not None:
+            comment = re.sub(r"\s+", " ", text[matched.end():]).strip(" ：:，,。")
+            if comment and comment.strip("<>《》[]【】 ") not in FEEDBACK_PLACEHOLDERS:
+                found.append(comment)
+                awaiting.pop(sender, None)
+            else:
+                awaiting[sender] = message.get("group_id")
             continue
-        comment = re.sub(r"\s+", " ", text[matched.end():]).strip(" ：:，,。")
+        if sender not in awaiting:
+            continue
+        if _DECISION_COMMAND.match(text):
+            awaiting.pop(sender)
+            continue
+        if message.get("group_id") != awaiting[sender]:
+            continue
+        comment = re.sub(r"\s+", " ", text).strip(" ：:，,。")
         if comment and comment.strip("<>《》[]【】 ") not in FEEDBACK_PLACEHOLDERS:
             found.append(comment)
     return "；".join(dict.fromkeys(found))
@@ -162,7 +180,7 @@ def revise(
     if not text:
         return _failure(
             "FEEDBACK_REQUIRED", run_id, approval_id=approval_id,
-            hint="说明需要修改什么；在如流可回复 `需修改 <审批ID> 修改意见`",
+            hint="说明需要修改什么；在如流点「需修改」后直接回复意见，或回复 `需修改 <审批ID> 修改意见`",
         )
     # Only the reason travels: a design-front action reads nothing else from its
     # event, and copying the entry payload (previous_state/artifact_id) would let

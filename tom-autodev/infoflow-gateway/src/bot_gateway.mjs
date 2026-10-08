@@ -645,6 +645,8 @@ async function refreshAnsweredCard(cardId, data, eventKey, sender) {
     approvers: approvers === null ? undefined : [...approvers],
     question: choice
       ? `已由 ${sender} 选择：${label}`
+      : answered && label === '需修改'
+      ? `已由 ${sender} 选择需修改：请直接在本群回复修改意见（不用带审批 ID）`
       : answered
       ? `已由 ${sender} 处理：${label}`
       : '已收到点击，待权限和有效期校验；以审批回执为准。',

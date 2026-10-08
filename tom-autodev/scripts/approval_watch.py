@@ -123,6 +123,10 @@ class ApprovalWatcher:
             if self.reporter is not None:
                 # A watcher that only reports at exit is useless while it runs.
                 self.reporter(outcome)
+        for revised in self._awaiting_feedback():
+            outcomes.append(revised)
+            if self.reporter is not None:
+                self.reporter(revised)
         for progress in self._progress():
             outcomes.append(progress)
             if self.reporter is not None:
@@ -418,7 +422,7 @@ class ApprovalWatcher:
             if decision == "REJECT" and not stale:
                 stopped = self.orchestrator.stop(run_id)
                 outcome["stopped_state"] = stopped.get("state")
-            if revised is not None:
+            if revised is not None and revised.get("ok"):
                 outcome["revised_event_id"] = revised.get("event_id")
             acknowledgement = self._acknowledge(
                 approval, decision, responder, note=_ack_note(approval, decision, stale, revised)
@@ -575,10 +579,11 @@ class ApprovalWatcher:
         return effective[-1].get("responder") if effective else None
 
     def _revise(self, approval: dict[str, Any], responder: str | None) -> dict[str, Any] | None:
-        """A REJECT typed with feedback is the redo instruction itself; record the redo.
+        """Record the redo once the member who chose 需修改 has said what to change.
 
-        Only the feedback of the member who cast the REJECT counts (run_change reads it
-        from the reply journal). A click, or a REJECT without text, waits for the IDE.
+        Only that member's feedback counts (run_change reads it from the reply journal):
+        the text after ``需修改 <id>``, or their next plain message in the chat after a
+        button tap. Without it the result is FEEDBACK_REQUIRED and the group is asked.
         """
         if gate_of(approval.get("action") or "") not in workflow_spec.REVISABLE_GATES:
             return self.orchestrator.route_failure(
@@ -597,11 +602,49 @@ class ApprovalWatcher:
 
             result = revise(
                 self.orchestrator, approval["run_id"], approval["approval_id"],
-                feedback="审批人选择需修改，请按审批重点修正当前阶段材料并重新提交。",
+                feedback=None, actor=responder or "infoflow",
             )
         except Exception:  # noqa: BLE001 - the REJECT already landed; redo stays available in the IDE
             return None
-        return result if result.get("ok") else None
+        if result.get("ok") or result.get("reason_code") == "FEEDBACK_REQUIRED":
+            return result
+        return None
+
+    def _awaiting_feedback(self) -> list[dict[str, Any]]:
+        """Finish a 需修改 whose feedback arrived after the decision was settled."""
+        from run_change import superseded
+
+        outcomes = []
+        for latest in self.orchestrator.state.latest_states():
+            run_id = latest["run_id"]
+            state = latest.get("state")
+            if state not in workflow_spec.REVISABLE_STATES:
+                continue
+            if execution_guard(self.orchestrator.state, run_id) is not None:
+                continue
+            gate = workflow_spec.STATES[state].output_gate
+            for approval in self.orchestrator.approvals.for_run(run_id):
+                if (
+                    approval.get("effective_decision") != "REVISE"
+                    or gate_of(approval.get("action") or "") != gate
+                    or self.orchestrator.state.idempotency_result(
+                        f"run-revise:{approval['approval_id']}") is not None
+                    or superseded(self.orchestrator.state, run_id, approval)
+                ):
+                    continue
+                responder = self._responder(approval["approval_id"])
+                revised = self._revise(approval, responder)
+                if not isinstance(revised, dict) or not revised.get("ok"):
+                    continue
+                outcome = {
+                    "run_id": run_id, "approval_id": approval["approval_id"],
+                    "action": approval.get("action"), "reason_code": "REVISE_FEEDBACK_RECEIVED",
+                    "revised_event_id": revised.get("event_id"),
+                }
+                self._acknowledge(approval, "REVISE_FEEDBACK", responder,
+                                  note=_ack_note(approval, "REVISE", False, revised))
+                outcomes.append(outcome)
+        return outcomes
 
     def _acknowledge(self, approval: dict[str, Any], decision: str, responder: str | None, *, note: str | None = None) -> dict[str, Any] | None:
         """Tell the approvers the decision landed; send it once per approval.
@@ -818,6 +861,11 @@ def _ack_note(
     gate = gate_of(approval.get("action") or "")
     if stale:
         return "该卡已被之后的重做/回退取代，本决定不会被使用。"
+    if decision == "REVISE" and revised is not None and revised.get("reason_code") == "FEEDBACK_REQUIRED":
+        return (
+            "请直接在本群回复修改意见（不用带审批 ID，可分多条发）；"
+            "收到后自动按意见登记重做，并在 IDE 继续后重新发起本门。"
+        )
     if decision == "REVISE" and revised is not None:
         return (
             f"已按意见登记重做（{' '.join(str(revised.get('feedback') or '').split())[:200]}）；"
@@ -850,18 +898,22 @@ def _ack_markdown(
             lines += ["", "**整体进度**", render_progress(progress)]
         lines += ["", "> 需要重新发起审批；内容若已变更，会绑定新的 input_hash。"]
         return "\n".join(lines)
-    landed = {"APPROVE": "已同意", "REVISE": "已标记需修改", "REJECT": "已驳回"}.get(decision, decision)
+    landed = {
+        "APPROVE": "已同意", "REVISE": "已标记需修改", "REJECT": "已驳回",
+        "REVISE_FEEDBACK": "已收到修改意见",
+    }.get(decision, decision)
     following = {
         "APPROVE": "Comate 会在下一步继续该 run。",
         "REVISE": "run 保留，Comate 按意见重做当前阶段并重新发起审批。",
         "REJECT": "run 已停止，Comate 不会继续后续阶段。",
     }.get(decision, "请以审批账本和 run 状态为准。")
     if note:
-        following = note if decision == "APPROVE" or "取代" in note else following + note
+        replaces = decision in {"APPROVE", "REVISE_FEEDBACK"} or "取代" in note or "回复修改意见" in note
+        following = note if replaces else following + note
     lines = [
             f"## tom-autodev {action} {landed}",
             "",
-            f"**决策** {decision}",
+            f"**决策** {'REVISE' if decision == 'REVISE_FEEDBACK' else decision}",
             f"**决策人** {responder or '-'}",
             f"**approval_id** `{approval['approval_id'][:12]}…`",
             "",

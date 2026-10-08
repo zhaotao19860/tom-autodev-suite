@@ -4,6 +4,16 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-08 · 「需修改」按钮后直接回复意见
+
+- 修复：watcher 处理“需修改”时调用 `revise` 缺少必填 `actor`，`TypeError` 被吞掉，点按钮
+  后只记账不重做；且它塞入固定占位意见，从未向审批人要真实意见。
+- 点按钮（或只回复 `需修改 <id>`）后，同一审批人在同一群的后续普通消息即为修改意见，
+  直到其下一条审批指令；其他人、其他群的消息不计入。缺意见时回执提示“直接在本群回复
+  修改意见”，watcher 每轮检查，收到后登记重做并回执“已收到修改意见”。
+- 卡片点击状态与审批正文同步说明该用法；网关改动需重启网关进程生效。
+- 控制面全量回归 1235 项通过；tom-review、autodebug 回归通过。
+
 ## 2026-10-08 · 需求变更回到 GRILL，G5 需修改原地重做
 
 - 根因（BGW-1995）：G1 之后用户取消 c2s_mss 严格等值，但诊断只能路由 PLAN/SPEC，回退

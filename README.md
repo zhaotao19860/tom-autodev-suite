@@ -91,7 +91,8 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
   后续审批正文和操作示例统一使用中文：“同意 <approval_id>”会继续当前 run；
   “需修改 <approval_id> <修改意见>”会保留 run、按意见重做并重新发起本门；
   “驳回 <approval_id>”会停止 run。按钮未完整送达会单独提示。“需修改”适用于
-  G1–G5；G5 的修改意见会原地重做 IMPLEMENT。
+  G1–G5；G5 的修改意见会原地重做 IMPLEMENT。点卡片“需修改”后直接在本群回复修改意见
+  即可（不用带审批 ID，可分多条，到你下一条审批指令为止）；watcher 收到后自动登记重做并回执。
 - GRILL 之后的需求变更不会被吸收进 Spec/计划/代码：PLAN/IMPLEMENT 以
   `USER_REQUIREMENT_CHANGED` 上报，诊断只能路由 `GRILL`，G6 批准后回到决策日志重新取得
   G1 及之后各门；重做阶段的审批卡会列出已批准诊断的修复方向与修复计划。

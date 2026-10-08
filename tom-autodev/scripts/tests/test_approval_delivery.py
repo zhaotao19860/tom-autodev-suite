@@ -141,7 +141,7 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         _, content = notify.sends[0]
         self.assertIn("需修改 approval-1 <你的修改意见>", content)
         self.assertIn("驳回 approval-1", content)
-        self.assertIn("需修改时把 <>", content)
+        self.assertIn("直接在本群回复修改意见", content)
         self.assertNotIn("REVISE approval-1", content)
 
     def test_the_message_says_what_is_approved_and_what_approving_causes(self):
