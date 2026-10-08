@@ -519,6 +519,14 @@ def _validate_diagnosis(instance: dict[str, Any]) -> list[SchemaIssue]:
     # the actual candidate remains hash-bound by IMPLEMENT and its fresh G5.
     if instance.get("route") != "REPAIR" and instance.get("repair_diff_hash") is not None:
         return [SchemaIssue("repair_diff_hash", "inconsistent")]
+    # A changed requirement is amended where it was decided. Repairing it at SPEC/PLAN
+    # leaves the approved decision log saying the opposite, and the next regeneration
+    # restores it.
+    requirement_changed = instance.get("classification") == "USER_REQUIREMENT_CHANGED"
+    if requirement_changed and instance.get("route") not in {"GRILL", "STOPPED"}:
+        return [SchemaIssue("route", "inconsistent")]
+    if instance.get("route") == "GRILL" and not requirement_changed:
+        return [SchemaIssue("classification", "inconsistent")]
     if not instance.get("repair_plan"):
         return [SchemaIssue("repair_plan", "missing")]
     return []

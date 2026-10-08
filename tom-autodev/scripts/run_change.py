@@ -9,7 +9,7 @@ way a workflow reset keeps the original history and continues from a chosen poin
 
 Two entry points, each authorized by a human decision that already exists:
 
-    * ``revise`` — a REVISE of the current producer gate (G1/G2/G3/G4) plus the
+    * ``revise`` — a REVISE of the current producer gate (G1/G2/G3/G4/G5) plus the
   reviewer's feedback. The same state is entered again with that feedback and the
   rejected draft as context, so the next draft is a response to the review rather
   than a fresh guess, and the gate shows what changed.
@@ -134,7 +134,8 @@ def revise(
     if state not in workflow_spec.REVISABLE_STATES:
         return _failure(
             "REVISE_NOT_SUPPORTED", run_id, state=state,
-            hint="只有 GRILL/SPEC/TASKS/PLAN 可按修改意见原地重做；更早阶段用 rewind，代码阶段走 DIAGNOSE",
+            hint="只有 GRILL/SPEC/TASKS/PLAN/IMPLEMENT 可按修改意见原地重做；更早阶段用 rewind，"
+                 "需求变更由 IMPLEMENT/PLAN 上报 USER_REQUIREMENT_CHANGED 经 DIAGNOSE 回到 GRILL",
         )
     if not isinstance(actor, str) or not actor.strip():
         return _failure("ACTOR_REQUIRED", run_id)
@@ -170,10 +171,19 @@ def revise(
     # PLAN is the only revisable phase whose predecessor (TASKS) has no revisions.
     # Use the already validated action as the source of truth.  Do not copy arbitrary
     # fields from the event: a REVISE event must not become an alternate version pin.
-    if state == "PLAN":
+    if state in {"PLAN", "IMPLEMENT"}:
         source_revisions = action.get("source_revisions")
         if isinstance(source_revisions, dict) and source_revisions:
             payload["source_revisions"] = dict(source_revisions)
+    if state == "IMPLEMENT":
+        # Keep the redo on the approved plan the rejected Change Set was built from.
+        plan = next((item for item in action.get("input_artifacts") or []
+                     if isinstance(item, dict) and item.get("phase") == "PLAN"), None)
+        if plan is None:
+            return _failure("PLAN_PIN_REQUIRED", run_id, approval_id=approval_id)
+        payload["plan_artifact_id"] = plan["artifact_id"]
+        payload["plan_content_hash"] = plan["content_hash"]
+        payload["task_id"] = action.get("task_id")
     payload["reentry"] = {
         "kind": "REVISE",
         "from_state": state,

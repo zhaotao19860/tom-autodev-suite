@@ -19,4 +19,6 @@ For a source Review failure, set `build_id`, `stage_id`, `job_id` and `environme
 
 For an iPipe failure, copy its exact `build_id`, `environment_fingerprint` and `failure_signature`. Select an observed `stage_id` and a `job_id` that belongs to that stage and appears in the failure bundle. A null stage/job is allowed only when the source has no corresponding stage/jobs; absence is not permission to invent one. The controller rejects erased or unrelated execution identities before locking the draft.
 
+When the user changed a requirement after G1 (the entry block or conflict says `USER_REQUIREMENT_CHANGED`, or the evidence shows it), keep `classification=USER_REQUIREMENT_CHANGED` and use `route=GRILL` (or `STOPPED`). Put the old and new rule in `comparison` and the decision-log change in `repair_direction`. The controller rejects any other route for that class, a relabelled class, and `route=GRILL` for anything else; on approval the direction and `repair_plan` reach GRILL as `revision_context`.
+
 The parent settles the applicable G6 and validates the route. The producer neither calls `repair_policy` with guessed history nor marks a FailureCase resolved; a verified repair result and its scope are required.

@@ -4,6 +4,24 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-08 · 需求变更回到 GRILL，G5 需修改原地重做
+
+- 根因（BGW-1995）：G1 之后用户取消 c2s_mss 严格等值，但诊断只能路由 PLAN/SPEC，回退
+  在进入代码阶段后被禁止，决策日志 B2 从未修改；PLAN/SPEC 以决策日志为准，每次重出都恢复
+  严格等值，诊断批准的修复方向也没有交给下游 producer。
+- diagnosis `route` 新增 `GRILL`，新增 `DIAGNOSE → GRILL`（需 G6）。
+  `USER_REQUIREMENT_CHANGED` 只能路由 `GRILL`/`STOPPED`，`GRILL` 只用于该分类；入口阻塞报告
+  已声明需求变更时，诊断改分类以 `REQUIREMENT_CHANGE_RECLASSIFIED` 拒绝（草案可修正）。
+- 诊断完成进入 GRILL/SPEC/PLAN 时，事件携带 `reentry`（`kind: DIAGNOSIS`、修复方向、修复
+  计划、诊断 artifact），producer 的 `revision_context` 与审批卡“本次修改说明”都会展示。
+- G5 加入可原地重做的门：`需修改` 后重新进入 IMPLEMENT，钉住被驳回 Change Set 的 PLAN
+  与 baseline revision；缺 PLAN 绑定时以 `PLAN_PIN_REQUIRED` 拒绝。
+- producer 合同：汇报草案只能依据已保存内容；用户后续要求与已批准决策日志/Spec 冲突时
+  必须上报 `USER_REQUIREMENT_CHANGED`，不得静默采纳或静默沿用上游。
+- workflow policy 变化：进行中的 run 需经 `migrate-workflow-spec` 审批后续跑。
+- 控制面全量回归 1232 项通过（新增 `test_requirement_change_route.py`）；tom-review、
+  autodebug 回归通过；未执行 BGW 本地编译或测试。
+
 ## 2026-10-08 · Change Set 受控生成、PLAN 冲突上报与已批准迁移续跑
 
 - 新增 `prepare-change-set`：校验当前 IMPLEMENT action/job、Plan 前驱、baseline、worktree

@@ -722,12 +722,19 @@ def _revision_lines(gate: dict[str, Any]) -> list[str]:
     reentry = material.get("reentry")
     if not isinstance(reentry, dict):
         return []
-    kind = "驳回后按意见重做" if reentry.get("kind") == "REVISE" else "变更请求回退后重做"
+    kind = {
+        "REVISE": "驳回后按意见重做",
+        "DIAGNOSIS": "按已批准诊断的修复方向重做",
+    }.get(reentry.get("kind"), "变更请求回退后重做")
     note = reentry.get("feedback") or reentry.get("reason")
     lines = ["**本次修改说明**", f"- {kind}（发起人 {_line(reentry.get('actor')) or '-'}）"]
     if isinstance(note, str) and note.strip():
         text = " ".join(note.split()).replace("@", "[at]")
         lines.append(f"- 意见：{text[:1000]}{'…' if len(text) > 1000 else ''}")
+    steps = [step for step in reentry.get("repair_plan") or [] if isinstance(step, str) and step.strip()]
+    if steps:
+        text = "；".join(" ".join(step.split()) for step in steps).replace("@", "[at]")
+        lines.append(f"- 修复计划：{text[:1000]}{'…' if len(text) > 1000 else ''}")
     previous = material.get("previous_draft")
     draft = material.get("draft")
     if not isinstance(previous, dict) or not isinstance(draft, dict):

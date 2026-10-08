@@ -157,6 +157,9 @@ def _revision_context(orchestrator: Any, action: Any) -> dict[str, Any] | None:
         "from_state": reentry.get("from_state"),
         "redo": reentry.get("redo"),
         "profile_changed_keys": reentry.get("profile_changed_keys"),
+        "repair_plan": reentry.get("repair_plan"),
+        "classification": reentry.get("classification"),
+        "diagnosis_artifact_id": reentry.get("diagnosis_artifact_id"),
     }
     job_id = reentry.get("previous_job_id")
     job = orchestrator.state.producer_job(job_id) if isinstance(job_id, str) and job_id else None

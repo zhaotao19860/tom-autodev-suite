@@ -75,6 +75,9 @@ class StateSpec:
 #     over a half-written requirement.
 #   DIAGNOSE -> PLAN: only for a CODE_ONLY repair (spec + DAG still hold), decided by
 #     phase_protocol._completion_target(); a spec/scope repair re-enters at SPEC.
+#   DIAGNOSE -> GRILL: a requirement the user changed after G1. The decision log is the
+#     authority every later phase derives from, so a change that skips it is re-derived
+#     away by the next SPEC/PLAN (BGW-1995 lost "drop exact c2s_mss equality" this way).
 STATES: dict[str, StateSpec] = {
     "INTAKE": StateSpec(
         registry="phase", controller="intake", schema="requirement-snapshot",
@@ -145,7 +148,7 @@ STATES: dict[str, StateSpec] = {
         registry="phase", skill="tom-diagnose", schema="diagnosis", output_gate="G6",
         predecessor=("REVIEW", "IPIPE", "IMPLEMENT", "PLAN"), envelope_revisions=True,
         title="07-diagnosis", side_effects=_SKILL_SIDE_EFFECTS,
-        transitions=frozenset({"SPEC", "PLAN", "ARCHITECTURE_REVIEW", "STOPPED"}),
+        transitions=frozenset({"GRILL", "SPEC", "PLAN", "ARCHITECTURE_REVIEW", "STOPPED"}),
     ),
     "RELEASE": StateSpec(
         registry="controller", controller="release",
@@ -171,6 +174,7 @@ STATES: dict[str, StateSpec] = {
 TRANSITION_REQUIREMENTS: dict[tuple[str, str], tuple[tuple[str, ...], str | None]] = {
     ("REVIEW", "WORKSPACE"): (("review",), None),
     ("REVIEW", "STOPPED"): (("review",), None),
+    ("DIAGNOSE", "GRILL"): (("failure-bundle",), "G6"),
     ("DIAGNOSE", "SPEC"): (("failure-bundle",), "G6"),
     ("DIAGNOSE", "ARCHITECTURE_REVIEW"): (("failure-bundle",), "G6"),
     ("IMPLEMENT", "DIAGNOSE"): (("producer-block-report", "task-plan"), None),
@@ -216,12 +220,16 @@ _FAILURE_DEFAULT = "STOPPED"
 # feedback and the same gate is asked again for the new hash (run_change.revise).
 # PLAN/G4 is included because the plan is itself a model-authored, hash-bound draft;
 # rejecting it must not strand the run or force the user to open a separate rewind.
-REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS", "PLAN"})
-REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3", "G4"})
+# IMPLEMENT/G5 likewise: a "需修改" on the Change Set re-enters IMPLEMENT with the
+# feedback; a requirement change found there leaves via a USER_REQUIREMENT_CHANGED
+# producer block -> DIAGNOSE -> GRILL rather than being absorbed into code.
+REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT"})
+REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3", "G4", "G5"})
 
 # Approved backward moves (run_change.rewind): the run re-enters the target and every
 # phase from there is produced again; nothing already recorded is rewritten. Later
-# states go back through DIAGNOSE, which owns repair routing once code exists.
+# states go back through DIAGNOSE, which owns repair routing once code exists and can
+# route a changed requirement to GRILL.
 # ARCHITECTURE_REVIEW has no producer, so a rewind is the only way out of it.
 REWIND_TARGETS: dict[str, frozenset[str]] = {
     "GRILL": frozenset({"GRILL"}),

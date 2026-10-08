@@ -27,5 +27,13 @@ python3 tom-autodev/scripts/cli.py report-producer-block \
 
 若阻塞实际改变 Spec/GRILL 验收，诊断应选择上游路线并重新取得相应审批。
 用户需求取消 MSS 全局严格等值属于 `USER_REQUIREMENT_CHANGED`；不能改写成
-`CODE_FAILURE`，也不能把“svc 缺失”当作事实。残余风险必须写入诊断和后续
+`CODE_FAILURE`/`PLAN_INCOMPLETE`，也不能把“svc 缺失”当作事实。该分类的诊断只能
+`route=GRILL`（或 `STOPPED`），控制面拒绝改分类或路由到 SPEC/PLAN；G6 批准后修复方向
+作为 `revision_context` 进入 GRILL，重新取得 G1 及其后各门。
+
+BGW-1995 的教训：10-05 用户取消严格等值，阻塞报告记为 `CONTRACT_INPUT_MISSING`，诊断
+路由 PLAN；PLAN 只服从仍写着 B2（严格等值）的决策日志和 Spec，于是每次重出计划都恢复了
+严格等值，10-08 路由 SPEC 的诊断也不再提这条变更。G5 “需修改”现在原地重做 IMPLEMENT，
+重做的 producer 可以按上面的方式上报；此时 `NO_CODE_CHANGES` 指本 job 未改代码，被驳回候选
+的提交须列入 `evidence`，留在工作区由 GRILL 之后的重做修订或回退。残余风险必须写入诊断和后续
 计划，不能宣称 100% 无 bug。

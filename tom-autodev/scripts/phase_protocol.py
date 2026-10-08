@@ -704,6 +704,16 @@ class PhaseProtocol:
                 return _failure("PREDECESSOR_REQUIRED")
             if not _diagnosis_source_matches(content, failure["envelope"]):
                 return _failure("DIAGNOSIS_SOURCE_MISMATCH", content_invalid=True)
+            events = self.state.events(run_id)
+            entry = events[-1].get("payload") if events else None
+            if (
+                isinstance(entry, dict)
+                and _payload_value(entry, "classification") == "USER_REQUIREMENT_CHANGED"
+                and content.get("classification") != "USER_REQUIREMENT_CHANGED"
+            ):
+                # The producer already reported a changed requirement; relabelling it
+                # as a plan/code defect is how it got repaired below the decision log.
+                return _failure("REQUIREMENT_CHANGE_RECLASSIFIED", content_invalid=True)
         return {"ok": True, "reason_code": "OK"}
 
     def _workflow_spec_drift(self, run_id: str) -> dict[str, Any] | None:
@@ -906,6 +916,10 @@ class PhaseProtocol:
                 },
                 "policy_decision": transition,
                 **({"task_id": next_task_id} if next_task_id is not None else {}),
+                **(
+                    {"reentry": _diagnosis_reentry(envelope, stored["artifact_id"])}
+                    if action["phase"] == "DIAGNOSE" and target in {"GRILL", "SPEC", "PLAN"} else {}
+                ),
             }
         result = {
             "ok": True, "reason_code": completion_reason, "phase_complete": True, "run_id": run_id,
@@ -2531,6 +2545,24 @@ def _valid_revisions(value: Any) -> bool:
         and {"business", "tests"}.issubset(value)
         and all(isinstance(revision, str) and revision for revision in value.values())
     )
+
+
+def _diagnosis_reentry(envelope: dict[str, Any], artifact_id: str) -> dict[str, Any]:
+    """The approved G6 direction, handed to the phase the diagnosis sends the run to.
+
+    Without it that phase only sees its own predecessor (GRILL for SPEC, TASKS for
+    PLAN), which still says what the diagnosis overturned.
+    """
+    content = envelope.get("content") if isinstance(envelope.get("content"), dict) else {}
+    return {
+        "kind": "DIAGNOSIS",
+        "from_state": "DIAGNOSE",
+        "diagnosis_artifact_id": artifact_id,
+        "diagnosis_hash": envelope.get("content_hash"),
+        "classification": content.get("classification"),
+        "reason": content.get("repair_direction"),
+        "repair_plan": list(content.get("repair_plan") or []),
+    }
 
 
 def _payload_value(payload: dict[str, Any], key: str) -> Any:

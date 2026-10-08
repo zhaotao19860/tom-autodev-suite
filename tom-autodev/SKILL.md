@@ -205,7 +205,7 @@ question/purpose/status/handoff, and current collaboration items. See
 [`references/phase-artifacts.md`](references/phase-artifacts.md) for the document map and
 artifact contract.
 
-When a reviewer selects “需修改” on G1/G2/G3/G4, do not tell them to restart and do not
+When a reviewer selects “需修改” on G1/G2/G3/G4/G5, do not tell them to restart and do not
 reissue the same gate manually. The next `/tom-autodev CARD 继续` consumes the
 hash-bound feedback, re-enters the producer phase, and delivers a new Chinese approval card
 for the new content hash. G4 is the PLAN producer gate and is revisable for the same reason
@@ -217,6 +217,11 @@ point of the instruction, keep what was not objected to, and the new gate shows 
 an earlier phase or a repository fact must change, open `scripts/cli.py rewind RUN_ID --to
 <GRILL|SPEC|TASKS> --reason ... --actor ... [--previous-profile COPY] --request`, wait for the
 human `CHANGE_REQUEST` approval, then apply it with `--approval-id`. Never move a run by hand.
+
+A requirement the user changes after G1 is never absorbed into a later draft. From PLAN or
+IMPLEMENT, report it as `USER_REQUIREMENT_CHANGED` (G5 “需修改” first re-enters IMPLEMENT so
+a pending job exists); the diagnosis routes `GRILL` and G6 re-opens the decision log. Tell
+the user what a draft contains only from the saved draft, never from the intended version.
 
 If a paused run returns `WORKFLOW_SPEC_DRIFT`, do not edit its event or hash in place and do
 not use ordinary `continue` to bypass the guard. Use the dedicated

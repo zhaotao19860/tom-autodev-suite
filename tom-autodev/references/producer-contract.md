@@ -37,10 +37,15 @@ The phase schema and actual action take precedence over descriptive field lists 
 
 When `context` returns `revision_context`, this job is a redo, not a fresh draft:
 
-- `instruction` is the reviewer's feedback (`REVISE`) or the change request reason (`REWIND`). Address every point of it and nothing beyond it.
+- `instruction` is the reviewer's feedback (`REVISE`), the change request reason (`REWIND`), or the approved G6 repair direction (`DIAGNOSIS`, with `repair_plan`). Address every point of it and nothing beyond it.
 - `previous_draft`, when present, is the version that was sent back. Start from it: keep what the instruction does not touch, so the diff on the new gate shows only the requested change.
 - Repository facts (`test_repo`, `business_repos`, branches, locks) come from the run's pinned profile; cite them from the profile instead of retyping them, so a profile change made with a rewind cannot leave a stale value in the draft.
 - If the instruction contradicts an approved earlier artifact, say so in the draft's open questions or decline; do not silently override the earlier phase — that is a rewind decision for a human.
+- Never silently follow the earlier artifact either. When a user's later requirement (in chat, a G5 “需修改”, or a `DIAGNOSIS` instruction) contradicts the approved decision log or Spec, PLAN reports `report-producer-conflict` and IMPLEMENT reports `report-producer-block`, both with `classification: USER_REQUIREMENT_CHANGED`, stating the old and new rule verbatim. The diagnosis then routes `GRILL`.
+
+## Reporting a draft
+
+Describe a submitted draft only from its saved content (`artifact show`, the `--output` file or the approval material), quoting the rules that decide behavior. A summary that claims a rule was removed or added must be checkable against that content; if the draft says otherwise, the draft is wrong — fix or report it, do not describe the intended version.
 
 ## Knowledge loading
 

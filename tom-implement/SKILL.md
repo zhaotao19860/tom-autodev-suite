@@ -21,7 +21,8 @@ Follow the [producer contract](../tom-autodev/references/producer-contract.md), 
 5. Produce a complete diff, file list, traceability delta, test IDs, and input/content hashes.
 6. Record `deviations`: every place the diff departs from the approved plan, each with `from_plan`, `as_implemented` and `reason`. The field is required and an empty list is the assertion that the plan was followed exactly, so it is never omitted. `candidate_hash` covers it, which means a deviation cannot be added after G5 or a Review bound that hash — if one surfaces later, the change set is a new one.
 7. Check source/diff coverage and report scope, ownership or evidence gaps; the worker runs EvidenceGate and semantic validation before completion.
-8. Save and submit the candidate draft, then return control for G5. Source edits/local commits in owned worktrees are the review candidate, not an iCode submission or deployed change. On approval, reuse this candidate rather than re-generating it.
+8. On a G5 “需修改” redo (`revision_context.kind == "REVISE"`), start from `previous_draft` and the commits already in the worktree, change only what the instruction asks and submit a new candidate. If the instruction changes a requirement fixed by the approved decision log or Spec, do not edit code: report `report-producer-block` with `classification: USER_REQUIREMENT_CHANGED`, the old and new rule, and the rejected candidate's commits in `evidence`. `NO_CODE_CHANGES` then means this job changed nothing; the earlier commits stay for the redo after GRILL, which revises or reverts them in new commits.
+9. Save and submit the candidate draft, then return control for G5. Source edits/local commits in owned worktrees are the review candidate, not an iCode submission or deployed change. On approval, reuse this candidate rather than re-generating it.
 
 ## Hard Boundary
 

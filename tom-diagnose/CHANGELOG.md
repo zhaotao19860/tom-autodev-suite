@@ -2,6 +2,11 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-10-08
+
+- 用户在 G1 后改变需求时保持 `USER_REQUIREMENT_CHANGED` 分类并使用 `route=GRILL`（或
+  `STOPPED`）；控制面拒绝其他路由、改分类及非需求变更的 `GRILL` 路由。
+
 ## 2026-09-22
 
 - 对齐修复后的控制器：REPAIR 提案尚无补丁时使用 `repair_diff_hash=null`；G6 审批提案，PLAN/IMPLEMENT 生成候选后重新取得 G5。
