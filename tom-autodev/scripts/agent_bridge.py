@@ -363,6 +363,16 @@ class AgentBridge:
             handoff for handoff in self.orchestrator.state.incomplete_handoffs(run_id)
             if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
         ]
+        if len(pending_approval_handoffs) > 1:
+            # Drop provably expired handoffs first, so a run whose approvals were
+            # consumed by explicit commands falls through to advance() instead of
+            # being refused by resume().
+            from approval_watch import reap_stale_resume_handoffs
+
+            pending_approval_handoffs = reap_stale_resume_handoffs(
+                self.orchestrator, run_id, pending_approval_handoffs,
+                actor="agent_bridge.continue",
+            )
         options = self._worker_options(run_id)
         # “需修改” is a settled human instruction, not a terminal stop.  Consume it
         # before asking the worker for the next action so typing “继续” after a

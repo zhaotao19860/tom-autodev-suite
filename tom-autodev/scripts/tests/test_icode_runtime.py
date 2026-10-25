@@ -194,6 +194,11 @@ class IcodeRuntimeTests(unittest.TestCase):
         }
         if "submission_mode" in change:
             reviewed["submission_mode"] = change["submission_mode"]
+        for field in ("task_id", "existing_cr", "change_id"):
+            if field in change:
+                reviewed[field] = change[field]
+        if "unchanged_baselines" in change:
+            reviewed["unchanged_baselines"] = change["unchanged_baselines"]
         content = json.dumps(reviewed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         artifact = self.artifacts.put(
             "run-1", "change-set", content,
@@ -382,6 +387,27 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "OK")
         self.assertEqual(result["change_number"], "42")
         self.assertNotIn("push", argv)
+
+    def test_a_later_g7_for_a_completed_submission_replays_its_receipt(self):
+        # A descriptor that gains a pinned baseline has a new input hash and needs a new G7,
+        # but it names the same change set and revision set: the CR already exists, so the
+        # earlier receipt is the answer, not a conflict with the first G7's intent payload.
+        first = self.change_set()
+        self.transport.changes = [{
+            "_number": 42, "current_revision": self.revision, "branch": "main",
+            "owner": {"username": "dev"}, "subject": "CARD-1 exact", "url": "https://icode.example/cr/42",
+        }]
+        runtime = self.runtime()
+        original = runtime.submit(first, approved(self.ledger, "run-1", "G7", first["input_hash"]))
+        self.assertEqual(original["reason_code"], "OK")
+
+        later = self.persist_reviewed_change_set({**first, "unchanged_baselines": [
+            {"module": "baidu/team/other", "branch": "main", "revision": "base-rev"}]})
+        self.assertNotEqual(later["input_hash"], first["input_hash"])
+        replayed = runtime.submit(later, approved(self.ledger, "run-1", "G7", later["input_hash"]))
+
+        self.assertEqual(replayed, original)
+        self.assertFalse(any(_is_push(call[0]) for call in self.transport.calls))
 
     def test_receipt_contains_complete_reviewed_revisions_and_strong_cr_identity(self):
         change = self.change_set()
@@ -650,6 +676,101 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "OK")
         self.assertEqual(result["change_number"], "99")
         self.assertTrue(any(_is_push(call[0]) for call in self.transport.calls))
+
+    # A-03: an append_existing_cr submission must be receiptable once its patchset landed.
+    APPEND_CHANGE_ID = "Ibbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+    def append_change_set(self):
+        change = self.child_change_set()
+        change.update({
+            "submission_mode": "append_existing_cr",
+            "task_id": "task-1",
+            "existing_cr": "41",
+            "change_id": self.APPEND_CHANGE_ID,
+        })
+        return self.persist_reviewed_change_set(change)
+
+    def append_target(self, revision):
+        return {
+            "_number": 41, "current_revision": revision, "branch": "main",
+            "change_id": self.APPEND_CHANGE_ID,
+            "owner": {"username": "dev"}, "subject": "CARD-1 earlier patchset",
+            "url": "https://icode.example/cr/41",
+        }
+
+    def test_append_existing_cr_is_receipted_after_its_push_lands(self):
+        change = self.append_change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = [self.append_target(self.revision)]
+        self.transport.on_push = lambda: self.transport.changes.__setitem__(
+            0, self.append_target(change["commit_revision"])
+        )
+
+        result = self.runtime().submit(change, approval)
+
+        self.assertEqual(result["reason_code"], "OK")
+        self.assertEqual(result["change_number"], "41")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_append_existing_cr_restart_replays_receipt_without_pushing_again(self):
+        change = self.append_change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = [self.append_target(self.revision)]
+        self.transport.on_push = lambda: self.transport.changes.__setitem__(
+            0, self.append_target(change["commit_revision"])
+        )
+        first = self.runtime().submit(change, approval)
+        second = self.runtime().submit(change, approval)
+
+        self.assertEqual(first["reason_code"], "OK")
+        self.assertEqual(second["reason_code"], "OK")
+        self.assertEqual(second["change_number"], "41")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_append_existing_cr_with_lost_receipt_is_reconciled_on_restart(self):
+        change = self.append_change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = [self.append_target(self.revision)]
+
+        def land_then_lose():
+            self.transport.changes[0] = self.append_target(change["commit_revision"])
+            raise TimeoutError("connection lost after push")
+
+        self.transport.on_push = land_then_lose
+        first = self.runtime().submit(change, approval)
+        self.transport.on_push = None
+        second = self.runtime().submit(change, approval)
+
+        self.assertEqual(first["reason_code"], "SUBMIT_RESULT_UNKNOWN")
+        self.assertEqual(second["reason_code"], "OK")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_append_target_moved_to_a_foreign_revision_is_not_confirmed(self):
+        change = self.append_change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = [self.append_target(self.revision)]
+        # Someone else uploaded a different patchset over the target CR meanwhile.
+        self.transport.on_push = lambda: self.transport.changes.__setitem__(
+            0, self.append_target("e" * 40)
+        )
+
+        first = self.runtime().submit(change, approval)
+        second = self.runtime().submit(change, approval)
+
+        self.assertEqual(first["reason_code"], "SUBMIT_CONFIRMATION_REQUIRED")
+        self.assertEqual(second["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_append_target_missing_is_cr_required_not_found_without_push(self):
+        change = self.append_change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = []
+
+        result = self.runtime().submit(change, approval)
+
+        self.assertEqual(result["reason_code"], "CR_REQUIRED_NOT_FOUND")
+        self.assertEqual(result["change_number"], "41")
+        self.assertFalse(any(_is_push(call[0]) for call in self.transport.calls))
 
 
 if __name__ == "__main__":

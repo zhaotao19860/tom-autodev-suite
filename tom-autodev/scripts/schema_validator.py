@@ -503,6 +503,15 @@ def _validate_finding_classifications(findings: list[Any]) -> list[SchemaIssue]:
 
 
 def _validate_diagnosis(instance: dict[str, Any]) -> list[SchemaIssue]:
+    # Environment/control-plane failures must not authorize a business repair.
+    # The diagnosis schema has no environment-recovery route yet, so fail closed
+    # instead of allowing CODE_ONLY (or a legacy SPEC fallback) to make a patch.
+    # This is only the self-reported half; phase_protocol also checks the class the
+    # iPipe runtime recorded for the failure, which a diagnosis cannot relabel.
+    from repair_policy import ENVIRONMENT_FAILURE_CLASSES, ENVIRONMENT_FORBIDDEN_ROUTES
+    if (instance.get("classification") in ENVIRONMENT_FAILURE_CLASSES
+            and instance.get("route") in ENVIRONMENT_FORBIDDEN_ROUTES):
+        return [SchemaIssue("route", "inconsistent")]
     if instance.get("evidence_state") == "INSUFFICIENT":
         if instance.get("route") != "DIAGNOSIS_INCOMPLETE":
             return [SchemaIssue("route", "inconsistent")]

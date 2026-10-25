@@ -103,13 +103,21 @@ already RST, counters are not evidence of product behavior.
 
 ## iPipe Parameter Mapping
 
-`P0新case回归` is a manual stage on x86bgw `ChangePipeline(348102)`. The parent fills
-these names from this run's compiled products:
+`P0新case回归` is on x86bgw `ChangePipeline(348102)`. Its manualParams may be empty
+despite static job/upstream dependencies. Discover declarations and inputs before G8;
+the current HTTP adapter blocks exact job override pending a verified platform contract.
+Use the run's frozen changed status, not worktree clean, to select products:
 
 | Parameter | Module | Product | Consumed as |
 |---|---|---|---|
 | `get_bgw_test_case` | `baidu/nsiqa/x86bgw` | QA ChangePipeline `504074` compile `productHttpUrl` | wget into `bgw_auto` |
-| `get_bgwagent` | `baidu/sysip/bgwagent` | bgwagent ChangePipeline `348142` compile `productHttpUrl` | wget, then copy `output/bgwagent` over `bgw_auto/tool/bgwagent` |
+| `get_bgwagent` | `baidu/sysip/bgwagent` | Changed: owned exact candidate ChangePipeline `348142` compile; unchanged: target branch BranchPipeline `348141` successful releaseOutputHttpUrl | wget, then copy `output/bgwagent` over `bgw_auto/tool/bgwagent` |
+
+Both inputs obey the frozen module policy. Verify branch/source revision/job identity
+and actual download. An unchanged module without a published product may only use an
+approved adapter-proven compile-only BranchPipeline operation; the current API cannot
+prove release exclusion and blocks. Never use arbitrary historical compile/latest or
+node97110098 as fallback. See the parent's phase protocol for read-only measured API evidence.
 
 Do not map `get_bgw_test_case` by basename `x86bgw`; that collides with `baidu/sysip/x86bgw`.
 Do not treat a filled `get_bgwagent` as proof the job replaced the tool; the job script must
@@ -120,10 +128,11 @@ and are redacted in evidence.
 
 Return this knowledge to `tom-autodev`. The parent:
 
-1. Discovers the failed/manual stage and its parameter names.
-2. Resolves product URLs from this run's current revisions.
+1. Discovers stage/job declarations and upstream inputs even with empty manualParams.
+2. Resolves verified products using the frozen changed/branch/revision policy.
 3. Fills `get_bgw_test_case` and `get_bgwagent`.
-4. Requests G8 and calls `ipipe-rerun`.
+4. Requests exact G8 only if runtime override is supported; otherwise returns blocking.
+   No pipeline template changes. Unknown write results only reconcile persisted intent.
 5. Reads the new job log, then client `out`/`res.csv`, then `/var/log/messages`.
 6. Classifies `ENV_UNSATISFIED` versus product `TEST_FAILURE` before repair.
 

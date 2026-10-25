@@ -67,6 +67,15 @@ REQUIRED_PROFILE = {
 
 
 class ProjectRegistryTests(unittest.TestCase):
+    def test_stage_parameter_mapping_requires_full_module_or_exact_cr_source(self):
+        profile = copy.deepcopy(REQUIRED_PROFILE)
+        profile["pipeline_profile"]["stage_parameter_mapping"] = {
+            "manual": {"product": "baidu/sysip/bgwagent", "cr": "test_cr_id"}}
+        self.assertTrue(validate_profile(profile, check_paths=False)["ready"])
+        for invalid in ("bgwagent", "guessed_cr_id", {"module": "baidu/sysip/bgwagent"}):
+            profile["pipeline_profile"]["stage_parameter_mapping"]["manual"]["product"] = invalid
+            self.assertFalse(validate_profile(profile, check_paths=False)["ready"])
+
     def _with_pipelines(self, entries):
         import copy
 

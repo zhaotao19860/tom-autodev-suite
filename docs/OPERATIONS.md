@@ -152,6 +152,8 @@ python3 tom-autodev/scripts/cli.py ai-review --help
 
 `ipipe-rerun` 的 `--parameter` 接受**参数名**，值由本次运行的产品/提交证据推导；不是任意 `NAME=VALUE`。例如 BGW 的 `get_bgw_test_case`、`get_bgwagent` 应先核对 [参数映射](../tom-project-bgw/references/runtime-topology.md)。`--print-parameters` 只展示脱敏后的参数，`--print-input-hash` 返回本次 G8 绑定值；实际重跑仍需匹配的批准。
 
+`ipipe-rebuild` 用于失败 build 的编译产物已被平台清理（下载 403/404）的情形：`ipipe-rerun` 对这种 build 的任何 stage 都会在环境任务失败。流程是 预检 → `--request-g8` → 批准 → `--approval-id/--input-hash` 触发并换绑 →（结果不明时）`--reconcile-only` → `continue`。已 pin 旧 workflow 的 run 因新增 `DIAGNOSE -> IPIPE` 边需先 `migrate-workflow-spec`。触发响应无法解析时只会用 GET 按 revision 和时间窗口认领比原 build 更新的唯一 build；多个候选返回 `BUILD_AMBIGUOUS`，不猜。
+
 `ipipe-adopt` 用于绑定平台已经触发、确属本次 CR 的 build。平台 AI Review 在 CR 已存在时启动，返回的 `conversation_id` 用于后续 poll；平台建议仍须逐条验证，不能直接作为修改指令。
 
 多模块项目按每个必需模块的 submission、revision、环境和 build 校验证据。全部必需模块验证通过后进入发布确认；发布也检查每个必需模块，任一尚未发布就返回 `RELEASE_WAITING`。

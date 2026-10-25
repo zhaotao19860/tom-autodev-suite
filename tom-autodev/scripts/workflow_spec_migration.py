@@ -199,6 +199,17 @@ def request(
 
 
 def apply(orchestrator: Any, run_id: str, approval_id: str) -> dict[str, Any]:
+    result = _apply(orchestrator, run_id, approval_id)
+    if result.get("ok") and result.get("approval_id") == approval_id:
+        # The explicit command consumed this approval; its resume handoff must not
+        # linger as a second candidate for `continue`.
+        orchestrator.state.complete_approval_handoffs(
+            run_id, approval_id, actor="migrate-workflow-spec", reason="APPROVAL_CONSUMED"
+        )
+    return result
+
+
+def _apply(orchestrator: Any, run_id: str, approval_id: str) -> dict[str, Any]:
     prepared = plan(orchestrator, run_id)
     if prepared.get("reason_code") == "NOTHING_TO_MIGRATE":
         return {"ok": True, "reason_code": "ALREADY_MIGRATED", **prepared}

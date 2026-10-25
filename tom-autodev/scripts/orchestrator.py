@@ -31,7 +31,7 @@ from collaboration import (
 from evidence_gate import EvidenceGate
 from evidence_policy import requirement_for
 from knowledge_sync import KnowledgeSync, project_ku_target
-from phase_protocol import PhaseProtocol
+from phase_protocol import PhaseProtocol, plan_implement_binding
 from project_registry import (
     acceptable_profile_paths,
     load_profile,
@@ -192,6 +192,283 @@ class Orchestrator:
         }
         self.state.save_idempotency_result(idempotency_key, result)
         return result
+
+    @guard_execution
+    def adopt_code_only_repair(
+        self,
+        run_id: str,
+        source_run_id: str,
+        target_run_id: str,
+        task_id: str,
+        diagnosis_artifact_id: str,
+        plan_artifact_id: str,
+    ) -> dict[str, Any]:
+        """Adopt one approved CODE_ONLY repair into a fresh run.
+
+        This is the narrow bridge from a terminal run to a new audit run. It
+        copies only the TASKS and PLAN envelopes, rebinds them to the target
+        run, and enters IMPLEMENT. Old approvals are never reused.
+        """
+        if run_id != target_run_id:
+            return {"ok": False, "reason_code": "RUN_ID_MISMATCH", "run_id": target_run_id}
+        if not all(isinstance(value, str) and value for value in (
+            source_run_id, target_run_id, task_id, diagnosis_artifact_id, plan_artifact_id,
+        )):
+            return {"ok": False, "reason_code": "INVALID_INPUT", "run_id": target_run_id}
+        source = self.status(source_run_id)
+        target = self.status(target_run_id)
+        if source.get("state") != "STOPPED":
+            return {"ok": False, "reason_code": "SOURCE_RUN_NOT_STOPPED", "run_id": source_run_id}
+        # (c) A target that already adopted may only replay the same adoption. Any other
+        # (diagnosis, plan) pair would silently re-bind a run whose IMPLEMENT is under way.
+        adoption_events = [
+            event for event in (target.get("events") or [])
+            if isinstance(event.get("payload"), dict)
+            and event["payload"].get("adoption_kind") == "CODE_ONLY_REPAIR"
+        ]
+        if adoption_events:
+            prior = adoption_events[-1]["payload"]
+            if (
+                prior.get("source_run_id") != source_run_id
+                or prior.get("task_id") != task_id
+                or prior.get("source_diagnosis_artifact_id") != diagnosis_artifact_id
+                or prior.get("source_plan_artifact_id") != plan_artifact_id
+            ):
+                return {"ok": False, "reason_code": "ADOPTION_CONFLICT", "run_id": target_run_id,
+                        "adopted_diagnosis_artifact_id": prior.get("source_diagnosis_artifact_id"),
+                        "adopted_plan_artifact_id": prior.get("source_plan_artifact_id")}
+            replay = self.state.idempotency_result(
+                _adoption_result_key(target_run_id, diagnosis_artifact_id, plan_artifact_id))
+            if isinstance(replay, dict):
+                return {**replay, "replayed": True, "event_id": adoption_events[-1].get("event_id")}
+            # Adopted before results were recorded: answer from the event, write nothing.
+            artifacts = prior.get("adoption_artifacts") if isinstance(prior.get("adoption_artifacts"), dict) else {}
+            return {"ok": True, "reason_code": "CODE_ONLY_REPAIR_ADOPTED", "replayed": True,
+                    "run_id": target_run_id, "source_run_id": source_run_id, "task_id": task_id,
+                    "event_id": adoption_events[-1].get("event_id"),
+                    "tasks_artifact_id": artifacts.get("tasks"),
+                    "plan_artifact_id": artifacts.get("plan")}
+        if target.get("state") != "INTAKE":
+            return {"ok": False, "reason_code": "TARGET_RUN_NOT_INTAKE", "run_id": target_run_id}
+
+        diagnosis = self.artifacts.phase_artifact(diagnosis_artifact_id)
+        plan = self.artifacts.phase_artifact(plan_artifact_id)
+        if not diagnosis.get("valid") or not plan.get("valid"):
+            return {"ok": False, "reason_code": "SOURCE_ARTIFACT_INVALID", "run_id": target_run_id}
+        diagnosis_envelope = diagnosis["envelope"]
+        plan_envelope = plan["envelope"]
+        diagnosis_content = diagnosis_envelope.get("content") or {}
+        if (
+            diagnosis_envelope.get("run_id") != source_run_id
+            or diagnosis_envelope.get("phase") != "DIAGNOSE"
+            or diagnosis_envelope.get("task_id") != task_id
+            or diagnosis_content.get("route") != "REPAIR"
+            or diagnosis_content.get("repair_scope") != "CODE_ONLY"
+        ):
+            return {"ok": False, "reason_code": "CODE_ONLY_ADOPTION_INVALID", "run_id": target_run_id}
+        # (b) Only the task's latest diagnosis is the source run's current answer; an
+        # older one was superseded by later evidence.
+        latest_diagnosis = next((
+            artifact for artifact in reversed(self.artifacts.phase_artifacts(source_run_id, "DIAGNOSE"))
+            if artifact.get("valid") and (artifact.get("envelope") or {}).get("task_id") == task_id
+        ), None)
+        if latest_diagnosis is None or latest_diagnosis.get("artifact_id") != diagnosis_artifact_id:
+            return {"ok": False, "reason_code": "ADOPTION_DIAGNOSIS_NOT_LATEST", "run_id": target_run_id,
+                    "latest_diagnosis_artifact_id": (latest_diagnosis or {}).get("artifact_id")}
+        if (
+            plan_envelope.get("run_id") != source_run_id
+            or plan_envelope.get("phase") != "PLAN"
+            or plan_envelope.get("task_id") != task_id
+        ):
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": target_run_id}
+        # (b) The Plan must be the one the source run accepted for this task, still
+        # descending from its current TASKS DAG (the same rule a CODE_ONLY repair
+        # inside one run uses to return to IMPLEMENT).
+        source_protocol = self.phase_protocol()
+        accepted_plan = source_protocol._accepted_plan(source_run_id, task_id)
+        if accepted_plan is None or accepted_plan.get("artifact_id") != plan_artifact_id:
+            return {"ok": False, "reason_code": "ADOPTION_PLAN_NOT_CURRENT", "run_id": target_run_id,
+                    "accepted_plan_artifact_id": (accepted_plan or {}).get("artifact_id")}
+        # (a) The repair budget follows the work, not the run id: the target inherits the
+        # source's confirmed rounds, and a source whose budget is spent cannot be revived
+        # by adopting it into a fresh run.
+        budget = _adoption_budget(source_protocol, self.state, source_run_id, diagnosis)
+        if not budget["ok"]:
+            return {**budget, "run_id": target_run_id, "source_run_id": source_run_id}
+
+        approved = [
+            approval for approval in self.approvals.for_run(source_run_id)
+            if approval.get("action") == "G6"
+            and approval.get("effective_decision") == "APPROVE"
+            and approval.get("input_hash") == diagnosis_envelope.get("approval_input_hash")
+        ]
+        if not approved:
+            return {"ok": False, "reason_code": "G6_APPROVAL_REQUIRED", "run_id": target_run_id}
+
+        source_events = self.state.events(source_run_id)
+        target_events = self.state.events(target_run_id)
+        if not source_events or not target_events:
+            return {"ok": False, "reason_code": "RUN_NOT_FOUND", "run_id": target_run_id}
+        source_intake = source_events[0].get("payload") or {}
+        target_intake = target_events[0].get("payload") or {}
+        if (
+            source_intake.get("requirement_id") != target_intake.get("requirement_id")
+            or source_intake.get("project") != target_intake.get("project")
+            or source_intake.get("profile_hash") != target_intake.get("profile_hash")
+        ):
+            return {"ok": False, "reason_code": "ADOPTION_BINDING_MISMATCH", "run_id": target_run_id}
+
+        tasks = self.artifacts.latest_phase(source_run_id, "TASKS", None)
+        if not tasks.get("valid"):
+            return {"ok": False, "reason_code": "TASK_DAG_REQUIRED", "run_id": target_run_id}
+        node = next(
+            (item for item in (tasks["envelope"].get("content") or {}).get("nodes", [])
+             if isinstance(item, dict) and item.get("task_id") == task_id),
+            None,
+        )
+        if node is None:
+            return {"ok": False, "reason_code": "TASK_NOT_IN_DAG", "run_id": target_run_id}
+
+        target_module = node.get("business_module")
+        trusted_receipts = []
+        for result in self.state.external_results(source_run_id):
+            intent = result.get("intent") or {}
+            response = result.get("receipt", {}).get("response") or {}
+            payload = intent.get("payload") or {}
+            if (
+                intent.get("operation") == "icode.submit"
+                and response.get("ok") is True
+                and response.get("reason_code") == "OK"
+                and (not target_module or response.get("module") == target_module)
+                # (d) A receipt without the task it belongs to cannot be attributed to
+                # this task; trusting it could carry another task's CR into the target.
+                and payload.get("task_id") == task_id
+                and isinstance(response.get("change_number"), str)
+                and isinstance(response.get("change_id"), str)
+            ):
+                trusted_receipts.append(response)
+        if len(trusted_receipts) != 1:
+            return {
+                "ok": False,
+                "reason_code": (
+                    "SUBMISSION_RECEIPT_REQUIRED"
+                    if not trusted_receipts else "SUBMISSION_RECEIPT_AMBIGUOUS"
+                ),
+                "run_id": target_run_id,
+            }
+        submission_identity = {
+            "module": trusted_receipts[0]["module"],
+            "change_number": trusted_receipts[0]["change_number"],
+            "change_id": trusted_receipts[0]["change_id"],
+        }
+
+        def rebind(envelope: dict[str, Any], phase: str, parent_hash: str | None) -> dict[str, Any]:
+            copied = dict(envelope)
+            copied["run_id"] = target_run_id
+            copied["action_id"] = hashlib.sha256(
+                f"adopt:{target_run_id}:{phase}:{envelope['content_hash']}".encode()
+            ).hexdigest()
+            copied["source_event_id"] = target_events[0]["event_id"]
+            copied["parent_artifact_hash"] = parent_hash
+            copied["approval_id"] = None
+            copied["approval_input_hash"] = None
+            return copied
+
+        copied_tasks = rebind(tasks["envelope"], "TASKS", None)
+        tasks_result = self.artifacts.put_envelope(copied_tasks)
+        copied_plan = rebind(plan_envelope, "PLAN", copied_tasks["content_hash"])
+        profile = self._runtime_profile(target_run_id)
+        if not profile.get("ok"):
+            return profile
+        profile_repos = {
+            "business": profile["profile"].get("business_repos", []),
+            "tests": [profile["profile"].get("test_repo", {})],
+        }
+        task_module = node.get("business_module") if isinstance(node, dict) else None
+        if isinstance(task_module, str):
+            profile_repos["business"] = [
+                item for item in profile_repos["business"]
+                if isinstance(item, dict) and item.get("module") == task_module
+            ]
+        normalized_repositories = []
+        for repository in copied_plan["content"].get("repositories", []):
+            role = repository.get("role") if isinstance(repository, dict) else None
+            candidates = profile_repos.get(role, [])
+            if not isinstance(role, str) or len(candidates) != 1:
+                return {"ok": False, "reason_code": "ADOPTION_REPOSITORY_AMBIGUOUS", "run_id": target_run_id}
+            normalized = dict(repository)
+            normalized["path"] = candidates[0]["path"]
+            normalized_repositories.append(normalized)
+        copied_plan["content"] = dict(copied_plan["content"])
+        copied_plan["content"]["repositories"] = normalized_repositories
+        copied_plan["content_hash"] = hashlib.sha256(
+            json.dumps(
+                copied_plan["content"], ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        copied_plan["action_id"] = hashlib.sha256(
+            f"adopt:{target_run_id}:PLAN:{copied_plan['content_hash']}".encode()
+        ).hexdigest()
+        plan_result = self.artifacts.put_envelope(copied_plan)
+        plan_binding = plan_implement_binding(plan_result)
+        if plan_binding is None:
+            return {"ok": False, "reason_code": "PLAN_PREDECESSOR_INVALID", "run_id": target_run_id}
+        payload = {
+            "previous_state": "INTAKE",
+            "task_id": task_id,
+            "source_run_id": source_run_id,
+            "source_diagnosis_artifact_id": diagnosis_artifact_id,
+            "source_plan_artifact_id": plan_artifact_id,
+            "adoption_kind": "CODE_ONLY_REPAIR",
+            "source_revisions": plan_binding["source_revisions"],
+            "plan_artifact_id": plan_binding["plan_artifact_id"],
+            "plan_content_hash": plan_binding["plan_content_hash"],
+            "parent_artifact_hash": copied_plan["content_hash"],
+            "adoption_artifacts": {
+                "tasks": tasks_result["artifact_id"],
+                "plan": plan_result["artifact_id"],
+                "diagnosis": diagnosis_artifact_id,
+            },
+            "submission_identity": submission_identity,
+            "inherited_repair_rounds": budget["rounds"],
+            "g6_approval_id": approved[0]["approval_id"],
+        }
+        # (e) INTAKE -> IMPLEMENT is not an edge of the workflow spec, and adding one
+        # would change the spec hash every pinned run is checked against. The entry is a
+        # controlled transition instead (like IPIPE_REBUILD): its policy decision names
+        # the adoption evidence that authorizes it, and it is a compare-and-set on the
+        # target's INTAKE event, so a concurrent change to the target fails the adoption
+        # rather than racing it.
+        decision = adoption_transition_decision(payload, approved[0])
+        if not decision.get("allowed"):
+            return {"ok": False, "reason_code": decision["reason_code"], "run_id": target_run_id}
+        payload["policy_decision"] = decision
+        result = {
+            "ok": True,
+            "reason_code": "CODE_ONLY_REPAIR_ADOPTED",
+            "run_id": target_run_id,
+            "source_run_id": source_run_id,
+            "task_id": task_id,
+            "tasks_artifact_id": tasks_result["artifact_id"],
+            "plan_artifact_id": plan_result["artifact_id"],
+            "inherited_repair_rounds": budget["rounds"],
+        }
+        committed = self.state.commit_transition_result(
+            target_run_id, target_events[-1]["event_id"], "IMPLEMENT", payload,
+            _adoption_result_key(target_run_id, diagnosis_artifact_id, plan_artifact_id), result,
+        )
+        status = committed.get("status")
+        if status not in {"COMMITTED", "REPLAY"}:
+            return {"ok": False, "reason_code": "ADOPTION_CONFLICT", "run_id": target_run_id,
+                    "detail": status}
+        stored = dict(committed["result"])
+        adopted = [
+            event for event in self.state.events(target_run_id)
+            if (event.get("payload") or {}).get("adoption_kind") == "CODE_ONLY_REPAIR"
+        ]
+        stored["event_id"] = adopted[-1]["event_id"] if adopted else None
+        return stored
 
     def status(self, run_id: str) -> dict[str, Any]:
         events = self.state.events(run_id)
@@ -1404,7 +1681,37 @@ class Orchestrator:
             blocked = execution_guard(self.state, bound_run)
             if blocked is not None:
                 return blocked
-        return self.approvals.resolve(approval_id, decision, input_hash, channel, run_id=run_id, responder=responder, state_store=self.state)
+        result = self.approvals.resolve(
+            approval_id, decision, input_hash, channel,
+            run_id=run_id, responder=responder, state_store=self.state,
+        )
+        # A direct Comate approval must create the same durable handoff as an
+        # Infoflow approval.  Previously only ApprovalWatcher created it, so a
+        # decision made through the IDE was recorded in the ledger but had no
+        # resume signal for the next Comate turn.
+        if (
+            result.get("reason_code") == "OK"
+            and result.get("effective_decision") == "APPROVE"
+            and result.get("effective_channel") == channel
+            and isinstance(bound_run, str)
+        ):
+            latest = self.state.events(bound_run)
+            if latest:
+                handoff_id = f"approval-resume-{approval_id}-{latest[-1]['event_id']}"
+                handoff = self.state.record_handoff(
+                    bound_run,
+                    handoff_id,
+                    {
+                        "kind": "APPROVAL_RESUME",
+                        "run_id": bound_run,
+                        "event_id": latest[-1]["event_id"],
+                        "approval_id": approval_id,
+                        "input_hash": input_hash,
+                        "action": result.get("action"),
+                    },
+                )
+                result["handoff"] = handoff
+        return result
 
     def collaboration_session(self, group_client: Any) -> CollaborationSession:
         """Create the per-run collaboration adapter with an explicitly supplied boundary."""
@@ -1563,7 +1870,11 @@ class Orchestrator:
             "owner": change_set.get("owner"),
             "revision_set": change_set.get("revision_set"),
         }
-        if intent != expected_intent:
+        if change_set.get("task_id"):
+            expected_intent["task_id"] = change_set["task_id"]
+        if intent != expected_intent and not _replayed_submit_intent(
+            self.approvals, run_id, intent, expected_intent
+        ):
             return {"ok": False, "reason_code": "ICODE_RECEIPT_MISMATCH", "run_id": run_id}
         approval_record = self.approvals.get(approval_id) if isinstance(approval_id, str) else None
         if not isinstance(approval_record, dict):
@@ -2458,7 +2769,8 @@ def _submit_followup_state(orchestrator: Any, run_id: str) -> str:
 
 
 def _stage_parameters(
-    orchestrator: Any, runtime: Any, run_id: str, names: list[str]
+    orchestrator: Any, runtime: Any, run_id: str, names: list[str],
+    stage_build_id: str | None = None, *, record_evidence: bool = False,
 ) -> dict[str, Any]:
     """Derive the values a manual stage would otherwise ask a person to type.
 
@@ -2466,15 +2778,38 @@ def _stage_parameters(
     published URL plus the per-repository irepo token. Both follow each CR's current
     patchset, so the product a stage downloads is the one the pipeline is actually
     building. Nothing is guessed: an input that cannot be derived is reported by name.
+
+    Read-only by default. `record_evidence=True` (G8 material preparation or execution
+    only) appends each product-download outcome as stage-bound dependency evidence.
     """
+    from stage_parameters import load_tokens, resolve, project_mapping
+
+    declaration = None
+    if stage_build_id is not None:
+        declaration = runtime.stage_parameter_names(stage_build_id)
+        if not declaration.get("ok"):
+            return declaration
+        if names and set(names) != set(declaration["names"]):
+            return {"ok": False, "reason_code": "STAGE_PARAMETER_NAMES_MISMATCH",
+                    "missing_parameters": sorted(set(declaration["names"]) - set(names)),
+                    "declared_parameters": declaration["names"]}
+        names = declaration["names"]
     if not names:
-        return {"ok": True, "reason_code": "OK", "parameters": {}}
-    from stage_parameters import load_tokens, resolve
+        if declaration is None:
+            return {"ok": False, "reason_code": "STAGE_PARAMETERS_UNKNOWN"}
+        return {"ok": True, "reason_code": "OK", "parameters": {}, "declaration": declaration}
 
     pinned = orchestrator._runtime_profile(run_id)
     if not pinned.get("ok"):
         return pinned
     profile = pinned["profile"]
+    mapping = project_mapping(profile, declaration["stage_name"]) if declaration else None
+    if mapping is not None and any(name not in mapping for name in names):
+        return {"ok": False, "reason_code": "STAGE_PARAMETER_UNRESOLVED",
+                "missing_parameters": [
+                    {"parameter": name, "detail": "PARAMETER_MAPPING_REQUIRED"}
+                    for name in names if name not in mapping
+                ], "declaration": declaration}
     derived = _ipipe_revision_set(orchestrator, run_id, profile)
     if not derived.get("ok"):
         return derived
@@ -2483,6 +2818,8 @@ def _stage_parameters(
         for item in derived["revisions"]["repositories"]
     }
     change_number = None
+    test_module = (profile.get("test_repo") or {}).get("module")
+    candidates = set()
     for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
         if artifact.get("kind") != "submission":
             continue
@@ -2490,20 +2827,47 @@ def _stage_parameters(
             submitted = json.loads(artifact["content"].decode("utf-8"))
         except (AttributeError, KeyError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        change_number = submitted.get("change_number") or change_number
-    # A fold changes which CR carries the work: T3's own CR was superseded by the one the
-    # requirement already had open in that repository, so the newest receipt names a CR
-    # that no longer exists. The open CR list is authoritative, and the receipt is the
-    # cross-check.
-    open_cr = _open_test_repo_cr(profile, run_id)
-    if open_cr is not None:
-        change_number = open_cr
+        if (submitted.get("module") == test_module
+                and str(submitted.get("revision")) == revisions.get(test_module)
+                and submitted.get("change_number")):
+            candidates.add(str(submitted["change_number"]))
+    if len(candidates) == 1:
+        change_number = next(iter(candidates))
+    # A CR-valued parameter requires an exact module/revision receipt. An unrelated
+    # single open CR or the newest receipt cannot authorize this run's stage input.
     product_urls: dict[str, str] = {}
-    pipeline = profile.get("pipeline_profile") or {}
-    from phase_protocol import _registered_pipeline
-
+    required_modules = {mapping[name] for name in names} if mapping is not None else set(revisions)
+    from pipeline_plan import frozen_plan
+    plan = frozen_plan(orchestrator.state.events(run_id))
+    if plan is None:
+        return {"ok": False, "reason_code": "FROZEN_PRODUCT_PLAN_REQUIRED"}
+    products = {}
     for module, revision in revisions.items():
-        found = runtime.product_url(module, revision, _registered_pipeline(pipeline, module))
+        if module not in required_modules:
+            continue
+        found = runtime.product_for_plan(plan, module)
+        if record_evidence and stage_build_id is not None and declaration is not None:
+            # B-21: only a caller about to write G8 material or execute records; each
+            # attempt is bound to this stage and to the declared parameters that consume
+            # the module, and the newest attempt wins (environment_evidence).
+            from environment_evidence import record_dependency_attempt
+            owned = runtime._load_stage_binding(stage_build_id) or {}
+            try:
+                record_dependency_attempt(
+                    orchestrator.state, run_id, build_id=owned.get("build_id"),
+                    stage_build_id=stage_build_id,
+                    stage_conf_id=(owned.get("stage") or {}).get("stage_conf_id"),
+                    module=module,
+                    consumed_by=[name for name in names if (mapping or {}).get(name) == module],
+                    declared_parameters=names, result=found,
+                    source="stage-parameter product download",
+                )
+            except Exception:  # noqa: BLE001 - evidence only; the result is still returned
+                logging.getLogger(__name__).warning(
+                    "dependency evidence for %s not recorded", module, exc_info=True)
+        if not found.get("ok"):
+            return found
+        products[module] = found
         # A known module with no published product keeps an empty entry, so the failure
         # names the module and revision instead of "not derivable".
         product_urls[module] = found["product_url"] if found.get("ok") else ""
@@ -2511,9 +2875,44 @@ def _stage_parameters(
         tokens = load_tokens(orchestrator.config_root)
     except ValueError as error:
         return {"ok": False, "reason_code": str(error), "run_id": run_id}
-    return resolve(
-        list(names), change_number=change_number, product_urls=product_urls, tokens=tokens
+    result = resolve(
+        list(names), change_number=change_number, product_urls=product_urls, tokens=tokens,
+        mapping=mapping,
     )
+    return {**result, "declaration": declaration, "mapping": mapping,
+            "product_revisions": {module: products[module]["revision"] for module in product_urls},
+            "products": products, "pipeline_plan_hash": plan["plan_hash"]}
+
+
+@guard_execution
+def _prepare_ipipe_g8(
+    orchestrator: Any, runtime: Any, run_id: str, stage_build_id: str,
+    resolved: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist only the exact redacted candidate; never settle or execute the gate."""
+    from stage_parameters import redacted
+
+    hashed = runtime.rerun_input_hash(stage_build_id, parameters=resolved["parameters"])
+    if not hashed.get("ok"):
+        return hashed
+    from persistence_policy import redact_secrets
+
+    # Approval material is shown on the card and stored; credentials never reach it.
+    material = redact_secrets({
+        "binding": hashed["binding"], "declaration": resolved["declaration"],
+        "parameters": redacted(resolved["parameters"]), "mapping": resolved.get("mapping"),
+        "product_revisions": resolved.get("product_revisions", {}),
+        "products": resolved.get("products", {}),
+        "pipeline_plan_hash": resolved.get("pipeline_plan_hash"),
+        "case_failures": hashed.get("case_failures", []),
+    })
+    orchestrator.state.save_idempotency_result(
+        f"ipipe.g8-material:{run_id}:{hashed['input_hash']}", material
+    )
+    return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id,
+            "gate": "G8", "approval_input_hash": hashed["input_hash"], "controller": "ipipe",
+            "module": hashed["binding"]["module"], "stage_build_id": stage_build_id,
+            "material": material}
 
 
 def _open_repo_reviews(module: Any, path: Any) -> list[dict[str, Any]] | None:
@@ -2632,6 +3031,95 @@ def _ipipe_revision_set(
             "parameters": {},
         },
     }
+
+
+def _adoption_result_key(target_run_id: str, diagnosis_artifact_id: str, plan_artifact_id: str) -> str:
+    return f"adopt-code-only-repair:{target_run_id}:{diagnosis_artifact_id}:{plan_artifact_id}"
+
+
+def adoption_transition_decision(payload: dict[str, Any], g6_approval: dict[str, Any]) -> dict[str, Any]:
+    """The controlled INTAKE -> IMPLEMENT decision for `adopt-code-only-repair`.
+
+    Not a workflow-spec edge (that would change the spec hash): allowed only with the
+    adoption's own evidence -- an approved G6 for the adopted diagnosis, a pinned Plan
+    and both baselines -- and recorded as the event's policy decision.
+    """
+    from transition_policy import POLICY_ID
+
+    revisions = payload.get("source_revisions")
+    complete = (
+        payload.get("adoption_kind") == "CODE_ONLY_REPAIR"
+        and isinstance(payload.get("plan_artifact_id"), str)
+        and isinstance(payload.get("plan_content_hash"), str)
+        and isinstance(revisions, dict) and {"business", "tests"} <= set(revisions)
+        and isinstance(g6_approval, dict)
+        and g6_approval.get("action") == "G6"
+        and g6_approval.get("effective_decision") == "APPROVE"
+    )
+    if not complete:
+        return {"allowed": False, "reason_code": "ADOPTION_EVIDENCE_MISSING",
+                "current_state": "INTAKE", "next_state": "IMPLEMENT", "policy_id": POLICY_ID}
+    return {"allowed": True, "reason_code": "OK", "current_state": "INTAKE",
+            "next_state": "IMPLEMENT", "policy_id": POLICY_ID,
+            "controlled": "CODE_ONLY_ADOPTION",
+            "evidence": {"g6_approval_id": g6_approval.get("approval_id"),
+                         "diagnosis_artifact_id": payload.get("source_diagnosis_artifact_id"),
+                         "plan_artifact_id": payload.get("plan_artifact_id")}}
+
+
+def _adoption_budget(protocol: Any, state: Any, source_run_id: str, diagnosis: dict[str, Any]) -> dict[str, Any]:
+    """Whether the source run's repair budget still allows the adopted repair round.
+
+    Uses the same history and policy as an in-run DIAGNOSE completion
+    (`PhaseProtocol._repair_history` + `repair_policy.next_action`), so the decision
+    matches what the source run itself would decide for this diagnosis.
+    """
+    import repair_policy
+
+    history = protocol._repair_history(source_run_id, diagnosis.get("envelope") or {})
+    rounds = sum(1 for entry in history if entry.get("diagnosis_confirmed"))
+    verdict = repair_policy.next_action(history)
+    if verdict.get("action") == "REPAIR":
+        return {"ok": True, "rounds": rounds}
+    reason = verdict.get("reason_code")
+    if reason in {"NO_PROGRESS", "THREE_FAILED_FIXES"}:
+        events = state.events(source_run_id)
+        diagnose_source = (diagnosis.get("envelope") or {}).get("source_event_id")
+        positions = [index for index, event in enumerate(events) if event.get("event_id") == diagnose_source]
+        after = positions[0] if positions else len(events)
+        if any(event.get("state") == "ARCHITECTURE_REVIEW" for event in events[after + 1:]):
+            return {"ok": True, "rounds": rounds}
+    return {"ok": False, "reason_code": "ADOPTION_BUDGET_EXHAUSTED", "repair_rounds": rounds,
+            "budget_reason": reason, "repair_round_limit": repair_policy.REPAIR_ROUND_LIMIT}
+
+
+def _under_run_lease(orchestrator: Any, run_id: str, call: Any) -> dict[str, Any]:
+    """Run one CLI write under the same per-run lease the worker drives the run with.
+
+    `ipipe-rerun` reaches the platform directly from the CLI. Without the lease a CLI
+    rerun and a worker (or a second CLI) could interleave on one run; the atomic claim in
+    the state store already prevents two POSTs per stage, and the lease serializes the
+    rest of the write path (stage binding, receipts, approval settlement) the same way
+    `worker_driver.submit_draft` / `report_producer_block` do.
+    """
+    import uuid as _uuid
+    from worker_driver import _WORKER_LEASE_PREFIX, _WORKER_LEASE_TTL_SECONDS
+
+    locks = getattr(getattr(orchestrator, "recovery", None), "locks", None)
+    if locks is None:
+        return call()
+    token = _uuid.uuid4().hex
+    key = f"{_WORKER_LEASE_PREFIX}{run_id}"
+    lease = locks.acquire(key, token, _WORKER_LEASE_TTL_SECONDS)
+    if not lease.get("acquired"):
+        return {"ok": False, "reason_code": "WORKER_LEASE_HELD", "run_id": run_id,
+                "owner_pid": lease.get("owner_pid"), "retry_allowed": True}
+    try:
+        return call()
+    finally:
+        released = locks.release(key, token)
+        if isinstance(released, dict) and not released.get("released"):
+            logging.getLogger(__name__).warning("run lease %s not released by ipipe-rerun", key)
 
 
 @guard_execution
@@ -2930,6 +3418,15 @@ def main(argv: list[str] | None = None) -> int:
     recover_change_set.add_argument("run_id")
     recover_change_set.add_argument("task_id")
     recover_change_set.add_argument("plan_artifact_id")
+    adopt_repair = subparsers.add_parser(
+        "adopt-code-only-repair",
+        help="将已批准 CODE_ONLY 修复从旧终态 run 承接到新 run，直接进入 IMPLEMENT",
+    )
+    adopt_repair.add_argument("source_run_id")
+    adopt_repair.add_argument("target_run_id")
+    adopt_repair.add_argument("task_id")
+    adopt_repair.add_argument("diagnosis_artifact_id")
+    adopt_repair.add_argument("plan_artifact_id")
     recover_stale = subparsers.add_parser(
         "recover-stale-submit", help="将旧 SUBMIT 检查点安全退回 PLAN"
     )
@@ -3007,15 +3504,24 @@ def main(argv: list[str] | None = None) -> int:
         help="人工阶段要填的参数名，可重复；取值由本 run 自动求出（CR 号取提交回执，"
              "产出下载命令取编译 job 的 productHttpUrl 加本地 irepo token）",
     )
-    ipipe_rerun.add_argument(
+    rerun_mode = ipipe_rerun.add_mutually_exclusive_group()
+    rerun_mode.add_argument(
         "--print-parameters",
         action="store_true",
         help="只打印求出的参数（token 脱敏），不执行阶段",
     )
-    ipipe_rerun.add_argument(
+    rerun_mode.add_argument(
         "--print-input-hash",
         action="store_true",
         help="只打印本次执行的 G8 绑定哈希，用于 request-approval",
+    )
+    rerun_mode.add_argument(
+        "--request-g8", action="store_true",
+        help="保存准确脱敏参数与绑定并投递 G8；不批准、不执行阶段",
+    )
+    rerun_mode.add_argument(
+        "--reconcile-only", action="store_true",
+        help="仅 GET 核对已存在且 G8 匹配的执行意图并保存确认回执；绝不 POST",
     )
 
     adopt = subparsers.add_parser(
@@ -3025,6 +3531,29 @@ def main(argv: list[str] | None = None) -> int:
     adopt.add_argument("run_id")
     adopt.add_argument("--module", default=None, help="要认领的模块，默认第一个业务仓")
     adopt.add_argument("--window-seconds", type=float, default=30)
+
+    rebuild = subparsers.add_parser(
+        "ipipe-rebuild",
+        help="编译产物已失效时，对同一 CR 版本受控重新构建（默认只读预检；--request-g8 只投递审批）",
+    )
+    rebuild.add_argument("run_id")
+    rebuild.add_argument("--reason", required=True, help="为什么要重新构建（进入 G8 绑定与审计）")
+    rebuild.add_argument("--module", default=None, help="要重新构建的模块；多模块计划必填")
+    rebuild.add_argument(
+        "--event-type", default="GERRIT_CHANGE", choices=("GERRIT_CHANGE", "NEW_COMMIT"),
+        help="对应 ipipe-cli trigger run --event-type；CR 的 patchset 用 GERRIT_CHANGE",
+    )
+    rebuild.add_argument("--approval-id", default=None, help="已批准的 G8；与 --input-hash 一起执行")
+    rebuild.add_argument("--input-hash", default=None, help="G8 绑定哈希（预检输出的 input_hash）")
+    rebuild_mode = rebuild.add_mutually_exclusive_group()
+    rebuild_mode.add_argument(
+        "--request-g8", action="store_true",
+        help="保存准确材料并投递 G8；不批准、不触发",
+    )
+    rebuild_mode.add_argument(
+        "--reconcile-only", action="store_true",
+        help="仅 GET 核对已存在的触发意图并认领新构建（再换绑）；绝不 POST",
+    )
 
     # Callable with no arguments so a session-stop hook can drive it: whoever stopped
     # the IDE may never have run a phase, which is exactly when the notice was missing.
@@ -3128,6 +3657,11 @@ def main(argv: list[str] | None = None) -> int:
     abandon.add_argument("intent_id")
     abandon.add_argument("--reason", required=True, help="为什么不再等这条外部写")
     abandon.add_argument("--actor", required=True, help="谁做的这个决定")
+    abandon.add_argument(
+        "--local-error-proven", action="store_true",
+        help="仅限 ipipe.rerun：校验该 intent 已有 ipipe.rerun.write_error 观察"
+             "（AttributeError/TypeError/NameError 且无 http_status，即请求未发出）后，"
+             "在放弃回执写入 local_error_proven=true；允许同一审批重发一次。不满足则拒绝")
 
     adopt_group = subparsers.add_parser(
         "adopt-group",
@@ -3323,6 +3857,15 @@ def main(argv: list[str] | None = None) -> int:
         result = orchestrator.recover_rebuilt_change_set(
             args.run_id, args.task_id, args.plan_artifact_id
         )
+    elif args.command == "adopt-code-only-repair":
+        result = orchestrator.adopt_code_only_repair(
+            args.target_run_id,
+            args.source_run_id,
+            args.target_run_id,
+            args.task_id,
+            args.diagnosis_artifact_id,
+            args.plan_artifact_id,
+        )
     elif args.command == "recover-stale-submit":
         result = orchestrator.recover_stale_submit(
             args.run_id, args.task_id, args.plan_artifact_id
@@ -3365,11 +3908,14 @@ def main(argv: list[str] | None = None) -> int:
                     allowed_roots=[Path(item).expanduser().resolve() for item in args.allowed_root],
                 )
         elif args.operation == "apply":
-            result = orchestrator.optimize(
-                args.run_id,
-                args.operation,
-                proposal_id=args.proposal_id,
-                approval_id=args.approval_id,
+            result = _settle_consumed_approval(
+                orchestrator, args.run_id, args.approval_id, "optimize",
+                orchestrator.optimize(
+                    args.run_id,
+                    args.operation,
+                    proposal_id=args.proposal_id,
+                    approval_id=args.approval_id,
+                ),
             )
         else:
             result = orchestrator.optimize(args.run_id, args.operation, **options)
@@ -3395,10 +3941,29 @@ def main(argv: list[str] | None = None) -> int:
         runtime = _cli_ipipe_runtime(orchestrator, args.run_id)
         if isinstance(runtime, dict):
             result = runtime
+        elif args.reconcile_only:
+            result = _settle_consumed_approval(
+                orchestrator, args.run_id, args.approval_id, "ipipe-rerun",
+                _under_run_lease(orchestrator, args.run_id, lambda: runtime.reconcile_rerun(
+                    args.stage_build_id,
+                    {"approval_id": args.approval_id, "input_hash": args.input_hash},
+                )),
+            )
         else:
-            resolved = _stage_parameters(orchestrator, runtime, args.run_id, args.parameters)
+            # Only G8 preparation or execution records dependency evidence (B-21);
+            # --print-parameters / --print-input-hash stay read-only.
+            resolved = _stage_parameters(
+                orchestrator, runtime, args.run_id, args.parameters, args.stage_build_id,
+                record_evidence=bool(args.request_g8)
+                or not (args.print_input_hash or args.print_parameters),
+            )
             if not resolved.get("ok"):
                 result = resolved
+            elif args.request_g8:
+                result = _deliver_worker_approval(
+                    orchestrator,
+                    _prepare_ipipe_g8(orchestrator, runtime, args.run_id, args.stage_build_id, resolved),
+                )
             elif args.print_input_hash:
                 result = runtime.rerun_input_hash(
                     args.stage_build_id, parameters=resolved["parameters"] or None
@@ -3409,18 +3974,46 @@ def main(argv: list[str] | None = None) -> int:
                 result = {
                     "ok": True, "reason_code": "OK",
                     "parameters": redacted(resolved["parameters"]),
+                    "declaration": resolved.get("declaration"),
                 }
             else:
-                result = runtime.rerun(
-                    args.stage_build_id,
-                    {"approval_id": args.approval_id, "input_hash": args.input_hash},
-                    parameters=resolved["parameters"] or None,
+                result = _settle_consumed_approval(
+                    orchestrator, args.run_id, args.approval_id, "ipipe-rerun",
+                    _under_run_lease(orchestrator, args.run_id, lambda: runtime.rerun(
+                        args.stage_build_id,
+                        {"approval_id": args.approval_id, "input_hash": args.input_hash},
+                        parameters=resolved["parameters"] or None,
+                    )),
                 )
     elif args.command == "ipipe-adopt":
         runtime = _cli_ipipe_runtime(orchestrator, args.run_id)
         result = runtime if isinstance(runtime, dict) else _ipipe_adopt(
             orchestrator, runtime, args.run_id, args.module, args.window_seconds
         )
+    elif args.command == "ipipe-rebuild":
+        import ipipe_rebuild
+
+        runtime = _cli_ipipe_runtime(orchestrator, args.run_id)
+        options = {"reason": args.reason, "module": args.module, "event_type": args.event_type}
+        if isinstance(runtime, dict):
+            result = runtime
+        elif args.request_g8:
+            result = _deliver_worker_approval(
+                orchestrator,
+                ipipe_rebuild.prepare_g8(orchestrator, runtime, args.run_id, **options),
+            )
+        elif args.approval_id or args.input_hash or args.reconcile_only:
+            if not (args.approval_id and args.input_hash):
+                result = {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": args.run_id,
+                          "detail": "执行与对账都需要 --approval-id 和 --input-hash"}
+            else:
+                result = ipipe_rebuild.execute(
+                    orchestrator, runtime, args.run_id, args.approval_id, args.input_hash,
+                    reconcile_only=args.reconcile_only,
+                )
+        else:
+            planned = ipipe_rebuild.plan(orchestrator, runtime, args.run_id, **options)
+            result = ipipe_rebuild.public_plan(planned) if planned.get("ok") else planned
     elif args.command == "ai-review":
         from cli_transport import ProcessTransport
 
@@ -3470,8 +4063,9 @@ def main(argv: list[str] | None = None) -> int:
         import profile_repin
 
         if args.approval_id:
-            result = profile_repin.apply(
-                orchestrator, args.run_id, args.approval_id, args.previous
+            result = _settle_consumed_approval(
+                orchestrator, args.run_id, args.approval_id, "repin-profile",
+                profile_repin.apply(orchestrator, args.run_id, args.approval_id, args.previous),
             )
         elif args.request:
             from approval_delivery import ComateApprovalClient
@@ -3509,7 +4103,10 @@ def main(argv: list[str] | None = None) -> int:
         import run_change
 
         if args.approval_id:
-            result = run_change.apply(orchestrator, args.run_id, args.approval_id)
+            result = _settle_consumed_approval(
+                orchestrator, args.run_id, args.approval_id, "rewind",
+                run_change.apply(orchestrator, args.run_id, args.approval_id),
+            )
         elif not (args.target and args.reason and args.actor):
             result = {"ok": False, "reason_code": "INVALID_INPUT",
                       "detail": "rewind 需要 --to、--reason、--actor（执行时只需 --approval-id）"}
@@ -3534,7 +4131,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "submit":
         result = _submit(orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
     elif args.command == "abandon-intent":
-        result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor)
+        result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor,
+                                 args.local_error_proven)
     elif args.command == "adopt-group":
         from clients.infoflow_group_client import InfoflowGroupClient
 
@@ -3634,7 +4232,38 @@ def _submit(
         argv_transport=ProcessTransport(),
         submission_policy=profile.get("submission_policy"),
     )
-    return orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime)
+    return _settle_consumed_approval(
+        orchestrator, run_id, approval.get("approval_id"), "submit",
+        orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime),
+    )
+
+
+def _replayed_submit_intent(
+    approvals: Any, run_id: str, intent: Any, expected: dict[str, Any]
+) -> bool:
+    """An earlier G7's completed push, replayed under a later G7 for the same change.
+
+    The iCode intent records the approval that authorized the push. A later descriptor
+    for the same change set and revision set (one that gained a pinned baseline, say)
+    is approved by a new G7, but the push it describes already happened. That receipt
+    is still this change's receipt when every identity field matches and the approval
+    the intent names was itself an APPROVE of G7 for the intent's own input hash.
+    """
+    if not isinstance(intent, dict):
+        return False
+    volatile = {"input_hash", "approval_id"}
+    if {k: v for k, v in intent.items() if k not in volatile} != {
+        k: v for k, v in expected.items() if k not in volatile
+    }:
+        return False
+    record = approvals.get(intent.get("approval_id")) if isinstance(intent.get("approval_id"), str) else None
+    return (
+        isinstance(record, dict)
+        and record.get("run_id") == run_id
+        and gate_of(record.get("action")) == "G7"
+        and record.get("effective_decision") == "APPROVE"
+        and record.get("input_hash") == intent.get("input_hash")
+    )
 
 
 def _g7_approval(
@@ -4381,7 +5010,8 @@ def _json_file(value: Any) -> dict[str, Any]:
 
 
 def _abandon_intent(
-    orchestrator: Orchestrator, intent_id: str, reason: str, actor: str
+    orchestrator: Orchestrator, intent_id: str, reason: str, actor: str,
+    local_error_proven: bool = False,
 ) -> dict[str, Any]:
     """Stop waiting on an external write, on the record.
 
@@ -4392,7 +5022,8 @@ def _abandon_intent(
     `INTENT_ALREADY_RECONCILED` exits 1 rather than printing a traceback.
     """
     try:
-        return {"ok": True, "reason_code": "OK", **orchestrator.state.abandon_intent(intent_id, reason, actor)}
+        return {"ok": True, "reason_code": "OK", **orchestrator.state.abandon_intent(
+            intent_id, reason, actor, local_error_proven=local_error_proven)}
     except ValueError as error:
         return {"ok": False, "reason_code": str(error), "intent_id": intent_id}
 
@@ -4480,7 +5111,35 @@ def _advance(
         # Only when the operator did not bring one: an `--evidence` file describing a
         # WORKSPACE binding computes its own hash, and `advance` compares the two.
         evidence.setdefault("input_hash", record["input_hash"])
-    return orchestrator.advance(run_id, next_state, evidence)
+    return _settle_consumed_approval(
+        orchestrator, run_id, approval_id, "advance",
+        orchestrator.advance(run_id, next_state, evidence),
+    )
+
+
+def _settle_consumed_approval(
+    orchestrator: Any, run_id: str, approval_id: Any, command: str, result: Any
+) -> Any:
+    """Close the resume handoff of an approval an explicit command just consumed.
+
+    `approve` records an APPROVAL_RESUME handoff against the run's then-latest event.
+    A command that spends that approval itself appends a newer event, so the handoff can
+    never resume anything and used to make the next `continue` fail with
+    MULTIPLE_RESUME_HANDOFFS. Only a successful result closes it, and only handoffs of
+    exactly this approval; completion is idempotent and audited.
+    """
+    state = getattr(orchestrator, "state", None)
+    if (
+        state is not None
+        and isinstance(result, dict)
+        and result.get("ok") is not False
+        and (result.get("ok") is True or result.get("reason_code") == "OK")
+        and isinstance(approval_id, str) and approval_id
+    ):
+        state.complete_approval_handoffs(
+            run_id, approval_id, actor=command, reason="APPROVAL_CONSUMED"
+        )
+    return result
 
 
 if __name__ == "__main__":

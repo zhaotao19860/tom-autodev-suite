@@ -71,6 +71,24 @@ A card may start with no acceptance criteria. Accept it, let `tom-grill` agree t
 
 ## Workflow
 
+For downstream product inputs, decide each module's `changed` status from this run's
+frozen Change Set / `pipeline_plan.product_inputs`; a clean worktree is not evidence
+of no changes. Unchanged modules require a successful release job of the target
+branch's **BranchPipeline**, with verifiable branch/source revision and an authenticated
+download check. If unavailable, prepare only an adapter-proven **compile-only**
+BranchPipeline action with release excluded, exact G8 binding, durable intent and
+query-only recovery for unknown outcomes. Changed modules require this run's owned
+**ChangePipeline** successful compile for the exact candidate revision and branch.
+Never fall back to arbitrary historical compile, latest build, or a fixed URL.
+
+Read stage, job/build declarations and upstream dependency inputs even when
+`manualParams` is empty. A profile mapping is not a declaration. Override declared
+task inputs only when the adapter proves exact scope/precedence without changing
+the pipeline template. The current HTTP adapter cannot prove job override or
+compile-only triggering and explicitly blocks with `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`
+or `COMPILE_ONLY_TRIGGER_UNSUPPORTED`. Do not claim a real rerun was repaired.
+See [`references/phase-protocol.md`](references/phase-protocol.md) for measured API limits.
+
 Advance one frontier task at a time:
 
 ```text
@@ -152,6 +170,12 @@ Call `EvidenceGate` before every checkpoint or external side effect. Block on a 
 
 For a failed or manual iPipe stage, load the project skill's runtime/parameter map first, then use `orchestrator.py ipipe-rerun RUN STAGE_BUILD_ID APPROVAL_ID INPUT_HASH --parameter NAME ...`; it is the explicit G8/manual-continuation path and reuses the durable stage ownership check. The project skill names the topology, logs, version/counter checks, and parameter-to-product mapping; this controller resolves product URLs, redacts tokens, requests G8, reruns, and classifies the new evidence. Child project skills never call iPipe.
 
+If the failed build's compile product can no longer be downloaded (the platform answers 403/404), stage re-runs cannot succeed; use `orchestrator.py ipipe-rebuild RUN --reason ...` (read-only check, then `--request-g8`, then `--approval-id A --input-hash H`). It builds the same CR revisions once more under G8, rebinds the run to the new build and supersedes the pending DIAGNOSE job; it needs the `DIAGNOSE -> IPIPE` edge, so an older pinned run is migrated first with `migrate-workflow-spec`. A superseded build (and a build rejected after `TRIGGER_MODE_MISMATCH`, marked `ipipe.build-rejected`) is never module, release or G9 evidence, and its stages cannot be re-run (`STAGE_BUILD_SUPERSEDED`). From `IPIPE` the replaced build must have failed or have its product proven gone.
+
+A stage re-run counts as started only when the stage carries a start time later than the intent's creation (30 s skew) and is not a successor another re-run already receipted; otherwise the outcome stays unknown. `abandon-intent --local-error-proven` needs an observation recorded with `before_dispatch: true`.
+
+To continue an approved CODE_ONLY repair of a `STOPPED` run in a fresh run, use `orchestrator.py adopt-code-only-repair SOURCE TARGET TASK DIAGNOSIS_ARTIFACT PLAN_ARTIFACT`. It accepts only the task's latest diagnosis and its accepted Plan of the current DAG, refuses a source whose repair budget is spent (`ADOPTION_BUDGET_EXHAUSTED`), requires a task-bound submission receipt, replays idempotently and refuses a different pair (`ADOPTION_CONFLICT`). The target inherits the source's spent rounds and enters IMPLEMENT through a recorded controlled decision (no new workflow edge).
+
 The platform's own review (小码哥) is a second opinion taken after SUBMIT, while the CR exists and nothing is merged: `orchestrator.py ai-review start RUN --change-number N --revision R`, then `ai-review poll RUN --conversation-id C`. The conversation id comes back once and `get_ai_review` accepts nothing else, so the trigger claims an intent and writes the id into a receipt; a trigger left without one reports `AI_REVIEW_CONVERSATION_LOST` instead of spending a second review to replace a lost one. Verify each finding against the code before changing anything: a report that cannot see the sibling repositories will call a cross-repository contract broken when the other side already enforces it. A finding you do confirm routes `SUBMIT -> DIAGNOSE` and repairs through the ordinary path, landing as a new revision on the same CR; the repaired task owes iCode that new change set before IPIPE will start.
 
 ## Hard Boundaries
@@ -163,7 +187,7 @@ The platform's own review (小码哥) is a second opinion taken after SUBMIT, wh
 - Require `WorkspaceGate`; missing matching baseline evidence returns `BASELINE_UNVERIFIED`.
 - Classify Review findings as `CONFIRMED`, `REJECTED_WITH_REASON`, or `NEEDS_CLARIFICATION`. Do not implement an unverified suggestion.
 - Route `CODE_FAILURE`, `TEST_FAILURE`, and confirmed blocking Review findings to `tom-diagnose` before repair. Environment failures never create business patches.
-- Return `DIAGNOSIS_INCOMPLETE` when root cause or verification is missing. Stop after two no-progress rounds per signature, force architecture Review after three failed fixes, and cap repair at five rounds.
+- Return `DIAGNOSIS_INCOMPLETE` when root cause or verification is missing. Stop after two no-progress rounds per signature, force architecture Review after three failed fixes, and cap repair at five rounds. An approved architecture Review resets only the first two counters (`NO_PROGRESS`, `THREE_FAILED_FIXES`); the five-round `REPAIR_LIMIT` counts every confirmed round of the run, across reviews and including rounds inherited through `adopt-code-only-repair`. When the failure has an authoritative environment classification -- strong evidence only: structured platform fields (a candidate mapping not yet verified against real iPipe responses; no observed response carries them, so it does not take effect today), a control-plane-proven dependency fetch failure of the diagnosed failed stage itself (latest attempt 403/404 on every exact candidate of a product that stage's declaration consumes; 5xx, missing statuses and `ipipe-rebuild` probes are never authoritative), or `ENV_*`/`PIPELINE_TRANSIENT`/`JOB_PARAMETER_OVERRIDE_UNSUPPORTED`/`COMPILE_ONLY_TRIGGER_UNSUPPORTED` -- a diagnosis may not route `REPAIR`, `SPEC` or `GRILL` (`ENVIRONMENT_REPAIR_FORBIDDEN`). Keyword hints (`ENVIRONMENT_SUSPECTED`) are advisory.
 
 ## Child Skills
 

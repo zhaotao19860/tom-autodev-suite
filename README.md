@@ -6,6 +6,16 @@ Tom Autodev 把一张 iCafe 需求卡推进到代码、独立产品测试、Revi
 
 适用环境：**Comate + iCafe / iCode / iPipe / KU / 如流**。Mac 负责源码、流程控制和 Review；编译、模拟器和业务测试在配置好的 iPipe runner 执行。
 
+下游下载产物按本 run 冻结 Change Set / pipeline_plan 判断模块是否 changed，不能用
+worktree clean 推断。未变模块取目标 branch 的 BranchPipeline 成功发布产物，验证实际源码
+revision 与下载；缺产物时仅允许有平台契约证明的 compile-only 动作，禁止触发 release。
+有变模块取本 run 所有的 ChangePipeline、当前 branch、exact candidate revision 的成功
+compile 产物。历史 compile、latest 或固定 URL 均不能代替。人工阶段即使 manualParams 为空，
+也检查 job 声明及上游输入；准确 override 能力不明则 blocking，不修改外部流水线模板。
+当前 HTTP 适配器尚无 compile-only/job override 契约证据，两项显式阻断，fake 测试覆盖
+授权 binding、持久化 intent 和未知结果只查回。详见
+[阶段协议](tom-autodev/references/phase-protocol.md)。
+
 ## 先看这一页
 
 ### 你只需要记住 4 个动作
@@ -41,6 +51,8 @@ python3 tom-autodev/scripts/cli.py prepare-change-set CARD_OR_RUN JOB_ID metadat
 `metadata.json` 只含 `change_set_id`、`task_id`、`test_ids`、`traceability_delta`、`deviations`。`--output` 只独占创建新文件，已存在则拒绝覆盖。schema 要求 `business_patch` / `test_patch` 是完整 Git patch，空字符串只允许配合 `patch_kinds` 的 `no-op`；SHA、路径、摘要或占位文本会被拒绝。
 
 PLAN 阶段发现计划与已批准 Spec 冲突时，用 `report-producer-conflict CARD_OR_RUN JOB_ID report.json` 上报（schema 见 `producer-conflict.schema.json`，报告的 `job_id` 必须与当前 job 一致）；控制器以 `SPEC_CONFLICT` 转入 DIAGNOSE，不会伪造任务计划。
+
+PLAN 的 `repositories[].path` 必须填 profile 的本地检出路径（绝对路径），不能写模块名（如 `baidu/sysip/x86bgw`）。G4 会校验该路径为非空绝对路径，否则以 `PLAN_REPOSITORY_MISMATCH` 拒绝；IMPLEMENT 的 `prepare_change_set` 仍按 profile 路径定位 worktree 做权威绑定。
 
 在 Comate 中可以直接使用卡片动作，不必手写 Python CLI：
 
@@ -136,6 +148,10 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 - 如流已回复并落账精确的 `WORKFLOW_SPEC_MIGRATION` 批准时，`continue` 会按当前 run 与
   当前迁移计划的 `input_hash` 消费该批准并应用迁移，再交给 worker 恢复；它不会自动批准或
   重开审批。`status` 只读显示「迁移已批准待应用」。
+- 显式命令（`migrate-workflow-spec`、`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`、`rewind`、
+  `repin-profile`、`optimize apply`）成功消费审批后，会完成该审批对应的 `APPROVAL_RESUME` handoff；
+  `continue` 遇到多条 handoff 时，只清理指向旧事件且审批已被消费/门禁已不符的过期项（审计原因 `STALE_EVENT`），
+  匹配最新事件的有效 handoff 与 REJECT 审批的 handoff 不受影响。
 
 具体规则与门禁材料清单见 [Approval Policy](tom-autodev/references/approval-policy.md)，G0/G5/G9 与非审批通知的对照见 [消息示例](docs/APPROVAL_UX_EXAMPLES.md)。
 
@@ -451,9 +467,51 @@ python3 tom-autodev/scripts/cli.py ipipe-adopt --help
 python3 tom-autodev/scripts/cli.py ai-review --help
 ```
 
-`ipipe-rerun` 的 `--parameter` 接受参数名，值由本次运行的产品和提交证据推导；不是任意 `NAME=VALUE`。平台 AI Review 的建议仍需逐条核对，不能直接作为修改指令。
+`continue` 遇到人工 iPipe 阶段会查询真实参数声明、解析项目/profile 的准确映射，准备并投递 exact hash 的 G8；批准后继续执行。空参数须有平台明确声明，未知参数或映射按名称阻断。普通 P0 和新 case 的映射分别处理。
+
+`ipipe-rerun` 的 `--parameter` 接受参数名，值由本次运行的产品和提交证据推导；不是任意 `NAME=VALUE`。省略该选项会自动发现平台声明，显式列表必须与声明一致。`--print-parameters` / `--print-input-hash` 只读检查；`--request-g8` 保存脱敏准确材料并投递，不执行阶段。继承自其他 stage 或 job 级的参数在 `--print-parameters` / `--request-g8` 阶段即返回 `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`（白名单不改变这一点），不会等到执行才拒绝。未变更模块的发布产物按精确 revision 候选逐个校验下载，全部失败才返回 `PRODUCT_DOWNLOAD_UNVERIFIED` 并列出各候选状态码。可在 profile 中配置 `pipeline_profile.stage_parameter_mapping`（准确阶段名 → 参数名 → 完整模块或 `test_cr_id`）；未知映射不按 basename 猜测。平台 AI Review 的建议仍需逐条核对，不能直接作为修改指令。
+
+**编译产物失效后的重新构建。** 失败 build 的编译产物若已不可下载（平台答复 403/404），该 build 的任何 stage 重跑都会在环境任务失败，
+`ipipe-rerun` 无意义；此时用 `ipipe-rebuild RUN --reason ...` 对同一 CR 版本重新触发整条流水线，批准后 run 换绑到新 build，`continue` 照常监控并在人工阶段准备 G8：
+
+```bash
+python3 tom-autodev/scripts/cli.py ipipe-rebuild RUN --reason "编译产物 404"                # 只读预检，打印 input_hash
+python3 tom-autodev/scripts/cli.py ipipe-rebuild RUN --reason "编译产物 404" --request-g8   # 投递 G8，不执行
+python3 tom-autodev/scripts/cli.py ipipe-rebuild RUN --reason "编译产物 404" --approval-id A --input-hash H
+python3 tom-autodev/scripts/cli.py ipipe-rebuild RUN --reason "编译产物 404" --approval-id A --input-hash H --reconcile-only
+```
+
+预检要求：run 在 IPIPE 失败后的 DIAGNOSE（或 IPIPE）、被诊断的 build 即当前 build、下载探测确认 403/404、CR 当前 patchset 等于冻结 revision。
+在 IPIPE 态（无诊断）发起时，被替换的 build 必须已有失败证据，或刚被探测证实产物失效；已成功且未证实产物失效的 build 拒绝替换（`REBUILD_NOT_JUSTIFIED` / `REPLACED_BUILD_NOT_FAILED`）。
+G8 绑定原构建号、attempt 序号与原因；旧 build 的事件和证据保留，只追加一条审计事件并把挂起的 DIAGNOSE job 标为 `SUPERSEDED`。
+被取代的旧 build 不再算作任何模块的通过证据，不进入发布选择、RELEASE 前驱或 G9；其 stage 不能再 `ipipe-rerun`（`STAGE_BUILD_SUPERSEDED`），其迟到证据也不再被摄取（`BUILD_SUPERSEDED`）。
+触发调用在本进程内即失败（调用点编程错误、请求未发出）时返回 `REBUILD_LOCAL_ERROR` 并关闭该次 trigger intent，可直接申请下一 attempt；若无法记录该证明则返回 `REBUILD_LOCAL_ERROR_UNRECORDED`，intent 保持开放，先 `--reconcile-only` 或 `abandon-intent`。
+新 build 的触发类型与原 build 不一致时返回 `TRIGGER_MODE_MISMATCH`：回执保留，新 build 记为 `ipipe.build-rejected`（不采信，discover/plan/watch/产物/发布都排除），原 build 仍是当前 build；可再次 `--request-g8` 生成 attempt+1，或改用与原 build 一致的 `--event-type`。
+该命令引入 `DIAGNOSE -> IPIPE` 边，已 pin 旧 workflow 的 run 须先 `migrate-workflow-spec`。
+
+**结果不明的阶段重跑。** `ipipe-rerun` 只有在阶段带有严格晚于本次执行意图创建时间（容差 30 秒）的 startTime 时才认定"已启动"；仅凭 SUCCESS/RUNNING 状态、或已被另一次重跑回执占用的后继 stage，都不算证据，结果保持 `QUERY_REQUIRED` / `RERUN_NOT_STARTED_UNPROVEN`。同一 stage 的两个不同 G8 并发执行时最多一次 POST（检查与认领在同一事务），CLI 的执行与 `--reconcile-only` 也持有与 worker 相同的 run 级租约（被占用时返回 `WORKER_LEASE_HELD`）。
+
+**CODE_ONLY 修复承接到新 run（`adopt-code-only-repair`）。** 源 run 已 `STOPPED`、其最新诊断是已获 G6 的 `REPAIR`/`CODE_ONLY` 时，可把该任务承接到同一需求、同一项目与 profile 的新 run（处于 INTAKE）：
+
+```bash
+python3 tom-autodev/scripts/cli.py adopt-code-only-repair SOURCE_RUN TARGET_RUN TASK_ID DIAGNOSIS_ARTIFACT_ID PLAN_ARTIFACT_ID
+```
+
+它只复制 TASKS 与 PLAN、不复用旧审批，以受控迁移进入 IMPLEMENT（事件记录 `policy_decision.controlled = CODE_ONLY_ADOPTION` 及 G6/诊断/Plan 证据；不新增 workflow 边，spec hash 不变），baseline 取 Plan 的 revision。拒绝条件：
+诊断不是该任务的最新诊断（`ADOPTION_DIAGNOSIS_NOT_LATEST`）；Plan 不是该任务已被接受且仍属当前 TASKS 的 Plan（`ADOPTION_PLAN_NOT_CURRENT`）；
+源 run 修复预算已耗尽（`ADOPTION_BUDGET_EXHAUSTED`：已达 5 轮，或因 `NO_PROGRESS`/`THREE_FAILED_FIXES` 停止且之后没有获批的 ARCHITECTURE_REVIEW）；
+提交回执缺少或不匹配 `task_id`（`SUBMISSION_RECEIPT_REQUIRED`）；目标 run 已承接过其他 (诊断, Plan)（`ADOPTION_CONFLICT`，同一组重放幂等）。
+目标 run 继承源 run 已消耗的修复轮次（`inherited_repair_rounds`），计入 5 轮上限。
+
+**修复轮次与环境类失败。** 获批的 ARCHITECTURE_REVIEW 只重置"三次失败升级"和"同签名无进展"计数；5 轮 `REPAIR_LIMIT` 按整个 run 累计。
+环境类失败只认强证据（权威分类）：平台结构化字段（job 的 `errorType`/`failType`/`failureType`/`systemErrorType`/`errorCategory`/`agentStatus`/`agentState`/`runnerStatus` 共 8 个字段的枚举值，如 runner/agent 离线、排队超时、资源不足）只是候选映射，未经真实 iPipe 返回验证；当前观测到的响应均不含这些字段，因此实际不生效；首次在真实返回中观测到任一字段时须先核对语义再启用（代码映射保留）。控制面自身证实的依赖获取失败，记为按 stage 绑定、逐次追加的 `ipipe.dependency-failure:{run}:{build}:{stage_build_id}:{module}:{attempt}`（记录含 `stage_conf_id`、声明参数与消费该模块的参数名）：只有被诊断的失败 stage 正是记录中的 stage、该 stage 的参数声明确实消费该模块、且该 stage/模块最新一次尝试在所有精确 revision 候选上均为 403/404 时才是 `ENV_UNSATISFIED`；含 5xx、任一候选无状态码或为其他状态码只记为 `advisory`，不拦截；后来一次下载成功会覆盖早先的 404。只有准备 G8 材料或执行时记录，`--print-parameters`/`--print-input-hash` 等只读入口不写。`ipipe-rebuild` 探测产物 403/404 只证明无法基于旧产物重跑，结果只留在 G8 材料里，不是失败原因的权威证据；以及 `ENV_*`、`PIPELINE_TRANSIENT`、`JOB_PARAMETER_OVERRIDE_UNSUPPORTED`、`COMPILE_ONLY_TRIGGER_UNSUPPORTED`。stage/job 名称或消息里的关键词（timeout、network 等）只作参考，记为 `ENVIRONMENT_SUSPECTED`，不拦截路由，由诊断和 G6 判断。权威环境分类成立时，诊断不能走任何会改业务代码的路由（`REPAIR`、`SPEC`、`GRILL`），草案和完成阶段都返回 `ENVIRONMENT_REPAIR_FORBIDDEN`，run 停止；`STOPPED`、`DIAGNOSIS_INCOMPLETE`、`ARCHITECTURE_REVIEW` 仍可用。iPipe BLOCKED 证据仍直接进入可恢复的 `ENVIRONMENT_BLOCKED`；DIAGNOSE 态下只有 `ipipe-rebuild`（产物已证实失效 + G8）能把 run 带回 IPIPE，`ipipe-rerun` 在 DIAGNOSE 态虽能执行，但新证据无法摄取，不推进 run。
 
 ### 中断、失败和配置变化
+
+若人工阶段已启动但控制器返回 `RERUN_RESPONSE_INVALID`，不要重新触发。
+`ipipe-rerun RUN STAGE APPROVAL HASH --reconcile-only` 仅查询原意图对应的
+build/stage、核对原 G8，确认后保存本地回执；它不创建新意图、不发执行 POST。
+原始应答缺少阶段 ID 时也先只读核对；WAITING 状态不能证明执行已接受。
 
 先查看状态，再选择动作：
 
@@ -483,7 +541,7 @@ python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py work-card reconcile --help
 ```
 
-`recover-legacy-pipeline-plan` 只用于升级前已进入 IPIPE、但缺少冻结 `pipeline_plan` 的历史 run。它从该 run 自己获审的提交和固定 profile 重建计划，不提交、不发布、不审批、不调用 runtime；旧 build 会按模块重新核验。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录解除阻断。
+`recover-legacy-pipeline-plan` 只用于升级前已进入 IPIPE、但缺少冻结 `pipeline_plan` 的历史 run。它从该 run 自己获审的提交和固定 profile 重建计划，不提交、不发布、不审批、不调用 runtime；旧 build 会按模块重新核验。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。对 `ipipe.rerun`，只有当观察记录了 `before_dispatch: true`（运行时确认错误发生在调用点、请求尚未发出）且无 `http_status` 时，才可加 `--local-error-proven` 让同一审批重发一次；被调方内部抛出的同类错误，以及没有 `before_dispatch` 字段的旧观察，一律拒绝（`LOCAL_ERROR_NOT_PROVEN`）。无该标志的放弃仍是终局。观察、回执、G8/重建审批材料写入前统一脱敏：`IREPO-TOKEN:`、`access_token=`、Authorization/Bearer 值以及本进程已加载的 irepo/iPipe token 原值（任意长度）。未变更模块的发布产物必须与冻结 revision 精确一致，否则返回 `PRODUCT_REVISION_MISMATCH`。不要手改数据库或删除记录解除阻断。
 
 ### 终态后优化
 

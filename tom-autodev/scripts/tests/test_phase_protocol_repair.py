@@ -1377,8 +1377,8 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
-    """A code-only repair must not drag the Spec and the DAG through their gates again."""
+class CodeOnlyRepairRoutesToImplement(unittest.TestCase):
+    """A code-only repair reuses an approved Plan when one is available."""
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -1400,7 +1400,21 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
             diagnosis["repair_scope"] = scope
         return diagnosis
 
-    def test_code_only_repair_reenters_at_plan_and_keeps_the_task(self):
+    def test_code_only_repair_reenters_at_implement_and_keeps_the_task(self):
+        # The reusable-Plan lookup is the seam: a CODE_ONLY repair returns to IMPLEMENT
+        # only when the task has an accepted Plan still bound to the current TASKS.
+        self.protocol._accepted_plan = lambda run_id, task_id: {
+            "valid": True,
+            "envelope": {"content": {"task_id": task_id}},
+        }
+        action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-scope"}
+        target = self.protocol._completion_target(
+            action, {"content": self._diagnosis("CODE_ONLY")}
+        )
+
+        self.assertEqual(target, ("IMPLEMENT", "T-1", "OK"))
+
+    def test_code_only_repair_without_plan_still_reenters_at_plan(self):
         action = {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": "run-scope"}
         target = self.protocol._completion_target(
             action, {"content": self._diagnosis("CODE_ONLY")}
@@ -1418,11 +1432,12 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
         self.assertEqual(amended, ("SPEC", None, "OK"))
         self.assertEqual(silent, ("SPEC", None, "OK"))
 
-    def _seed_round(self, run_id, signature):
+    def _seed_round(self, run_id, signature, source_event_id="seed-event"):
         content = self._diagnosis("CODE_ONLY")
         content["failure_signature"] = signature
-        self.protocol.artifacts.put_envelope(
-            final_envelope(run_id, "DIAGNOSE", "T-1", content))
+        envelope = final_envelope(run_id, "DIAGNOSE", "T-1", content)
+        envelope["source_event_id"] = source_event_id
+        self.protocol.artifacts.put_envelope(envelope)
 
     def test_second_confirmed_repair_round_still_repairs(self):
         run_id = "run-budget-2"
@@ -1444,6 +1459,68 @@ class CodeOnlyRepairRoutesToPlan(unittest.TestCase):
         target = self.protocol._completion_target(
             {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id}, {"content": current})
         self.assertEqual(target, ("ARCHITECTURE_REVIEW", None, "THREE_FAILED_FIXES"))
+
+    def test_architecture_review_starts_a_new_repair_budget_epoch(self):
+        # Two counters (SKILL.md Hard Boundaries, failure-taxonomy.md): an approved
+        # ARCHITECTURE_REVIEW resets the "three failed fixes" / "no progress" counters,
+        # so two rounds before it plus two after do not escalate again. It does NOT
+        # reset the absolute five-round REPAIR_LIMIT, which is checked separately below.
+        run_id = "run-budget-after-architecture"
+        before = self.protocol.state.transition(run_id, "DIAGNOSE", {})
+        self._seed_round(run_id, "SIG-0", before["event_id"])
+        before_b = self.protocol.state.transition(run_id, "DIAGNOSE", {})
+        self._seed_round(run_id, "SIG-1", before_b["event_id"])
+        self.protocol.state.transition(run_id, "ARCHITECTURE_REVIEW", {})
+        after_a = self.protocol.state.transition(run_id, "DIAGNOSE", {})
+        self._seed_round(run_id, "SIG-A", after_a["event_id"])
+        current = self._diagnosis("CODE_ONLY")
+        current["failure_signature"] = "SIG-B"
+        target = self.protocol._completion_target(
+            {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id},
+            {"content": current},
+        )
+        self.assertEqual(target, ("PLAN", "T-1", "OK"))
+
+    def test_architecture_review_does_not_refill_the_absolute_repair_limit(self):
+        run_id = "run-budget-limit-across-epochs"
+        for signature in ("SIG-0", "SIG-1", "SIG-2"):
+            event = self.protocol.state.transition(run_id, "DIAGNOSE", {})
+            self._seed_round(run_id, signature, event["event_id"])
+        self.protocol.state.transition(run_id, "ARCHITECTURE_REVIEW", {})
+        after = self.protocol.state.transition(run_id, "DIAGNOSE", {})
+        self._seed_round(run_id, "SIG-A", after["event_id"])
+        current = self._diagnosis("CODE_ONLY")
+        current["failure_signature"] = "SIG-B"
+
+        target = self.protocol._completion_target(
+            {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id}, {"content": current})
+
+        self.assertEqual(target, ("STOPPED", None, "REPAIR_LIMIT"))
+
+    def test_nine_rounds_over_three_epochs_stop_after_the_fifth_repair(self):
+        # B-02: walking a run round by round, approving every architecture review it
+        # asks for, the fifth confirmed round stops the run and nothing later repairs.
+        run_id = "run-budget-nine-rounds"
+        targets = []
+        for number in range(1, 10):
+            event = self.protocol.state.transition(run_id, "DIAGNOSE", {})
+            current = self._diagnosis("CODE_ONLY")
+            current["failure_signature"] = f"SIG-{number}"
+            targets.append(self.protocol._completion_target(
+                {"phase": "DIAGNOSE", "task_id": "T-1", "run_id": run_id}, {"content": current}))
+            self._seed_round(run_id, f"SIG-{number}", event["event_id"])
+            if targets[-1][0] == "ARCHITECTURE_REVIEW":
+                self.protocol.state.transition(run_id, "ARCHITECTURE_REVIEW", {})
+            elif number % 3 == 0:
+                # Force a fresh epoch every three rounds even when no escalation came.
+                self.protocol.state.transition(run_id, "ARCHITECTURE_REVIEW", {})
+
+        self.assertEqual(targets[0], ("PLAN", "T-1", "OK"))
+        self.assertEqual(targets[1], ("PLAN", "T-1", "OK"))
+        self.assertEqual(targets[2], ("ARCHITECTURE_REVIEW", None, "THREE_FAILED_FIXES"))
+        self.assertEqual(targets[3], ("PLAN", "T-1", "OK"))
+        self.assertEqual(targets[4], ("STOPPED", None, "REPAIR_LIMIT"))
+        self.assertTrue(all(target == ("STOPPED", None, "REPAIR_LIMIT") for target in targets[4:]))
 
     def test_recurring_cross_run_failure_escalates_to_architecture_review(self):
         # MEDIUM-004: the same root cause seen unresolved across >= 2 runs is escalated

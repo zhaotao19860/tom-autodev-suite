@@ -61,6 +61,17 @@ def _diff(root: Path, baseline: str, revision: str) -> str:
         raise ValueError("DIFF_NOT_UTF8") from None
 
 
+def _commits_above_baseline(root: Path, baseline: str) -> int:
+    """How many commits HEAD carries beyond ``baseline`` (0 for a no-op worktree).
+
+    iCode/Gerrit rejects a push with more than one commit per CR (HCK_F507), so this
+    is the predicate the IMPLEMENT producer must keep at 0 or 1 before the change set's
+    revisions bind.
+    """
+    out = _git(root, "rev-list", "--count", baseline + ".." + "HEAD").decode().strip()
+    return int(out) if out.isdigit() else 0
+
+
 def _ownership_rows(orchestrator: Any, run_id: str) -> dict[tuple[str, str], dict[str, Any]]:
     import sqlite3
     from workspace_manager import _ownership_database
@@ -176,11 +187,31 @@ def prepare(orchestrator: Any, run_id: str, job_id: str,
         for repo in repositories:
             allowed_repos = (profile.get("business_repos", []) if repo["role"] == "business"
                              else [profile.get("test_repo", {})])
-            if not any(Path(item["path"]).expanduser().resolve() ==
-                       Path(repo["path"]).expanduser().resolve() for item in allowed_repos):
+            profile_repo = next(
+                (
+                    item for item in allowed_repos
+                    if isinstance(item, dict)
+                    and (
+                        Path(item["path"]).expanduser().resolve()
+                        == Path(repo["path"]).expanduser().resolve()
+                        or any(
+                            row.get("worktree_path")
+                            and Path(row["worktree_path"]).expanduser().resolve()
+                            == Path(repo["path"]).expanduser().resolve()
+                            for (owned_task, owned_repo), row in rows.items()
+                            if owned_task == task_id
+                            and owned_repo == str(Path(item["path"]).expanduser().resolve())
+                        )
+                    )
+                ),
+                None,
+            )
+            if profile_repo is None:
                 raise ValueError("PLAN_REPOSITORY_MISMATCH")
+            selected_repo = dict(profile_repo)
+            selected_repo["revision"] = repo["revision"]
             roots[repo["role"]] = _owned_worktree(
-                orchestrator, rows, run_id, task_id, repo)
+                orchestrator, rows, run_id, task_id, selected_repo)
         patches = {}
         revisions = {}
         for role, root in roots.items():
@@ -191,12 +222,41 @@ def prepare(orchestrator: Any, run_id: str, job_id: str,
                 raise ValueError("BASELINE_REVISION_INVALID")
             if _git(root, "rev-parse", "--verify", baselines[role] + "^{commit}").decode().strip() != baselines[role]:
                 raise ValueError("WORKTREE_BASELINE_MISMATCH")
+            # iCode/Gerrit rejects a push that carries more than one commit per CR
+            # (HCK_F507 "too_many_commits"). A resume, or a G5 "需修改" redo that adds
+            # another commit, can leave >1 commit above the pinned baseline. Reject it
+            # here -- before the revisions/candidate_hash bind and before G5/G7 -- so the
+            # worktree is squashed to a single commit instead of the run only discovering
+            # it at SUBMIT after both approvals were already spent.
+            if _commits_above_baseline(root, baselines[role]) > 1:
+                raise ValueError("MULTIPLE_COMMITS_ABOVE_BASELINE")
             # query_ownership verifies that HEAD descends from this baseline.
             patches[role] = _diff(root, baselines[role], revision)
             revisions[role] = revision
         for repo in repositories:
             root = roots[repo["role"]]
-            _owned_worktree(orchestrator, rows, run_id, task_id, repo)
+            profile_repo = next(
+                (
+                    item for item in (
+                        profile.get("business_repos", [])
+                        if repo["role"] == "business"
+                        else [profile.get("test_repo", {})]
+                    )
+                    if isinstance(item, dict)
+                    and (
+                        Path(item["path"]).expanduser().resolve()
+                        == Path(repo["path"]).expanduser().resolve()
+                        or roots[repo["role"]].resolve()
+                        == Path(repo["path"]).expanduser().resolve()
+                    )
+                ),
+                None,
+            )
+            if profile_repo is None:
+                raise ValueError("PLAN_REPOSITORY_MISMATCH")
+            selected_repo = dict(profile_repo)
+            selected_repo["revision"] = repo["revision"]
+            _owned_worktree(orchestrator, rows, run_id, task_id, selected_repo)
             _require_clean(root)
             if _head(root) != revisions[repo["role"]]:
                 raise ValueError("WORKTREE_HEAD_CHANGED")

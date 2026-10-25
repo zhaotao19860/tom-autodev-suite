@@ -1135,18 +1135,33 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(self.orchestrator.status(run_id)["state"], "DIAGNOSE")
 
     def test_worker_ipipe_manual_wait_parks_for_a_human(self):
-        # A manual pipeline gate is not the worker's call: the trigger runs, but a
-        # non-terminal monitor result parks the run at IPIPE without fabricating evidence.
+        # Discover real empty inputs, prepare G8, then resume exactly once after approval.
         run_id, knowledge = self._drive_to_ipipe("BGW-533")
         api = self._ipipe_api(run_id, build_status="RUNNING", stage_status="MANUAL")
+        api.details["stage-1"] = {"stageBuild": {
+            "stageBuildId": "stage-1", "pipelineBuildId": "build-1",
+            "pipelineConfId": api.pipeline["id"], "stageName": "compile",
+            "manualParams": None, "hasDynamicParams": False,
+        }}
         need = worker_driver.execute_controller(
             self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
         self._approval(run_id, "G7", need["approval_input_hash"])
         parked = worker_driver.execute_controller(
             self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
-        self.assertEqual((parked["ok"], parked["reason_code"]), (True, "PARKED"))
-        self.assertEqual((parked["parked"], parked["monitor_status"]), ("IPIPE_MONITOR", "MANUAL_WAIT"))
+        self.assertEqual((parked["ok"], parked["reason_code"]), (False, "APPROVAL_REQUIRED"))
+        self.assertEqual(parked["gate"], "G8")
         self.assertEqual(self.orchestrator.status(run_id)["state"], "IPIPE")
+        self.assertEqual(sum(call[0] == "manual_execute_stage" for call in api.calls), 0)
+        self._approval(run_id, "G8", parked["approval_input_hash"])
+        api.rerun_result = {"stageBuildId": "stage-1"}
+        api.on_rerun = lambda: api.builds["build-1"]["stageBuilds"][0].update(status="RUNNING")
+        resumed = worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        self.assertEqual(resumed["parked"], "IPIPE_MONITOR")
+        worker_driver.execute_controller(
+            self.orchestrator, run_id, knowledge_sync=knowledge, ipipe_api=api)
+        writes = [call for call in api.calls if call[0] == "manual_execute_stage"]
+        self.assertEqual(writes, [("manual_execute_stage", "stage-1", {})])
 
     def test_worker_advance_chains_through_a_settled_ipipe(self):
         # With G7 settled for the trigger and an ipipe_api injected, advance() runs the

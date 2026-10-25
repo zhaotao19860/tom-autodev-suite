@@ -205,6 +205,11 @@ class IcodeRuntime:
             "owner": change_set["owner"],
             "revision_set": change_set["revision_set"],
         }
+        if change_set.get("task_id"):
+            payload["task_id"] = change_set["task_id"]
+        if change_set.get("existing_cr") or change_set.get("change_id"):
+            payload["existing_cr"] = change_set.get("existing_cr")
+            payload["change_id"] = change_set.get("change_id")
         base_key = f"icode.submit:{self.run_id}:{change_set['change_set_id']}:{change_set['revision_set_id']}"
         # An abandonment is an audit record saying "we stopped waiting on this write", not
         # a submission. The closed attempt keeps its intent and its receipt, and this
@@ -223,6 +228,13 @@ class IcodeRuntime:
                 break
             abandoned = True
             key = f"{base_key}:after:{prior['intent_id']}"
+        # A submission that already completed for this exact change set and revision set is
+        # replayed as it is. Its intent payload carries the approval and input hash of the
+        # first G7, so claiming again after a later G7 (a descriptor that gained a pinned
+        # baseline, say) would read as a conflicting write although no write is attempted.
+        completed = self.state.result_by_idempotency_key(key)
+        if completed is not None:
+            return dict(completed["receipt"]["response"])
         claim = self.state.claim_intent(self.run_id, "icode.submit", key, payload)
         if claim["status"] == "CONFLICT":
             return _failure("SUBMIT_CONFLICT")
@@ -239,15 +251,25 @@ class IcodeRuntime:
             return self._receipt(intent["intent_id"], change_set, reconciliation["change"], key)
         if reconciliation.get("reason_code") == "CR_IDENTITY_CONFLICT":
             return reconciliation
-        if reconciliation.get("reason_code") != "CR_NOT_FOUND":
+        if reconciliation.get("reason_code") not in ("CR_NOT_FOUND", "CR_APPEND_ALLOWED"):
             return {**reconciliation, "intent_id": intent["intent_id"], "retry_allowed": False}
+        if (
+            reconciliation.get("reason_code") == "CR_NOT_FOUND"
+            and change_set.get("submission_mode") == "append_existing_cr"
+        ):
+            return _failure(
+                "CR_REQUIRED_NOT_FOUND",
+                intent_id=intent["intent_id"],
+                retry_allowed=False,
+                change_number=change_set.get("existing_cr"),
+            )
         # An existing intent means someone may already have pushed, so a blind re-push is
         # refused and the caller is sent to query instead. An *abandoned* lineage whose
         # reconcile says the CR does not exist is that query, already answered: the write
         # demonstrably did not land, so this attempt may proceed.
         if claim["status"] == "EXISTING" and not abandoned:
             return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
-        if self.submission_policy == "one_cr_per_repo":
+        if self.submission_policy == "one_cr_per_repo" and reconciliation.get("reason_code") == "CR_NOT_FOUND":
             sibling = self._open_card_cr(cli, repo_path, change_set)
             blocked = self._profile_error()
             if blocked is not None:
@@ -422,6 +444,7 @@ class IcodeRuntime:
         if not isinstance(changes, list):
             return _failure("CR_RESPONSE_INVALID")
         change_id = _commit_change_id(repo_path, change_set["commit_revision"])
+        matches = []
         for change in changes:
             if not isinstance(change, dict):
                 continue
@@ -440,8 +463,21 @@ class IcodeRuntime:
                         card_id=change_set["card_id"],
                         change_number=str(change.get("_number") or change.get("number") or ""),
                     )
+                matches.append(change)
+        if len(matches) > 1:
+            return _failure("CR_DUPLICATE_AMBIGUOUS", module=change_set["module"], card_id=change_set["card_id"])
+        for change in matches:
+                number = str(change.get("_number") or change.get("number") or "")
+                if change_set.get("submission_mode") == "append_existing_cr":
+                    if (
+                        number != str(change_set.get("existing_cr"))
+                        or not change_set.get("change_id")
+                        or change.get("change_id") != change_set.get("change_id")
+                    ):
+                        return _failure("CR_IDENTITY_CONFLICT", change_number=number)
+                    return {"reason_code": "CR_APPEND_ALLOWED", "change_number": number}
                 if change_id and change.get("change_id") == change_id:
-                    return {"reason_code": "CR_ALREADY_MATCHED", "change_number": str(change.get("_number") or change.get("number") or "")}
+                    return {"reason_code": "CR_ALREADY_MATCHED", "change_number": number}
                 current = change.get("current_revision")
                 if (
                     isinstance(current, str)
@@ -456,7 +492,7 @@ class IcodeRuntime:
                         cr_revision=current,
                         submitted_revision=change_set["commit_revision"],
                     )
-                return {"reason_code": "CR_APPEND_ALLOWED", "change_number": str(change.get("_number") or change.get("number") or "")}
+                return {"reason_code": "CR_APPEND_ALLOWED", "change_number": number}
         return None
 
     def _discover_cli(self, repo_path: Path) -> dict[str, Any]:
@@ -491,6 +527,12 @@ class IcodeRuntime:
             return _failure("CHANGE_SET_INVALID")
         if value["run_id"] != self.run_id:
             return _failure("CHANGE_SET_RUN_MISMATCH")
+        mode = value.get("submission_mode", "create_new_cr")
+        if mode not in ("create_new_cr", "append_existing_cr"):
+            return _failure("SUBMISSION_MODE_INVALID")
+        if mode == "append_existing_cr":
+            if not _nonempty(value.get("task_id")) or not _nonempty(value.get("existing_cr")) or not _nonempty(value.get("change_id")):
+                return _failure("CR_IDENTITY_REQUIRED")
         revisions = value.get("revision_set")
         if not isinstance(revisions, dict):
             return _failure("REVISION_SET_INVALID")
@@ -534,6 +576,11 @@ class IcodeRuntime:
         }
         if "submission_mode" in value:
             canonical["submission_mode"] = value["submission_mode"]
+        for field in ("task_id", "existing_cr", "change_id"):
+            if field in value:
+                canonical[field] = value[field]
+        if "unchanged_baselines" in value:
+            canonical["unchanged_baselines"] = value["unchanged_baselines"]
         canonical_bytes = json.dumps(
             canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
@@ -580,8 +627,24 @@ class IcodeRuntime:
             ):
                 related.append(change)
         for change in related:
-            if _exact_change(change, change_set):
+            # The exact-revision check comes first for every mode. An append target whose
+            # current patchset already *is* this commit has received the push (this run's,
+            # or one whose receipt was lost before a restart) and must be receipted; only
+            # an append target still pointing at some other revision is "allowed to
+            # receive" it. Answering CR_APPEND_ALLOWED for both left the post-push
+            # reconcile unable to ever confirm an append submission.
+            number = str(change.get("_number") or change.get("number") or "")
+            appending = change_set.get("submission_mode") == "append_existing_cr"
+            if _exact_change(change, change_set) and (
+                not appending or number == str(change_set.get("existing_cr"))
+            ):
                 return {"ok": True, "reason_code": "OK", "change": change}
+            if (
+                appending
+                and number == str(change_set.get("existing_cr"))
+                and change.get("change_id") == change_set.get("change_id")
+            ):
+                return {"reason_code": "CR_APPEND_ALLOWED", "change": change}
         if related:
             return _failure("CR_IDENTITY_CONFLICT")
         return _failure("CR_NOT_FOUND")
@@ -620,6 +683,7 @@ class IcodeRuntime:
             "revision_set": change_set["revision_set"],
             "change_number": number,
             "patchset": patchset,
+            "change_id": _commit_change_id(Path(change_set["repo_path"]), change_set["commit_revision"]),
             # Which intent lineage receipted this submission. An attempt that supersedes
             # an abandoned one lives under a chained key, and the caller has to be able
             # to find the durable record without re-deriving that chain.

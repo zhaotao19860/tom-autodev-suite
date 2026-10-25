@@ -11,6 +11,8 @@ from progress_snapshot import build as build_progress, phase_route
 
 
 _OPERATION = "infoflow.work-card.upsert"
+_TERMINAL_STATES = frozenset({"RELEASE_SUCCESS", "STOPPED"})
+_TERMINAL_QUIET = frozenset({"WORK_CARD_UNCHANGED", "WORK_CARD_UNAVAILABLE", "WORKFLOW_SPEC_DRIFT"})
 _NOT_DISPATCHED = frozenset({
     "INFOFLOW_GATEWAY_UNAVAILABLE",
     "INFOFLOW_GATEWAY_MISSING",
@@ -129,12 +131,21 @@ def _card_payload(snapshot: dict[str, Any], group_id: str) -> dict[str, Any]:
 
 
 def refresh_all(orchestrator: Any, client: Any) -> list[dict[str, Any]]:
-    """Refresh every live run without making the watcher own progress semantics."""
+    """Refresh every run without making the watcher own progress semantics.
+
+    The watcher calls this each tick, so a finished run must stay silent: its last
+    card is final, and a spec-drifted STOPPED run can never be migrated or rendered
+    again. Only a terminal run's real update (e.g. the final card) is reported.
+    """
     outcomes = []
     for latest in orchestrator.state.latest_states():
         run_id = latest.get("run_id")
-        if isinstance(run_id, str) and run_id:
-            outcomes.append(refresh(orchestrator, client, run_id))
+        if not isinstance(run_id, str) or not run_id:
+            continue
+        outcome = refresh(orchestrator, client, run_id)
+        if latest.get("state") in _TERMINAL_STATES and outcome.get("reason_code") in _TERMINAL_QUIET:
+            continue
+        outcomes.append(outcome)
     return outcomes
 
 

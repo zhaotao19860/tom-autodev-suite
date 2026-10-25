@@ -127,6 +127,22 @@ class ProducerValidationTests(unittest.TestCase):
                 self.assertEqual(protocol.validate_draft(action, changed)["reason_code"], reason)
                 self.assertEqual(protocol.validate_result(action, changed)["reason_code"], reason)
 
+    def test_plan_rejects_module_name_repository_path_at_g4(self):
+        # A plan must cite each repository by its profile checkout path (absolute). A
+        # module name like "baidu/sysip/x86bgw" would pass schema and revision checks but
+        # fail IMPLEMENT's prepare_change_set with PLAN_REPOSITORY_MISMATCH; the gate now
+        # rejects it so G4 and IMPLEMENT agree.
+        action, job_id, valid = self.frontier("PLAN")
+        protocol = self.orch.phase_protocol(self.sync)
+        self.assertTrue(protocol.validate_draft(
+            action, worker_driver.build_envelope(action, valid))["ok"])
+        module_named = copy.deepcopy(valid)
+        module_named["repositories"][0]["path"] = "baidu/sysip/x86bgw"
+        envelope = worker_driver.build_envelope(action, module_named)
+        checked = protocol.validate_draft(action, envelope)
+        self.assertEqual(checked["reason_code"], "PLAN_REPOSITORY_MISMATCH")
+        self.assertTrue(checked.get("content_invalid"), checked)
+
     def test_legacy_wrong_task_is_archived_before_corrected_submit(self):
         action, job_id, valid = self.frontier()
         wrong = {**valid, "task_id": "T-2"}

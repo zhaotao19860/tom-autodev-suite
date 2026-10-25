@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from persistence_policy import ensure_persistable, validate_evidence_refs
+from persistence_policy import ensure_persistable, redact_secrets, validate_evidence_refs
 
 
 class StateStore:
@@ -335,6 +335,23 @@ class StateStore:
             ).fetchone()
         return json.loads(row["result_json"]) if row is not None else None
 
+    def idempotency_results_with_prefix(self, prefix: str) -> list[tuple[str, dict[str, Any]]]:
+        """Every saved idempotency result whose key starts with `prefix`, oldest first.
+
+        Read-only. Compared with `substr` rather than LIKE so `%`/`_` inside a run or
+        pipeline id can never act as wildcards.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT idempotency_key, result_json FROM idempotency_results
+                WHERE substr(idempotency_key, 1, ?) = ?
+                ORDER BY created_at, idempotency_key
+                """,
+                (len(prefix), prefix),
+            ).fetchall()
+        return [(row["idempotency_key"], json.loads(row["result_json"])) for row in rows]
+
     def commit_transition_result(
         self,
         run_id: str,
@@ -345,12 +362,18 @@ class StateStore:
         result: dict[str, Any],
         failure_accounting: dict[str, Any] | None = None,
         extra_results: list[tuple[str, dict[str, Any]]] | None = None,
+        supersede_jobs: list[str] | None = None,
     ) -> dict[str, Any]:
         """CAS the current checkpoint and persist its definite result atomically.
 
         `extra_results` are further idempotency records that must land with the event or
         not at all (a rewind's profile re-pin); a key already holding another value
         aborts the whole commit as RESULT_CONFLICT.
+
+        `supersede_jobs` marks those still-PENDING producer jobs of this run SUPERSEDED in
+        the same transaction (a controlled re-entry that leaves the phase they were
+        waiting on). The rows and their drafts stay; only the status changes, and a
+        superseded job can no longer be claimed or fulfilled.
 
         `failure_accounting`, when given, folds the cross-run FailureCase write/resolve into
         the SAME transaction as the transition (R-M6), so a crash or a replay can never leave a
@@ -413,6 +436,16 @@ class StateStore:
                     VALUES (?, ?, ?)
                     """,
                     (extra_key, _encode(extra_value), created_at),
+                )
+            for job_id in supersede_jobs or []:
+                connection.execute(
+                    """
+                    UPDATE producer_jobs
+                    SET status = 'SUPERSEDED', agent_status = 'IDLE', agent_id = NULL,
+                        agent_lease_expires_at = NULL, updated_at = ?
+                    WHERE job_id = ? AND run_id = ? AND status = 'PENDING'
+                    """,
+                    (created_at, job_id, run_id),
                 )
             if isinstance(failure_accounting, dict):
                 record = failure_accounting.get("record")
@@ -487,6 +520,62 @@ class StateStore:
                 if existing["payload_json"] != encoded:
                     return {"status": "CONFLICT", "intent": _intent_row(existing)}
                 return {"status": "EXISTING", "intent": _intent_row(existing)}
+            intent_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO external_intents(
+                    intent_id, run_id, operation, idempotency_key, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (intent_id, run_id, operation, idempotency_key, encoded, _now()),
+            )
+            row = connection.execute(
+                "SELECT * FROM external_intents WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        return {"status": "CLAIMED", "intent": _intent_row(row)}
+
+    def claim_exclusive_intent(
+        self,
+        run_id: str,
+        operation: str,
+        idempotency_key: str,
+        payload: dict[str, Any],
+        *,
+        exclusive_prefix: str,
+    ) -> dict[str, Any]:
+        """`claim_intent`, refused while another unreceipted intent shares the prefix.
+
+        Check and insert happen in one IMMEDIATE transaction, so two callers holding
+        different approvals for the same target (for example two G8s for one iPipe
+        stage) cannot both pass the "no prior unknown outcome" check and both send.
+        A key belongs to the prefix when it equals it or continues it after ``:``.
+        Returns ``{"status": "BLOCKED", "intent": <prior>}`` when such an intent exists.
+        """
+        encoded = _encode(payload)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM external_intents WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+            if existing is not None:
+                if (existing["run_id"] != run_id or existing["operation"] != operation
+                        or existing["payload_json"] != encoded):
+                    return {"status": "CONFLICT", "intent": _intent_row(existing)}
+                return {"status": "EXISTING", "intent": _intent_row(existing)}
+            pending = connection.execute(
+                """
+                SELECT intent.* FROM external_intents AS intent
+                LEFT JOIN receipts AS receipt ON receipt.intent_id = intent.intent_id
+                WHERE intent.run_id = ? AND intent.operation = ?
+                  AND receipt.intent_id IS NULL
+                  AND (intent.idempotency_key = ? OR substr(intent.idempotency_key, 1, ?) = ?)
+                ORDER BY intent.sequence LIMIT 1
+                """,
+                (run_id, operation, exclusive_prefix, len(exclusive_prefix) + 1,
+                 exclusive_prefix + ":"),
+            ).fetchone()
+            if pending is not None:
+                return {"status": "BLOCKED", "intent": _intent_row(pending)}
             intent_id = uuid.uuid4().hex
             connection.execute(
                 """
@@ -639,7 +728,9 @@ class StateStore:
         evidence_json = json.dumps(
             evidence_refs, ensure_ascii=False, separators=(",", ":")
         )
-        response_json = _encode(response)
+        # A receipt may quote what the platform said; credentials in it are redacted
+        # (exact loaded token values and token shapes) before anything is written.
+        response_json = _encode(redact_secrets(response))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             intent = connection.execute(
@@ -685,7 +776,9 @@ class StateStore:
             ).fetchone()
         return _receipt_row(row)
 
-    def abandon_intent(self, intent_id: str, reason: str, actor: str) -> dict[str, Any]:
+    def abandon_intent(
+        self, intent_id: str, reason: str, actor: str, *, local_error_proven: bool = False
+    ) -> dict[str, Any]:
         """Stop waiting on an unreconciled external write, on the record.
 
         The x86bgw CDN-URL run had no supported way to do this, so it was done three
@@ -722,6 +815,17 @@ class StateStore:
             "ok": False, "reason_code": "INTENT_ABANDONED",
             "abandoned": True, "reason": reason.strip(), "actor": actor.strip(),
         }
+        if local_error_proven:
+            # Structured, checked marker: only a rerun write whose recorded observation shows
+            # a local programming error that raised before any HTTP request existed.
+            intent_row = self.intent_by_id(intent_id)
+            if intent_row is None:
+                raise ValueError("INTENT_NOT_FOUND")
+            if not _local_error_observed(
+                intent_row, self.external_observations(intent_row["run_id"], intent_id=intent_id)
+            ):
+                raise ValueError("LOCAL_ERROR_NOT_PROVEN")
+            response["local_error_proven"] = True
         ensure_persistable(response)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -790,7 +894,9 @@ class StateStore:
         Observations are deliberately separate from receipts: a failed read-back is
         evidence about an unresolved write, not a terminal result. Callers must pass
         hashes/identities and bounded reason data, never document bodies or diffs.
+        Credential values in it are redacted before the policy check.
         """
+        observation = redact_secrets(observation)
         ensure_persistable(observation)
         with self._connect() as connection:
             intent = connection.execute(
@@ -960,6 +1066,51 @@ class StateStore:
                     "SELECT * FROM handoffs WHERE handoff_id = ?", (handoff_id,)
                 ).fetchone()
         return _handoff_row(row)
+
+    def complete_handoff_audited(
+        self, handoff: dict[str, Any], *, actor: str, reason: str
+    ) -> dict[str, Any]:
+        """Complete one handoff and leave a durable record of who closed it and why.
+
+        Completion reuses `complete_handoff` (idempotent). The audit row is written first
+        under a per-handoff key, so a crash between the two steps is repaired by a retry;
+        a replay that names a different actor keeps the first record.
+        """
+        payload = handoff.get("payload") or {}
+        try:
+            self.save_idempotency_result(
+                f"handoff-completion:{handoff['handoff_id']}",
+                {
+                    "handoff_id": handoff["handoff_id"],
+                    "run_id": handoff.get("run_id"),
+                    "approval_id": payload.get("approval_id"),
+                    "handoff_event_id": payload.get("event_id"),
+                    "actor": actor,
+                    "reason": reason,
+                },
+            )
+        except ValueError:
+            pass
+        return self.complete_handoff(handoff["handoff_id"])
+
+    def complete_approval_handoffs(
+        self, run_id: str, approval_id: str, *, actor: str, reason: str
+    ) -> list[str]:
+        """Complete every open APPROVAL_RESUME handoff of exactly this approval.
+
+        Called by commands that consume an approval explicitly. Handoffs of other
+        approvals are never touched. Idempotent: a second call finds nothing open.
+        """
+        if not isinstance(approval_id, str) or not approval_id:
+            return []
+        completed: list[str] = []
+        for handoff in self.incomplete_handoffs(run_id):
+            payload = handoff.get("payload") or {}
+            if payload.get("kind") != "APPROVAL_RESUME" or payload.get("approval_id") != approval_id:
+                continue
+            self.complete_handoff_audited(handoff, actor=actor, reason=reason)
+            completed.append(handoff["handoff_id"])
+        return completed
 
     def incomplete_handoffs(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as connection:
@@ -1137,6 +1288,8 @@ class StateStore:
             ).fetchone()
             if row is None:
                 raise ValueError("PRODUCER_JOB_NOT_FOUND")
+            if row["status"] == "SUPERSEDED":
+                raise ValueError("PRODUCER_JOB_SUPERSEDED")
             if row["status"] == "FULFILLED":
                 if row["draft_json"] != encoded:
                     raise ValueError("PRODUCER_JOB_CONFLICT")
@@ -1750,6 +1903,51 @@ class StateStore:
 def _encode(value: dict[str, Any]) -> str:
     ensure_persistable(value)
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+LOCAL_ERROR_TYPES = frozenset({"AttributeError", "TypeError", "NameError"})
+
+
+def _local_error_observed(
+    intent: dict[str, Any], observations: list[dict[str, Any]], *, legacy: bool = False,
+) -> bool:
+    """True when recorded evidence shows the write failed locally, before any request.
+
+    Covers `ipipe.rerun` intents and the `ipipe.trigger` intents `ipipe-rebuild` claims.
+    Needs an `ipipe.rerun.write_error` (`ipipe.rebuild.write_error`) observation of a
+    programming-error type with no `http_status` (a status would mean the platform answered), no recorded response, and
+    `before_dispatch: true` -- the runtime's own traceback check that the error was
+    raised by the call itself rather than inside the client after a request may already
+    have gone out. Observations written before that field existed do not qualify: an
+    AttributeError/TypeError raised deep in the adapter has the same type and no status,
+    and accepting it re-sent a write whose first request was already on the wire.
+
+    `legacy=True` is the read-only shape check for receipts written before the field
+    existed; it never authorizes a new abandonment (see IpipeRuntime._rerun_key).
+    """
+    expected = _LOCAL_ERROR_OPERATIONS.get(intent.get("operation"))
+    if expected is None:
+        return False
+    write_error, response = expected
+    seen = [o.get("observation") or {} for o in observations]
+    if any(o.get("operation") == response for o in seen):
+        return False
+    return any(
+        o.get("operation") == write_error
+        and o.get("error_type") in LOCAL_ERROR_TYPES
+        and "http_status" not in o
+        and (o.get("before_dispatch") is True or (legacy and "before_dispatch" not in o))
+        for o in seen
+    )
+
+
+# Intent operation -> (write-error observation, response observation) that can prove a
+# local error before dispatch: an iPipe stage rerun, and an `ipipe-rebuild` trigger
+# (recorded under `ipipe.trigger` with its own `ipipe.rebuild.*` observations).
+_LOCAL_ERROR_OPERATIONS = {
+    "ipipe.rerun": ("ipipe.rerun.write_error", "ipipe.rerun.response"),
+    "ipipe.trigger": ("ipipe.rebuild.write_error", "ipipe.rebuild.response"),
+}
 
 
 def _now() -> str:

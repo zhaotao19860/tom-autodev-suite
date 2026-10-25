@@ -119,10 +119,26 @@ class ApprovalLedger:
             if row["effective_decision"]:
                 conflict = row["effective_decision"] != decision or row["effective_channel"] != channel
                 _record(c, approval_id, decision, input_hash, channel, responder, False, conflict, True, None, True, observed)
-                return {**_row(row), "reason_code": "OK", "conflict": conflict}
+                return {
+                    **_row(row),
+                    "reason_code": "OK",
+                    "conflict": conflict,
+                    "duplicate": not conflict,
+                    "settled_elsewhere": row["effective_channel"] != channel,
+                }
             c.execute("UPDATE approvals SET effective_decision=?,effective_channel=?,resolved_at=? WHERE approval_id=?", (decision,channel,observed.isoformat(),approval_id))
             _record(c, approval_id, decision, input_hash, channel, responder, True, False, True, None, False, observed)
-        return {"approval_id": approval_id, "run_id": row["run_id"], "input_hash": input_hash, "effective_decision": decision, "effective_channel": channel, "reason_code": "OK", "conflict": False}
+        return {
+            "approval_id": approval_id,
+            "run_id": row["run_id"],
+            "input_hash": input_hash,
+            "effective_decision": decision,
+            "effective_channel": channel,
+            "reason_code": "OK",
+            "conflict": False,
+            "duplicate": False,
+            "settled_elsewhere": False,
+        }
 
     def timeout(self, approval_id: str, input_hash: str, *, run_id: str | None = None, state_store: Any | None = None, now: datetime | None = None) -> dict[str, Any]:
         observed = now or datetime.now(timezone.utc)

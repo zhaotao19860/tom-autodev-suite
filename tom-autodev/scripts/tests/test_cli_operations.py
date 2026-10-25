@@ -16,7 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "clients"))
@@ -606,6 +606,11 @@ class CliOperationTests(unittest.TestCase):
                 self.calls.append((stage_build_id, approval, parameters))
                 return {"ok": True, "reason_code": "OK", "stage_build_id": stage_build_id}
 
+            def stage_parameter_names(self, stage_build_id):
+                self.calls.append(("declaration", stage_build_id))
+                return {"ok": True, "names": [], "stage_name": "manual",
+                        "source": "stageAndRealJobBuilds.stageBuild.manualParams"}
+
         runtime = Runtime()
         output = io.StringIO()
         with (
@@ -619,11 +624,67 @@ class CliOperationTests(unittest.TestCase):
             ])
 
         self.assertEqual(code, 0)
-        # No --parameter given, so the stage is continued with nothing filled in.
+        # Omitted --parameter queries the platform; only its explicit empty declaration
+        # permits continuation without values.
         self.assertEqual(
             runtime.calls,
-            [("stage-9", {"approval_id": "approval-9", "input_hash": "hash-9"}, None)],
+            [("declaration", "stage-9"),
+             ("stage-9", {"approval_id": "approval-9", "input_hash": "hash-9"}, None)],
         )
+
+    def test_ipipe_print_does_not_treat_unknown_declaration_as_empty(self):
+        from types import SimpleNamespace
+        runtime = SimpleNamespace(
+            stage_parameter_names=lambda stage: {"ok": False, "reason_code": "STAGE_PARAMETERS_UNKNOWN"},
+            rerun=Mock(),
+        )
+        output = io.StringIO()
+        with patch("orchestrator.Orchestrator", return_value=self.orchestrator), \
+                patch("orchestrator._cli_ipipe_runtime", return_value=runtime), \
+                contextlib.redirect_stdout(output):
+            code = main(["--config-root", str(self.root), "ipipe-rerun", self.run_id,
+                         "stage-9", "-", "-", "--print-parameters"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["reason_code"], "STAGE_PARAMETERS_UNKNOWN")
+        runtime.rerun.assert_not_called()
+
+    def test_ipipe_request_g8_prepares_and_delivers_without_execution(self):
+        from types import SimpleNamespace
+        runtime = SimpleNamespace(
+            stage_parameter_names=lambda stage: {"ok": True, "names": [], "stage_name": "manual"},
+            rerun=Mock(),
+        )
+        prepared = {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G8",
+                    "run_id": self.run_id, "approval_input_hash": "exact"}
+        output = io.StringIO()
+        with patch("orchestrator.Orchestrator", return_value=self.orchestrator), \
+                patch("orchestrator._cli_ipipe_runtime", return_value=runtime), \
+                patch("orchestrator._prepare_ipipe_g8", return_value=prepared) as prepare, \
+                patch("orchestrator._deliver_worker_approval",
+                      return_value={"ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT"}) as deliver, \
+                contextlib.redirect_stdout(output):
+            code = main(["--config-root", str(self.root), "ipipe-rerun", self.run_id,
+                         "stage-9", "-", "-", "--request-g8"])
+        self.assertEqual(code, 0)
+        self.assertEqual(prepare.call_args.args[3], "stage-9")
+        self.assertEqual(prepare.call_args.args[4]["parameters"], {})
+        deliver.assert_called_once_with(self.orchestrator, prepared)
+        runtime.rerun.assert_not_called()
+
+    def test_reconcile_only_never_resolves_parameters_or_calls_rerun(self):
+        from types import SimpleNamespace
+        runtime = SimpleNamespace(reconcile_rerun=Mock(return_value={"ok": True}), rerun=Mock())
+        with patch("orchestrator.Orchestrator", return_value=self.orchestrator), \
+                patch("orchestrator._cli_ipipe_runtime", return_value=runtime), \
+                patch("orchestrator._stage_parameters") as parameters, \
+                contextlib.redirect_stdout(io.StringIO()):
+            code = main(["--config-root", str(self.root), "ipipe-rerun", self.run_id,
+                         "stage-9", "approval-9", "hash-9", "--reconcile-only"])
+        self.assertEqual(code, 0)
+        runtime.reconcile_rerun.assert_called_once_with(
+            "stage-9", {"approval_id": "approval-9", "input_hash": "hash-9"})
+        runtime.rerun.assert_not_called()
+        parameters.assert_not_called()
 
 
 if __name__ == "__main__":

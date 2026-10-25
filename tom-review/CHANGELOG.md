@@ -2,6 +2,12 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-10-25
+
+- Review Method 新增必读项：change-set 修改源码时按 `tom-autodev/references/changelog-policy.md` 核对每个改动仓库的
+  changelog 条目（版本递增、卡片号、日期、提交身份、最新在上、沿用模块格式；原先没有时从 1.0.0 创建）；缺失记为
+  `CONFIRMED` 阻断 Standards finding。
+
 ## 2026-09-21
 
 - 后续补全：统一 DraftContent、ACCEPT/REJECT/INCOMPLETE 和 P0–P3；增加 AC 覆盖矩阵，区分未知需求、缺少范围和已证实遗漏。

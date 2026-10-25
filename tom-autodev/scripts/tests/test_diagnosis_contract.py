@@ -112,6 +112,28 @@ class DiagnosisContractTests(unittest.TestCase):
     def test_patchless_pipeline_repair_proposal_resumes_to_plan_after_g6(self):
         self.finish_diagnosis(self.pipeline_failure())
 
+    def test_a12_a_quoted_bearer_line_is_redacted_before_the_g6_hash_is_bound(self):
+        secret = "Bearer-abcdefgh12345678"
+        proposal = self.pipeline_failure()
+        proposal["log_evidence"] = [*proposal["log_evidence"], f"curl -H 'Authorization: {secret}' -> 401"]
+        job_id = self.job()
+
+        waiting = self.submit(job_id, proposal)
+
+        self.assertEqual(waiting.get("reason_code"), "APPROVAL_REQUIRED", waiting)
+        stored = self.orch.state.producer_job(job_id)["draft"]
+        self.assertNotIn("abcdefgh12345678", str(stored))
+        self.assertIn("[REDACTED]", str(stored))
+        # Resubmitting the same raw draft is the same recorded content and the same hash.
+        again = self.submit(job_id, proposal)
+        self.assertEqual(again.get("approval_input_hash"), waiting["approval_input_hash"], again)
+        self.approve("G6", waiting["approval_input_hash"])
+        done = self.submit(job_id, proposal)
+        self.assertNotEqual(done.get("reason_code"), "PERSISTENCE_SECRET_REJECTED", done)
+        self.assertEqual(self.orch.state.events(self.run_id)[-1]["state"], "PLAN", done)
+        saved = self.orch.artifacts.latest_phase(self.run_id, "DIAGNOSE")["envelope"]["content"]
+        self.assertEqual(saved, stored)
+
     def test_rejected_source_review_can_be_diagnosed_without_fake_pipeline_ids(self):
         self.finish_diagnosis(self.review_failure())
 
@@ -140,6 +162,16 @@ class DiagnosisContractTests(unittest.TestCase):
         self.assertEqual(validate_named_schema(proposal, "diagnosis"), [])
         for field, bad in [("hypothesis", None), ("repair_plan", [])]:
             self.assertTrue(validate_named_schema({**proposal, field: bad}, "diagnosis"))
+
+    def test_environment_failure_never_authorizes_business_repair(self):
+        proposal = specialized_examples()["diagnosis"]
+        for classification in (
+            "ENVIRONMENT_FAILURE", "ENV_UNSATISFIED", "ENV_TRANSIENT",
+            "JOB_PARAMETER_OVERRIDE_UNSUPPORTED", "COMPILE_ONLY_TRIGGER_UNSUPPORTED",
+        ):
+                    candidate = {**proposal, "classification": classification, "route": "REPAIR"}
+                    candidate.pop("repair_scope", None)
+                    self.assertTrue(validate_named_schema(candidate, "diagnosis"))
 
 
 if __name__ == "__main__":

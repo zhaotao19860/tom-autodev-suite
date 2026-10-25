@@ -35,6 +35,14 @@ BGW tests must assert the stable externally observable gateway/API/protocol boun
 
 Read [`references/runtime-topology.md`](references/runtime-topology.md) before diagnosing or continuing a BGW iPipe product-case stage. It names the live client/BGW/RS topology, associated logs, version and counter inspection, and the `P0新case回归` parameter map (`get_bgw_test_case`, `get_bgwagent`). That stage updates client `bgw_auto` and `tool/bgwagent` only; the server BGW binary is replaced by earlier compile/regression stages.
 
+Empty `manualParams` does not mean no job inputs. `get_bgwagent` can inherit an upstream
+static default. Resolve it from the run's frozen changed status: unchanged uses target
+branch BranchPipeline successful release; changed uses owned exact-candidate ChangePipeline
+compile, with verifiable revision/branch and download. Require a proven job override
+contract without changing the external template; unsupported override or compile-only
+trigger blocks explicitly. Never report `params={}` as dynamic resolution or a fixed old
+node as this run's product.
+
 ## Verification Contract
 
 The BGW project profile must map each task to business revisions, product-test revision,

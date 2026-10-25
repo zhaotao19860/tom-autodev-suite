@@ -73,8 +73,17 @@ class StateSpec:
 #   REVIEW/SUBMIT -> WORKSPACE: a PASS submits that task immediately; the CR can land
 #     while later DAG nodes are open, so the frontier rebinds instead of running IPIPE
 #     over a half-written requirement.
-#   DIAGNOSE -> PLAN: only for a CODE_ONLY repair (spec + DAG still hold), decided by
-#     phase_protocol._completion_target(); a spec/scope repair re-enters at SPEC.
+#   DIAGNOSE -> IMPLEMENT: a CODE_ONLY repair with an unchanged approved Plan can
+#     reuse that Plan and go straight back to implementation; the repair still
+#     produces a new Change Set and must pass Review/G5 again.
+#   DIAGNOSE -> PLAN: a CODE_ONLY repair that needs its Plan regenerated (or an
+#     older run without a reusable Plan), decided by phase_protocol._completion_target();
+#     a spec/scope repair re-enters at SPEC.
+#   DIAGNOSE -> IPIPE: a controlled re-build only (`ipipe-rebuild`). The compile product
+#     of the build that failed is no longer downloadable, so no stage of that build can be
+#     re-run; the same CR revisions are built again under a G8 bound to the original
+#     build, the attempt and the reason, and the run re-enters IPIPE bound to the new
+#     build. No code, Spec or Plan changes; the pending DIAGNOSE job is superseded.
 #   DIAGNOSE -> GRILL: a requirement the user changed after G1. The decision log is the
 #     authority every later phase derives from, so a change that skips it is re-derived
 #     away by the next SPEC/PLAN (BGW-1995 lost "drop exact c2s_mss equality" this way).
@@ -148,7 +157,9 @@ STATES: dict[str, StateSpec] = {
         registry="phase", skill="tom-diagnose", schema="diagnosis", output_gate="G6",
         predecessor=("REVIEW", "IPIPE", "IMPLEMENT", "PLAN"), envelope_revisions=True,
         title="07-diagnosis", side_effects=_SKILL_SIDE_EFFECTS,
-        transitions=frozenset({"GRILL", "SPEC", "PLAN", "ARCHITECTURE_REVIEW", "STOPPED"}),
+        transitions=frozenset({
+            "GRILL", "SPEC", "PLAN", "IMPLEMENT", "ARCHITECTURE_REVIEW", "IPIPE", "STOPPED",
+        }),
     ),
     "RELEASE": StateSpec(
         registry="controller", controller="release",
@@ -180,6 +191,7 @@ TRANSITION_REQUIREMENTS: dict[tuple[str, str], tuple[tuple[str, ...], str | None
     ("IMPLEMENT", "DIAGNOSE"): (("producer-block-report", "task-plan"), None),
     ("PLAN", "DIAGNOSE"): (("producer-conflict", "task-dag"), None),
     ("ENVIRONMENT_BLOCKED", "IPIPE"): (("submission",), "G8"),
+    ("DIAGNOSE", "IPIPE"): (("ipipe-rebuild",), "G8"),
 }
 
 # Human-readable (subject, effect) per gate, for approval cards.
@@ -192,7 +204,8 @@ GATE_LABELS: dict[str, tuple[str, str]] = {
     "G5": ("候选改动集：业务 diff 与测试 diff", "进入标准与 Spec 双轴 Review"),
     "G6": ("诊断结论与修复方向", "按修复方向执行修复"),
     "G7": ("提交 iCode 并触发 iPipe 的固定版本", "提交 CR，触发允许的流水线"),
-    "G8": ("重跑失败的流水线阶段", "按当前远程证据重跑该阶段"),
+    "G8": ("重跑失败的流水线阶段，或为产物已失效的构建重新触发整条流水线",
+           "按当前远程证据重跑该阶段，或对同一 CR 版本重新构建"),
     "G9": ("正式发布", "执行发布阶段"),
     "G10": ("控制面优化建议", "应用优化建议"),
     "WORKFLOW_SPEC_MIGRATION": (

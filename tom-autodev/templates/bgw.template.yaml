@@ -82,6 +82,14 @@ knowledge_sources:
   search_scope: bgwagent graph impact analysis
 
 pipeline_profile:
+  product_policy: frozen_changeset_branch_release_or_exact_change_compile
+  # These are mappings, not invented platform declarations or API capabilities.
+  # Inspect job/build declarations and upstream inputs even when manualParams is empty.
+  # Never edit the external pipeline template to make an override work.
+  stage_parameter_mapping:
+    P0新case回归:
+      get_bgw_test_case: baidu/nsiqa/x86bgw
+      get_bgwagent: baidu/sysip/bgwagent
   pipeline_id: __PIPELINE_ID__
   allowed_parameters:
   - AGILE_COMPILE_BRANCH

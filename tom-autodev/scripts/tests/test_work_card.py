@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from state_store import StateStore
-from work_card import refresh
+from work_card import refresh, refresh_all
 
 
 class _Orchestrator:
@@ -95,6 +95,26 @@ class WorkCardTests(unittest.TestCase):
         self.assertIn("bgwagent=SUCCESS", self.client.sent[0]["lines"][3])
         self.assertIn("x86bgw=MONITORING", self.client.sent[0]["lines"][3])
         self.assertIn("bgwagent,x86bgw", self.client.sent[0]["lines"][5])
+
+    def test_refresh_all_is_silent_for_finished_runs(self):
+        self.state.latest_states = lambda: [
+            {"run_id": "stopped-drift", "state": "STOPPED"},
+            {"run_id": "stopped-same", "state": "STOPPED"},
+            {"run_id": "live", "state": "IPIPE"},
+        ]
+        drift = {"ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT", "run_id": "stopped-drift"}
+        self.progress.stop()
+        with patch("work_card.build_progress", side_effect=lambda _o, rid: {**self.current, "run_id": rid}), \
+             patch("work_card.execution_guard",
+                   side_effect=lambda _s, rid: drift if rid == "stopped-drift" else None):
+            first = refresh_all(self.orchestrator, self.client)
+            second = refresh_all(self.orchestrator, self.client)
+        self.progress.start()
+        self.assertEqual([(i["run_id"], i["reason_code"]) for i in first if i["run_id"] != "stopped-same"],
+                         [("live", "WORK_CARD_UPDATED")])
+        # Second tick: nothing changed anywhere, so finished runs report nothing.
+        self.assertEqual([i["run_id"] for i in second], ["live"])
+        self.assertEqual(second[0]["reason_code"], "WORK_CARD_UNCHANGED")
 
     def test_missing_group_does_not_send(self):
         with patch("work_card.group_id_for_run", return_value=None):

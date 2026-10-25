@@ -1,7 +1,10 @@
 import hashlib
 import json
+import re
+import sqlite3
 import sys
 import tempfile
+import time
 import threading
 import unittest
 from typing import Any
@@ -155,13 +158,38 @@ class FakeApi:
         self.calls.append(("builds_by_revision", module, revision, pipeline_id))
         return list(self.candidates)
 
+    # Like the platform, a stage that is executing (or has executed) reports when it
+    # started. A fixture stage that omits `startTime` is stamped the first time it is
+    # read in that status, and keeps the stamp while the status stays the same, so a
+    # stage that was already SUCCESS/RUNNING before a rerun intent reads as old while a
+    # status change after the POST reads as a new start.
+    _STAMPED_STATUSES = {"RUNNING", "SKIPPING", "BUILDING", "EXECUTING", "SUCC", "SUCCESS", "SUCCEEDED"}
+
+    def _stamp(self, stages):
+        if not hasattr(self, "_start_stamps"):
+            self._start_stamps = {}
+        stamped = []
+        for stage in stages or []:
+            item = dict(stage)
+            status = str(item.get("status") or "").upper()
+            if "startTime" not in item and status in self._STAMPED_STATUSES:
+                key = (str(item.get("id") or item.get("stageBuildId") or ""), status)
+                if key not in self._start_stamps:
+                    self._start_stamps[key] = int(time.time() * 1000)
+                item["startTime"] = self._start_stamps[key]
+            stamped.append(item)
+        return stamped
+
     def build_by_id(self, build_id, *, module=None, revision=None, pipeline_id=None):
         self.calls.append(("build_by_id", build_id))
-        return dict(self.builds[build_id])
+        record = dict(self.builds[build_id])
+        if isinstance(record.get("stageBuilds"), list):
+            record["stageBuilds"] = self._stamp(record["stageBuilds"])
+        return record
 
     def pipeline_stage_info(self, build_id):
         self.calls.append(("pipeline_stage_info", build_id))
-        return [dict(stage) for stage in self.stages.get(build_id, [])]
+        return self._stamp(self.stages.get(build_id, []))
 
     def failed_jobs(self, build_id):
         self.calls.append(("failed_jobs", build_id))
@@ -494,7 +522,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(first["reason_code"], "OK")
         self.assertEqual(replay["stage_build_id"], "stage-1")
         self.assertEqual(conflict["reason_code"], "RERUN_CONFLICT")
-        self.assertEqual(forged["reason_code"], "RERUN_CONFLICT")
+        self.assertEqual(forged["reason_code"], "APPROVAL_REQUIRED")
         self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
 
     def test_a_log_link_missing_from_the_listing_is_taken_from_the_stage_detail(self):
@@ -677,6 +705,119 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertNotEqual(with_parameters["input_hash"], printed["input_hash"])
         self.assertEqual(executed["reason_code"], "OK")
 
+    def test_ack_without_stage_identity_is_confirmed_by_get_and_never_reposted(self):
+        failed = {"id": "stage-1", "stageName": "unit", "status": "PENDING_FOR_USER"}
+        self.bind_build(status="RUNNING", stages=[failed])
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        hashed = self.runtime.rerun_input_hash("stage-1")
+        approval = approved(self.ledger, "G8", hashed["input_hash"])
+        self.api.rerun_result = {"accepted": True}
+        self.api.on_rerun = lambda: self.api.builds["build-1"].update(
+            stageBuilds=[{"id": "stage-1", "stageName": "unit", "status": "SKIPPING"}])
+        result = self.runtime.rerun("stage-1", approval)
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(self.runtime.reconcile_rerun("stage-1", approval)["ok"])
+        self.assertEqual(sum(c[0] == "manual_execute_stage" for c in self.api.calls), 1)
+        observations = self.state.external_observations("run-1")
+        self.assertEqual(observations[-1]["observation"]["response_keys"], ["accepted"])
+
+    def test_waiting_after_ack_stays_unknown_until_controlled_get_recovery(self):
+        manual = {"id": "stage-1", "stageName": "unit", "status": "PENDING_FOR_USER"}
+        self.bind_build(status="RUNNING", stages=[manual])
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        approval = approved(self.ledger, "G8", self.runtime.rerun_input_hash("stage-1")["input_hash"])
+        self.api.rerun_result = {}
+        self.api.on_rerun = lambda: self.api.builds["build-1"].update(
+            stageBuilds=[{"id": "stage-1", "stageName": "unit", "status": "WAITTING"}])
+        self.assertEqual(self.runtime.rerun("stage-1", approval)["reason_code"], "RERUN_RESPONSE_INVALID")
+        self.api.builds["build-1"]["stageBuilds"][0]["status"] = "RUNNING"
+        self.assertEqual(self.runtime.reconcile_rerun(
+            "stage-1", {**approval, "input_hash": "wrong"})["reason_code"], "RERUN_CONFLICT")
+        self.assertTrue(self.runtime.reconcile_rerun("stage-1", approval)["ok"])
+        self.assertEqual(sum(c[0] == "manual_execute_stage" for c in self.api.calls), 1)
+
+    def test_rerun_response_parser_accepts_nested_stage_but_not_boolean_id(self):
+        from clients.ipipe_runtime import _rerun_response_stage
+        self.assertEqual(_rerun_response_stage(
+            {"entities": {"stageBuild": {"stageBuildId": 123}}}), "123")
+        for response in ({}, {"id": True}, {"entities": True}, True):
+            self.assertEqual(_rerun_response_stage(response), "")
+
+    def test_failed_stage_recovery_requires_start_after_claim(self):
+        from clients.ipipe_runtime import _rerun_started
+        self.assertFalse(_rerun_started({"status": "FAIL", "start_time": 1000},
+                                       since="2026-10-12T09:52:49.830544+00:00"))
+        self.assertTrue(_rerun_started({"status": "FAIL", "start_time": 1791798770000},
+                                      since="2026-10-12T09:52:49.830544+00:00"))
+
+    def test_a_status_without_a_new_start_time_never_proves_a_rerun_started(self):
+        # A-01: SUCCESS/RUNNING alone is not evidence; the start must postdate the intent.
+        from clients.ipipe_runtime import _rerun_started
+        since = "2026-10-12T09:52:49+00:00"
+        claimed_ms = int(datetime.fromisoformat(since).timestamp() * 1000)
+        for status in ("SUCC", "RUNNING"):
+            with self.subTest(status=status):
+                self.assertFalse(_rerun_started({"status": status}, since=since))
+                self.assertFalse(_rerun_started(
+                    {"status": status, "start_time": claimed_ms - 3600_000}, since=since))
+                self.assertTrue(_rerun_started(
+                    {"status": status, "start_time": claimed_ms + 5_000}, since=since))
+
+    def test_a_stage_already_successful_before_the_intent_is_not_receipted(self):
+        # A-01 trigger 1: a silent-case SUCC stage is re-run; the POST times out and the
+        # stage still reads SUCC with its old start time. That is the old run, not this one.
+        old_start = int((datetime.now(timezone.utc) - timedelta(hours=2)).timestamp() * 1000)
+        succeeded = {
+            "id": "stage-1", "stageName": "P0新case回归", "status": "SUCC", "startTime": old_start,
+            "jobBuildBeans": [{"id": "job-1", "jobName": "P0新功能调试", "status": "SUCC",
+                               "logs": [{"url": "https://logonline.example/silent"}]}],
+        }
+        self.bind_build(status="SUCCESS", stages=[succeeded])
+        self.api.stages["build-1"] = [succeeded]
+        runtime = pinned_runtime(
+            self.state, self.ledger, self.api,
+            log_reader=lambda url: {"ok": True, "success_ratios": [0.0], "failed_cases": ["c"]},
+        )
+        runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        approval = approved(self.ledger, "G8", runtime.rerun_input_hash("stage-1")["input_hash"])
+        self.api.rerun_result = TimeoutError("unknown")
+
+        first = runtime.rerun("stage-1", approval)
+        again = runtime.reconcile_rerun("stage-1", approval)
+
+        self.assertEqual(first["reason_code"], "RERUN_RESULT_UNKNOWN", first)
+        self.assertEqual(again["reason_code"], "QUERY_REQUIRED", again)
+        self.assertIsNone(self.state.result_by_idempotency_key(
+            f"ipipe.rerun:run-1:stage-1:{approval['approval_id']}"))
+        self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
+
+    def test_a_successor_receipted_by_an_earlier_attempt_is_not_this_attempts_evidence(self):
+        # A-01 trigger 2: attempt 1 re-executed stage-1 into stage-2 and was receipted.
+        # Attempt 2's POST is lost; stage-2 is still RUNNING. It belongs to attempt 1.
+        failed = {"id": "stage-1", "stageConfId": 7, "stageName": "unit", "status": "FAIL"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        first_approval = approved(self.ledger, "G8", self.runtime.rerun_input_hash("stage-1")["input_hash"])
+        successor = {"id": "stage-2", "stageConfId": 7, "stageName": "unit", "status": "RUNNING",
+                     "startTime": int(time.time() * 1000) + 1000}
+        self.api.rerun_result = {"stageBuildId": "stage-2", "status": "RUNNING"}
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[failed, successor])
+        self.api.stages["build-1"] = [failed, successor]
+        first = self.runtime.rerun("stage-1", first_approval)
+        self.assertEqual(first["started_stage_build_id"], "stage-2", first)
+
+        options = {"parameters": {"k": "v"}}
+        second_approval = approved(
+            self.ledger, "G8", self.runtime.rerun_input_hash("stage-1", **options)["input_hash"])
+        self.api.rerun_result = TimeoutError("unknown")
+        second = self.runtime.rerun("stage-1", second_approval, **options)
+        settled = self.runtime.reconcile_rerun("stage-1", second_approval)
+
+        self.assertEqual(second["reason_code"], "RERUN_RESULT_UNKNOWN", second)
+        self.assertEqual(settled["reason_code"], "QUERY_REQUIRED", settled)
+        self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 2)
+
     def test_rediscovering_an_owned_build_keeps_the_stored_binding(self):
         self.bind_build(status="RUNNING")
         stored = self.state.idempotency_result("ipipe.build-binding:run-1:build-1")
@@ -749,6 +890,352 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(reconciled["reason_code"], "OK")
         self.assertEqual(replay, reconciled)
         self.assertEqual(sum(call[0] == "manual_execute_stage" for call in self.api.calls), 1)
+
+    # --- unknown rerun outcomes keep a redacted shape; reconcile names what it saw ---
+
+    def _observations(self, operation):
+        return [
+            item["observation"] for item in self.state.external_observations("run-1")
+            if item["observation"].get("operation") == operation
+        ]
+
+    def test_unknown_rerun_persists_redacted_response_shape_without_secrets(self):
+        self._failed_stage()
+        approval = self._g8()
+        self.api.rerun_result = IpipeTransportError(
+            "PIPELINE_TRANSIENT", status=502, transient=True,
+            diagnostic={
+                "http_status": 502, "body_truncated": False,
+                "body_excerpt": '{"code":502,"msg":"upstream https://irepo.example/a?sig=SIGNED failed"}',
+            },
+        )
+        result = self.runtime.rerun("stage-1", approval)
+        self.assertEqual(result["reason_code"], "RERUN_RESULT_UNKNOWN")
+        (observed,) = self._observations("ipipe.rerun.write_error")
+        self.assertEqual(observed["http_status"], 502)
+        self.assertEqual(observed["body_keys"], ["code", "msg"])
+        self.assertEqual(observed["business_code"], 502)
+        text = json.dumps(observed)
+        self.assertNotIn("SIGNED", text)
+        self.assertNotIn("https://", text)
+
+    def test_unknown_rerun_from_a_timeout_records_only_the_error_type(self):
+        self._failed_stage()
+        self.api.rerun_result = TimeoutError("slow")
+        self.runtime.rerun("stage-1", self._g8())
+        (observed,) = self._observations("ipipe.rerun.write_error")
+        self.assertEqual(observed, {"operation": "ipipe.rerun.write_error", "error_type": "TimeoutError",
+                                    "before_dispatch": False})
+
+    def test_transport_keeps_the_shape_of_an_unparseable_success_body(self):
+        def sender(method, url, headers, body, timeout, limit):
+            return {"status": 200, "body": "plain text ok, token=abc"}
+
+        transport = IpipeHttpTransport(token="secret-value", sender=sender)
+        with self.assertRaises(IpipeTransportError) as caught:
+            transport.request("POST", "/write", body={})
+        self.assertEqual(caught.exception.reason_code, "IPIPE_RESPONSE_INVALID")
+        self.assertEqual(caught.exception.diagnostic["http_status"], 200)
+        self.assertEqual(caught.exception.diagnostic["response_type"], "non_json_text")
+        self.assertNotIn("abc", json.dumps(caught.exception.diagnostic))
+
+    def test_reconcile_separates_unknown_from_observed_not_started(self):
+        self._failed_stage()
+        approval = self._g8()
+        self.api.rerun_result = TimeoutError("unknown")
+        self.assertEqual(self.runtime.rerun("stage-1", approval)["reason_code"], "RERUN_RESULT_UNKNOWN")
+        within_grace = self.runtime.reconcile_rerun("stage-1", approval)
+        self.assertEqual(within_grace["reason_code"], "QUERY_REQUIRED")
+        self.runtime.clock = lambda: datetime.now(timezone.utc) + timedelta(seconds=900)
+        unproven = self.runtime.reconcile_rerun("stage-1", approval)
+        self.assertEqual(unproven["reason_code"], "RERUN_NOT_STARTED_UNPROVEN")
+        self.assertIs(unproven["abandon_eligible"], True)
+        self.assertIs(unproven["rejection_proven"], False)
+        self.assertIs(unproven["retry_allowed"], False)
+        self.assertEqual(unproven["evidence"]["stage_status"], "FAIL")
+        self.assertEqual(len(self._observations("ipipe.rerun.reconcile")), 1)
+        self.assertEqual(len(self._posts()), 1)
+
+    def test_abandoned_intent_replays_for_old_g8_and_unblocks_a_new_binding(self):
+        self._failed_stage()
+        approval = self._g8()
+        self.api.rerun_result = TimeoutError("unknown")
+        first = self.runtime.rerun("stage-1", approval)
+        self.runtime.clock = lambda: datetime.now(timezone.utc) + timedelta(seconds=900)
+        self.assertEqual(
+            self.runtime.reconcile_rerun("stage-1", approval)["reason_code"], "RERUN_NOT_STARTED_UNPROVEN"
+        )
+        options = {"parameters": {"k": "v"}}
+        blocked = self.runtime.rerun("stage-1", self._g8(**options), **options)
+        self.assertEqual(blocked["reason_code"], "QUERY_REQUIRED")
+        self.state.abandon_intent(first["intent_id"], "no start observed after grace", "tester")
+        # The same binding maps to the same approval id, so the old G8 only replays the
+        # abandonment; re-initiating needs a genuinely different approved binding.
+        replay = self.runtime.rerun("stage-1", approval)
+        self.assertEqual(replay["reason_code"], "INTENT_ABANDONED")
+        self.api.rerun_result = {"stageBuildId": "stage-1", "status": "RUNNING"}
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        started = self.runtime.rerun("stage-1", self._g8(**options), **options)
+        self.assertEqual(started["reason_code"], "OK")
+        self.assertEqual(len(self._posts()), 2)
+
+    # --- a stage may be re-run again under a new G8; replays and unknowns stay safe ---
+
+    def _failed_stage(self):
+        failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        )
+
+    def _posts(self):
+        return [call for call in self.api.calls if call[0] == "manual_execute_stage"]
+
+    def _g8(self, **options):
+        return approved(self.ledger, "G8", self.runtime.rerun_input_hash("stage-1", **options)["input_hash"])
+
+    def _finish_as_failed(self):
+        self.api.builds["build-1"] = build(
+            status="FAIL", stages=[{"id": "stage-1", "stageName": "unit", "status": "FAIL"}]
+        )
+
+    def test_same_stage_can_be_rerun_again_under_a_new_g8_with_new_parameters(self):
+        self._failed_stage()
+        first_approval = self._g8()
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        first = self.runtime.rerun("stage-1", first_approval)
+        self.assertEqual(first["reason_code"], "OK")
+
+        self._finish_as_failed()
+        new_parameters = {"test_cr_id": "122402145"}
+        second_approval = self._g8(parameters=new_parameters)
+        self.assertNotEqual(second_approval["approval_id"], first_approval["approval_id"])
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        second = self.runtime.rerun("stage-1", second_approval, parameters=new_parameters)
+
+        self.assertEqual(second["reason_code"], "OK", second)
+        posts = self._posts()
+        self.assertEqual(len(posts), 2)
+        self.assertEqual(posts[0][2], {})
+        self.assertEqual(posts[1][2], new_parameters)
+        keys = {item["idempotency_key"] for item in self.state.all_intents("run-1")
+                if item["operation"] == "ipipe.rerun"}
+        self.assertEqual(keys, {
+            f"ipipe.rerun:run-1:stage-1:{first_approval['approval_id']}",
+            f"ipipe.rerun:run-1:stage-1:{second_approval['approval_id']}",
+        })
+
+    def test_replaying_either_authorisation_never_posts_again(self):
+        self._failed_stage()
+        first_approval = self._g8()
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        first = self.runtime.rerun("stage-1", first_approval)
+        self._finish_as_failed()
+        parameters = {"test_cr_id": "122402145"}
+        second_approval = self._g8(parameters=parameters)
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        second = self.runtime.rerun("stage-1", second_approval, parameters=parameters)
+
+        restarted = pinned_runtime(self.state, self.ledger, self.api)
+        self.assertEqual(restarted.rerun("stage-1", second_approval, parameters=parameters), second)
+        self.assertEqual(restarted.rerun("stage-1", first_approval), first)
+        self.assertEqual(restarted.reconcile_rerun("stage-1", first_approval), first)
+        self.assertEqual(restarted.reconcile_rerun("stage-1", second_approval), second)
+        self.assertEqual(len(self._posts()), 2)
+
+    def test_a_stage_continued_by_an_earlier_attempt_is_not_this_attempts_evidence(self):
+        # A-13(b): attempt 1 continued stage-1 in place (same id) and was receipted.
+        # Attempt 2's POST is lost; stage-1 still shows attempt 1's run. Its start is
+        # recent enough to pass the intent-time check, but it predates attempt 1's
+        # receipt, so it is not a new execution.
+        failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        first_approval = approved(self.ledger, "G8", self.runtime.rerun_input_hash("stage-1")["input_hash"])
+        started = int(time.time() * 1000) - 5000
+        running = {"id": "stage-1", "stageName": "unit", "status": "RUNNING", "startTime": started}
+        self.api.rerun_result = {"stageBuildId": "stage-1", "status": "RUNNING"}
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[running])
+        self.api.stages["build-1"] = [running]
+        first = self.runtime.rerun("stage-1", first_approval)
+        self.assertEqual(first["reason_code"], "OK", first)
+
+        options = {"parameters": {"k": "v"}}
+        second_approval = approved(
+            self.ledger, "G8", self.runtime.rerun_input_hash("stage-1", **options)["input_hash"])
+        self.api.rerun_result = TimeoutError("unknown")
+        second = self.runtime.rerun("stage-1", second_approval, **options)
+        settled = self.runtime.reconcile_rerun("stage-1", second_approval)
+        self.assertEqual(second["reason_code"], "RERUN_RESULT_UNKNOWN", second)
+        self.assertEqual(settled["reason_code"], "QUERY_REQUIRED", settled)
+
+        # A later execution of the same stage id (started after attempt 1's receipt) is.
+        later = {**running, "startTime": int(time.time() * 1000) + 2000}
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[later])
+        self.api.stages["build-1"] = [later]
+        self.assertEqual(self.runtime.reconcile_rerun("stage-1", second_approval)["reason_code"], "OK")
+
+    def test_two_g8s_for_one_stage_interleaved_post_at_most_once(self):
+        # A-05: attempt B runs completely while attempt A sits between its "no unknown
+        # prior" check and its claim. Only one of them may reach the platform.
+        self._failed_stage()
+        first_approval = self._g8()
+        parameters = {"test_cr_id": "122402145"}
+        second_approval = self._g8(parameters=parameters)
+        self.api.rerun_result = TimeoutError("unknown")
+        other = pinned_runtime(self.state, self.ledger, self.api)
+        inner = {}
+        original = self.runtime._rerun_dispatch
+
+        def interleave(stage_build_id, call_parameters):
+            if "second" not in inner:
+                inner["second"] = other.rerun("stage-1", second_approval, parameters=parameters)
+            return original(stage_build_id, call_parameters)
+
+        with patch.object(self.runtime, "_rerun_dispatch", side_effect=interleave):
+            first = self.runtime.rerun("stage-1", first_approval)
+
+        self.assertEqual(inner["second"]["reason_code"], "RERUN_RESULT_UNKNOWN", inner["second"])
+        self.assertEqual(first["reason_code"], "QUERY_REQUIRED", first)
+        self.assertEqual(first["intent_id"], inner["second"]["intent_id"])
+        self.assertEqual(len(self._posts()), 1)
+
+    def test_two_concurrent_g8s_for_one_stage_post_at_most_once(self):
+        self._failed_stage()
+        approvals = [self._g8(), self._g8(parameters={"test_cr_id": "122402145"})]
+        options = [{}, {"parameters": {"test_cr_id": "122402145"}}]
+        self.api.rerun_result = TimeoutError("unknown")
+        barrier = threading.Barrier(2)
+        results = [None, None]
+
+        def attempt(index):
+            runtime = pinned_runtime(self.state, self.ledger, self.api)
+            original = runtime._rerun_dispatch
+
+            def gate(*args):
+                barrier.wait(timeout=10)
+                return original(*args)
+
+            runtime._rerun_dispatch = gate
+            results[index] = runtime.rerun("stage-1", approvals[index], **options[index])
+
+        threads = [threading.Thread(target=attempt, args=(i,)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(len(self._posts()), 1, results)
+        self.assertEqual(sorted(r["reason_code"] for r in results),
+                         ["QUERY_REQUIRED", "RERUN_RESULT_UNKNOWN"])
+
+    def test_cli_rerun_runs_under_the_run_lease(self):
+        # A-05: the CLI write path takes the same per-run lease as the worker.
+        import orchestrator as controller
+        from worker_driver import _WORKER_LEASE_PREFIX
+        with tempfile.TemporaryDirectory() as root:
+            orch = controller.Orchestrator(Path(root))
+            key = f"{_WORKER_LEASE_PREFIX}run-1"
+            calls = []
+            held = orch.recovery.locks.acquire(key, "worker-token", 300)
+            self.assertTrue(held["acquired"])
+            refused = controller._under_run_lease(orch, "run-1", lambda: calls.append(1) or {"ok": True})
+            orch.recovery.locks.release(key, "worker-token")
+            allowed = controller._under_run_lease(orch, "run-1", lambda: calls.append(2) or {"ok": True})
+
+        self.assertEqual(refused["reason_code"], "WORKER_LEASE_HELD")
+        self.assertEqual(allowed, {"ok": True})
+        self.assertEqual(calls, [2])
+
+    def test_an_unreceipted_earlier_attempt_blocks_a_new_rerun_with_query_required(self):
+        self._failed_stage()
+        first_approval = self._g8()
+        self.api.rerun_result = TimeoutError("unknown")
+        first = self.runtime.rerun("stage-1", first_approval)
+        self.assertEqual(first["reason_code"], "RERUN_RESULT_UNKNOWN")
+
+        parameters = {"test_cr_id": "122402145"}
+        second_approval = self._g8(parameters=parameters)
+        blocked = self.runtime.rerun("stage-1", second_approval, parameters=parameters)
+
+        self.assertEqual(blocked["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(blocked["intent_id"], first["intent_id"])
+        self.assertEqual(len(self._posts()), 1)
+        self.assertEqual(
+            self.runtime.reconcile_rerun("stage-1", second_approval)["reason_code"], "RERUN_CONFLICT"
+        )
+        # The unknown attempt can still be settled with GET only, then a new run is allowed.
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        self.assertTrue(self.runtime.reconcile_rerun("stage-1", first_approval)["ok"])
+        self._finish_as_failed()
+        self.api.rerun_result = {"stageBuildId": "stage-1", "status": "RUNNING"}
+        self.api.on_rerun = lambda: self.api.builds["build-1"].update(
+            stageBuilds=[{"id": "stage-1", "stageName": "unit", "status": "RUNNING"}])
+        again = self.runtime.rerun("stage-1", second_approval, parameters=parameters)
+        self.assertEqual(again["reason_code"], "OK", again)
+        self.assertEqual(len(self._posts()), 2)
+
+    def test_legacy_keyed_history_is_a_prior_attempt_and_stays_reconcilable(self):
+        self._failed_stage()
+        legacy_approval = self._g8()
+        binding = self.runtime.rerun_input_hash("stage-1")["binding"]
+        payload = {**binding, "input_hash": legacy_approval["input_hash"],
+                   "approval_id": legacy_approval["approval_id"]}
+        legacy_key = "ipipe.rerun:run-1:stage-1"
+        claim = self.state.claim_intent("run-1", "ipipe.rerun", legacy_key, payload)
+        self.assertEqual(claim["status"], "CLAIMED")
+
+        # Pending legacy claim: reconcile-only works under its own approval (GET only),
+        # and a new authorisation is refused until it is settled.
+        parameters = {"test_cr_id": "122402145"}
+        new_approval = self._g8(parameters=parameters)
+        self.assertEqual(
+            self.runtime.rerun("stage-1", new_approval, parameters=parameters)["reason_code"],
+            "QUERY_REQUIRED",
+        )
+        self.assertEqual(
+            self.runtime.reconcile_rerun("stage-1", legacy_approval)["reason_code"], "QUERY_REQUIRED"
+        )
+        self.assertEqual(self._posts(), [])
+
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        settled = self.runtime.reconcile_rerun("stage-1", legacy_approval)
+        self.assertTrue(settled["ok"], settled)
+        self.assertEqual(self.runtime.rerun("stage-1", legacy_approval), settled)
+        self.assertEqual(self._posts(), [])
+
+        # The history is preserved and a fresh authorisation runs under its own key.
+        self._finish_as_failed()
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        result = self.runtime.rerun("stage-1", new_approval, parameters=parameters)
+        self.assertEqual(result["reason_code"], "OK", result)
+        self.assertEqual(len(self._posts()), 1)
+        self.assertIsNotNone(self.state.result_by_idempotency_key(legacy_key))
+        self.assertEqual(self.runtime.rerun("stage-1", legacy_approval), settled)
+
+    def test_wrong_hash_or_foreign_run_approval_is_refused_after_a_completed_rerun(self):
+        self._failed_stage()
+        first_approval = self._g8()
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        self.assertEqual(self.runtime.rerun("stage-1", first_approval)["reason_code"], "OK")
+        self._finish_as_failed()
+        parameters = {"test_cr_id": "122402145"}
+        good = self.runtime.rerun_input_hash("stage-1", parameters=parameters)["input_hash"]
+
+        wrong_hash = approved(self.ledger, "G8", "f" * 64)
+        foreign = approved(self.ledger, "G8", good, run_id="run-2")
+        for supplied in (
+            {"approval_id": wrong_hash["approval_id"], "input_hash": good},
+            wrong_hash,
+            foreign,
+            {"approval_id": foreign["approval_id"], "input_hash": good},
+            dict(first_approval, input_hash=good),
+        ):
+            result = self.runtime.rerun("stage-1", supplied, parameters=parameters)
+            self.assertFalse(result["ok"], supplied)
+        self.assertEqual(len(self._posts()), 1)
 
     def test_monitor_and_release_restore_durable_build_ownership_after_restart(self):
         self.bind_build(status="SUCCESS")
@@ -1357,6 +1844,328 @@ class FailureSignatureTests(unittest.TestCase):
             "message": "request 87654321-dead-4ace-9abe-cba987654321 rejected"}])
         self.assertEqual(one, two)
 
+
+class _DeclaringApi(FakeApi):
+    """FakeApi that also serves the live pipeline configuration and a stage declaration."""
+
+    def __init__(self, configuration_stages, stage_conf_id=4875670):
+        super().__init__()
+        self.stage_conf_id = stage_conf_id
+        self.configuration_stages = configuration_stages
+        self.capability = {"supported": True, "evidence_ref": "fake", "contract_hash": "hash"}
+
+    def get_pipeline_by_id(self, pipeline_id, brief=True):
+        self.calls.append(("get_pipeline_by_id", pipeline_id))
+        return {**self.pipeline, "stages": self.configuration_stages}
+
+    def stage_job_override_capability(self):
+        return dict(self.capability)
+
+    def stage_detail(self, stage_id):
+        self.calls.append(("stage_detail", stage_id))
+        return {"entities": {
+            "stageBuild": {
+                "stageBuildId": stage_id, "pipelineBuildId": "build-1", "pipelineConfId": "pipe-1",
+                "stageConfId": self.stage_conf_id, "stageName": "unit",
+                "manualParams": None, "hasDynamicParams": False,
+            },
+            "realJobBuilds": [[{"jobConfId": 3}]],
+        }}
+
+
+def _own_stage_configuration(conf_id=4875670, up_stage_param=False):
+    return [{
+        "stageConfId": conf_id, "stageName": "unit",
+        "paramBeans": [
+            {"name": "get_bgw_test_case", "upStageParam": up_stage_param},
+            {"name": "get_bgwagent", "upStageParam": up_stage_param},
+        ],
+        "groupJobs": [[{"jobConfId": 3, "realJob": {"shellConf": {
+            "command": 'echo "${get_bgw_test_case} ${get_bgwagent}"'}}}]],
+    }]
+
+
+def _upstream_configuration(conf_id=4875670):
+    return [
+        {"stageConfId": 1, "paramBeans": [{"name": "get_bgwagent"}]},
+        {"stageConfId": conf_id, "stageName": "unit", "upstreamStageId": 1,
+         "paramBeans": [{"name": "get_bgw_test_case"}],
+         "groupJobs": [[{"jobConfId": 3, "realJob": {"shellConf": {
+             "command": 'echo "${get_bgw_test_case} ${get_bgwagent}"'}}}]]},
+    ]
+
+
+STAGE_PARAMETERS = {"get_bgw_test_case": "case", "get_bgwagent": "agent"}
+
+
+class StageOwnParameterRerunTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.state = StateStore(root / "state.sqlite")
+        self.ledger = ApprovalLedger(root / "approvals.sqlite")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def arrange(self, configuration_stages):
+        self.api = _DeclaringApi(configuration_stages)
+        self.runtime = pinned_runtime(self.state, self.ledger, self.api)
+        failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL", "stageConfId": 4875670}
+        item = build(status="FAIL", stages=[failed])
+        self.api.candidates = [item]
+        self.api.builds["build-1"] = item
+        self.assertEqual(self.runtime.discover(PROFILE, REVISIONS)["reason_code"], "OK")
+        self.api.stages["build-1"] = [failed]
+        self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+
+    def approval(self):
+        bound = self.runtime.rerun_input_hash("stage-1", parameters=STAGE_PARAMETERS)
+        self.assertEqual(bound["reason_code"], "OK", bound)
+        return approved(self.ledger, "G8", bound["input_hash"])
+
+    def posts(self):
+        return [call for call in self.api.calls if call[0] == "manual_execute_stage"]
+
+    def rerun_intents(self):
+        return [i for i in self.state.all_intents("run-1") if i["operation"] == "ipipe.rerun"]
+
+    def running(self):
+        self.api.builds["build-1"] = build(
+            status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+
+    def test_declaration_on_the_stage_itself_uses_manual_execute_stage_once(self):
+        self.arrange(_own_stage_configuration())
+        declaration = self.runtime.stage_parameter_names("stage-1")
+        self.assertTrue(declaration["requires_job_override"])
+        self.assertEqual(
+            {entry["scope"] for entries in declaration["declarations"].values() for entry in entries},
+            {"stage:4875670"})
+        approval = self.approval()
+        self.running()
+        result = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(result["reason_code"], "OK", result)
+        self.assertEqual(self.posts(), [("manual_execute_stage", "stage-1", STAGE_PARAMETERS)])
+        self.assertIsInstance(self.posts()[0][2], dict)
+
+    def test_inherited_or_upstream_flagged_declaration_stays_unsupported_without_post(self):
+        for label, configuration in (
+            ("upstream stage", _upstream_configuration()),
+            ("upStageParam", _own_stage_configuration(up_stage_param=True)),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                self.state = StateStore(Path(directory) / "state.sqlite")
+                self.ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")
+                self.arrange(configuration)
+                hashed = self.runtime.rerun_input_hash("stage-1", parameters=STAGE_PARAMETERS)
+                self.assertEqual(hashed["reason_code"], "JOB_PARAMETER_OVERRIDE_UNSUPPORTED")
+                result = self.runtime.rerun(
+                    "stage-1", {"approval_id": "any", "input_hash": "any"},
+                    parameters=dict(STAGE_PARAMETERS))
+                self.assertEqual(result["reason_code"], "JOB_PARAMETER_OVERRIDE_UNSUPPORTED")
+                self.assertEqual(self.posts(), [])
+                self.assertEqual(self.rerun_intents(), [])
+
+    def test_job_scope_names_fail_closed(self):
+        from stage_parameters import job_scope_names
+        own = {"names": ["a"], "declarations": {"a": [
+            {"source": "stage:7.paramBeans", "scope": "stage:7", "upStageParam": False},
+            {"source": "stage:7.inParamsMap", "scope": "stage:7"}]}}
+        self.assertEqual(job_scope_names(own, 7), [])
+        self.assertEqual(job_scope_names(own, 8), ["a"])
+        nested = {"names": ["a"], "declarations": {"a": [
+            {"source": "x.paramBeans", "scope": "stage:7.groupJobs[0][0]"}]}}
+        self.assertEqual(job_scope_names(nested, 7), ["a"])
+        self.assertEqual(job_scope_names({"names": ["a"]}, 7), ["a"])
+        self.assertEqual(job_scope_names({"names": ["a"], "declarations": {}}, 7), ["a"])
+
+    def test_missing_dispatch_method_is_a_local_error_that_claims_nothing(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self.running()
+        original = self.api.manual_execute_stage
+        self.api.manual_execute_stage = None
+        result = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(result["reason_code"], "RERUN_LOCAL_ERROR")
+        self.assertIs(result["retry_allowed"], False)
+        self.assertEqual(self.rerun_intents(), [])
+        self.assertEqual(self.state.pending_intents("run-1"), [])
+        # Nothing was claimed, so the same approval is still usable once the fault is gone.
+        self.api.manual_execute_stage = original
+        again = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(again["reason_code"], "OK", again)
+
+    def test_wrong_arity_dispatch_is_a_local_error_that_claims_nothing(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self.api.manual_execute_stage = lambda only_one: None
+        result = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(result["reason_code"], "RERUN_LOCAL_ERROR")
+        self.assertEqual(self.rerun_intents(), [])
+
+    def test_call_site_error_after_claim_is_closed_not_left_unknown(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self.api.manual_execute_stage = lambda only_one: None
+        # Defeat the pre-claim signature check to exercise the post-claim safeguard.
+        with patch("clients.ipipe_runtime.inspect.signature", side_effect=ValueError):
+            result = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(result["reason_code"], "RERUN_LOCAL_ERROR")
+        self.assertEqual(self.state.pending_intents("run-1"), [])
+        (intent,) = self.rerun_intents()
+        receipt = self.state.result_by_idempotency_key(intent["idempotency_key"])["receipt"]["response"]
+        self.assertEqual(receipt["reason_code"], "INTENT_ABANDONED")
+        (observed,) = [
+            o["observation"] for o in self.state.external_observations("run-1")
+            if o["observation"].get("operation") == "ipipe.rerun.write_error"]
+        self.assertEqual(observed["error_type"], "TypeError")
+
+    def _local_error_attempt(self, approval):
+        self.api.manual_execute_stage = lambda only_one: None
+        with patch("clients.ipipe_runtime.inspect.signature", side_effect=ValueError):
+            return self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+
+    def test_same_approval_may_be_reissued_once_after_a_proven_local_error(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        first = self._local_error_attempt(approval)
+        self.assertEqual(first["reason_code"], "RERUN_LOCAL_ERROR")
+        self.assertEqual(self.posts(), [])
+        del self.api.manual_execute_stage  # back to the class implementation
+        self.running()
+        again = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(again["reason_code"], "OK", again)
+        old, new = self.rerun_intents()
+        self.assertEqual(new["idempotency_key"], old["idempotency_key"] + ":retry-1")
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_second_local_error_is_final_for_that_approval(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self._local_error_attempt(approval)
+        self.assertEqual(self._local_error_attempt(approval)["reason_code"], "RERUN_LOCAL_ERROR")
+        del self.api.manual_execute_stage
+        third = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(third["reason_code"], "INTENT_ABANDONED")
+        self.assertEqual(len(self.rerun_intents()), 2)
+        self.assertEqual(self.posts(), [])
+
+    def test_manual_abandon_without_the_marker_stays_final(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self.api.rerun_result = AttributeError("raised inside the adapter")
+        self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        (intent,) = self.rerun_intents()
+        self.state.abandon_intent(intent["intent_id"], "gave up", "owner")
+        again = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(again["reason_code"], "INTENT_ABANDONED")
+        self.assertEqual(len(self.rerun_intents()), 1)
+
+    def test_an_error_raised_inside_the_adapter_cannot_be_abandoned_as_local(self):
+        # A-02: an AttributeError/TypeError raised deep in the client (here: inside
+        # manual_execute_stage, after the request may already have been sent) is not
+        # proof that nothing left. `--local-error-proven` is refused and the approval
+        # cannot be re-sent; only a plain abandonment (final) is possible.
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self.api.rerun_result = AttributeError("raised inside the adapter")
+        first = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        (intent,) = self.rerun_intents()
+        (observed,) = [
+            o["observation"] for o in self.state.external_observations("run-1")
+            if o["observation"].get("operation") == "ipipe.rerun.write_error"]
+
+        with self.assertRaisesRegex(ValueError, "LOCAL_ERROR_NOT_PROVEN"):
+            self.state.abandon_intent(intent["intent_id"], "local bug", "owner", local_error_proven=True)
+        self.api.rerun_result = {"stageBuildId": "stage-1", "status": "RUNNING"}
+        again = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+
+        self.assertEqual(first["reason_code"], "RERUN_RESULT_UNKNOWN", first)
+        self.assertIs(observed["before_dispatch"], False)
+        self.assertEqual(again["reason_code"], "QUERY_REQUIRED", again)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_a_call_site_error_is_proven_local_and_allows_exactly_one_reissue(self):
+        # A-02 counterpart: the call itself raised (wrong arity), so no request exists;
+        # the runtime records before_dispatch=true, closes the claim as proven local,
+        # and the same approval may be sent once.
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        first = self._local_error_attempt(approval)
+        (observed,) = [
+            o["observation"] for o in self.state.external_observations("run-1")
+            if o["observation"].get("operation") == "ipipe.rerun.write_error"]
+        del self.api.manual_execute_stage
+        self.running()
+        again = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+
+        self.assertEqual(first["reason_code"], "RERUN_LOCAL_ERROR")
+        self.assertIs(observed["before_dispatch"], True)
+        self.assertEqual(again["reason_code"], "OK", again)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_a_legacy_proven_abandonment_still_replays_its_completed_retry(self):
+        # A receipt written before `before_dispatch` existed (the real d63d8af4 case)
+        # keeps resolving to the retry already made under it; it grants no new one.
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self._local_error_attempt(approval)
+        del self.api.manual_execute_stage
+        self.running()
+        done = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(done["reason_code"], "OK", done)
+        with sqlite3.connect(self.state.database_path) as connection:
+            for (row_id, text) in connection.execute(
+                "SELECT rowid, observation_json FROM external_observations").fetchall():
+                value = json.loads(text)
+                value.pop("before_dispatch", None)
+                connection.execute(
+                    "UPDATE external_observations SET observation_json = ? WHERE rowid = ?",
+                    (json.dumps(value), row_id))
+
+        replay = pinned_runtime(self.state, self.ledger, self.api).rerun(
+            "stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+
+        self.assertEqual(replay, done)
+        self.assertEqual(len(self.posts()), 1)
+
+    def test_marker_without_a_recorded_observation_is_not_trusted(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self.api.rerun_result = TimeoutError("unknown")
+        self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        (intent,) = self.rerun_intents()
+        with self.assertRaisesRegex(ValueError, "LOCAL_ERROR_NOT_PROVEN"):
+            self.state.abandon_intent(intent["intent_id"], "x", "owner", local_error_proven=True)
+
+    def test_error_inside_the_client_after_dispatch_stays_unknown(self):
+        self.arrange(_own_stage_configuration())
+        approval = self.approval()
+        self.api.rerun_result = AttributeError("raised inside the adapter")
+        result = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(result["reason_code"], "RERUN_RESULT_UNKNOWN")
+        self.assertEqual(len(self.state.pending_intents("run-1")), 1)
+
+    def test_every_api_method_the_runtime_calls_exists_on_the_real_client(self):
+        import clients.ipipe_runtime as runtime_module
+        import product_policy
+
+        client_methods = {
+            name for name in dir(IpipeApiClient)
+            if not name.startswith("_") and callable(getattr(IpipeApiClient, name))}
+        # Reachable only after `compile_only_capability()` reports `supported`, which the
+        # real adapter never does (asserted below), so `compile_binding` raises first.
+        gated_by_compile_capability = {"reconcile_branch_compile", "trigger_branch_compile"}
+        for module in (runtime_module, product_policy):
+            referenced = set(re.findall(
+                r"\bapi\.([A-Za-z_]\w*)", Path(module.__file__).read_text(encoding="utf-8")))
+            self.assertGreater(len(referenced), 5, module.__name__)
+            missing = referenced - client_methods - gated_by_compile_capability
+            self.assertEqual(missing, set(), f"{module.__name__} calls API methods that do not exist")
+        self.assertFalse(IpipeApiClient(object(), current_user="u").compile_only_capability()["supported"])
+        self.assertNotIn("execute_stage_job_override",
+                         Path(runtime_module.__file__).read_text(encoding="utf-8"))
 
 if __name__ == "__main__":
     unittest.main()

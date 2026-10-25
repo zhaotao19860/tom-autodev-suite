@@ -39,8 +39,10 @@ _REVIEW = {
            "诊断的 classification / route / hypothesis / repair_direction / repair_plan；其余证据见材料包"),
     "G7": ("区分 iCode 提交与 iPipe 首次触发；精确版本、目标分支、模块和参数",
            "已归档 submit descriptor + Review，或当前模块 trigger binding；两者 hash 不通用"),
-    "G8": ("失败重跑或人工阶段继续；build/stage、真实失败原因及脱敏参数",
-           "当前阶段远程证据、case_failures、rerun binding 与参数来源"),
+    "G8": ("失败重跑或人工阶段继续；build/stage、真实失败原因及脱敏参数；"
+           "重新构建时看被替换的 build、产物探测结论、次数与原因",
+           "当前阶段远程证据、case_failures、rerun binding 与参数来源；"
+           "重新构建为 rebuild binding 与下载探测状态"),
     "G9": ("全部必需模块的 build、版本、环境、发布规则和发布证据一致",
            "冻结 pipeline plan 与本次 action 钉住的全部 iPipe 产物；旧 build 不可替代"),
     "G10": ("控制面候选 diff、允许目录、收益、风险、验证命令与回滚",
@@ -63,7 +65,7 @@ _EFFECTS = {
     "G4": "WORKSPACE 绑定获批仅进入 PLAN；Task Plan 获批才进入 IMPLEMENT（以本次对象为准）",
     "G6": "按诊断路由回 GRILL / SPEC / PLAN / ARCHITECTURE_REVIEW 或 STOPPED；后续各门仍须分别通过",
     "G7": "仅执行本次 hash 绑定的 iCode 提交或单模块 iPipe 触发；不是两种操作的通用授权",
-    "G8": "仅重跑或继续本次 build/stage 和参数绑定的阶段，不批准新代码或发布",
+    "G8": "仅重跑或继续本次 build/stage 和参数绑定的阶段，或对同一 CR 版本重新构建一次；不批准新代码或发布",
     "G9": "只读核验平台发布并记录匹配证据；全部模块通过才进入 RELEASE_SUCCESS，未发布则等待，不强制发布",
     "G10": "仅应用允许目录内的控制面候选改动并验证/失败回滚；不修改业务 run 的授权",
     "PROFILE_REPIN": "执行另行 apply 后移动 profile pin；不改阶段、不重新授权既有提交，不允许改变审批成员",
@@ -312,6 +314,49 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
 
     missing = _missing()
     try:
+        if gate_name == "G8":
+            material = orchestrator.state.idempotency_result(
+                f"ipipe.g8-material:{run_id}:{input_hash}"
+            )
+            if not isinstance(material, dict) or _hash(material.get("binding")) != input_hash:
+                return missing
+            binding = material["binding"]
+            if binding.get("operation") == "ipipe.rebuild":
+                probe = material.get("probe") or {}
+                unverified = (material.get("revisions") or {}).get("unverified") or []
+                return {
+                    "summary": [
+                        "操作 为同一 CR 版本重新触发整条流水线；仅授权这一次构建，不批准新代码或发布。",
+                        f"模块 {_text(binding.get('module'))}，流水线 {_text(binding.get('pipeline_id'))}，"
+                        f"第 {_text(binding.get('attempt'))} 次构建，触发类型 {_text(binding.get('event_type'))}",
+                        f"被替换的构建 {_text(binding.get('original_build_id'))}；编译产物下载探测 "
+                        f"{_text(probe.get('verdict'))} HTTP {_text(probe.get('http_status'))}",
+                        f"原因 {_text(binding.get('reason'))}",
+                        *(f"仓库 {_text(item.get('module'))}，分支 {_text(item.get('branch'))}，"
+                          f"版本 {_text(item.get('revision'))}" for item in binding.get("repositories", [])),
+                        *(f"未能核对当前 patchset：{_text(module)}" for module in unverified),
+                    ],
+                    "material_status": "PINNED", "content_hash": _hash(material),
+                    "references": [], "repositories": binding.get("repositories", []),
+                    "_review_content": material,
+                }
+            declaration = material.get("declaration") or {}
+            return {
+                "summary": [
+                    "操作 继续人工 iPipe 阶段；仅授权本次 build/stage、版本和参数。",
+                    f"模块 {_text(binding.get('module'))}，流水线 {_text(binding.get('pipeline_id'))}",
+                    f"构建 {_text(binding.get('build_id'))}，阶段 {_text(binding.get('stage_build_id'))}"
+                    f" {_text(declaration.get('stage_name'))}",
+                    f"参数声明来源 {_text(declaration.get('source'))}",
+                    *(f"仓库 {_text(item.get('module'))}，分支 {_text(item.get('branch'))}，"
+                      f"版本 {_text(item.get('revision'))}" for item in binding.get("repositories", [])),
+                    *(f"参数 {name} = {value}" for name, value in material.get("parameters", {}).items()),
+                    *([] if material.get("parameters") else ["平台明确声明空参数，执行输入 {}"]),
+                ],
+                "material_status": "PINNED", "content_hash": _hash(material),
+                "references": [], "repositories": binding.get("repositories", []),
+                "_review_content": material,
+            }
         if gate_name == "G0":
             return _g0_context(orchestrator, run_id, input_hash)
         if gate_name == "G4":
@@ -510,9 +555,54 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
                     return {"summary": content_summary(content),
                             "references": [{"label": "固定审批产物", "ref": artifact["path"]}] + references(content),
                             "content_hash": _hash(content), "material_status": "PINNED"}
+        if gate_name == "G7":
+            trigger = _trigger_context(orchestrator, run_id, input_hash)
+            if trigger is not None:
+                return trigger
     except (AttributeError, KeyError, TypeError, ValueError, OSError):
         return missing
     return missing
+
+
+def _trigger_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[str, Any] | None:
+    """The G7 iPipe trigger a hash names, rebuilt from the frozen plan without transport.
+
+    Without it a trigger approval had nothing to show and could never be delivered.
+    """
+    from clients.ipipe_runtime import _context, trigger_binding
+    from pipeline_plan import frozen_plan
+
+    plan = frozen_plan(orchestrator.state.events(run_id))
+    pinned = orchestrator._runtime_profile(run_id)
+    if plan is None or not pinned.get("ok"):
+        return None
+    for module in plan["required_modules"]:
+        context = _context(pinned["profile"], plan["revision_set"], run_id, module)
+        if context.get("reason_code") != "OK":
+            continue
+        binding = trigger_binding(context, run_id)
+        if _hash(binding) != input_hash:
+            continue
+        rows = [
+            f"{item['kind']} 仓库 {_text(item['module'])}，分支 {_text(item['branch'])}，"
+            f"版本 {_short(item['revision'])}"
+            for item in binding["repositories"]
+        ]
+        unchanged = sorted((plan.get("unchanged") or {}).keys())
+        return {
+            "summary": [
+                "操作 触发 iPipe 流水线（平台上不存在该版本的构建，需新建一次）",
+                f"模块 {_text(binding['module'])}，流水线 {_text(binding['pipeline_id'])}",
+                f"版本集 {_short(binding['revision_set_id'])}",
+                *rows,
+                *(f"未变更仓库 {_text(name)} 不触发流水线" for name in unchanged),
+            ],
+            "references": [{"label": "冻结流水线计划", "ref": str(plan["plan_hash"])}],
+            "content_hash": input_hash,
+            "material_status": "PINNED",
+            "_review_content": {"trigger_binding": binding},
+        }
+    return None
 
 
 def content_summary(content: Any) -> list[str]:
@@ -1018,6 +1108,15 @@ def _submit_descriptor(content: dict[str, Any]) -> list[str]:
         mode = "新建 CR"
     else:
         mode = "提交前由 iCode 校验新建/追加"
+    baselines = content.get("unchanged_baselines")
+    if isinstance(baselines, list):
+        for item in baselines:
+            if isinstance(item, dict):
+                rows.append(
+                    f"未变更仓库 {_text(item.get('module'))}，分支 {_text(item.get('branch'))}，"
+                    f"基线版本 {_short(item.get('revision'))}（不新建 CR、不触发流水线，"
+                    "沿用该版本已发布的产物）"
+                )
     return [
         f"提交方式 {mode}",
         f"主仓库 {_text(content.get('module'))}，分支 {_text(content.get('target_branch'))}",

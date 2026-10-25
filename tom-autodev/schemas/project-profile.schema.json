@@ -95,6 +95,11 @@
     "release_rule"
    ],
    "properties": {
+    "product_policy": {
+     "type": "string",
+     "const": "frozen_changeset_branch_release_or_exact_change_compile",
+     "description": "Fixed default policy. Changed is decided from this run's frozen change set/plan, never worktree cleanliness. Unchanged requires target-branch BranchPipeline successful release and verified downloadable product; otherwise only adapter-proven compile-only may be authorized. Changed requires owned exact candidate ChangePipeline compile. Profile cannot assert API override/compile-only capability."
+    },
     "pipeline_id": {
      "type": "string",
      "minLength": 1
@@ -104,6 +109,17 @@
      "items": {
       "type": "string",
       "minLength": 1
+     }
+    },
+    "stage_parameter_mapping": {
+     "type": "object",
+     "description": "Exact stage name -> platform-declared stage/job/dependency input name -> full product module or test_cr_id. Mapping does not declare parameter names or prove runtime override capability; empty manualParams is not absence of dependency inputs.",
+     "additionalProperties": {
+      "type": "object",
+      "additionalProperties": {
+       "type": "string",
+       "pattern": "^(test_cr_id|[^/\\s]+/[^/\\s]+/[^/\\s]+)$"
+      }
      }
     },
     "stage_classes": {

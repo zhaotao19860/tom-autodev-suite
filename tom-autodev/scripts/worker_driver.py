@@ -596,6 +596,13 @@ def submit_draft(
         )
         if not reopened.get("ok"):
             return reopened
+    # A draft quoting a log (a `Bearer ...` line, an irepo header) is redacted before it
+    # is validated, hashed or stored, so it is not refused for a credential it only
+    # cites. Only a job with no recorded draft is redacted: once a draft is recorded an
+    # approval may already be bound to its content hash, and redacting a resubmission
+    # would change that hash -- such a draft keeps the ordinary refusal. IMPLEMENT is
+    # never rewritten: its content is a patch whose bytes and hashes are the candidate.
+    draft = _redacted_fresh_draft(previous, action, draft)
     agent_id = f"submit:{os.getpid()}"
     try:
         try:
@@ -612,6 +619,25 @@ def submit_draft(
             )
         except (ValueError, AttributeError):
             pass
+
+
+def _redacted_fresh_draft(previous: Any, action: dict[str, Any], draft: Any) -> Any:
+    """`draft` redacted when that cannot move a bound hash; otherwise `draft` unchanged.
+
+    Redacted: a job with no recorded draft (nothing is bound to its hash yet), or a
+    resubmission whose redacted form *is* the recorded draft (the same bytes the
+    approval was bound to, so the replay is consumed instead of refused). A different
+    resubmission of a recorded draft and IMPLEMENT content are returned unchanged.
+    """
+    from persistence_policy import redact_secrets
+
+    if not isinstance(draft, dict) or action.get("phase") == "IMPLEMENT":
+        return draft
+    recorded = previous.get("draft") if isinstance(previous, dict) else None
+    if recorded is None:
+        return redact_secrets(draft)
+    cleaned = redact_secrets(draft)
+    return cleaned if cleaned == recorded else draft
 
 
 def _produce(
@@ -943,6 +969,14 @@ def execute_controller(
             return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G7",
                     "approval_input_hash": input_hash, "task_id": task_id}
         return _submit(orchestrator, run_id, task_id, approval_id, icode_skill, icode_runtime=icode_runtime)
+    if controller in ("ipipe", "release") and ipipe_api is not None and knowledge_sync is None:
+        # IPIPE/RELEASE evidence is published to KU like every phase artifact. complete_phase
+        # resolves the run's own sync when none is injected; these controllers must too, or
+        # every ingest fails at publish time after the evidence was already gathered.
+        resolved = orchestrator.knowledge_sync(run_id)
+        if isinstance(resolved, dict):
+            return resolved
+        knowledge_sync = resolved
     if controller == "ipipe" and ipipe_api is not None:
         return _execute_ipipe(orchestrator, run_id, action, ipipe_api, knowledge_sync=knowledge_sync)
     if controller == "release" and ipipe_api is not None:
@@ -1105,12 +1139,23 @@ def _execute_ipipe(
         return hashed
     trigger_hash = hashed["input_hash"]
     approval_id = _settled_approval_id(orchestrator, run_id, "G7", trigger_hash)
+    adopted = None
     if approval_id is None:
-        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G7",
-                "approval_input_hash": trigger_hash, "controller": "ipipe", "module": module}
-    triggered = runtime.trigger(
-        profile, revision_set, {"approval_id": approval_id, "input_hash": trigger_hash}, module
-    )
+        # iCode starts the module's ChangePipeline when the CR lands, so the build for these
+        # exact revisions usually exists already. Adopting it writes nothing to iPipe and
+        # needs no trigger approval; only a missing build asks a person to start one.
+        adopted = runtime.discover(profile, revision_set, module)
+        if adopted.get("reason_code") == "BUILD_QUERY_REQUIRED":
+            return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G7",
+                    "approval_input_hash": trigger_hash, "controller": "ipipe", "module": module}
+        if not adopted.get("ok"):
+            return {"ok": False, "reason_code": "IPIPE_ADOPT_FAILED", "detail": adopted,
+                    "run_id": run_id, "module": module}
+        triggered = adopted
+    else:
+        triggered = runtime.trigger(
+            profile, revision_set, {"approval_id": approval_id, "input_hash": trigger_hash}, module
+        )
     if not triggered.get("ok"):
         return {"ok": False, "reason_code": "IPIPE_TRIGGER_FAILED", "detail": triggered,
                 "run_id": run_id}
@@ -1149,6 +1194,18 @@ def _execute_ipipe(
                 "evidence_refs": monitored.get("evidence_refs") or [],
             },
         )
+    if status == "MANUAL_WAIT":
+        stages = [stage for stage in monitored.get("stages") or []
+                  if stage.get("status") in {
+                      "PENDING_FOR_USER", "WAITING_FOR_MANUAL", "MANUAL", "PAUSED",
+                      "WAITING_INPUT", "WAITING_FOR_CONFIRM",
+                  }]
+        stage_id = monitored.get("stage_build_id")
+        if not stage_id and stages:
+            stage_id = stages[0].get("stage_build_id")
+        if not stage_id:
+            return {"ok": False, "reason_code": "STAGE_OWNERSHIP_UNVERIFIED", "run_id": run_id}
+        return _prepare_manual_stage(orchestrator, runtime, run_id, str(stage_id), module)
     if status not in ("SUCCESS", "FAILURE"):
         # MANUAL_WAIT / TIMEOUT / TRANSIENT / INVALID: not the worker's call to make.
         return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "IPIPE_MONITOR",
@@ -1169,6 +1226,50 @@ def _execute_ipipe(
     landed = orchestrator.status(run_id).get("state")
     return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
             "build_id": build_id, "monitor_status": status, "module": module, "result": ingested}
+
+
+def _prepare_manual_stage(
+    orchestrator: Any, runtime: Any, run_id: str, stage_id: str, module: str,
+) -> dict[str, Any]:
+    from orchestrator import _stage_parameters, _prepare_ipipe_g8
+
+    # This path writes G8 material, so it is the one that records dependency evidence.
+    resolved = _stage_parameters(orchestrator, runtime, run_id, [], stage_id, record_evidence=True)
+    if not resolved.get("ok"):
+        if resolved.get("reason_code") == "BRANCH_COMPILE_APPROVAL_REQUIRED":
+            input_hash = resolved["input_hash"]
+            material = {"binding": resolved["binding"], "parameters": {},
+                        "product_target": resolved["binding"], "operation": "ipipe.branch_compile"}
+            orchestrator.state.save_idempotency_result(
+                f"ipipe.g8-material:{run_id}:{input_hash}", material)
+            approval_id = _settled_approval_id(orchestrator, run_id, "G8", input_hash)
+            if approval_id is None:
+                return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "gate": "G8",
+                        "approval_input_hash": input_hash, "controller": "ipipe",
+                        "run_id": run_id, "stage_build_id": stage_id,
+                        "module": resolved["binding"]["module"], "material": material}
+            result = runtime.ensure_branch_compile(
+                resolved["binding"], {"approval_id": approval_id, "input_hash": input_hash})
+            return {"ok": bool(result.get("ok")), "reason_code": result["reason_code"],
+                    "run_id": run_id, "stage_build_id": stage_id, "detail": result,
+                    **({"parked": "IPIPE_MONITOR"} if result.get("ok") else {})}
+        return {**resolved, "run_id": run_id, "stage_build_id": stage_id}
+    parameters = resolved["parameters"]
+    prepared = _prepare_ipipe_g8(orchestrator, runtime, run_id, stage_id, resolved)
+    if prepared.get("reason_code") != "APPROVAL_REQUIRED":
+        return prepared
+    input_hash = prepared["approval_input_hash"]
+    approval_id = _settled_approval_id(orchestrator, run_id, "G8", input_hash)
+    if approval_id is None:
+        return prepared
+    executed = runtime.rerun(
+        stage_id, {"approval_id": approval_id, "input_hash": input_hash}, parameters=parameters
+    )
+    if not executed.get("ok"):
+        return executed
+    return {"ok": True, "reason_code": "PARKED", "parked": "IPIPE_MONITOR",
+            "run_id": run_id, "controller": "ipipe", "module": module,
+            "stage_build_id": stage_id, "result": executed}
 
 
 def _finalize_ipipe(
@@ -1647,6 +1748,14 @@ def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         handoff for handoff in orchestrator.state.incomplete_handoffs(run_id)
         if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
     ]
+    if len(candidates) > 1:
+        # Expired handoffs (a later explicit command already consumed their approval)
+        # must not make the one valid handoff unusable; only provably stale ones go.
+        from approval_watch import reap_stale_resume_handoffs
+
+        candidates = reap_stale_resume_handoffs(
+            orchestrator, run_id, candidates, actor="worker_driver.resume"
+        )
     if not candidates:
         return {"ok": False, "reason_code": "NO_RESUME_HANDOFF", "run_id": run_id}
     if len(candidates) > 1:

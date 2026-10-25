@@ -44,6 +44,19 @@ def _has_change_id_trailer(body: str) -> bool:
     return False
 
 
+def _commit_change_id(root: Any, revision: str) -> str | None:
+    try:
+        body = _git(root, "log", "-1", "--format=%B", revision)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    for line in reversed(body.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("Change-Id:"):
+            value = stripped.split(":", 1)[1].strip()
+            return value or None
+    return None
+
+
 def _matching_clean_worktree(preferred: str, revision: str) -> str | None:
     """Use the owned worktree, or a sibling owned checkout at the exact revision.
 
@@ -81,7 +94,7 @@ def _matching_clean_worktree(preferred: str, revision: str) -> str | None:
     return None
 
 
-def _commit_if_dirty(root: Any, message: str) -> str:
+def _commit_if_dirty(root: Any, message: str, *, change_id: str | None = None) -> str:
     """Commit with the repository's own identity, carrying a Change-Id.
 
     iCode refuses a push whose committer does not match the pushing account, so an
@@ -105,16 +118,27 @@ def _commit_if_dirty(root: Any, message: str) -> str:
             ["git", "-C", str(root), "commit", "-q", "-m", message],
             check=True,
         )
-        if not _has_change_id_trailer(_git(root, "log", "-1", "--format=%B")):
-            change_id = "I" + hashlib.sha1(
+        body = _git(root, "log", "-1", "--format=%B")
+        if change_id is not None:
+            if not change_id.startswith("I") or not change_id[1:]:
+                raise ValueError("CHANGE_ID_INVALID")
+            amended = f"{body.rstrip()}\n\nChange-Id: {change_id}\n"
+        elif not _has_change_id_trailer(body):
+            generated = "I" + hashlib.sha1(
                 _git(root, "rev-parse", "HEAD").encode("utf-8")
             ).hexdigest()
-            amended = f"{_git(root, 'log', '-1', '--format=%B').rstrip()}\n\nChange-Id: {change_id}\n"
+            amended = f"{body.rstrip()}\n\nChange-Id: {generated}\n"
+        else:
+            amended = None
+        if amended is not None:
             subprocess.run(
                 ["git", "-C", str(root), "commit", "-q", "--amend", "-m", amended],
                 check=True,
             )
-    return _require_pushable_head(root)
+    revision = _require_pushable_head(root)
+    if change_id is not None and _commit_change_id(root, revision) != change_id:
+        raise ValueError("CHANGE_ID_MISMATCH")
+    return revision
 
 
 def _require_pushable_head(root: Any) -> str:
@@ -135,6 +159,64 @@ def _require_pushable_head(root: Any) -> str:
     if email.split("@", 1)[0].strip() != configured.split("@", 1)[0].strip():
         raise ValueError("GIT_IDENTITY_MISMATCH")
     return revision
+
+
+def _remote_branch_head(path: Any, branch: str) -> str | None:
+    """The revision a repository's remote currently serves for one branch, or None."""
+    if not isinstance(path, str) or not path or not isinstance(branch, str) or not branch:
+        return None
+    try:
+        output = _git(path, "ls-remote", "--exit-code", "origin", f"refs/heads/{branch}")
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    for line in output.splitlines():
+        revision, _, ref = line.partition("\t")
+        if ref.strip() == f"refs/heads/{branch}" and revision.strip():
+            return revision.strip()
+    return None
+
+
+def unchanged_baselines(
+    orchestrator: Any, run_id: str, profile: dict[str, Any]
+) -> list[dict[str, str]] | dict[str, Any]:
+    """Pin each business repository no task of the approved DAG changes.
+
+    A registered repository the requirement does not touch has nothing to submit and no
+    pipeline to run: its already-published product is what downstream stages download.
+    What the run must still fix is *which* revision that product is for, so the G7
+    descriptor carries it and the approver authorizes it with the rest of the change.
+    The pin is the branch head at descriptor time; a head that moves before the plan
+    is frozen changes the descriptor and therefore asks for a fresh G7.
+
+    Returns the list (possibly empty), or a failure dict when a pin cannot be resolved.
+    An empty list is also returned when the DAG does not name every task's repository:
+    "unchanged" is never inferred from a guess.
+    """
+    repositories = [r for r in profile.get("business_repos") or [] if isinstance(r, dict)]
+    if len(repositories) < 2:
+        return []
+    dag = orchestrator.artifacts.latest_phase(run_id, "TASKS", None)
+    if not dag.get("valid"):
+        return []
+    nodes = ((dag.get("envelope") or {}).get("content") or {}).get("nodes") or []
+    touched: set[str] = set()
+    for node in nodes:
+        module = node.get("business_module") if isinstance(node, dict) else None
+        if not isinstance(module, str) or not module:
+            return []
+        touched.add(module)
+    pins: list[dict[str, str]] = []
+    for repository in repositories:
+        module = repository.get("module")
+        if not isinstance(module, str) or module in touched:
+            continue
+        revision = _remote_branch_head(repository.get("path"), repository.get("branch"))
+        if revision is None:
+            return {"ok": False, "reason_code": "BASELINE_UNRESOLVED", "module": module,
+                    "branch": repository.get("branch")}
+        pins.append({"module": module, "branch": str(repository.get("branch")),
+                     "revision": revision})
+    return sorted(pins, key=lambda item: item["module"])
 
 
 def _canonical(value: dict[str, Any]) -> bytes:
@@ -235,8 +317,21 @@ def _build_and_archive(orchestrator: Any, run_id: str, task_id: str) -> dict[str
 
     message = f"{_card_id(orchestrator, run_id)} {task_id} reviewed change set"
     try:
-        business_revision = _commit_if_dirty(business_row["worktree_path"], message)
-        test_revision = _commit_if_dirty(test_row["worktree_path"], message)
+        adopted = _adopted_submission_identity(orchestrator, run_id, task_id)
+        desired_change_id = adopted.get("change_id") if adopted else None
+        business_primary = (
+            not isinstance(expected_revisions, dict)
+            or expected_revisions.get("business") != business_row["baseline_revision"]
+            or expected_revisions.get("tests") == test_row["baseline_revision"]
+        )
+        business_revision = _commit_if_dirty(
+            business_row["worktree_path"], message,
+            change_id=desired_change_id if adopted and business_primary else None,
+        )
+        test_revision = _commit_if_dirty(
+            test_row["worktree_path"], message,
+            change_id=desired_change_id if adopted and not business_primary else None,
+        )
     except ValueError as error:
         return {"ok": False, "reason_code": str(error), "task_id": task_id}
     expected_revisions = content.get("revisions")
@@ -305,8 +400,19 @@ def _build_and_archive(orchestrator: Any, run_id: str, task_id: str) -> dict[str
         "card_id": _card_id(orchestrator, run_id),
         "owner": owner,
         "revision_set": revision_set,
-        "submission_mode": "create_new_cr",
+        "submission_mode": "append_existing_cr" if adopted else "create_new_cr",
     }
+    if adopted:
+        descriptor.update({
+            "task_id": task_id,
+            "existing_cr": adopted["change_number"],
+            "change_id": adopted["change_id"],
+        })
+    baselines = unchanged_baselines(orchestrator, run_id, profile)
+    if isinstance(baselines, dict):
+        return {**baselines, "task_id": task_id}
+    if baselines:
+        descriptor["unchanged_baselines"] = baselines
     canonical_bytes = _canonical(descriptor)
     archived = orchestrator.artifacts.put(
         run_id,
@@ -329,6 +435,35 @@ def _build_and_archive(orchestrator: Any, run_id: str, task_id: str) -> dict[str
             "input_hash": hashlib.sha256(canonical_bytes).hexdigest(),
             "reviewed_artifact_id": archived["artifact_id"],
         },
+    }
+
+
+def _adopted_submission_identity(orchestrator: Any, run_id: str, task_id: str) -> dict[str, str] | None:
+    """Return the one trusted CR identity carried by a CODE_ONLY adoption.
+
+    The adoption event is the only local source of cross-run identity. It is populated
+    from a durable successful iCode receipt, never from the newest remote CR.
+    """
+    events = orchestrator.state.events(run_id)
+    adoption = next(
+        (
+            event.get("payload") or {}
+            for event in reversed(events)
+            if isinstance(event.get("payload"), dict)
+            and event["payload"].get("adoption_kind") == "CODE_ONLY_REPAIR"
+            and event["payload"].get("task_id") == task_id
+        ),
+        None,
+    )
+    identity = adoption.get("submission_identity") if isinstance(adoption, dict) else None
+    if not isinstance(identity, dict):
+        return None
+    if not all(isinstance(identity.get(key), str) and identity[key] for key in ("change_number", "change_id")):
+        raise ValueError("SUBMISSION_RECEIPT_REQUIRED")
+    return {
+        "module": identity.get("module", ""),
+        "change_number": identity["change_number"],
+        "change_id": identity["change_id"],
     }
 
 

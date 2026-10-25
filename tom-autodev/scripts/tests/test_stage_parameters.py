@@ -1,8 +1,12 @@
+import contextlib
+import io
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import cli_transport
 import orchestrator as orchestrator_module
@@ -13,6 +17,38 @@ TOKEN = "82f7b234-8b56-40c5-9011-5492673ed8d8"
 
 
 class StageParameterTests(unittest.TestCase):
+    def test_explicit_empty_and_unknown_declarations_are_distinct(self):
+        self.assertEqual(stage_parameters.declared_names(
+            {"manualParams": None, "hasDynamicParams": False})["names"], [])
+        for declaration in ({}, {"manualParams": None}, {"manualParams": [], "hasDynamicParams": True},
+                            {"manualParams": [{"unexpected": "x"}]}):
+            self.assertFalse(stage_parameters.declared_names(declaration)["ok"])
+        self.assertEqual(stage_parameters.declared_names(
+            {"manualParams": '[{"name":"get_bgwagent"}]'})["names"], ["get_bgwagent"])
+
+    def test_mapping_is_exact_and_all_unknown_inputs_are_reported(self):
+        result = stage_parameters.resolve(
+            ["x86bgw_product", "prefix_get_bgwagent", "random_cr_id"],
+            change_number="1", product_urls={"baidu/sysip/x86bgw": URL}, tokens={},
+        )
+        self.assertEqual(len(result["missing_parameters"]), 3)
+        self.assertEqual(stage_parameters.resolve(
+            [], change_number=None, product_urls={}, tokens={})["parameters"], {})
+        bgw = {"project_id": "bgw"}
+        # p0级自动化回归测试 is the current BGW P0 automation stage name and carries the same
+        # known get_bgw_test_case/get_bgwagent form fields as the historical P0新case回归 stage.
+        self.assertEqual(stage_parameters.project_mapping(
+            bgw, "p0级自动化回归测试")["get_bgwagent"], "baidu/sysip/bgwagent")
+        self.assertEqual(stage_parameters.project_mapping(
+            bgw, "P0新case回归")["get_bgw_test_case"], "baidu/nsiqa/x86bgw")
+        self.assertEqual(stage_parameters.project_mapping(
+            {"project_id": "other"}, "P0新case回归"), {})
+        self.assertEqual(stage_parameters.project_mapping(bgw, "unrelated_stage"), {})
+        profile = {"pipeline_profile": {"stage_parameter_mapping": {
+            "manual": {"input": "baidu/test/product"}}}}
+        self.assertEqual(stage_parameters.project_mapping(profile, "manual"),
+                         {"input": "baidu/test/product"})
+
     def test_both_parameters_of_the_bgw_new_case_stage_are_derived(self):
         qa_url = "https://irepo.baidu-int.com/rest/prod/v3/baidu/nsiqa/x86bgw/nodes/102407103/files"
         qa_token = "50c9c669-7fbf-442f-b61a-51d2c36ef172"
@@ -123,6 +159,199 @@ class StageParameterTests(unittest.TestCase):
     def test_no_configured_file_is_not_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(stage_parameters.load_tokens(Path(directory)), {})
+
+
+class ManualStageControlPlaneTests(unittest.TestCase):
+    def runtime(self, declaration):
+        from clients.ipipe_runtime import IpipeRuntime
+        runtime = IpipeRuntime.__new__(IpipeRuntime)
+        owned = {"build_id": "build", "context": {"pipeline_id": "pipeline"},
+                 "stage": {"stage_conf_id": "conf"}}
+        runtime._load_stage_binding = lambda stage_id: owned if stage_id == "stage" else None
+        runtime.api = SimpleNamespace(stage_detail=lambda stage_id: {"entities": {
+            "stageBuild": {"stageBuildId": stage_id, "pipelineBuildId": "build",
+                           "pipelineConfId": "pipeline", "stageConfId": "conf",
+                           "stageName": "manual", **declaration}}})
+        return runtime
+
+    def test_discovery_requires_owned_matching_platform_identity(self):
+        runtime = self.runtime({"manualParams": None, "hasDynamicParams": False})
+        self.assertEqual(runtime.stage_parameter_names("stage")["names"], [])
+        self.assertEqual(runtime.stage_parameter_names("other")["reason_code"],
+                         "STAGE_OWNERSHIP_UNVERIFIED")
+        runtime = self.runtime({"manualParams": [], "pipelineBuildId": "other"})
+        self.assertEqual(runtime.stage_parameter_names("stage")["reason_code"],
+                         "STAGE_PARAMETER_IDENTITY_MISMATCH")
+
+    def test_cli_resolution_without_names_reads_declaration(self):
+        runtime = self.runtime({"manualParams": None, "hasDynamicParams": False})
+        result = orchestrator_module._stage_parameters(None, runtime, "run", [], "stage")
+        self.assertEqual(result["parameters"], {})
+        self.assertIn("manualParams", result["declaration"]["source"])
+        self.assertFalse(orchestrator_module._stage_parameters(None, runtime, "run", [])["ok"])
+        mismatch = orchestrator_module._stage_parameters(
+            None, runtime, "run", ["get_bgwagent"], "stage")
+        self.assertEqual(mismatch["reason_code"], "STAGE_PARAMETER_NAMES_MISMATCH")
+
+    def test_unknown_mapping_fails_before_products_or_credentials(self):
+        runtime = self.runtime({"manualParams": ["first", "second"]})
+        orchestrator = SimpleNamespace(_runtime_profile=lambda run: {
+            "ok": True, "profile": {"project_id": "bgw"}})
+        result = orchestrator_module._stage_parameters(orchestrator, runtime, "run", [], "stage")
+        self.assertEqual([p["parameter"] for p in result["missing_parameters"]], ["first", "second"])
+
+    def test_discovered_profile_mapping_uses_exact_pinned_products(self):
+        runtime = self.runtime({"manualParams": ["input"]})
+        product_calls = []
+        runtime.product_for_plan = lambda plan, module: (
+            product_calls.append((module, "agent-revision")) or {
+                "ok": True, "product_url": URL, "revision": "agent-revision"})
+        profile = {"project_id": "other", "pipeline_profile": {
+            "stage_parameter_mapping": {"manual": {"input": "baidu/sysip/bgwagent"}}}}
+        orchestrator = SimpleNamespace(
+            _runtime_profile=lambda run: {"ok": True, "profile": profile},
+            artifacts=SimpleNamespace(artifacts_for_run=lambda run: []),
+            config_root=Path("/unused"),
+            state=SimpleNamespace(events=lambda run: []),
+        )
+        revisions = {"ok": True, "revisions": {"repositories": [
+            {"module": "baidu/sysip/bgwagent", "revision": "agent-revision"},
+            {"module": "baidu/sysip/x86bgw", "revision": "business-revision"},
+        ]}}
+        with patch("pipeline_plan.frozen_plan", return_value={"plan_hash": "frozen"}), \
+                patch.object(orchestrator_module, "_ipipe_revision_set", return_value=revisions), \
+                patch.object(stage_parameters, "load_tokens", return_value={"baidu/sysip/bgwagent": TOKEN}):
+            result = orchestrator_module._stage_parameters(orchestrator, runtime, "run", [], "stage")
+        self.assertTrue(result["ok"])
+        self.assertEqual(product_calls, [("baidu/sysip/bgwagent", "agent-revision")])
+        self.assertIn(TOKEN, result["parameters"]["input"])
+
+    def resolve_gone_bgwagent(self, **options):
+        """Resolve a P0 stage whose `get_bgwagent` answers 404 on every candidate."""
+        from state_store import StateStore
+        runtime = self.runtime({"manualParams": ["get_bgwagent"]})
+        gone = {"ok": False, "reason_code": "PRODUCT_DOWNLOAD_UNVERIFIED", "module": "baidu/sysip/bgwagent",
+                "build_id": "agent-new", "http_statuses": [404],
+                "candidates": [{"build_id": "agent-new", "http_status": 404},
+                               {"build_id": "agent-old", "http_status": 404}],
+                "download_check": {"build_id": "agent-old", "http_status": 404}}
+        runtime.product_for_plan = lambda plan, module: dict(gone)
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        state = StateStore(Path(root.name) / "state.sqlite")
+        orchestrator = SimpleNamespace(
+            _runtime_profile=lambda run: {"ok": True, "profile": {"project_id": "bgw"}},
+            artifacts=SimpleNamespace(artifacts_for_run=lambda run: []), state=state,
+        )
+        revisions = {"ok": True, "revisions": {"repositories": [
+            {"module": "baidu/sysip/bgwagent", "revision": "agent-revision"}]}}
+        with patch("pipeline_plan.frozen_plan", return_value={"plan_hash": "frozen"}), \
+                patch.object(orchestrator_module, "_ipipe_revision_set", return_value=revisions), \
+                patch("stage_parameters.project_mapping",
+                      return_value={"get_bgwagent": "baidu/sysip/bgwagent"}):
+            runtime.stage_parameter_names = lambda stage: {
+                "ok": True, "names": ["get_bgwagent"], "stage_name": "P0新case回归"}
+            result = orchestrator_module._stage_parameters(
+                orchestrator, runtime, "run", [], "stage", **options)
+        return result, state
+
+    def test_b11_get_bgwagent_gone_on_every_candidate_is_recorded_for_the_stage(self):
+        result, state = self.resolve_gone_bgwagent(record_evidence=True)
+
+        self.assertEqual(result["reason_code"], "PRODUCT_DOWNLOAD_UNVERIFIED")
+        # Keyed by the build and stage the parameters belong to, not the product's build.
+        recorded = state.idempotency_result(
+            "ipipe.dependency-failure:run:build:stage:baidu/sysip/bgwagent:0001")
+        self.assertEqual(
+            (recorded["classification"], recorded["http_statuses"], recorded["stage_conf_id"],
+             recorded["consumed_by"], recorded["declared_parameters"]),
+            ("ENV_UNSATISFIED", [404], "conf", ["get_bgwagent"], ["get_bgwagent"]))
+
+    def test_b21_read_only_resolution_writes_no_dependency_evidence(self):
+        result, state = self.resolve_gone_bgwagent()
+
+        self.assertEqual(result["reason_code"], "PRODUCT_DOWNLOAD_UNVERIFIED")
+        self.assertEqual(state.idempotency_results_with_prefix("ipipe.dependency-failure:"), [])
+
+    def test_b21_cli_print_parameters_and_input_hash_write_no_dependency_evidence(self):
+        from types import SimpleNamespace as Namespace
+        seen = []
+
+        def fake_stage_parameters(*args, **kwargs):
+            seen.append(kwargs.get("record_evidence"))
+            return {"ok": False, "reason_code": "PRODUCT_DOWNLOAD_UNVERIFIED"}
+
+        runtime = Namespace(rerun=lambda *a, **k: {"ok": False})
+        with tempfile.TemporaryDirectory() as root, \
+                patch("orchestrator.Orchestrator"), \
+                patch("orchestrator._cli_ipipe_runtime", return_value=runtime), \
+                patch("orchestrator._stage_parameters", side_effect=fake_stage_parameters), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for flag in ("--print-parameters", "--print-input-hash", "--request-g8"):
+                orchestrator_module.main(["--config-root", root, "ipipe-rerun", "run",
+                                          "stage", "-", "-", flag])
+        self.assertEqual(seen, [False, False, True])
+
+    def test_manual_monitor_enters_g8_preparation_in_worker_controller(self):
+        import worker_driver
+        runtime = SimpleNamespace(
+            trigger_input_hash=lambda *args: {"ok": True, "input_hash": "trigger"},
+            discover=lambda *args: {"ok": True, "build_id": "build"},
+            monitor_once=lambda *args: {"status": "MANUAL_WAIT", "stage_build_id": "stage"},
+        )
+        checkpoints = []
+        orchestrator = SimpleNamespace(
+            _runtime_profile=lambda run: {"ok": True, "profile": {}},
+            ipipe_runtime=lambda *args: runtime,
+            state=SimpleNamespace(save_ipipe_monitoring=lambda *args: checkpoints.append(args)),
+        )
+        with patch.object(worker_driver, "_next_ipipe_module", return_value="module"), \
+                patch.object(worker_driver, "_ipipe_module_binding", return_value={"bound": True}), \
+                patch.object(orchestrator_module, "_ipipe_revision_set",
+                             return_value={"ok": True, "revisions": {}}), \
+                patch.object(worker_driver, "_settled_approval_id", return_value=None), \
+                patch.object(worker_driver, "_prepare_manual_stage",
+                             return_value={"gate": "G8"}) as prepare:
+            result = worker_driver._execute_ipipe(orchestrator, "run", {}, object())
+        self.assertEqual(result["gate"], "G8")
+        prepare.assert_called_once_with(orchestrator, runtime, "run", "stage", "module")
+        self.assertEqual(checkpoints[0][2]["status"], "MANUAL_WAIT")
+
+    def test_worker_prepares_exact_g8_then_consumes_only_matching_approval(self):
+        import worker_driver
+        from approval_summary import pinned_context, _hash
+        material_store = {}
+        binding = {"run_id": "run", "build_id": "build", "stage_build_id": "stage", "module": "module",
+                   "repositories": [{"module": "baidu/test/product", "revision": "revision"}]}
+        input_hash = _hash(binding)
+        runtime = self.runtime({"manualParams": None, "hasDynamicParams": False})
+        runtime.rerun_input_hash = lambda stage_id, parameters: {
+            "ok": True, "input_hash": input_hash, "case_failures": [], "binding": binding}
+        runtime._rerun_binding = lambda stage_id, parameters: {"ok": True, "binding": binding}
+        calls = []
+        runtime.rerun = lambda stage_id, approval, parameters: (
+            calls.append((stage_id, approval, parameters)) or {"ok": True})
+        state = SimpleNamespace(
+            save_idempotency_result=lambda key, value: material_store.setdefault(key, value),
+            idempotency_result=lambda key: material_store.get(key),
+            events=lambda run: [])
+        orchestrator = SimpleNamespace(state=state)
+        with patch.object(worker_driver, "_settled_approval_id", return_value=None):
+            result = worker_driver._prepare_manual_stage(
+                orchestrator, runtime, "run", "stage", "module")
+        self.assertEqual(result["gate"], "G8")
+        self.assertEqual(result["approval_input_hash"], input_hash)
+        self.assertEqual(calls, [])
+        with patch.object(orchestrator_module, "_request_approval",
+                          return_value={"ok": True, "approval_id": "pending"}) as request:
+            delivered = orchestrator_module._deliver_worker_approval(orchestrator, result)
+        request.assert_called_once_with(orchestrator, "run", "G8", input_hash)
+        self.assertEqual(delivered["parked"], "APPROVAL_WAIT")
+        self.assertEqual(pinned_context(orchestrator, "run", "G8", input_hash)["material_status"], "PINNED")
+        self.assertEqual(pinned_context(orchestrator, "run", "G8", "wrong")["material_status"], "MISSING")
+        with patch.object(worker_driver, "_settled_approval_id", return_value="approved"):
+            worker_driver._prepare_manual_stage(orchestrator, runtime, "run", "stage", "module")
+        self.assertEqual(calls, [("stage", {"approval_id": "approved", "input_hash": input_hash}, {})])
 
 
 class OpenTestRepoCrTests(unittest.TestCase):

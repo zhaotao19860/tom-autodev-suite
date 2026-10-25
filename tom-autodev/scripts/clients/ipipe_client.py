@@ -66,6 +66,8 @@ class IpipeHttpTransport:
             raise ValueError("IPIPE_TRANSPORT_CONFIG_INVALID")
         self.base_url = base_url.rstrip("/")
         self._token = _load_token(token)
+        from persistence_policy import register_secret
+        register_secret(self._token)
         self.sender = sender or _urllib_sender
         self.timeout_seconds = timeout_seconds
         self.max_read_attempts = max_read_attempts
@@ -143,12 +145,21 @@ class IpipeHttpTransport:
                 transient=status == 429 or status >= 500,
             )
         if isinstance(payload, str):
+            raw_chars = len(payload)
             try:
                 payload = json.loads(payload) if payload else {}
             except json.JSONDecodeError:
-                raise IpipeTransportError("IPIPE_RESPONSE_INVALID") from None
+                # Shape only: the unparseable text itself may carry anything.
+                raise IpipeTransportError(
+                    "IPIPE_RESPONSE_INVALID", status=status,
+                    diagnostic={"http_status": status, "response_type": "non_json_text",
+                                "body_chars": raw_chars},
+                ) from None
         if not isinstance(payload, (dict, list)):
-            raise IpipeTransportError("IPIPE_RESPONSE_INVALID")
+            raise IpipeTransportError(
+                "IPIPE_RESPONSE_INVALID", status=status,
+                diagnostic={"http_status": status, "response_type": type(payload).__name__},
+            )
         if isinstance(payload, dict) and "code" in payload:
             code = payload.get("code")
             if code not in {0, 200, "0", "200"}:
@@ -164,8 +175,16 @@ class IpipeHttpTransport:
         if raw_token:
             clean_body = clean_body.replace(raw_token, "[REDACTED]")
         clean_body = re.sub(r"(?i)\bBearer-[A-Za-z0-9._~+/=-]+", "[REDACTED]", clean_body)
+        # irepo tokens echoed back in a request body, access_token parameters,
+        # Authorization values and any loaded secret value, whatever its length.
+        from persistence_policy import redact_text
+        clean_body = redact_text(clean_body)
         excerpt = clean_body[: self.body_limit]
-        diagnostic: dict[str, Any] = {}
+        diagnostic: dict[str, Any] = {
+            key: value for key, value in (error.diagnostic or {}).items()
+            if key in {"response_type", "body_chars", "error_type"}
+            and isinstance(value, (str, int)) and not isinstance(value, bool)
+        }
         if excerpt:
             diagnostic["body_excerpt"] = excerpt
             diagnostic["body_truncated"] = len(clean_body) > len(excerpt)
@@ -185,16 +204,69 @@ class IpipeApiClient:
         self.transport = transport
         self.current_user = current_user.strip()
 
-    def get_pipeline_by_id(self, pipeline_id: str) -> dict[str, Any]:
+    def get_pipeline_by_id(self, pipeline_id: str, *, brief: bool = True) -> dict[str, Any]:
         # The gateway 404s unless the empty pipelineConfId/user/token params are present.
         # `brief` matters: the full configuration of a mature pipeline runs past any sane
         # body bound, while the brief form still names the pipeline and its code sources.
         value = self.transport.request(
             "GET",
             f"/api/ipipe/v10/pipeline/conf/{pipeline_id}",
-            params={"pipelineConfId": "", "user": "", "token": "", "brief": "true"},
+            params={"pipelineConfId": "", "user": "", "token": "", "brief": str(brief).lower()},
         )
         return _entity(value)
+
+    def stage_job_override_capability(self) -> dict[str, Any]:
+        # --param / arbitrary POST JSON does not prove override precedence or job scope.
+        return {"supported": False, "reason_code": "JOB_PARAMETER_OVERRIDE_UNSUPPORTED"}
+
+    def compile_only_capability(self) -> dict[str, Any]:
+        # No documented stage selection/stop-before-release contract in either client.
+        return {"supported": False, "reason_code": "COMPILE_ONLY_TRIGGER_UNSUPPORTED"}
+
+    def verify_product_download(self, url: str, module: str) -> dict[str, Any]:
+        """Bounded authenticated read; neither redirects nor HTML prove an archive."""
+        from stage_parameters import load_tokens
+        parsed = urllib.parse.urlsplit(url)
+        if (parsed.scheme != "https" or parsed.hostname != "irepo.baidu-int.com"
+                or not parsed.path.startswith(f"/rest/prod/v3/{module}/")
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            return {"ok": False, "reason_code": "PRODUCT_URL_INVALID"}
+        try:
+            token = load_tokens(Path.home() / ".tom-autodev").get(module)
+            if not token:
+                return {"ok": False, "reason_code": "IREPO_TOKEN_REQUIRED"}
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+            opener = urllib.request.build_opener(NoRedirect())
+            request = urllib.request.Request(url, headers={
+                "IREPO-TOKEN": token, "Range": "bytes=0-1",
+            })
+            try:
+                response = opener.open(request, timeout=self.transport.timeout_seconds)
+            except urllib.error.HTTPError as error:
+                if error.code not in {302, 303, 307, 308}:
+                    raise
+                # irepo returns a signed download Location (measured 307). Do not forward
+                # IREPO-TOKEN to the product server and never archive the signed Location.
+                location = error.headers.get("Location", "")
+                destination = urllib.parse.urlsplit(location)
+                if (destination.scheme not in {"http", "https"} or not destination.hostname
+                        or destination.username or destination.password or destination.fragment):
+                    return {"ok": False, "reason_code": "PRODUCT_DOWNLOAD_REDIRECT_INVALID"}
+                error.close()
+                response = opener.open(urllib.request.Request(location, headers={
+                    "Range": "bytes=0-1",
+                }), timeout=self.transport.timeout_seconds)
+            with response:
+                valid = response.status in {200, 206} and response.read(2) == b"\x1f\x8b"
+            return {"ok": valid, "reason_code": "OK" if valid else "PRODUCT_DOWNLOAD_UNVERIFIED"}
+        except urllib.error.HTTPError as error:
+            return {"ok": False, "reason_code": "PRODUCT_DOWNLOAD_UNVERIFIED",
+                    "http_status": error.code}
+        except Exception as error:
+            return {"ok": False, "reason_code": "PRODUCT_DOWNLOAD_UNVERIFIED",
+                    "error_type": type(error).__name__}
 
     def get_pipeline_by_name(self, module: str, name: str) -> list[dict[str, Any]]:
         value = self.transport.request("GET", "/api/agile/v1/pipelineConfs/pipelineConfInfo", params={"module": module, "pipelineName": name})
@@ -212,6 +284,16 @@ class IpipeApiClient:
 
     def recent_builds(self, module: str, pipeline_id: str) -> list[dict[str, Any]]:
         value = self.transport.request("GET", "/api/rest/v10/pipeline-build/builds", params={"module": module, "pipelineConfId": pipeline_id, "_embed": "trigger,stageBuilds,params", "_limit": 20})
+        return _entities(value)
+
+    def branch_product_builds(self, module: str, pipeline_id: str) -> list[dict[str, Any]]:
+        # Verified read contract: name/token must be present even when empty; omission
+        # returned OBJECT_NOT_FOUND. Listing is only discovery, never product proof.
+        value = self.transport.request(
+            "GET", "/api/rest/v10/pipeline-build/builds",
+            params={"module": module, "name": "BranchPipeline", "token": "",
+                    "pipelineConfId": pipeline_id, "_embed": "", "_limit": 100},
+        )
         return _entities(value)
 
 
@@ -262,7 +344,21 @@ class IpipeApiClient:
         value = self.transport.request("GET", "/api/agile/getReleaseInfo", params={"module": module, "branch": branch, "offset": 0, "limit": 20})
         return _entities(value)
 
-    def trigger_by_revision(self, pipeline_id: str, revision: str, parameters: dict[str, Any]) -> dict[str, Any]:
+    def trigger_by_revision(
+        self, pipeline_id: str, revision: str, parameters: dict[str, Any],
+        *, event_type: str | None = None,
+    ) -> dict[str, Any]:
+        """POST /pipeline-build/{id}/revision, the endpoint behind `ipipe-cli trigger run`.
+
+        `event_type` is the CLI's `--event-type` (`GERRIT_CHANGE` for a CR patchset,
+        `NEW_COMMIT` for a merged commit). It is only sent when asked for, so every
+        existing caller keeps the exact request it always sent. Its placement in the
+        body is inferred from the CLI (which carries an `eventType` field next to
+        `triggerUser`); it has not been exercised against the live gateway.
+        """
+        body: dict[str, Any] = {"triggerUser": self.current_user, **parameters}
+        if event_type is not None:
+            body["eventType"] = event_type
         value = self.transport.request(
             "POST",
             f"/api/rest/v10/pipeline-build/{pipeline_id}/revision",
@@ -272,7 +368,7 @@ class IpipeApiClient:
                 "pipelineConfId": pipeline_id,
                 "revision": revision,
             },
-            body={"triggerUser": self.current_user, **parameters},
+            body=body,
         )
         return _entity(value)
 

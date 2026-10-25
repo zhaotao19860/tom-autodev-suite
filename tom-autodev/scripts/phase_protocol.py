@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from artifact_store import ArtifactStore
+from build_markers import is_excluded
 from collaboration import (
     intake_prerequisites,
     intake_prerequisites_valid,
@@ -653,6 +654,18 @@ class PhaseProtocol:
             }
             if repository_revisions != action.get("source_revisions"):
                 return _failure("SOURCE_REVISION_MISMATCH", content_invalid=True)
+            # The plan must cite each repository by its profile checkout path, which is an
+            # absolute filesystem path, not a module name such as "baidu/sysip/x86bgw".
+            # IMPLEMENT's prepare_change_set resolves the owned worktrees by this exact
+            # path (the authoritative profile binding); a module name would pass G4 and
+            # only fail there with PLAN_REPOSITORY_MISMATCH. Rejecting a non-absolute path
+            # keeps the G4 gate and the IMPLEMENT producer in agreement.
+            for item in content.get("repositories", []):
+                if not isinstance(item, dict):
+                    return _failure("PLAN_REPOSITORY_MISMATCH", content_invalid=True)
+                path = item.get("path")
+                if not isinstance(path, str) or not path or not Path(path).is_absolute():
+                    return _failure("PLAN_REPOSITORY_MISMATCH", content_invalid=True)
             plan_tests = {
                 item.get("test_id") for item in content.get("tests", []) if isinstance(item, dict)
             }
@@ -714,6 +727,19 @@ class PhaseProtocol:
                 # The producer already reported a changed requirement; relabelling it
                 # as a plan/code defect is how it got repaired below the decision log.
                 return _failure("REQUIREMENT_CHANGE_RECLASSIFIED", content_invalid=True)
+            authoritative = (
+                self._authoritative_failure_class(run_id, content.get("stage_id"))
+                if content.get("route") in repair_policy.ENVIRONMENT_FORBIDDEN_ROUTES else None
+            )
+            if authoritative is not None:
+                # The failure is a proven environment failure; any route that ends in
+                # changed business code (REPAIR, or re-planning via SPEC/GRILL) is
+                # refused before G6, not only at completion.
+                return _failure(
+                    "ENVIRONMENT_REPAIR_FORBIDDEN", content_invalid=True,
+                    authoritative_classification=authoritative,
+                    route=content.get("route"),
+                )
         return {"ok": True, "reason_code": "OK"}
 
     def _workflow_spec_drift(self, run_id: str) -> dict[str, Any] | None:
@@ -895,6 +921,16 @@ class PhaseProtocol:
         transition = self.transitions.validate(action["state"], target)
         if not transition.get("allowed"):
             return _failure(transition.get("reason_code", "INVALID_TRANSITION"), run_id=run_id)
+        # DIAGNOSE -> IMPLEMENT (CODE_ONLY repair) pins the reused Plan exactly like
+        # PLAN -> IMPLEMENT does, and IMPLEMENT's baselines are that Plan's. The
+        # diagnosis' own source_revisions are the failed candidate, not a baseline.
+        repair_plan_binding: dict[str, Any] | None = None
+        if action["phase"] == "DIAGNOSE" and target == "IMPLEMENT":
+            repair_plan_binding = plan_implement_binding(
+                self._accepted_plan(run_id, next_task_id or action.get("task_id"))
+            )
+            if repair_plan_binding is None:
+                return _failure("PLAN_PREDECESSOR_REQUIRED", run_id=run_id)
         event_payload = {
                 "previous_state": action["state"],
                 "source_event_id": action["source_event_id"],
@@ -908,6 +944,15 @@ class PhaseProtocol:
                     if action["phase"] == "PLAN" and target == "IMPLEMENT" else {}
                 ),
                 "source_revisions": validated["draft"].get("source_revisions", {}),
+                **(
+                    {
+                        "plan_artifact_id": repair_plan_binding["plan_artifact_id"],
+                        "plan_content_hash": repair_plan_binding["plan_content_hash"],
+                        "source_revisions": repair_plan_binding["source_revisions"],
+                        "repair_source_revisions": validated["draft"].get("source_revisions", {}),
+                    }
+                    if repair_plan_binding is not None else {}
+                ),
                 "knowledge_receipt": {
                     "child_doc_id": receipt["child_doc_id"],
                     "child_version": receipt["child_version"],
@@ -1033,6 +1078,9 @@ class PhaseProtocol:
 
     def _task_id(self, run_id: str, state: str, current: dict[str, Any]) -> str | None:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+        reopened = self._architecture_reentry_task(run_id, current)
+        if reopened is not None:
+            return reopened
         explicit = payload.get("task_id")
         if not isinstance(explicit, str):
             evidence = payload.get("evidence")
@@ -1086,6 +1134,55 @@ class PhaseProtocol:
                 artifact = self.artifacts.latest_phase(run_id, phase)
                 if artifact.get("valid"):
                     return artifact["envelope"].get("task_id")
+        return None
+
+    def _architecture_reentry_task(
+        self, run_id: str, current: dict[str, Any]
+    ) -> str | None:
+        """Recover the task explicitly reopened by an architecture-review rewind.
+
+        The rewind enters TASKS without a task_id, then WORKSPACE and PLAN inherit
+        that checkpoint through source_event_id.  Follow that short audit chain so
+        a semantically unchanged DAG cannot make the old Review hide the reopened
+        task from the frontier.
+        """
+        events = self.state.events(run_id)
+        event_by_id = {
+            event.get("event_id"): event for event in events
+            if isinstance(event, dict) and isinstance(event.get("event_id"), str)
+        }
+        cursor = current
+        for _ in range(3):
+            payload = cursor.get("payload") if isinstance(cursor, dict) else None
+            source_event_id = payload.get("source_event_id") if isinstance(payload, dict) else None
+            if not isinstance(source_event_id, str) and isinstance(payload, dict):
+                evidence = payload.get("evidence")
+                source_event_id = evidence.get("source_event_id") if isinstance(evidence, dict) else None
+            if not isinstance(source_event_id, str) and isinstance(payload, dict):
+                identity = payload.get("operation_identity")
+                source_event_id = identity.get("source_event_id") if isinstance(identity, dict) else None
+            if not isinstance(source_event_id, str) or not source_event_id:
+                return None
+            cursor = event_by_id.get(source_event_id)
+            if not isinstance(cursor, dict):
+                return None
+            payload = cursor.get("payload")
+            reentry = payload.get("reentry") if isinstance(payload, dict) else None
+            if (
+                cursor.get("state") == "TASKS"
+                and isinstance(reentry, dict)
+                and reentry.get("kind") == "REWIND"
+                and reentry.get("from_state") == "ARCHITECTURE_REVIEW"
+            ):
+                architecture_event = event_by_id.get(reentry.get("from_event_id"))
+                reopened = (
+                    architecture_event.get("payload", {}).get("task_id")
+                    if isinstance(architecture_event, dict)
+                    else None
+                )
+                if isinstance(reopened, str) and reopened and self._task_dependencies_met(run_id, reopened):
+                    return reopened
+                return None
         return None
 
     def _passing_reviews(self, run_id: str) -> dict[str, int]:
@@ -1363,6 +1460,47 @@ class PhaseProtocol:
             return None
         return artifact
 
+    def _accepted_plan(self, run_id: str, task_id: Any) -> dict[str, Any] | None:
+        """The task's latest Plan that a controller transition accepted, if still usable.
+
+        "Accepted" means a persisted event consumed the artifact: a PLAN completion
+        (``previous_state == PLAN`` naming it), an IMPLEMENT pin, or an adoption that
+        copied it. A Plan artifact stored by a completion that never committed its
+        transition (a rejected or abandoned G4) is skipped. The accepted Plan must still
+        descend from the run's current TASKS DAG and pin both repository baselines;
+        otherwise a CODE_ONLY repair cannot reuse it and the caller re-enters PLAN.
+        """
+        if not isinstance(task_id, str) or not task_id:
+            return None
+        accepted_ids: set[str] = set()
+        for event in self.state.events(run_id):
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if payload.get("previous_state") == "PLAN" and isinstance(payload.get("artifact_id"), str):
+                accepted_ids.add(payload["artifact_id"])
+            if isinstance(payload.get("plan_artifact_id"), str):
+                accepted_ids.add(payload["plan_artifact_id"])
+            adoption = payload.get("adoption_artifacts")
+            if isinstance(adoption, dict) and isinstance(adoption.get("plan"), str):
+                accepted_ids.add(adoption["plan"])
+        latest = next((
+            artifact for artifact in reversed(self.artifacts.phase_artifacts(run_id, "PLAN"))
+            if artifact.get("valid")
+            and artifact.get("artifact_id") in accepted_ids
+            and (artifact.get("envelope") or {}).get("task_id") == task_id
+        ), None)
+        if latest is None:
+            return None
+        envelope = latest.get("envelope") or {}
+        if envelope.get("run_id") != run_id or plan_implement_binding(latest) is None:
+            return None
+        tasks = self.artifacts.latest_phase(run_id, "TASKS", None)
+        if (
+            not tasks.get("valid")
+            or tasks["envelope"].get("content_hash") != envelope.get("parent_artifact_hash")
+        ):
+            return None
+        return latest
+
     def _source_revisions(
         self, run_id: str, current: dict[str, Any], predecessor: dict[str, Any] | None,
         state: str, task_id: str | None,
@@ -1573,6 +1711,12 @@ class PhaseProtocol:
         if action["phase"] == "DIAGNOSE":
             content = envelope["content"]
             route = content.get("route")
+            if route in repair_policy.ENVIRONMENT_FORBIDDEN_ROUTES and (
+                content.get("classification") in repair_policy.ENVIRONMENT_FAILURE_CLASSES
+                or self._authoritative_failure_class(
+                    action["run_id"], content.get("stage_id")) is not None
+            ):
+                return "STOPPED", None, "ENVIRONMENT_REPAIR_FORBIDDEN"
             if route == "DIAGNOSIS_INCOMPLETE":
                 return "STOPPED", None, "DIAGNOSIS_INCOMPLETE"
             if route != "REPAIR":
@@ -1602,11 +1746,14 @@ class PhaseProtocol:
                 return "STOPPED", None, budget["reason_code"]
             if budget["action"] == "ARCHITECTURE_REVIEW":
                 return "ARCHITECTURE_REVIEW", None, budget["reason_code"]
-            # A code-only repair leaves the Spec and the DAG standing, so it re-enters
-            # at PLAN and wins a fresh G4 there. Anything that amends the Spec or moves
-            # task scope re-enters at SPEC, which is also the default when the diagnosis
-            # does not say -- the conservative reading of an older artifact.
+            # A code-only repair leaves the Spec, DAG and approved Plan standing, so
+            # it can return directly to IMPLEMENT. The new Change Set still gets a
+            # fresh G5/Review. Older runs may lack a reusable Plan, and a Plan that no
+            # longer descends from the current TASKS cannot be reused; those retain
+            # the PLAN route and its G4 gate.
             if content.get("repair_scope") == "CODE_ONLY":
+                if self._accepted_plan(action["run_id"], action.get("task_id")) is not None:
+                    return "IMPLEMENT", action.get("task_id"), "OK"
                 return "PLAN", action.get("task_id"), "OK"
             return "SPEC", None, "OK"
         target = action.get("target_state")
@@ -1627,6 +1774,38 @@ class PhaseProtocol:
         so each recorded round counts as an unresolved attempt.
         """
         history: list[dict[str, Any]] = []
+        events = self.state.events(run_id)
+        event_positions = {
+            event.get("event_id"): position
+            for position, event in enumerate(events)
+            if isinstance(event, dict) and isinstance(event.get("event_id"), str)
+        }
+        # An approved ARCHITECTURE_REVIEW starts a new repair *epoch*: the rounds after
+        # it get fresh "three failed fixes" and "same signature, no progress" counters
+        # (repair_policy compares only rounds of the latest epoch). It does not refill
+        # the run's absolute REPAIR_LIMIT -- every round stays in the history, so the
+        # fifth confirmed round of the run stops it however many reviews came between.
+        architecture_positions = [
+            position for position, event in enumerate(events)
+            if isinstance(event, dict) and event.get("state") == "ARCHITECTURE_REVIEW"
+        ]
+
+        def epoch_of(position: int) -> int:
+            return sum(1 for boundary in architecture_positions if boundary < position)
+
+        # Rounds a CODE_ONLY adoption carried over from its source run count toward the
+        # absolute limit too (adopt-code-only-repair records them on the entry event).
+        for event in events:
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if payload.get("adoption_kind") == "CODE_ONLY_REPAIR":
+                inherited = payload.get("inherited_repair_rounds")
+                count = inherited if isinstance(inherited, int) and not isinstance(inherited, bool) else 0
+                for _ in range(max(0, count)):
+                    history.append({
+                        "failure_class": None, "diagnosis_confirmed": True,
+                        "failure_signature": None, "progress": True, "resolved": False,
+                        "epoch": -1, "inherited": True,
+                    })
         previous_signature: Any = None
         current_hash = current_envelope.get("content_hash")
         seen_current = False
@@ -1634,12 +1813,19 @@ class PhaseProtocol:
             if not artifact.get("valid"):
                 continue
             envelope = artifact.get("envelope") or {}
+            source_position = event_positions.get(envelope.get("source_event_id"), -1)
             if envelope.get("content_hash") == current_hash:
                 seen_current = True
-            history.append(self._repair_round(envelope.get("content") or {}, previous_signature))
+            history.append({
+                **self._repair_round(envelope.get("content") or {}, previous_signature),
+                "epoch": epoch_of(source_position),
+            })
             previous_signature = history[-1]["failure_signature"]
         if not seen_current:
-            history.append(self._repair_round(current_envelope.get("content") or {}, previous_signature))
+            history.append({
+                **self._repair_round(current_envelope.get("content") or {}, previous_signature),
+                "epoch": len(architecture_positions),
+            })
         return history
 
     @staticmethod
@@ -1679,6 +1865,78 @@ class PhaseProtocol:
         content = (artifact.get("envelope") or {}).get("content") or {}
         signature = content.get("failure_signature")
         return signature if isinstance(signature, str) and signature else None
+
+    def _authoritative_failure_class(
+        self, run_id: str, diagnosed_stage: Any = None,
+    ) -> str | None:
+        """The *proven* environment class of the CURRENT diagnosis' failure, or None.
+
+        Strong evidence only, read for the IPIPE evidence the DIAGNOSE-entry event points
+        at: a control-plane-proven dependency fetch failure of the diagnosed failed stage
+        itself (`environment_evidence`, B-21: the latest attempt of a product the stage's
+        own parameter declaration consumes answered 403/404 on every candidate; a 5xx, a
+        missing status, another stage of the same build or an `ipipe-rebuild` probe are
+        never authoritative). The diagnosed stage is `diagnosed_stage` (the diagnosis'
+        `stage_id`) when it is a FAILURE stage of that evidence; otherwise every FAILURE
+        stage of the evidence is checked against its own records.
+        Otherwise a runtime class in `repair_policy.RUNTIME_ENVIRONMENT_CLASSES` / `ENV_*`
+        (structured platform fields, control-plane answers), falling back to the
+        FailureCase entry under the same rule. Keyword-derived classes
+        (`ENVIRONMENT_SUSPECTED`, legacy `ENVIRONMENT_FAILURE`) are advisory and return
+        None, so the diagnosis and G6 decide. A REVIEW/other-origin diagnosis has no
+        runtime class. The diagnosis' own `classification` cannot override this one.
+        """
+        events = self.state.events(run_id)
+        payload = events[-1].get("payload") if events else None
+        payload = payload if isinstance(payload, dict) else {}
+        if payload.get("previous_state") != "IPIPE":
+            return None
+        artifact_id = payload.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            return None
+        artifact = self.artifacts.phase_artifact(artifact_id)
+        if not artifact.get("valid"):
+            return None
+        content = (artifact.get("envelope") or {}).get("content") or {}
+        from environment_evidence import proven_dependency_failure
+        failed_stages = [
+            str(stage.get("stage_id")) for stage in content.get("stages") or []
+            if isinstance(stage, dict) and stage.get("status") == "FAILURE" and stage.get("stage_id")
+        ]
+        # The diagnosed stage decides when it is one of the evidence's FAILURE stages.
+        # A diagnosis naming no stage, or a stage that did not fail, cannot dodge the
+        # guard: then every FAILURE stage's own record is read.
+        if isinstance(diagnosed_stage, str) and diagnosed_stage in failed_stages:
+            candidates = [diagnosed_stage]
+        else:
+            candidates = failed_stages
+        for stage_id in candidates:
+            proven = proven_dependency_failure(self.state, run_id, content.get("build_id"), stage_id)
+            if proven is not None and self._stage_conf_matches(run_id, proven):
+                return proven["classification"]
+        classification = content.get("classification")
+        if repair_policy.runtime_environment_class(classification):
+            return classification
+        signature = content.get("failure_signature")
+        case = self.state.failure_case(signature) if isinstance(signature, str) and signature else None
+        recorded = case.get("classification") if isinstance(case, dict) else None
+        return recorded if repair_policy.runtime_environment_class(recorded) else None
+
+    def _stage_conf_matches(self, run_id: str, record: dict[str, Any]) -> bool:
+        """The record names the same stage occurrence the runtime bound (build + conf).
+
+        The record is written from the owned stage binding; a binding that now disagrees
+        (another build or stage configuration) makes the record prove nothing.
+        """
+        binding = self.state.idempotency_result(
+            f"ipipe.stage-binding:{run_id}:{record.get('stage_build_id')}")
+        if not isinstance(binding, dict):
+            return True
+        if binding.get("build_id") is not None and str(binding["build_id"]) != record.get("build_id"):
+            return False
+        stage = binding.get("stage") if isinstance(binding.get("stage"), dict) else {}
+        conf = str(stage.get("stage_conf_id") or "")
+        return not conf or not record.get("stage_conf_id") or conf == record["stage_conf_id"]
 
     def _cross_run_escalation(
         self, signature: Any
@@ -1806,6 +2064,11 @@ class PhaseProtocol:
             if existing.get("ingest_hash") != content_hash:
                 return _failure("COMPLETION_CONFLICT", run_id=run_id)
             return self._validated_cached_ipipe_ingestion(run_id, existing)
+        # A superseded or rejected build is no longer the run's build: its result,
+        # whatever it is, cannot become this run's current IPIPE evidence.
+        if is_excluded(self.state, run_id, content["build_id"]):
+            return _failure("BUILD_SUPERSEDED", run_id=run_id, build_id=content["build_id"],
+                            retry_allowed=False)
         drift = self._workflow_spec_drift(run_id)
         if drift is not None:
             return drift
@@ -2247,6 +2510,8 @@ class PhaseProtocol:
             stored = envelope.get("content") if isinstance(envelope, dict) else None
             if not isinstance(stored, dict) or stored.get("status") != "SUCCESS":
                 continue
+            if is_excluded(self.state, run_id, stored.get("build_id")):
+                continue
             module = stored.get("module")
             if module not in required:
                 continue
@@ -2545,6 +2810,52 @@ def _valid_revisions(value: Any) -> bool:
         and {"business", "tests"}.issubset(value)
         and all(isinstance(revision, str) and revision for revision in value.values())
     )
+
+
+def plan_baseline_revisions(plan_content: Any) -> dict[str, Any] | None:
+    """The repository baselines an approved Plan pins, as {role: revision}.
+
+    IMPLEMENT measures every Change Set from these revisions, whichever way the run
+    entered IMPLEMENT (PLAN completion, a CODE_ONLY repair, or an adoption). Taking
+    them from anywhere else -- notably a diagnosis' frozen candidate revisions -- makes
+    prepare_change_set and validate_content refuse the repair as
+    BASELINE_REVISION_MISMATCH.
+    """
+    if not isinstance(plan_content, dict):
+        return None
+    baselines = {
+        item.get("role"): item.get("revision")
+        for item in plan_content.get("repositories", []) or []
+        if isinstance(item, dict)
+    }
+    if set(baselines) != {"business", "tests"} or not _valid_revisions(baselines):
+        return None
+    return baselines
+
+
+def plan_implement_binding(plan_artifact: Any) -> dict[str, Any] | None:
+    """The IMPLEMENT entry payload fields that pin one stored Plan artifact.
+
+    Shared by PLAN-independent entries into IMPLEMENT (DIAGNOSE CODE_ONLY repair and
+    `adopt-code-only-repair`) so both pin the Plan the same way PLAN->IMPLEMENT does:
+    ``plan_artifact_id`` + ``plan_content_hash`` for `_pinned_plan`, and
+    ``source_revisions`` equal to the Plan's own repository baselines.
+    """
+    if not isinstance(plan_artifact, dict) or not plan_artifact.get("valid"):
+        return None
+    envelope = plan_artifact.get("envelope")
+    if not isinstance(envelope, dict) or envelope.get("phase") != "PLAN":
+        return None
+    baselines = plan_baseline_revisions(envelope.get("content"))
+    artifact_id = plan_artifact.get("artifact_id")
+    content_hash = envelope.get("content_hash")
+    if baselines is None or not isinstance(artifact_id, str) or not _valid_hash(content_hash):
+        return None
+    return {
+        "plan_artifact_id": artifact_id,
+        "plan_content_hash": content_hash,
+        "source_revisions": baselines,
+    }
 
 
 def _diagnosis_reentry(envelope: dict[str, Any], artifact_id: str) -> dict[str, Any]:

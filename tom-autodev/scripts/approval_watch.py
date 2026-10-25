@@ -173,7 +173,10 @@ class ApprovalWatcher:
             approval = self._approved_gate(run_id, brief.get("gate"), latest.get("created_at"))
             if approval is None:
                 continue
-            handoff_id = f"{_RESUME_HANDOFF_PREFIX}-{approval['approval_id']}"
+            handoff_id = (
+                f"{_RESUME_HANDOFF_PREFIX}-{approval['approval_id']}-"
+                f"{latest['event_id']}"
+            )
             try:
                 handoff = self.orchestrator.state.record_handoff(
                     run_id,
@@ -797,6 +800,52 @@ def _resume_markdown(
     return "\n".join(lines)
 
 
+def reap_stale_resume_handoffs(
+    orchestrator: Any, run_id: str, handoffs: list[dict[str, Any]], *, actor: str
+) -> list[dict[str, Any]]:
+    """Complete provably expired APPROVAL_RESUME handoffs; return the ones that remain.
+
+    A handoff is expired only when ALL hold: it names an event other than the run's
+    latest one, its approval is an APPROVE bound to the handoff's run and input_hash,
+    and that approval was already consumed (its id is recorded in a later event) or its
+    gate no longer matches the current state's gate. Handoffs of the latest event,
+    REJECT/TIMEOUT/REVISE approvals and malformed rows are always kept.
+    """
+    import json
+
+    events = orchestrator.state.events(run_id)
+    if not events:
+        return list(handoffs)
+    latest_id = events[-1].get("event_id")
+    spec = workflow_spec.STATES.get(events[-1].get("state"))
+    current_gate = spec.output_gate if spec is not None else None
+    ids = [event.get("event_id") for event in events]
+    kept: list[dict[str, Any]] = []
+    for handoff in handoffs:
+        data = handoff.get("payload") or {}
+        event_id = data.get("event_id")
+        approval = orchestrator.approvals.get(data.get("approval_id"))
+        expired = (
+            isinstance(event_id, str) and event_id and event_id != latest_id
+            and isinstance(approval, dict)
+            and approval.get("run_id") == run_id
+            and approval.get("effective_decision") == "APPROVE"
+            and approval.get("input_hash") == data.get("input_hash")
+        )
+        if expired:
+            later = events[ids.index(event_id) + 1:] if event_id in ids else []
+            consumed = any(
+                str(approval["approval_id"]) in json.dumps(event.get("payload"), sort_keys=True, default=str)
+                for event in later
+            )
+            expired = consumed or gate_of(approval.get("action")) != current_gate
+        if not expired:
+            kept.append(handoff)
+            continue
+        orchestrator.state.complete_handoff_audited(handoff, actor=actor, reason="STALE_EVENT")
+    return kept
+
+
 def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[str, Any]:
     """Hand one approved resume back to a live Comate turn.
 
@@ -812,10 +861,16 @@ def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[st
         run_id = latest.get("run_id")
         if not isinstance(run_id, str):
             continue
-        for handoff in orchestrator.state.incomplete_handoffs(run_id):
-            data = handoff.get("payload") or {}
-            if data.get("kind") == "APPROVAL_RESUME":
-                candidates.append((str(handoff["handoff_id"]), run_id, data))
+        open_handoffs = [
+            handoff for handoff in orchestrator.state.incomplete_handoffs(run_id)
+            if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
+        ]
+        if len(open_handoffs) > 1:
+            open_handoffs = reap_stale_resume_handoffs(
+                orchestrator, run_id, open_handoffs, actor="approval_watch.stop_hook"
+            )
+        for handoff in open_handoffs:
+            candidates.append((str(handoff["handoff_id"]), run_id, handoff.get("payload") or {}))
     if not candidates:
         return {"ok": True, "reason_code": "NO_RESUME_HANDOFF"}
     if len(candidates) > 1:
@@ -903,7 +958,7 @@ def _ack_markdown(
         "REVISE_FEEDBACK": "已收到修改意见",
     }.get(decision, decision)
     following = {
-        "APPROVE": "Comate 会在下一步继续该 run。",
+        "APPROVE": "审批已生效；另一渠道无需重复点击。若 IDE 会话仍在运行，会在下一轮自动接续；若会话已结束，请在 Comate 输入“继续”。",
         "REVISE": "run 保留，Comate 按意见重做当前阶段并重新发起审批。",
         "REJECT": "run 已停止，不会继续后续阶段。",
     }.get(decision, "请以审批账本和 run 状态为准。")

@@ -63,13 +63,15 @@ class PipelinePlanTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.profile))
 
     def _descriptor(self, module, revision, change_id, tests='t1', task=None, tests_only=False,
-                    reviewed_artifact_id=None, change_set_hash=None):
+                    reviewed_artifact_id=None, change_set_hash=None, unchanged=None):
         value = {'run_id': self.run, 'change_set_id': change_id,
                  'revision_set_id': digest([module, revision, tests]),
                  'repo_path': str(self.root/module), 'module': module, 'target_branch': 'main',
                  'commit_revision': revision, 'card_id': 'BGW-1', 'owner': 'dev',
                  'revision_set': {'business': {'module': module, 'branch': 'main', 'revision': revision},
                                   'test': {'module': 'tests', 'branch': 'main', 'revision': tests}}}
+        if unchanged is not None:
+            value['unchanged_baselines'] = unchanged
         if tests_only:
             value.update(module='tests', commit_revision=tests, repo_path=str(self.root/'tests'))
         value['input_hash'] = digest(value)
@@ -222,6 +224,159 @@ class PipelinePlanTests(unittest.TestCase):
             revisions = _ipipe_revision_set(self.orch, self.run, self.profile)
         self.assertTrue(revisions['ok'], revisions)
         self.assertEqual(revisions['revisions'], payload['pipeline_plan']['revision_set'])
+
+    def _start_unchanged(self, pin=None):
+        """Only A changes; B is a registered repository the requirement never touches."""
+        pin = pin if pin is not None else {'module': 'B', 'branch': 'main', 'revision': 'b-base'}
+        self._submit(self._descriptor('A', 'a1', 'A-1', unchanged=[pin]))
+        return self.orch.state.events(self.run)[-1]['payload']
+
+    def test_unchanged_module_is_pinned_without_a_pipeline_of_its_own(self):
+        plan = self._start_unchanged()['pipeline_plan']
+
+        self.assertEqual(list(plan['modules']), ['A'])
+        self.assertEqual(plan['required_modules'], ['A'])
+        self.assertEqual(plan['unchanged'], {'B': {
+            'module': 'B', 'branch': 'main', 'revision': 'b-base', 'source': 'baseline_pin'}})
+        revisions = {r['module']: r['revision'] for r in plan['revision_set']['repositories']}
+        self.assertEqual(revisions, {'A': 'a1', 'B': 'b-base', 'tests': 't1'})
+
+    def test_unchanged_module_takes_part_in_the_dependency_closure(self):
+        from pipeline_plan import create_plan
+        self._start_unchanged()
+        conservative = copy.deepcopy(self.profile)
+        for entry in conservative['pipeline_profile']['pipelines']:
+            entry.pop('depends_on')
+
+        plan = create_plan(self.orch, self.run, conservative)
+
+        self.assertEqual(plan['modules']['A']['expected_revisions'],
+                         {'A': 'a1', 'B': 'b-base', 'tests': 't1'})
+
+    def test_unchanged_module_without_a_pin_stays_unresolved(self):
+        self._submit(self._descriptor('A', 'a1', 'A-1'), expect_ok=False)
+        from pipeline_plan import create_plan
+
+        with self.assertRaises(ValueError) as caught:
+            create_plan(self.orch, self.run, self.profile)
+        self.assertEqual(str(caught.exception), 'REVISION_UNRESOLVED')
+
+    def test_unchanged_pin_must_name_the_registered_branch(self):
+        from pipeline_plan import create_plan
+        self._submit(self._descriptor('A', 'a1', 'A-1', unchanged=[
+            {'module': 'B', 'branch': 'elsewhere', 'revision': 'b-base'}]), expect_ok=False)
+
+        with self.assertRaises(ValueError) as caught:
+            create_plan(self.orch, self.run, self.profile)
+        self.assertEqual(str(caught.exception), 'SOURCE_REVISION_MISMATCH')
+
+    def test_a_module_that_was_submitted_ignores_a_stale_pin(self):
+        self._submit(self._descriptor('A', 'a1', 'A-1', unchanged=[
+            {'module': 'B', 'branch': 'main', 'revision': 'b-base'}]))
+        plan = self.orch.state.events(self.run)[-1]['payload']['pipeline_plan']
+        self.assertEqual(list(plan['modules']), ['A'])
+
+        self._submit(self._descriptor('B', 'b1', 'B-1', task='task-B', unchanged=[
+            {'module': 'A', 'branch': 'main', 'revision': 'a-stale'}]))
+        plan = self.orch.state.events(self.run)[-1]['payload']['pipeline_plan']
+
+        self.assertNotIn('unchanged', plan)
+        self.assertEqual(sorted(plan['modules']), ['A', 'B'])
+
+    def _submit_replaying(self, descriptor):
+        """Submit through a runtime that, like the real one, replays a completed push."""
+        state, run = self.orch.state, self.run
+
+        class Replaying(FakeIcodeRuntime):
+            def submit(self, change_set, approval):
+                key = f"icode.submit:{run}:{change_set['change_set_id']}:{change_set['revision_set_id']}"
+                done = state.result_by_idempotency_key(key)
+                if done is not None:
+                    return dict(done["receipt"]["response"])
+                return super().submit(change_set, approval)
+
+        approval = approved(self.orch.approvals, 'G7', descriptor['input_hash'], self.run)
+        with patch('orchestrator.load_profile', return_value={'ready': True, 'profile': self.profile}):
+            return self.orch.submit_to_ipipe(self.run, descriptor, approval,
+                                             icode_runtime=Replaying(self.orch.state, self.run))
+
+    def test_a_pin_added_after_the_push_replays_the_receipt_under_the_new_g7(self):
+        # BGW-1995: the CR was pushed under a descriptor with no pin, the plan could not
+        # resolve the untouched repository, and the refreshed descriptor carries the pin.
+        self.orch.state.transition(self.run, 'SUBMIT', {'previous_state': 'REVIEW'})
+        first = self._submit_replaying(self._descriptor('A', 'a1', 'A-1'))
+        self.assertEqual(first['reason_code'], 'REVISION_UNRESOLVED', first)
+
+        pinned = self._descriptor('A', 'a1', 'A-1', unchanged=[
+            {'module': 'B', 'branch': 'main', 'revision': 'b-base'}])
+        result = self._submit_replaying(pinned)
+
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(self.orch.status(self.run)['state'], 'IPIPE')
+
+    def test_a_replayed_push_needs_its_own_g7_to_have_been_approved(self):
+        self.orch.state.transition(self.run, 'SUBMIT', {'previous_state': 'REVIEW'})
+        self._submit_replaying(self._descriptor('A', 'a1', 'A-1'))
+        intent = self.orch.state.intent_by_idempotency_key(
+            f"icode.submit:{self.run}:A-1:{digest(['A', 'a1', 't1'])}")
+        from orchestrator import _replayed_submit_intent
+        payload = intent['payload']
+        moved = {**payload, 'input_hash': 'other', 'approval_id': 'other'}
+
+        self.assertTrue(_replayed_submit_intent(self.orch.approvals, self.run, payload, moved))
+        forged = {**payload, 'approval_id': 'missing'}
+        self.assertFalse(_replayed_submit_intent(self.orch.approvals, self.run, forged, moved))
+        other_commit = {**moved, 'commit_revision': 'a2'}
+        self.assertFalse(_replayed_submit_intent(self.orch.approvals, self.run, payload, other_commit))
+
+    def _ipipe_action(self):
+        action = self.protocol.next(self.run)
+        self.assertTrue(action['ok'], action)
+        self.assertEqual(action['state'], 'IPIPE')
+        return action
+
+    def test_a_build_the_platform_already_started_is_adopted_without_a_trigger_g7(self):
+        from pipeline_plan import frozen_plan
+        self._start_unchanged()
+        plan = frozen_plan(self.orch.state.events(self.run))
+        target = plan['modules']['A']
+        self.api.pipeline = {'id': target['pipeline_id'], 'module': 'A'}
+        build = {'id': 'platform-1', 'pipelineConfId': target['pipeline_id'], 'module': 'A',
+                 'revision': 'a1', 'status': 'RUNNING',
+                 'stageBuilds': [{'id': 'platform-1-stage', 'class': 'unit', 'status': 'RUNNING'}]}
+        self.api.builds['platform-1'] = build
+        self.api.candidates = [build]
+
+        with patch.object(self.orch, 'ipipe_runtime', return_value=self._runtime()):
+            result = worker_driver._execute_ipipe(self.orch, self.run, self._ipipe_action(),
+                                                  self.api, self.knowledge)
+
+        self.assertEqual(result.get('build_id'), 'platform-1', result)
+        self.assertNotEqual(result.get('reason_code'), 'APPROVAL_REQUIRED')
+        self.assertFalse(any(call[0] == 'trigger_by_revision' for call in self.api.calls))
+
+    def test_a_missing_build_asks_for_a_trigger_g7_with_readable_material(self):
+        from approval_summary import pinned_context
+        self._start_unchanged()
+        self.api.pipeline = {'id': 'pipe-A', 'module': 'A'}
+
+        with patch.object(self.orch, 'ipipe_runtime', return_value=self._runtime()):
+            result = worker_driver._execute_ipipe(self.orch, self.run, self._ipipe_action(),
+                                                  self.api, self.knowledge)
+        self.assertEqual(result['reason_code'], 'APPROVAL_REQUIRED', result)
+
+        with patch('orchestrator.load_profile', return_value={'ready': True, 'profile': self.profile}):
+            material = pinned_context(self.orch, self.run, 'G7', result['approval_input_hash'])
+        self.assertEqual(material['material_status'], 'PINNED', material)
+        self.assertTrue(any('未变更仓库 B' in line for line in material['summary']))
+        self.assertEqual(pinned_context(self.orch, self.run, 'G7', '0' * 64)['material_status'], 'MISSING')
+
+    def test_release_needs_only_the_changed_module(self):
+        self._start_unchanged()
+        self._build('A', 'a-built')
+        self._publish('a-built')
+
+        self.assertEqual(self._release().get('state'), 'RELEASE_SUCCESS')
 
     def test_explicit_independence_and_default_dependency_closure(self):
         from pipeline_plan import create_plan

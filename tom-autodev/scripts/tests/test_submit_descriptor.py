@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 import sys
 
@@ -79,6 +80,76 @@ class OwnedRowLookupTests(unittest.TestCase):
             self.assertIsNotNone(submit_descriptor.owned_row(rows, "T-1", str(real) + "/"))
             self.assertIsNone(submit_descriptor.owned_row(rows, "T-2", str(real)))
             self.assertIsNone(submit_descriptor.owned_row(rows, "T-1", None))
+
+
+class _Artifacts:
+    def __init__(self, nodes):
+        self.nodes = nodes
+
+    def latest_phase(self, run_id, phase, task_id):
+        return {"valid": True, "envelope": {"content": {"nodes": self.nodes}}}
+
+
+class _Orchestrator:
+    def __init__(self, nodes):
+        self.artifacts = _Artifacts(nodes)
+
+
+class UnchangedBaselineTests(unittest.TestCase):
+    PROFILE = {"business_repos": [
+        {"module": "A", "branch": "feature", "path": "/repo/a"},
+        {"module": "B", "branch": "shared", "path": "/repo/b"},
+    ]}
+
+    def pins(self, nodes, profile=None, heads=None):
+        heads = heads if heads is not None else {"shared": "b-head"}
+        with unittest.mock.patch.object(
+            submit_descriptor, "_remote_branch_head", side_effect=lambda path, branch: heads.get(branch)
+        ):
+            return submit_descriptor.unchanged_baselines(
+                _Orchestrator(nodes), "run", profile or self.PROFILE
+            )
+
+    def test_untouched_repository_is_pinned_at_the_branch_head(self):
+        self.assertEqual(
+            self.pins([{"task_id": "T1", "business_module": "A"}]),
+            [{"module": "B", "branch": "shared", "revision": "b-head"}],
+        )
+
+    def test_every_repository_touched_has_nothing_to_pin(self):
+        nodes = [{"task_id": "T1", "business_module": "A"}, {"task_id": "T2", "business_module": "B"}]
+        self.assertEqual(self.pins(nodes), [])
+
+    def test_unnamed_task_repository_is_never_guessed(self):
+        self.assertEqual(self.pins([{"task_id": "T1"}]), [])
+
+    def test_single_repository_profile_has_nothing_to_pin(self):
+        profile = {"business_repos": self.PROFILE["business_repos"][:1]}
+        self.assertEqual(self.pins([{"task_id": "T1", "business_module": "A"}], profile), [])
+
+    def test_unresolvable_head_is_reported_not_skipped(self):
+        result = self.pins([{"task_id": "T1", "business_module": "A"}], heads={})
+        self.assertEqual(result["reason_code"], "BASELINE_UNRESOLVED")
+        self.assertEqual(result["module"], "B")
+
+    def test_remote_head_reads_the_named_branch_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            remote = Path(temp) / "remote.git"
+            work = Path(temp) / "work"
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "init", "-q", str(work)], check=True)
+            for key, value in (("user.email", "dev@example.test"), ("user.name", "dev")):
+                subprocess.run(["git", "-C", str(work), "config", key, value], check=True)
+            subprocess.run(["git", "-C", str(work), "commit", "-q", "--allow-empty", "-m", "one"], check=True)
+            subprocess.run(["git", "-C", str(work), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "HEAD:refs/heads/shared"], check=True)
+            subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "HEAD:refs/heads/shared-other"], check=True)
+            head = subprocess.run(["git", "-C", str(work), "rev-parse", "HEAD"], capture_output=True,
+                                  text=True, check=True).stdout.strip()
+
+            self.assertEqual(submit_descriptor._remote_branch_head(str(work), "shared"), head)
+            self.assertIsNone(submit_descriptor._remote_branch_head(str(work), "missing"))
+            self.assertIsNone(submit_descriptor._remote_branch_head("", "shared"))
 
 
 if __name__ == "__main__":

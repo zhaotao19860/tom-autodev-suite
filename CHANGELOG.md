@@ -4,6 +4,317 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-25 · 依赖失败证据绑定 stage、只认 403/404、最新一次为准；结构化字段说明更正（B-21、B-22）
+
+- B-23：同 stage/模块之后出现的 5xx 或缺状态码下载结果不再覆盖先前已证实的 403/404；只有成功下载才解除环境拦截（`environment_evidence.proven_dependency_failure`，测试 `test_b23_an_inconclusive_later_attempt_does_not_clear_a_proven_404`）。
+- B-21（P2）：`environment_evidence` 重写。此前 `ipipe.dependency-failure:{run}:{build}:{module}` 只按 build 记录、不绑定失败
+  stage，第一条永久有效，5xx 也记 `ENV_TRANSIENT`，`ipipe-rebuild` 探测 403/404 也写权威记录，`ipipe-rerun --print-parameters`
+  只读检查也会写；结果是同一 build 上的真实代码失败被永久判为环境类、无法 REPAIR。现在：
+  - 证据绑定 stage：键为 `ipipe.dependency-failure:{run}:{build}:{stage_build_id}:{module}:{attempt:04d}`，内容含
+    `stage_build_id`、`stage_conf_id`、`module`、`declared_parameters`（该 stage 的参数声明）与 `consumed_by`（声明中映射到该模块的
+    参数名）。`PhaseProtocol._authoritative_failure_class(run_id, diagnosed_stage)` 只读被诊断的失败 stage 的记录：诊断的
+    `stage_id` 是 IPIPE 证据中的 FAILURE stage 时只看它；未给 stage 或给了未失败的 stage 时，逐个看证据里每个 FAILURE stage 自己的
+    记录（不能靠改 `stage_id` 绕开）。`consumed_by` 为空、或 stage binding 的 build/`stage_conf_id` 与记录不一致时不算权威。
+  - 只认 403/404：`class_for_statuses` 仅在全部候选为 403/404 时返回 `ENV_UNSATISFIED`；含 5xx 记 `advisory: ENV_TRANSIENT_SUSPECTED`，
+    缺状态码或其他状态码记 `advisory: DOWNLOAD_STATUS_UNPROVEN`，只供诊断参考，不拦截。
+  - `ipipe-rebuild --request-g8` 不再写依赖记录（删除 `record_probe_failure`）；探测结果只留在 G8 材料中，它只证明无法基于旧产物重跑。
+  - 只读入口不写：`_stage_parameters` 新增 `record_evidence`（默认 False）；只有 `worker_driver._prepare_manual_stage`（写 G8 材料）
+    与 CLI `ipipe-rerun --request-g8`/执行路径传 True，`--print-parameters`、`--print-input-hash` 与 rebuild 的 plan 步骤不写。
+  - 不再"第一条永久"：选择"按尝试次数分键"。状态库的幂等结果不可覆盖，同 key 改写会破坏既有不可变约定；分键追加则每次尝试都留档
+    可审计，读取时每个 stage/模块只取 attempt 最大的一条。一次下载成功也追加一条 `outcome: AVAILABLE`，覆盖早先的 404。
+  - 旧格式记录（`{run}:{build}:{module}`）不再被读取，此前因它被拦截的诊断回到正常诊断 + G6。
+- B-22（P3 文档）：README、`tom-autodev/references/failure-taxonomy.md` 与本文件对 `errorType`/`failType`/`failureType`/
+  `systemErrorType`/`errorCategory`/`agentStatus`/`agentState`/`runnerStatus` 8 个结构化字段的描述改为：候选映射，未经真实 iPipe
+  返回验证；当前观测到的响应均不含这些字段，因此实际不生效；首次在真实返回中观测到任一字段时须先核对语义再启用。代码映射保留。
+- 文档：README、`failure-taxonomy.md`、`phase-protocol.md`、`tom-autodev/SKILL.md` 的依赖失败强证据描述同步为 stage 绑定且仅 403/404。
+- 测试（修复前均失败）：`test_code_only_repair_baseline` 新增 `test_b21_another_stages_dependency_404_does_not_block_this_stages_code_repair`、
+  `test_b21_a_5xx_is_advisory_and_never_blocks`、`test_b21_a_module_the_stage_does_not_consume_is_not_authoritative`、
+  `test_b21_the_latest_attempt_wins`、`test_b21_a_diagnosis_cannot_dodge_by_naming_no_or_a_passing_stage`；
+  `test_a_rebuild_probe_403_is_authoritative` 改为 `test_b21_a_rebuild_probe_403_is_not_authoritative`；
+  `test_ipipe_rebuild` 的探测测试改为 `test_b21_a_requested_rebuild_probe_404_is_not_authoritative_environment_evidence`；
+  `test_stage_parameters` 新增 `test_b21_read_only_resolution_writes_no_dependency_evidence`、
+  `test_b21_cli_print_parameters_and_input_hash_write_no_dependency_evidence`。本 stage 消费 `get_bgwagent` 且全部 404 时仍拒绝
+  REPAIR/SPEC/GRILL（`test_b11_every_exact_get_bgwagent_candidate_404_is_authoritative`、`test_a_proven_dependency_404_blocks_repair_and_spec`）。
+  workflow spec hash 不变（`76bb964c…d410`）。
+
+### 剩余风险（待负责人决定，未接受）
+
+- `DIAGNOSE -> ENVIRONMENT_BLOCKED` 边未加：环境类诊断止于 STOPPED，只能绕行 `ipipe-rebuild` 或新开 run。重开条件：下次计划内改
+  workflow spec hash 时补这条边。
+- B-03(c)(d)：承接时改写 Plan 的 repositories path 且没有新的 G4；跳过目标 run 的 G0。后续仍有 G5/Review。
+- B-22：8 个结构化字段的映射仍在代码中，未经真实 iPipe 返回验证；目前不生效，首次观测到时须先核对语义。
+- A-13(a)：rerun 确认依赖 `startTime` 字段，需在真实网关上确认该字段存在且语义如预期。
+- 403 被统一视为产物失效：若 token 权限错误也返回 403，会被误判为依赖产物不存在（`ENV_UNSATISFIED`）。
+
+## 2026-10-25 · 评审第二轮：权威环境分类只认强证据；环境类禁止所有改代码路由（B-11、B-04 残留、A-11/12/13b）
+
+- B-11：`clients/ipipe_runtime._classification` 不再把 stage/job 名称或消息里的 environment/capacity/runner/network/timeout/infra
+  当作环境失败。只有结构化平台字段（job 的 `errorType`/`failType`/`failureType`/`systemErrorType`/`errorCategory` 取
+  AGENT_OFFLINE、RUNNER_OFFLINE、RESOURCE_INSUFFICIENT 等 → `ENV_UNSATISFIED`，QUEUE_TIMEOUT/SCHEDULE_TIMEOUT → `ENV_TRANSIENT`；
+  `agentStatus`/`agentState`/`runnerStatus` 为 OFFLINE/LOST/DISCONNECTED → `ENV_UNSATISFIED`）产生权威环境类（B-22 更正：这 8 个
+  字段是候选映射，未经真实 iPipe 返回验证；当前观测到的响应均不含这些字段，因此实际不生效；首次在真实返回中观测到任一字段时须先
+  核对语义再启用；代码映射保留）。关键词命中排在
+  test/code 关键词之后，只记为参考类 `ENVIRONMENT_SUSPECTED`。`case test_syn_proxy_timeout assert failed` 现为 `TEST_FAILURE`，
+  `network.c:12: error` 为 `ENVIRONMENT_SUSPECTED`，两者都能正常 REPAIR。
+- 新增 `environment_evidence.py`：控制面自身证实的依赖获取失败才是权威证据——人工阶段参数解析时产物在所有精确 revision 候选上
+  下载均 403/404（`ENV_UNSATISFIED`）或仅 5xx（`ENV_TRANSIENT`），由 `_stage_parameters` 记为
+  `ipipe.dependency-failure:{run}:{build}:{module}`；`ipipe-rebuild` G8 材料中探测结论 `UNAVAILABLE` 的 build 同样成立。
+- `PhaseProtocol._authoritative_failure_class` 只返回强证据：依赖失败记录 > IPIPE 证据中的 `repair_policy.RUNTIME_ENVIRONMENT_CLASSES`
+  / `ENV_*` > 同规则的 FailureCase；参考类与历史遗留的 `ENVIRONMENT_FAILURE` 返回 None（交给诊断与 G6）。
+- B-04 残留：权威环境类成立时，`repair_policy.ENVIRONMENT_FORBIDDEN_ROUTES`（`REPAIR`、`SPEC`、`GRILL`——route 枚举中会导向改业务代码的
+  三项）在草案校验与完成阶段都返回 `ENVIRONMENT_REPAIR_FORBIDDEN`；允许 `STOPPED`、`DIAGNOSIS_INCOMPLETE`、`ARCHITECTURE_REVIEW`。
+  诊断自报环境类时 schema 校验同样覆盖这三条路由。
+- A-11：`IREPO-TOKEN` 值级规则接受分隔符后的空白与 `IREPO-TOKEN=`。
+- A-12：`worker_driver.submit_draft` 对尚未记录草稿的 job 先 `redact_secrets` 再校验/哈希/存储，引用日志中的 Bearer 行不再导致草稿被拒；
+  已记录草稿的 job（可能已有审批绑定其 hash）与 IMPLEMENT（内容是补丁本身）不改写，仍按原规则拒绝。
+- A-13(b)：rerun 对账时，请求的 stage 若已被其他 intent 的回执认领，只有 startTime 严格晚于该回执时间才算本 intent 的执行。
+- 测试：`test_code_only_repair_baseline` 新增 6 项（关键词误判可 REPAIR、依赖 404 拒绝 REPAIR/SPEC/GRILL、rebuild 探测 403 权威、
+  结构化 runner 离线权威、route=SPEC 绕行被拒、STOPPED/ARCHITECTURE_REVIEW 可用），`test_secret_redaction` 新增 3 项，
+  `test_ipipe_runtime` 新增 1 项；`test_relabelled_environment_failure_cannot_be_repaired` 的权威类改为 `ENV_UNSATISFIED`
+  （`ENVIRONMENT_FAILURE` 不再是运行时权威类）。workflow spec hash 不变。
+- 剩余风险：结构化环境字段（上述 8 个）是候选映射，未经真实 iPipe 返回验证；当前观测到的响应均不含这些字段，因此实际不生效；首次在
+  真实返回中观测到任一字段时须先核对语义再启用。目前真实流量下权威环境类主要来自依赖失败证据与 `ENV_*`/控制面答复，其余环境失败
+  走正常诊断 + G6；`DIAGNOSE -> ENVIRONMENT_BLOCKED` 边未加，环境类诊断止于 STOPPED；B-03 承接仍重写 Plan 仓库 path 且无新 G4、
+  跳过目标 run 的 G0（其后仍有 G5/Review）。
+- 补完（同日，接续中断的实现）：
+  - 依赖失败证据单一来源：`ipipe-rebuild --request-g8` 探测 403/404 时由 `environment_evidence.record_probe_failure` 写入
+    `ipipe.dependency-failure:{run}:{原 build}:{module}`；`proven_dependency_failure` 只读该前缀，不再把 G8 材料
+    `ipipe.g8-material` 当证据（只读的 plan 步骤不写）。此前已存的 rebuild G8 材料不再单独构成权威环境证据，相应诊断回到 G6 判断。
+  - 产物下载判定收紧：每个精确候选都须带状态码；全为 403/404 → `ENV_UNSATISFIED`，403/404/5xx 混合或全 5xx → `ENV_TRANSIENT`；
+    任一候选无状态码（缺 irepo token、本地错误）或为其他状态码（401 等）→ 不记录。原实现只看去重后的状态码集合，一个 404 加一个
+    缺 token 的候选也会记成 `ENV_UNSATISFIED`。
+  - A-12：已记录草稿的 job 再次提交时，若脱敏后与已记录草稿完全相同（同一 hash），按脱敏内容消费，原样重放审批后的草稿不再被
+    `PERSISTENCE_SECRET_REJECTED` 拒绝；内容不同的重提仍不改写。
+  - `ipipe_watch` 通知的修复方向补充 `ENVIRONMENT_SUSPECTED`（参考类，照常诊断）与 `ENV_UNSATISFIED`/`ENV_TRANSIENT`。
+  - 测试：`test_code_only_repair_baseline` 新增 8 项（`test_b11_*`、`test_b04_non_code_routes_stay_open_under_an_authoritative_class`），
+    `test_a_rebuild_probe_403_is_authoritative` 改为“仅 G8 材料不算、记录后才算”；`test_ipipe_rebuild`、`test_stage_parameters`、
+    `test_diagnosis_contract` 各新增 1 项接线测试；`test_secret_redaction` 新增 2 项。workflow spec hash 不变。
+
+## 2026-10-25 · 评审跟进：rebuild 本地错误不再悬挂；job 级参数判断统一；产物候选逐个校验
+
+- `ipipe-rebuild` 调用点本地错误：`state_store._local_error_observed` 现在同样接受 `operation=ipipe.trigger` 的 intent 与
+  `ipipe.rebuild.write_error` 观察（同样要求 `before_dispatch is True`、无 `http_status`、无 `ipipe.rebuild.response`）。
+  调用点错误后 trigger intent 以 `local_error_proven` 关闭，下一次申请取 attempt+1，不再永久 `QUERY_REQUIRED`。
+  原来吞掉 `ValueError` 的静默处理改为返回 `REBUILD_LOCAL_ERROR_UNRECORDED`（带 `abandon_error`，intent 仍开放，需对账或
+  `abandon-intent`）；成功关闭时 `REBUILD_LOCAL_ERROR` 带 `intent_closed: true`。
+- 新增共享函数 `stage_parameters.job_override_decision`，`IpipeRuntime.stage_parameter_names`（G8 材料准备）与
+  `_rerun_binding`（hash/写入）都用它：继承自其他 stage、嵌套 job 或 `upStageParam` 的参数没有可用写入，一律
+  `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`（返回 `parameters` 与 `allowlisted_parameters`），不论是否在
+  `known_job_override_names` 白名单内、平台能力声明为何；stage 自身声明但不在 manualParams 的参数，仍需白名单或已证实的
+  override 契约。此前白名单让继承参数在材料阶段显示可执行、到 hash/执行才被拒。
+- `product_policy.select_product`：精确匹配冻结 revision 的候选按顺序逐个做下载校验，前一个失败继续下一个；全部失败才返回
+  `PRODUCT_DOWNLOAD_UNVERIFIED`，附 `candidates`（build/stage/job id、状态码、原因码）与 `http_statuses`，不含 URL。
+- 测试：`test_ipipe_rebuild.LocalErrorTests`（3 项）；`test_product_policy` 新增 `test_allowlisted_inherited_parameter_is_refused_when_material_is_prepared`、
+  `test_parameters_declared_on_the_stage_itself_stay_executable`、`test_a_failed_download_moves_on_to_the_next_exact_candidate`、
+  `test_only_when_every_exact_candidate_fails_is_the_failure_returned`；原"白名单继承参数放行"与"能力声明即放行"两处断言按新合同改写，
+  依赖继承形状的 proof 校验测试改用 stage 自身声明的夹具。workflow spec hash 不变。
+
+## 2026-10-25 · 两份独立评审确认缺陷修复（A-01…A-06、B-01…B-08）
+
+- A-03 `append_existing_cr` 永远拿不到回执：`IcodeRuntime._reconcile` 先做精确 revision 判断（目标 CR 当前 patchset 等于
+  本次 `commit_revision` 且 CR 号一致即 `OK` 并写回执），仍指向其他 revision 才是 `CR_APPEND_ALLOWED`。push 后对账、
+  重启重放都能确认；目标 CR 被他人改到别的 revision 时仍为 `SUBMIT_CONFIRMATION_REQUIRED` / `QUERY_REQUIRED`。
+- B-01 CODE_ONLY 修复回 IMPLEMENT 的 baseline：`DIAGNOSE -> IMPLEMENT` 事件按 PLAN->IMPLEMENT 的形状 pin 该任务已被接受的
+  Plan（`plan_artifact_id`/`plan_content_hash`），`source_revisions`/`baseline_revisions` 取 Plan 的仓库 revision，诊断的候选
+  revision 另记为 `repair_source_revisions`。Plan 未被接受或不属当前 TASKS 时仍回 PLAN。新增共享函数
+  `phase_protocol.plan_baseline_revisions` / `plan_implement_binding`，`adopt-code-only-repair` 同样使用。
+- B-05 被取代 build 进入发布证据：新增 `build_markers.py`（`is_superseded` / `is_rejected` / `is_excluded`，唯一定义）。
+  `pipeline_plan.successful_builds`（因而 `release_builds`、RELEASE 前驱、G9 绑定、worker 发布核验、进度快照）、
+  `_ipipe_passed_modules` 与 IPIPE 证据摄取（`BUILD_SUPERSEDED`）都排除被取代/被拒 build；被取代 build 的 stage 不能再
+  `ipipe-rerun`（`STAGE_BUILD_SUPERSEDED`）。IPIPE 态发起 `ipipe-rebuild` 时，被替换 build 必须有失败证据或刚被探测证实产物失效
+  （`REPLACED_BUILD_NOT_FAILED`）。
+- A-01 未知结果被误判为已启动：`_rerun_started` 要求 startTime 严格晚于 intent 创建时间减 30 秒容差
+  （新常量 `_RERUN_START_CLOCK_SKEW_SECONDS`）；仅有 SUCCESS/RUNNING 状态不算证据；已被其他 rerun 回执占用的后继 stage 不采信。
+- A-02 `--local-error-proven`：`write_error` 观察记录 `before_dispatch`（调用点 traceback 判断），`_local_error_observed` 要求其为
+  true；无该字段的旧观察不能用于新的放弃。已写入的旧放弃回执（如 d63d8af4）只在其 retry 已存在时继续指向该 retry，不授权新的重发。
+- A-04 `TRIGGER_MODE_MISMATCH` 后无出路：新 build 记 `ipipe.build-rejected:{run}:{build}`（独立于 superseded），discover/plan/watch/
+  产物/发布全部排除；回执保留；返回 `build_rejected` 与 `next_step`（再次 `--request-g8` 生成 attempt+1 或改 `--event-type`）。
+- A-05 同 stage 两个 G8 并发双发：`StateStore.claim_exclusive_intent`（同一 IMMEDIATE 事务内检查 `ipipe.rerun:{run}:{stage}`
+  前缀下无无回执 intent 再插入），rerun 改用它；CLI `ipipe-rerun` 执行与 `--reconcile-only` 纳入 worker 同一 run 级租约
+  （`_under_run_lease`，复用 `recovery.locks` 与 `worker-run:` 键）。
+- A-06 凭据可能落库：`persistence_policy` 新增 `redact_secrets` / `redact_text` / `register_secret`，并在 `ensure_persistable`
+  增加值级检查（`IREPO-TOKEN:`、`access_token=`、Authorization/Bearer、已加载 token 原值；与既有策略一致：发现即拒绝）。
+  观察、回执、G8 与重建审批材料、iPipe 错误体在写入前统一脱敏；`load_tokens` 与 iPipe transport 注册 token 原值（仅内存）。
+- B-02 修复轮次没有绝对上限：ARCHITECTURE_REVIEW 只重置 `THREE_FAILED_FIXES` 与 `NO_PROGRESS`（按 epoch 计）；`REPAIR_LIMIT`
+  （≥5 轮，`repair_policy.REPAIR_ROUND_LIMIT`）按整个 run 累计，含承接继承的轮次。
+- B-03 `adopt-code-only-repair` 前置校验：继承源 run 已消耗轮次（`inherited_repair_rounds`），预算耗尽拒绝
+  `ADOPTION_BUDGET_EXHAUSTED`；只认该任务最新诊断（`ADOPTION_DIAGNOSIS_NOT_LATEST`）与当前 DAG 下已接受的 Plan
+  （`ADOPTION_PLAN_NOT_CURRENT`）；已承接目标只允许同一对 (诊断, Plan) 幂等重放，否则 `ADOPTION_CONFLICT`；提交回执必须带匹配
+  `task_id`；进入 IMPLEMENT 改为 CAS 的受控迁移（`policy_decision.controlled = CODE_ONLY_ADOPTION` 记录 G6/诊断/Plan 证据），
+  不新增 workflow 边。
+- B-04 环境失败守卫：以 iPipe 运行时记录的分类（IPIPE 证据，次选 FailureCase）为准，诊断改写分类也不能 `REPAIR`
+  （草案阶段即 `ENVIRONMENT_REPAIR_FORBIDDEN`，完成时 STOPPED）；`PIPELINE_TRANSIENT` 加入 `NON_REPAIRABLE_FAILURES`；
+  环境类集合统一为 `repair_policy.ENVIRONMENT_FAILURE_CLASSES`。`DIAGNOSE -> ENVIRONMENT_BLOCKED` 未加入（会改变 workflow hash），
+  环境类诊断仍终止于 STOPPED，文档已写明。
+- B-06/B-07/B-08 文档：phase-protocol.md 改为"发布 revision 必须等于冻结 revision，否则 `PRODUCT_REVISION_MISMATCH`"；
+  diagnosis.schema `repair_scope` 描述、state-machine.md、SKILL.md、failure-taxonomy.md 与上述行为对齐；README 补
+  `adopt-code-only-repair`、`ipipe-rebuild` 新约束、`abandon-intent --local-error-proven`、并发 rerun 与脱敏说明。
+- workflow spec hash 不变（`76bb964c…d410`）：未改 `workflow_spec.py`；schema 描述不参与 hash。
+- 测试：新增 `test_code_only_repair_baseline.py`、`test_superseded_build_evidence.py`、`test_secret_redaction.py`、
+  `test_adopt_code_only_repair.py`，并在 `test_icode_runtime`、`test_ipipe_runtime`、`test_ipipe_rebuild`、
+  `test_state_and_artifacts`、`test_phase_protocol_repair` 中补回归。`FakeApi` 为缺 `startTime` 的执行中阶段按首次读取打时间戳
+  （状态不变则时间不变），以符合平台语义。
+
+## 2026-10-25 · 补记：此前已落地但未入账的变化（实际落地日期未记录，本日核对后补齐）
+
+- CODE_ONLY 修复直接回 IMPLEMENT：`repair_scope == CODE_ONLY` 且任务有可复用 Plan 时 `DIAGNOSE -> IMPLEMENT`，新 Change Set
+  仍需 G5/Review；无 Plan 的旧 run 回 PLAN。（本日 B-01 修正其 baseline 与 Plan pin。）
+- ARCHITECTURE_REVIEW 作为修复预算边界：最初实现为整体 epoch 清零；本日 B-02 改为只重置"三次失败升级/同签名无进展"，
+  5 轮上限按 run 累计。
+- 环境失败禁止 REPAIR 守卫：`ENVIRONMENT_FAILURE`、`ENV_UNSATISFIED`、`ENV_TRANSIENT`、`JOB_PARAMETER_OVERRIDE_UNSUPPORTED`、
+  `COMPILE_ONLY_TRIGGER_UNSUPPORTED` 的诊断 route=REPAIR 被 schema 与完成路由拒绝（`ENVIRONMENT_REPAIR_FORBIDDEN`）。
+  （本日 B-04 改为以运行时分类为准并加入 `PIPELINE_TRANSIENT`。）
+- `adopt-code-only-repair`：把已停止 run 中获 G6 的 CODE_ONLY 修复承接到新 run，只复制 TASKS/PLAN，不复用审批。
+  （本日 B-03 补齐前置校验。）
+- `tom-autodev/references/changelog-policy.md`：IMPLEMENT 必须为每个改动源码的仓库在同一 change-set 内追加 changelog 条目，
+  Review 将缺失列为阻断 Standards finding；tom-implement / tom-review 的 SKILL.md 引用该策略。
+- `prepare-change-set` 在 baseline 之上超过一个提交时返回 `MULTIPLE_COMMITS_ABOVE_BASELINE`（iCode HCK_F507），
+  在 G5/G7 之前失败而非等到 SUBMIT。
+- `_architecture_reentry_task`：ARCHITECTURE_REVIEW 经 rewind 进入 TASKS（不带 task_id）后，WORKSPACE/PLAN 沿
+  `source_event_id` 审计链找回被重开的任务；语义未变的 DAG 不再让旧 Review 把该任务藏出前沿。
+
+## 2026-10-25 · 修复显式命令消费审批后遗留 APPROVAL_RESUME handoff（`MULTIPLE_RESUME_HANDOFFS`）
+
+- 根因：`approve` 在批准时按 run 当时的最新事件创建 `APPROVAL_RESUME` handoff；`migrate-workflow-spec --approval-id`、
+  `ipipe-rebuild --approval-id` 等显式命令直接消费审批，却不完成该 handoff，且 `ipipe-rebuild` 随后追加 IPIPE 事件，
+  使 handoff 指向旧事件、永远不会被 `resume` 消费。多条 PENDING 并存时 `continue` 一律返回 `MULTIPLE_RESUME_HANDOFFS`。
+- 源头：新增 `StateStore.complete_approval_handoffs` / `complete_handoff_audited`（复用 `complete_handoff`，幂等，只完成
+  `payload.approval_id` 等于该审批的 handoff，并写 `handoff-completion:{id}` 审计：actor、reason）。命令成功后调用：
+  `migrate-workflow-spec` 应用、`ipipe-rebuild` 触发/对账换绑、`ipipe-rerun`（含 `--reconcile-only`）、`submit`、
+  `advance`、`repin-profile --approval-id`、`rewind --approval-id`、`optimize apply`。失败结果不完成 handoff。
+- 兜底：`worker_driver.resume`、`continue` 与 Stop-hook `auto_resume_from_hook` 在候选 >1 时先完成"已过期"的 handoff
+  （reason=`STALE_EVENT`）：`payload.event_id` 不等于最新事件，且审批仍是绑定同一 input_hash 的 APPROVE，并且已被后续事件消费
+  或其 gate 与当前状态不符。匹配最新事件的 handoff、REJECT/TIMEOUT 审批的 handoff 一律保留；清理后恰好 1 条才继续，
+  0 条为 `NO_RESUME_HANDOFF`（`continue` 此时转入 `advance`），仍 >1 为 `MULTIPLE_RESUME_HANDOFFS`。
+- 新增 `tests/test_stale_resume_handoffs.py`（13 项）。
+
+## 2026-10-25 · `ipipe-rebuild`：编译产物失效后对同一 CR 版本受控重新构建
+
+- 场景：失败 build 的编译产物已不可下载（HTTP 403/404），该 build 的任何 stage 重跑都会在第一个环境任务失败，
+  `ipipe-rerun` 只是在消耗 G8。新增 `ipipe-rebuild RUN --reason ... [--module M] [--event-type GERRIT_CHANGE|NEW_COMMIT]`：
+  默认只读预检；`--request-g8` 保存准确材料并投递 G8、不执行；`--approval-id A --input-hash H` 触发一次并换绑；
+  加 `--reconcile-only` 只用 GET 认领已发出的触发。
+- 前置条件（fail closed，`REBUILD_NOT_JUSTIFIED`）：run 在"IPIPE 失败后的 DIAGNOSE"或 IPIPE；诊断的正是当前被跟踪的 build；
+  只读探测其 `AGILE_COMPILE` 产物，确认平台答复 403/404（200 为仍可下载，5xx/超时/缺 token 为无法判定，均拒绝）；
+  业务 CR 当前 patchset 必须等于冻结 revision（`REVISION_DRIFT` / `REVISION_UNVERIFIED`）；无未决触发 intent（`QUERY_REQUIRED`）。
+  探测不输出产物 URL、签名地址或 token，只给状态码。
+- 审批：沿用 G8，hash 绑定 run、pipeline、模块、`revision_set_id`、仓库清单、环境指纹、原构建号、attempt 序号、
+  触发类型与原因；材料另含探测结论与 CR 核对结果（不入 hash）。执行时在写之前再次复核产物状态与 CR。
+- 触发：复用 `trigger_by_revision`（新增可选 `event_type`，即 `ipipe-cli trigger run --event-type`，默认不改变既有请求）。
+  幂等键 `ipipe.trigger:{run}:{pipeline}:{revision_set_id}:attempt-N`；历史无后缀键即 attempt-1，原样保留，仅被适配的 build 同样记作 attempt-1。
+  响应无法解析时记录脱敏观察并按 revision + 时间窗口只读对账：只认 id 大于原 build、revision 集合匹配、本 run 尚未拥有的 build，
+  多个候选返回 `BUILD_AMBIGUOUS`，没有候选保持 `QUERY_REQUIRED`，不重发。若平台上已有这样的更新 build（如从 iPipe 页面手动发起），
+  直接认领而不再触发第三个。
+- 换绑（单事务）：追加一条 IPIPE 审计事件（克隆入口 payload，冻结计划与 G7 绑定不变，附 `rebuild` 审计记录）、写
+  `ipipe.build-superseded:{run}:{旧 build}` 标记、把挂起的 DIAGNOSE producer job 置为 `SUPERSEDED`（保留行与草稿，不可再 claim/fulfill）；
+  之后记录新 build 的全部 stage 归属。旧 build 的事件、回执、artifact、stage 绑定一律不改。`discover`、产物选择、`watch-ipipe`
+  都忽略被取代的 build。新 build 的 `trigger.ciType` 与原 build 不同返回 `TRIGGER_MODE_MISMATCH`，回执保留但不换绑。
+- 状态机：新增受控边 `DIAGNOSE -> IPIPE`（证据 `ipipe-rebuild` + G8），G8 标签补充"重新触发整条流水线"。**workflow_spec_hash 因此改变**，
+  已 pin 的在途 run 会报 `WORKFLOW_SPEC_DRIFT`，需先 `migrate-workflow-spec RUN --request`、批准、`--approval-id` 应用。
+- 新增 `tests/test_ipipe_rebuild.py`（38 项 fake 测试）；`StateStore` 新增 `idempotency_results_with_prefix`、
+  `commit_transition_result(..., supersede_jobs=)`，`fulfill_producer_job` 拒绝 `SUPERSEDED` job。
+- 未验证：`eventType` 在 `trigger_by_revision` 请求体中的位置按 ipipe-cli 推断，从未对真实网关执行过写入；
+  测试 CR 无 open 状态时其 patchset 只能报告"未核对"，不阻断。
+
+## 2026-10-23 · 未变更模块发布产物必须与冻结 revision 一致；本地编程错误放弃的 rerun 可重发一次
+
+- 根因：`product_policy.select_product` 对未变更模块的 `AGILE_RELEASE` 只比较构建与 job 自身的 revision，
+  从不与 `pipeline_plan` 冻结 revision 比较，于是取分支上最新成功发布；证明里的 revision 变成新提交，
+  而 binding 的仓库清单仍写冻结值，两者无人校验。现在在最近 30 条成功 BranchPipeline 构建中查找 revision
+  精确等于冻结值的发布，找不到返回 `PRODUCT_REVISION_MISMATCH`（带已见 revision 前 8 位），不回退到最新，
+  并走原有"缺发布产物 → compile-only 受阻"路径。`_rerun_binding` 另行核对 proof revision 与冻结值、
+  binding 仓库 revision 一致，不一致返回 `PRODUCT_PARAMETER_BINDING_MISMATCH`。该变化会使依赖旧结果的
+  G8 `input_hash` 变化，需重新申请审批。
+- `abandon-intent --local-error-proven`：仅当 `ipipe.rerun` 的 intent 已有 `ipipe.rerun.write_error`
+  观察（AttributeError/TypeError/NameError、无 `http_status`、无响应观察）时，才在放弃回执写入
+  `local_error_proven=true`。带该标记的放弃让同一审批得到 `:retry-1` 键重发一次（每个审批最多一次，
+  重发前仍复核观察）；无标记的放弃仍是终局。运行时自己关闭的本地错误 intent 也带该标记。
+
+## 2026-10-22 · iPipe 重跑：本 stage 自有参数走 manual_execute_stage，本地错误不再留"未知" intent
+
+- 根因：`dependency_declaration` 把"不在 manualParams 的必需名"一律标为 `requires_job_override`，
+  包括声明在本 stage 自己 paramBeans/inParamsMap 的名；`rerun` 随后调用套件内不存在的
+  `execute_stage_job_override`，在 claim 之后本地抛 `AttributeError`，被当成 `RERUN_RESULT_UNKNOWN`，
+  POST 从未发出。已删除该悬空调用，一律使用 `manual_execute_stage`。
+- 新增 `stage_parameters.job_scope_names`：仅当名的声明 scope 为 `stage:{stageConfId}` 且
+  `upStageParam` 非真时视为本 stage 自有；上游/嵌套 job/`upStageParam` 仍在 `_rerun_binding`
+  即返回 `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`（G8 与 claim 之前）。`parameter_declaration`
+  内容未变，既有 G8 的 input_hash 不受影响。
+- `rerun` 在 claim 前解析 `manual_execute_stage` 并校验可调用与参数形状，失败返回
+  `RERUN_LOCAL_ERROR`（`retry_allowed=false`，不创建 intent，同一 approval 仍可用）。claim 后若错误由
+  调用点本身抛出（traceback 无被调方栈帧），写 `INTENT_ABANDONED` 回执并返回 `RERUN_LOCAL_ERROR`；
+  真正进入客户端后的超时/未知仍为 `RERUN_RESULT_UNKNOWN`。
+- 新增测试：本 stage 声明走一次 POST、上游/`upStageParam` 无 POST 无 intent、本地错误不留未决
+  intent、runtime 引用的 `api.*` 方法均存在于真实 `IpipeApiClient`（`reconcile_branch_compile`、
+  `trigger_branch_compile` 受 `compile_only_capability` 保护，真实适配器恒为不支持）。
+
+## 2026-10-14 · iPipe 重跑未知结果留证据，reconcile 区分"未启动但未证明被拒"
+
+- 只读核查 ipipe-cli 0.2.0：二进制中阶段写入路径仅 `/api/agile/v1/stageBuilds/build`
+  （同时含 `AGILE-PLAT-NAME/TOKEN`），另有 `job-builds/cancel/%d`；无独立 retry 路径，
+  `build retry` 帮助为"重新执行/手动执行阶段"。证据为字符串级，未经反汇编绑定到函数，故不新增
+  端点、不按 FAIL/PENDING 切换端点，现有 `manual_execute_stage` 保持不变。
+- 重跑写入出错（含超时/5xx/非 JSON 2xx）时向 intent 追加 `ipipe.rerun.write_error` 观察：
+  HTTP 状态、错误类型、顶层字段名、业务 code、<=200 字符且已去 URL/token 的片段；不含 token、
+  签名 URL、完整响应。传输层为 `IPIPE_RESPONSE_INVALID` 补充 `response_type/body_chars`。
+- `reconcile_rerun` 新增 `RERUN_NOT_STARTED_UNPROVEN`：超过 300s 宽限且阶段状态、起始时间未变、
+  无后继 run 时返回，`abandon_eligible=true`、`rejection_proven=false`、`retry_allowed=false`，
+  并追加 `ipipe.rerun.reconcile` 观察。宽限内仍为 `QUERY_REQUIRED`；已启动仍为 `OK` 回执。
+- 已知约束：同一绑定对应同一 approval_id，放弃 intent 后旧 G8 只会重放 `INTENT_ABANDONED`，
+  重新发起必须是不同的已批准绑定（如参数变化）。
+
+## 2026-10-14 · 同一 iPipe 阶段可在新 G8 下再次重跑
+
+- `ipipe.rerun` 幂等键加入 approval_id（`ipipe.rerun:{run}:{stage}:{approval_id}`），
+  修复同一 stage 第二次合法重跑被 RERUN_CONFLICT 拦截；同一授权重放仍不重复 POST。
+- 旧格式键（无 approval 维度）仅对创建它的审批继续有效，对其他审批视为"先前尝试"。
+- 新增前置：该 stage 先前存在已 claim 但无 receipt 的 intent 时拒绝新重跑（QUERY_REQUIRED），
+  须先 `--reconcile-only`（只 GET，按传入 approval 精确定位 intent）。
+
+## 2026-10-12 · 人工 iPipe 阶段自动发现参数并准备 G8
+
+- 新增冻结 changeset/plan 的产物规则，涵盖非发布门禁测试模块。未变模块仅取目标 branch
+  BranchPipeline 成功 release job 的实际 revision/发布 URL；有变模块仅取本 run owned、
+  exact candidate ChangePipeline compile。校验阶段/job 身份和 gzip 下载，不接受历史 compile/latest。
+- 只读实测 bgwagent BranchPipeline 发布产物可查询且可下载；下载为 307 签名重定向，
+  第二跳不转发 IREPO-TOKEN，不持久化签名 URL。补齐已文档化 listing name/token 必需参数。
+- P0 空 manualParams 仍发现 job shell 和上游 paramBeans 依赖，定位 get_bgwagent 静态默认
+  node97110098；原 G8 params {} 未动态覆盖。真实 API 的准确 job override 与 compile-only
+  尚无契约证明，显式 blocking；新触发协议仅由 fake 验证，不编造平台字段或修改模板。
+- compile-only 的 reviewable 实现绑定 run/plan/module/branch/revision/scope/capability，先持久化
+  intent，未知结果仅查回；新增 fake 回归。当前业务 run、profile pin、审批及外部配置未改变。
+
+- 修复执行应答仅解析顶层 ID 的缺口：支持嵌套身份，缺身份时 GET 确认，不重复 POST；
+  保存不含原始内容的应答形状观察。新增 `--reconcile-only`，准确 G8 下仅查询既有意图并补确认。
+  阶段快速失败可按晚于 claim 的 startTime 确认执行；旧失败/等待状态不作为确认。
+
+- `continue` 对 MANUAL_WAIT 查询真实 stage 参数声明，按项目/profile 的准确映射解析产品，
+  准备 exact hash 的 G8 并使用既有审批投递入口；批准后执行并恢复监控。
+- `ipipe-rerun` 省略 `--parameter` 时查询声明，空参数须平台明确证明；新增 `--request-g8`，
+  将脱敏 binding、声明、映射及产品 revision 保存为审批材料，不批准或执行阶段。
+- 移除参数 basename/子串推断，未知映射和缺失产品/token 列出缺失项并阻断。
+  BGW 普通 P0 与新 case 的 skill 文档分别说明，profile schema 支持准确 stage 映射。
+- 定向验证只使用 fake 控制面；当前真实 stage 的读取不作为业务回归通过证据。
+
+## 2026-10-09 · watcher 不再为已结束的 run 刷日志
+
+- `work_card.refresh_all` 每个 watcher tick 遍历全部 run；已结束（STOPPED/RELEASE_SUCCESS）的 run
+  每次仍输出 `WORK_CARD_UNCHANGED/UNAVAILABLE`，且 spec 漂移的旧 run 每次输出 `WORKFLOW_SPEC_DRIFT`，
+  导致 `watcher.log` 无休止增长。现对已结束 run 静默这三类无变化结果；真正的卡片更新仍会上报。
+  进行中的 run 行为不变。
+- 新增回归测试 `test_work_card.py::test_refresh_all_is_silent_for_finished_runs`。
+- 运维：`watch-approvals` 需常驻（`bin/supervise.sh`），否则 如流批准只能在下次 `continue` 时才落账。
+
+## 2026-10-08 · G4 校验补齐：PLAN 仓库路径必须是绝对检出路径
+
+- 关闭一个 G4/IMPLEMENT 校验缺口：PLAN 阶段此前只校验 `repositories[].role` 与 `revision`，
+  不校验 `path`，导致把 `path` 写成模块名（如 `baidu/sysip/x86bgw`）的计划能通过 G4 审批，
+  直到 IMPLEMENT 的 `prepare_change_set` 才以 `PLAN_REPOSITORY_MISMATCH` 失败。
+- `phase_protocol.py` 的 PLAN 分支新增校验：每个 `repositories[].path` 必须是非空的绝对路径，
+  否则返回 `PLAN_REPOSITORY_MISMATCH`（`content_invalid`）。profile 检出路径即绝对路径，
+  IMPLEMENT 仍是“路径↔profile↔worktree”的权威绑定；本校验把该约束提前到门上，使 G4 与 IMPLEMENT 一致。
+- 新增回归测试 `test_producer_validation.py::test_plan_rejects_module_name_repository_path_at_g4`。
+
 ## 2026-10-08 · 停止run 改名、Comate 直接提意见、如流即时回执、G6 卡精简
 
 - 「驳回」更名为「停止run」：按钮、回复指引、回执文案统一为“停止run/停止”，语义仍是停止本 run；

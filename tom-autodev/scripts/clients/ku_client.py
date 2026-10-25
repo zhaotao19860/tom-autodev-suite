@@ -246,7 +246,11 @@ class KuClient:
         # repositoryGuid, canonical URL, and the marker verified by the
         # read-back below; requiring title here made a successful remote write
         # look like KU_RUN_ROOT_VERIFICATION_FAILED.
-        response_reason = self._remote_info_reason(info)
+        # KU's create response may omit repositoryGuid; the subsequent
+        # authoritative read-back still verifies repository, URL and marker.
+        response_reason = self._remote_info_reason(
+            info, allow_missing_repository=True
+        )
         if response_reason is not None:
             self._observe(
                 intent,

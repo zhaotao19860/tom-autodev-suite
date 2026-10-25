@@ -36,6 +36,7 @@ Use the output slots in `phase-contract.md`. Put repository/revision and actual 
 Review is source-only: never run project code, compile, or test. Load by the changed behavior:
 
 - [`references/spec-coverage.md`](references/spec-coverage.md): **always.** Check the current task's acceptance points, including required behavior with no new code line.
+- [`../tom-autodev/references/changelog-policy.md`](../tom-autodev/references/changelog-policy.md): **always when the change-set modifies source.** Verify each changed repository carries a matching `changelog` entry (correct version bump, card id, date, committing identity, newest-on-top, format per the module's file; a new `changelog` seeded at `1.0.0` when previously absent). A code change missing its changelog entry is a `CONFIRMED` blocking Standards finding.
 - [`references/review-heuristics.md`](references/review-heuristics.md): for changed executable behavior and affected callers; select the relevant data-flow, boundary, recovery, consistency, and contract passes.
 - [`references/security-checklist.md`](references/security-checklist.md): when the change touches web/HTTP, auth, crypto, deserialization, or external input. Feeds Standards.
 - [`references/rule-catalog.md`](references/rule-catalog.md): read the rule families triggered by the changed language and behavior; a reading checklist is not scanner execution evidence.

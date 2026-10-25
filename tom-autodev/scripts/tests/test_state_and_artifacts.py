@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from artifact_store import ArtifactStore
+from persistence_policy import validate_evidence_refs
 from state_store import StateStore
 
 
@@ -380,6 +381,10 @@ class StateAndArtifactTests(unittest.TestCase):
                 (["ku:document-only"], "EVIDENCE_REF_INVALID"),
                 (["ipipe:build/stage/credential"], "PERSISTENCE_SECRET_REJECTED"),
             ]
+            self.assertEqual(
+                validate_evidence_refs(["ku:-aYy-P1zRE15Oh/2"]),
+                ["ku:-aYy-P1zRE15Oh/2"],
+            )
 
             for index, (references, reason_code) in enumerate(invalid_cases):
                 with self.subTest(references=references):
@@ -544,6 +549,69 @@ class AbandonIntentTests(unittest.TestCase):
         self.assertEqual(
             self.store.live_idempotency_key(base), f"{base}:after:{second['intent_id']}"
         )
+
+
+class AbandonLocalErrorProofTests(unittest.TestCase):
+    """`--local-error-proven` is written only when the observation shows no request left."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = StateStore(Path(temporary.name) / "state.sqlite")
+
+    def rerun(self, key="k", operation="ipipe.rerun"):
+        return self.store.intent("run-1", operation, key, {"approval_id": "a"})
+
+    def observe(self, intent, **fields):
+        self.store.record_external_observation(
+            intent["intent_id"], {"operation": "ipipe.rerun.write_error", **fields})
+
+    def abandon(self, intent, proven=True):
+        return self.store.abandon_intent(
+            intent["intent_id"], "local bug", "owner", local_error_proven=proven)
+
+    def test_each_local_error_type_is_accepted_and_marked(self):
+        for number, kind in enumerate(("AttributeError", "TypeError", "NameError")):
+            intent = self.rerun(f"k{number}")
+            self.observe(intent, error_type=kind, before_dispatch=True)
+            result = self.abandon(intent)
+            self.assertIs(result["receipt"]["response"]["local_error_proven"], True)
+
+    def test_an_error_not_proven_to_precede_dispatch_is_refused(self):
+        # A-02: the type and a missing http_status do not show that no request left;
+        # only the runtime's call-site check (before_dispatch) does. An observation
+        # without that field (written before it existed) is never accepted.
+        deep = self.rerun("deep")
+        self.observe(deep, error_type="TypeError", before_dispatch=False)
+        legacy = self.rerun("legacy")
+        self.observe(legacy, error_type="AttributeError")
+        for intent in (deep, legacy):
+            with self.assertRaisesRegex(ValueError, "LOCAL_ERROR_NOT_PROVEN"):
+                self.abandon(intent)
+            self.assertIsNone(self.store.result_by_idempotency_key(intent["idempotency_key"]))
+
+    def test_missing_observation_http_status_other_type_and_response_are_refused(self):
+        bare = self.rerun("bare")
+        sent = self.rerun("sent")
+        self.observe(sent, error_type="TypeError", http_status=500, before_dispatch=True)
+        other = self.rerun("other")
+        self.observe(other, error_type="IpipeTransportError", before_dispatch=True)
+        answered = self.rerun("answered")
+        self.observe(answered, error_type="TypeError", before_dispatch=True)
+        self.store.record_external_observation(
+            answered["intent_id"], {"operation": "ipipe.rerun.response", "response_type": "dict"})
+        wrong_operation = self.rerun("notify", operation="collaboration.notify")
+        self.observe(wrong_operation, error_type="TypeError", before_dispatch=True)
+        for intent in (bare, sent, other, answered, wrong_operation):
+            with self.assertRaisesRegex(ValueError, "LOCAL_ERROR_NOT_PROVEN"):
+                self.abandon(intent)
+            self.assertIsNone(self.store.result_by_idempotency_key(intent["idempotency_key"]))
+
+    def test_manual_abandon_carries_no_marker(self):
+        intent = self.rerun()
+        self.observe(intent, error_type="TypeError")
+        response = self.abandon(intent, proven=False)["receipt"]["response"]
+        self.assertNotIn("local_error_proven", response)
 
 
 class GenericPutSchemaTests(unittest.TestCase):

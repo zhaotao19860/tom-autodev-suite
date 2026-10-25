@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from approval_delivery import deliver_markdown
+import build_markers
 from approval_watch import _ide_turn_recipients
 
 _NOTICE_KEY = "ipipe-watch-notice"
@@ -34,6 +35,9 @@ _REPAIR_DIRECTION = {
     "CODE_FAILURE": "研发修代码：回 DIAGNOSE 生成修复方案，再走 PLAN/IMPLEMENT",
     "TEST_FAILURE": "先判定是用例问题还是产品缺陷：用例问题由测试改用例，缺陷回 DIAGNOSE",
     "ENVIRONMENT_FAILURE": "环境问题：不要改代码，确认 runner/镜像/容量后用 G8 重跑该阶段",
+    "ENVIRONMENT_SUSPECTED": "疑似环境问题（仅名称/日志关键词提示，非权威）：先看日志判定，代码或用例问题照常回 DIAGNOSE",
+    "ENV_UNSATISFIED": "环境不满足（平台结构化字段证实）：不要改代码，恢复 runner/资源后用 G8 重跑该阶段",
+    "ENV_TRANSIENT": "环境暂时不可用（平台结构化字段证实）：不要改代码，稍后用 G8 重跑该阶段",
     "MIXED_FAILURE": "多个阶段同时失败，先按最早失败的阶段定性，再决定是否回 DIAGNOSE",
     "PIPELINE_FAILURE": "流水线自身失败，先看阶段日志确认是否为平台问题",
 }
@@ -236,6 +240,10 @@ class IpipeWatcher:
             response = item.get("receipt", {}).get("response")
             if isinstance(response, dict) and response.get("build_id"):
                 build_id = str(response["build_id"])
+                # A build replaced by `ipipe-rebuild` is history, not something to poll.
+                # A build rejected after a mismatched trigger is not followed either.
+                if build_markers.is_excluded(self.orchestrator.state, run_id, build_id):
+                    continue
                 if build_id not in found:
                     found.append(build_id)
         return found

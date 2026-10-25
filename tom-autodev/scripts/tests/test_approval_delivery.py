@@ -891,6 +891,24 @@ class ChangeSetSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary[0], "提交方式 追加现有 CR")
 
+    def test_g7_submit_descriptor_lists_unchanged_repositories(self):
+        summary = content_summary({
+            "change_set_id": "CS-1",
+            "revision_set_id": "RS-1",
+            "module": "module",
+            "target_branch": "branch",
+            "commit_revision": "revision",
+            "submission_mode": "create_new_cr",
+            "revision_set": {},
+            "unchanged_baselines": [
+                {"module": "baidu/sysip/bgwagent", "branch": "dev", "revision": "97860aca1dc9"},
+            ],
+        })
+
+        line = next(item for item in summary if item.startswith("未变更仓库"))
+        self.assertIn("baidu/sysip/bgwagent", line)
+        self.assertIn("不新建 CR、不触发流水线", line)
+
 
 if __name__ == "__main__":
     unittest.main()

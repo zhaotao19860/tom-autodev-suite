@@ -12,6 +12,8 @@ import json
 import subprocess
 from typing import Any
 
+from build_markers import is_excluded
+
 
 def canonical_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -118,6 +120,10 @@ def required_modules(profile: dict[str, Any]) -> list[str]:
 
 
 def create_plan(orchestrator: Any, run_id: str, profile: dict[str, Any]) -> dict[str, Any]:
+    if profile.get("pipeline_profile", {}).get(
+        "product_policy", "frozen_changeset_branch_release_or_exact_change_compile"
+    ) != "frozen_changeset_branch_release_or_exact_change_compile":
+        raise ValueError("PRODUCT_POLICY_INVALID")
     submissions = current_submissions(orchestrator, run_id)
     descriptors = current_descriptors(orchestrator, run_id)
     recorded = {(s["change_set_id"], s["revision_set_id"]) for s in submissions}
@@ -148,6 +154,25 @@ def create_plan(orchestrator: Any, run_id: str, profile: dict[str, Any]) -> dict
                 raise ValueError("SUBMISSION_BINDING_MISMATCH")
             candidates.setdefault(module, set()).add(entry["revision"])
         decoded_submissions.append((submission, revision_set))
+    # A repository no submission names was not changed by this requirement. The approved
+    # descriptor pinned the revision whose published product it stands for; it takes part
+    # in every build identity but has no pipeline of its own to run or release.
+    unchanged: dict[str, dict[str, Any]] = {}
+    pins = {}
+    for entry in descriptors.values():
+        for pin in entry["descriptor"].get("unchanged_baselines") or []:
+            if isinstance(pin, dict) and isinstance(pin.get("module"), str):
+                pins[pin["module"]] = pin
+    test_module_name = profile["test_repo"]["module"]
+    for module, repository in known.items():
+        pin = pins.get(module)
+        if module in candidates or module == test_module_name or pin is None:
+            continue
+        if pin.get("branch") != repository["branch"] or not pin.get("revision"):
+            raise ValueError("SOURCE_REVISION_MISMATCH")
+        candidates[module] = {pin["revision"]}
+        unchanged[module] = {"module": module, "branch": repository["branch"],
+                             "revision": pin["revision"], "source": "baseline_pin"}
     if set(candidates) != set(known):
         raise ValueError("REVISION_UNRESOLVED")
     for module, values in candidates.items():
@@ -181,7 +206,7 @@ def create_plan(orchestrator: Any, run_id: str, profile: dict[str, Any]) -> dict
     pipeline = profile["pipeline_profile"]
     entries = {e["module"]: e for e in pipeline.get("pipelines") or []}
     modules = {}
-    for module in required_modules(profile):
+    for module in [m for m in required_modules(profile) if m not in unchanged]:
         submission = receipts.get(module)
         if submission is None:
             raise ValueError("IPIPE_MODULE_SUBMISSION_MISSING")
@@ -224,9 +249,21 @@ def create_plan(orchestrator: Any, run_id: str, profile: dict[str, Any]) -> dict
             "module", "pipeline_id", "release_rule", "environment_fingerprint",
             "source_revisions", "expected_revisions", "target_branch", "expected_branches", "stage_classes")})
         modules[module] = target
+    if not modules:
+        raise ValueError("IPIPE_MODULE_SUBMISSION_MISSING")
     plan = {"version": 1, "run_id": run_id, "revision_set": revision_set,
             "profile_content_hash": canonical_hash(profile),
             "modules": modules, "required_modules": list(modules), "submissions": submissions}
+    plan["product_inputs"] = {
+        module: {"module": module, "branch": repository["branch"],
+                 "revision": revisions[module], "changed": module not in unchanged,
+                 "pipeline_name": "BranchPipeline" if module in unchanged else "ChangePipeline",
+                 "pipeline_id": None if module in unchanged else entries.get(module, {}).get(
+                     "pipeline_id", pipeline["pipeline_id"])}
+        for module, repository in sorted(known.items())
+    }
+    if unchanged:
+        plan["unchanged"] = {module: unchanged[module] for module in sorted(unchanged)}
     return {**plan, "plan_hash": canonical_hash(plan)}
 
 
@@ -287,6 +324,11 @@ def successful_builds(artifacts: Any, state: Any, run_id: str,
         content = envelope.get("content") or {}
         target = plan["modules"].get(content.get("module"))
         if not target or content.get("status") != "SUCCESS":
+            continue
+        # A build replaced by ipipe-rebuild (or rejected after a mismatched trigger)
+        # is audit history. Its SUCCESS proves nothing about the run's current build,
+        # so it can neither pass the module nor be selected as release/G9 evidence.
+        if is_excluded(state, run_id, content.get("build_id")):
             continue
         durable = state.idempotency_result(f"ipipe.build-binding:{run_id}:{content.get('build_id')}")
         binding = durable.get("binding") if isinstance(durable, dict) else None
