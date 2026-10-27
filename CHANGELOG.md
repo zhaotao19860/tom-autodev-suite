@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-27 · BranchPipeline 只推进当前那个人工阶段
+
+- 现象：BranchPipeline 275700446 的「自动化回归测试」还在跑时，「发布」已经显示 PENDING_FOR_USER；`_advance_branch_release` 取了 monitor 返回的第一个人工 stage，给「发布」发起了 G8（c52c3b33…），审批对象是错的。
+- 修复：`worker_driver._next_ready_manual_stage` 只取第一个未完成的 stage，且它必须是等待人工的那个；前面还有 stage 在跑时 park 为 `RELEASE_WAITING`。错发的 G8 不批即可，超时后作废。
+- 测试：新增 `test_branch_release_stage_order` 2 项；全量通过。
+
 ## 2026-10-27 · 人工阶段执行后多读几次确认，不再一律"结果不明"
 
 - iPipe 人工阶段执行接口只回 `{code, entities, msg}`，不带 stage id；控制器立即读一次 stage 列表时开始时间还没更新，于是每次都报 `RERUN_RESPONSE_INVALID`/`CONTROLLER_STEP_FAILED`，需要人工 `--reconcile-only`（BGW-1995 在 348102 与 348101 上各发生一次）。`IpipeRuntime.rerun` 对无 stage 身份的确认改为最多 4 次只读确认、间隔 5 秒，仍从不重发写入。

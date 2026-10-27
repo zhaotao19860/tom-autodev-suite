@@ -1553,9 +1553,16 @@ def _advance_branch_release(
     deadline = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
     observed = runtime.monitor_once(branch_build, deadline)
     if observed.get("status") == "MANUAL_WAIT" and observed.get("stage_build_id"):
+        # iPipe shows a downstream manual stage (发布) as PENDING_FOR_USER while earlier
+        # stages are still running. Only the first stage that is not done may be driven:
+        # asking for a G8 on the release while regression runs approves the wrong step.
+        ready = _next_ready_manual_stage(observed.get("stages") or [])
+        if ready is None:
+            return {"ok": True, "reason_code": "PARKED", "run_id": run_id,
+                    "parked": "RELEASE_WAITING", "controller": "release",
+                    "branch_build_id": branch_build, "monitor_status": "RUNNING"}
         prepared = _prepare_manual_stage(
-            orchestrator, runtime, run_id, str(observed["stage_build_id"]),
-            waiting.get("module") or "",
+            orchestrator, runtime, run_id, ready, waiting.get("module") or "",
         )
         return {**prepared, "controller": "release", "branch_build_id": branch_build}
     if observed.get("status") == "FAILURE":
@@ -1564,6 +1571,25 @@ def _advance_branch_release(
     return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "RELEASE_WAITING",
             "controller": "release", "branch_build_id": branch_build,
             "monitor_status": observed.get("status")}
+
+
+_MANUAL_STAGE_STATUSES = frozenset({
+    "PENDING_FOR_USER", "WAITING_FOR_MANUAL", "MANUAL", "PAUSED", "WAITING_INPUT",
+    "WAITING_FOR_CONFIRM",
+})
+_DONE_STAGE_STATUSES = frozenset({"SUCC", "SUCCESS", "SUCCEEDED", "SKIPPED", "SKIP"})
+
+
+def _next_ready_manual_stage(stages: list[dict[str, Any]]) -> str | None:
+    """The first not-yet-done stage, when it is a manual one waiting for a person."""
+    for stage in stages:
+        status = str(stage.get("status") or "").upper()
+        if status in _DONE_STAGE_STATUSES:
+            continue
+        if status in _MANUAL_STAGE_STATUSES and stage.get("stage_build_id"):
+            return str(stage["stage_build_id"])
+        return None
+    return None
 
 
 def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, Any]) -> dict[str, Any]:
