@@ -791,6 +791,35 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertTrue(self.runtime.reconcile_rerun("stage-1", approval)["ok"])
         self.assertEqual(sum(c[0] == "manual_execute_stage" for c in self.api.calls), 1)
 
+    def test_a_manual_stage_behind_a_running_stage_gets_no_g8(self):
+        # 348101 lists 发布 as PENDING_FOR_USER while 自动化回归测试 still runs (BGW-1995).
+        running = {"id": "stage-0", "stageName": "regression", "status": "RUNNING"}
+        release = {"id": "stage-1", "stageName": "release", "status": "PENDING_FOR_USER"}
+        self.bind_build(status="RUNNING", stages=[running, release])
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        early = self.runtime.rerun_input_hash("stage-1")
+        self.assertEqual(early["reason_code"], "MANUAL_STAGE_NOT_READY")
+        self.assertEqual(early["waiting_on"][0]["stage_build_id"], "stage-0")
+
+    def test_an_approval_granted_before_the_stage_was_ready_does_not_run_it(self):
+        running = {"id": "stage-0", "stageName": "regression", "status": "RUNNING"}
+        release = {"id": "stage-1", "stageName": "release", "status": "PENDING_FOR_USER"}
+        self.bind_build(status="RUNNING", stages=[running, release])
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        # The hash an older controller asked for: the binding without readiness facts.
+        from clients.ipipe_runtime import _canonical_hash
+        self.api.builds["build-1"]["stageBuilds"] = [
+            {**running, "status": "SUCC"}, release]
+        ready = self.runtime.rerun_input_hash("stage-1")
+        self.assertEqual(ready["reason_code"], "OK")
+        legacy = {k: v for k, v in ready["binding"].items() if k != "ready_after"}
+        wrong = approved(self.ledger, "G8", _canonical_hash(legacy))
+        self.assertFalse(self.runtime.rerun("stage-1", wrong)["ok"])
+        self.assertFalse(any(c[0] == "manual_execute_stage" for c in self.api.calls))
+        right = approved(self.ledger, "G8", ready["input_hash"])
+        self.runtime.rerun("stage-1", right)
+        self.assertEqual(sum(c[0] == "manual_execute_stage" for c in self.api.calls), 1)
+
     def test_rerun_response_parser_accepts_nested_stage_but_not_boolean_id(self):
         from clients.ipipe_runtime import _rerun_response_stage
         self.assertEqual(_rerun_response_stage(

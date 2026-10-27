@@ -1256,6 +1256,11 @@ def _prepare_manual_stage(
         return {**resolved, "run_id": run_id, "stage_build_id": stage_id}
     parameters = resolved["parameters"]
     prepared = _prepare_ipipe_g8(orchestrator, runtime, run_id, stage_id, resolved)
+    if prepared.get("reason_code") == "MANUAL_STAGE_NOT_READY":
+        # An earlier stage is still running: nothing to approve yet, keep watching.
+        return {"ok": True, "reason_code": "PARKED", "parked": "IPIPE_MONITOR",
+                "run_id": run_id, "controller": "ipipe", "module": module,
+                "stage_build_id": stage_id, "waiting_on": prepared.get("waiting_on")}
     if prepared.get("reason_code") != "APPROVAL_REQUIRED":
         return prepared
     input_hash = prepared["approval_input_hash"]

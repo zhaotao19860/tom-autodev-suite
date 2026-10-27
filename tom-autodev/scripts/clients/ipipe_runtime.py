@@ -703,6 +703,16 @@ class IpipeRuntime:
             declaration = None
             proofs = {}
         stage = stage_binding["stage"]
+        # A manual stage is only actionable once every stage before it is done. iPipe lists
+        # a downstream manual stage (发布) as PENDING_FOR_USER while regression still runs;
+        # approving it then approves the wrong step. The live listing decides, and the G8
+        # binds the predecessors it saw, so an approval granted too early never matches.
+        ready_after = None
+        if stage["status"] in _MANUAL:
+            readiness = self._manual_stage_readiness(stage_binding)
+            if not readiness.get("ok"):
+                return readiness
+            ready_after = readiness["ready_after"]
         rerunnable = stage["status"] in _FAILURE | _MANUAL
         # A stage whose jobs all exited zero while their logs report failed cases is a
         # failure the platform calls a success. Refusing to re-run it left the only remedy
@@ -738,8 +748,36 @@ class IpipeRuntime:
                 **({"parameters": redacted(parameters)} if parameters else {}),
                 **({"parameter_declaration": declaration} if declaration else {}),
                 **({"product_proofs": proofs} if proofs else {}),
+                **({"ready_after": ready_after} if ready_after else {}),
             },
         }
+
+    def _manual_stage_readiness(self, stage_binding: dict[str, Any]) -> dict[str, Any]:
+        """Whether every stage listed before this manual stage is done (GET only)."""
+        build_id = str(stage_binding.get("build_id") or "")
+        stage_build_id = stage_binding["stage_build_id"]
+        key_source = self._load_build_binding(build_id) or stage_binding["context"]
+        try:
+            build = self.api.build_by_id(build_id, **self._build_key(key_source))
+            stages = [_normalize_stage(item) for item in self._build_stages(build_id, build)]
+        except Exception as error:
+            return _failure(_transport_reason(error, "STAGE_QUERY_FAILED"))
+        ids = [item["stage_build_id"] for item in stages]
+        if stage_build_id not in ids:
+            return _failure("STAGE_OWNERSHIP_UNVERIFIED", stage_build_id=stage_build_id)
+        earlier = stages[:ids.index(stage_build_id)]
+        pending = [item for item in earlier if item["status"] not in _SUCCESS | _SKIPPED]
+        if pending:
+            return _failure(
+                "MANUAL_STAGE_NOT_READY", stage_build_id=stage_build_id,
+                waiting_on=[{"stage_build_id": item["stage_build_id"], "name": item["name"],
+                             "status": item["status"]} for item in pending],
+                retry_allowed=True,
+            )
+        return {"ok": True, "ready_after": [
+            {"stage_build_id": item["stage_build_id"], "status": item["status"]}
+            for item in earlier
+        ]}
 
     def rerun_input_hash(
         self, stage_build_id: str, *, parameters: dict[str, Any] | None = None

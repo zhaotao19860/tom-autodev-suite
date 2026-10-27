@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-27 · 早到的人工阶段 G8 在执行层失效
+
+- 上一条只修了 worker 的选择；已批出去的错误 G8（c52c3b33…，「发布」）仍然有效：它的 input hash 只绑定 stage 本身，回归一跑完 worker 就会拿它执行发布。
+- 修复：`IpipeRuntime._rerun_binding` 对人工 stage 先只读拉取实时 stage 列表，前面任何 stage 未完成就返回 `MANUAL_STAGE_NOT_READY`（不出 hash、不发 G8、不写意图）；就绪后把前序 stage 的状态写进 binding（`ready_after`），所以就绪前批的 G8 hash 不再匹配，执行被拒，需按就绪后的新 G8 重新审批。worker 遇到 `MANUAL_STAGE_NOT_READY` 时 park 继续等。
+- 测试：新增 2 项（未就绪不出 G8；早批的 G8 不能执行、新 G8 可以）；全量 1480 通过。
+
 ## 2026-10-27 · BranchPipeline 只推进当前那个人工阶段
 
 - 现象：BranchPipeline 275700446 的「自动化回归测试」还在跑时，「发布」已经显示 PENDING_FOR_USER；`_advance_branch_release` 取了 monitor 返回的第一个人工 stage，给「发布」发起了 G8（c52c3b33…），审批对象是错的。
