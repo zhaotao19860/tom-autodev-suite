@@ -312,7 +312,7 @@ class IpipeRuntime:
                     "environment_fingerprint": binding["environment_fingerprint"],
                     "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
                 }
-            if aggregate in _SUCCESS and all(_stage_passed(stage) for stage in normalized_stages):
+            if _build_passed(aggregate, self._mark_expression_skips(normalized_stages)):
                 silent = self._silent_case_failures(normalized_stages)
                 if silent:
                     return {
@@ -517,6 +517,30 @@ class IpipeRuntime:
                     "scripts": parsed.get("scripts") or [],
                 })
         return found
+
+    def _mark_expression_skips(self, stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Flag the wholly skipped stages the pipeline's own skip expression ruled out.
+
+        The stage listing reports a skipped stage but not why; only the stage detail
+        carries each job's `skipByStage`. A stage every one of whose jobs reports
+        `EXPRESSION` was excluded by the pipeline configuration for this branch (BGW's
+        348102 skips `P0新case回归` and `系统测试p0级功能回归` for every dpdk-2011 branch),
+        so it can never run and is not missing evidence. A manual skip, an unreadable
+        detail or any job without that marker leaves the stage unflagged.
+        """
+        for stage in stages:
+            if stage.get("status") not in _SKIPPED or any(
+                job not in _SKIPPED for job in stage.get("job_statuses") or []
+            ):
+                continue
+            try:
+                detail = self.api.stage_detail(str(stage.get("stage_build_id")))
+            except Exception:
+                continue
+            reasons = _job_skip_reasons(detail)
+            if reasons and all(reason == "EXPRESSION" for reason in reasons):
+                stage["skipped_by_expression"] = True
+        return stages
 
     def _stage_job_logs(self, stage_build_id: Any) -> dict[str, str]:
         """job_build_id -> log link, from the stage detail response.
@@ -1808,7 +1832,7 @@ class IpipeRuntime:
             return _failure("BUILD_IDENTITY_MISMATCH")
         if not _matches_build(current, binding):
             return _failure("REVISION_MISMATCH")
-        if _status(current) not in _SUCCESS:
+        if _status(current) not in _SUCCESS | _SKIPPED:
             return _failure("PIPELINE_NOT_SUCCESSFUL")
         try:
             stages = [_normalize_stage(stage) for stage in self._build_stages(build_id, current)]
@@ -1817,7 +1841,7 @@ class IpipeRuntime:
         stage_identity_failure = _stage_identity_failure(stages)
         if stage_identity_failure is not None:
             return _failure(stage_identity_failure)
-        if any(not _stage_passed(stage) for stage in stages):
+        if not _build_passed(_status(current), self._mark_expression_skips(stages)):
             return _failure("PIPELINE_NOT_SUCCESSFUL")
         try:
             releases = self.api.release_info(binding["module"], binding["target_branch"])
@@ -2517,6 +2541,37 @@ def _stage_passed(stage: dict[str, Any]) -> bool:
         return False
     jobs = stage.get("job_statuses") or []
     return any(job in _SUCCESS for job in jobs) and not any(job in _FAILURE for job in jobs)
+
+
+def _build_passed(aggregate: str, stages: list[dict[str, Any]]) -> bool:
+    """Whether a finished build is passing evidence.
+
+    iPipe reports a build SKIPPED when any stage was skipped, so a build whose only
+    skipped stages were excluded by the pipeline's skip expression still passes —
+    provided every other stage passed and at least one stage actually ran.
+    """
+    if aggregate not in _SUCCESS | _SKIPPED or not stages:
+        return False
+    ran = [stage for stage in stages if not stage.get("skipped_by_expression")]
+    if not ran or not all(_stage_passed(stage) for stage in ran):
+        return False
+    return aggregate in _SUCCESS or len(ran) < len(stages) or any(
+        stage.get("status") in _SKIPPED for stage in ran)
+
+
+def _job_skip_reasons(detail: Any) -> list[str]:
+    """Every job's `skipByStage` in a stage detail response (None when absent)."""
+    reasons: list[str] = []
+    pending: list[Any] = [detail]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if "skipByStage" in value and (value.get("id") or value.get("jobBuildId")):
+                reasons.append(str(value.get("skipByStage") or ""))
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return reasons
 
 
 def _normalize_job(value: dict[str, Any]) -> dict[str, Any]:

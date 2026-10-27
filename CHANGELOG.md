@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-27 · iPipe：流水线表达式跳过的 stage 不算缺证据
+
+- 现象：BGW-1995 run 160c6840 的 build 275535376 在 x86bgw ChangePipeline(348102) 上编译、单测、P0 回归全部通过，但 `P0新case回归`、`系统测试p0级功能回归` 被流水线跳过表达式对 dpdk-2011 分支固定跳过（`skipByStage: EXPRESSION`），平台整单报 `SKIPPED`；`monitor` 只认 SUCC 类整单状态且要求每个 stage 有运行 job，run 永远停在 MONITORING。
+- 修复：`clients/ipipe_runtime.py` 新增 `_mark_expression_skips`（读 stage detail，全部 job 均为 `skipByStage=EXPRESSION` 的整段跳过 stage 标记为不适用）和 `_build_passed`（整单 SUCC 或 SKIPPED 时，排除表达式跳过 stage 后其余 stage 必须全部通过且至少一个实际运行）；`monitor` 与 `verify_release_of_build` 共用该判定。人工跳过、stage detail 读不到、或任一 job 不带该标记的跳过 stage 仍按缺证据处理；全部 stage 都被表达式跳过的 build 不算通过。
+- 测试：`test_ipipe_runtime` 新增 3 项（表达式跳过通过、人工跳过仍阻断、全跳过不算通过）；全量 1471 项通过。
+
 ## 2026-10-25 · 依赖失败证据绑定 stage、只认 403/404、最新一次为准；结构化字段说明更正（B-21、B-22）
 
 - B-23：同 stage/模块之后出现的 5xx 或缺状态码下载结果不再覆盖先前已证实的 403/404；只有成功下载才解除环境拦截（`environment_evidence.proven_dependency_failure`，测试 `test_b23_an_inconclusive_later_attempt_does_not_clear_a_proven_404`）。

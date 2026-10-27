@@ -451,6 +451,39 @@ class IpipeRuntimeTests(unittest.TestCase):
         mismatch = self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
         self.assertEqual(mismatch["reason_code"], "REVISION_MISMATCH")
 
+    def _expression_skip_fixture(self, skip_reason="EXPRESSION", aggregate="SKIPPED"):
+        ran = {"id": "stage-1", "stageName": "unit", "status": "SUCC",
+               "jobBuildBeans": [{"id": "job-1", "stageBuildId": "stage-1", "status": "SUCC"}]}
+        skipped = {"id": "stage-2", "stageName": "system", "status": "SKIPPED",
+                   "jobBuildBeans": [{"id": "job-2", "stageBuildId": "stage-2", "status": "SKIPPED"}]}
+        self.bind_build(status=aggregate, stages=[ran, skipped])
+        self.api.stages["build-1"] = [ran, skipped]
+        self.api.details["stage-2"] = {"entities": {"realJobBuilds": [[
+            {"id": 2, "jobName": "system", "status": "SKIPPED", "skipByStage": skip_reason}]]}}
+        return (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+
+    def test_a_stage_the_pipeline_expression_skipped_is_not_missing_evidence(self):
+        # BGW 348102 skips its system-test stage for every dpdk-2011 branch; the build then
+        # reports SKIPPED although every stage that could run passed.
+        result = self.runtime.monitor("build-1", self._expression_skip_fixture())
+        self.assertEqual(result["status"], "SUCCESS")
+
+    def test_a_manually_skipped_stage_still_blocks_success(self):
+        result = self.runtime.monitor_once(
+            "build-1", self._expression_skip_fixture(skip_reason="MANUAL"))
+        self.assertEqual(result["status"], "MONITORING")
+
+    def test_a_build_whose_every_stage_was_expression_skipped_is_not_success(self):
+        skipped = {"id": "stage-2", "stageName": "system", "status": "SKIPPED",
+                   "jobBuildBeans": [{"id": "job-2", "stageBuildId": "stage-2", "status": "SKIPPED"}]}
+        self.bind_build(status="SKIPPED", stages=[skipped])
+        self.api.stages["build-1"] = [skipped]
+        self.api.details["stage-2"] = {"entities": {"realJobBuilds": [[
+            {"id": 2, "status": "SKIPPED", "skipByStage": "EXPRESSION"}]]}}
+        result = self.runtime.monitor_once(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        self.assertEqual(result["status"], "MONITORING")
+
     def test_monitor_once_returns_checkpoint_for_running_build(self):
         self.bind_build(
             status="RUNNING",
