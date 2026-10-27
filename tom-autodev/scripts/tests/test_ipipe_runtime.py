@@ -227,7 +227,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.state = StateStore(root / "state.sqlite")
         self.ledger = ApprovalLedger(root / "approvals.sqlite")
         self.api = FakeApi()
-        self.runtime = pinned_runtime(self.state, self.ledger, self.api)
+        self.runtime = pinned_runtime(self.state, self.ledger, self.api, sleeper=lambda _seconds: None)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -753,6 +753,28 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(sum(c[0] == "manual_execute_stage" for c in self.api.calls), 1)
         observations = self.state.external_observations("run-1")
         self.assertEqual(observations[-1]["observation"]["response_keys"], ["accepted"])
+
+    def test_an_identityless_ack_is_confirmed_once_the_stage_shows_its_start(self):
+        # iPipe acknowledges a manual-stage execute with {code, entities, msg}; the stage
+        # listing reports the start a few seconds later (BGW-1995 on 348101 and 348102).
+        manual = {"id": "stage-1", "stageName": "unit", "status": "PENDING_FOR_USER"}
+        self.bind_build(status="RUNNING", stages=[manual])
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        approval = approved(self.ledger, "G8", self.runtime.rerun_input_hash("stage-1")["input_hash"])
+        self.api.rerun_result = {"code": 0, "entities": None, "msg": "ok"}
+        polls = []
+
+        def later_start(_seconds):
+            polls.append(_seconds)
+            self.api.builds["build-1"].update(
+                stageBuilds=[{"id": "stage-1", "stageName": "unit", "status": "RUNNING"}])
+        self.runtime.sleeper = later_start
+        self.api.on_rerun = lambda: self.api.builds["build-1"].update(
+            stageBuilds=[{"id": "stage-1", "stageName": "unit", "status": "WAITTING"}])
+        result = self.runtime.rerun("stage-1", approval)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(len(polls), 1)
+        self.assertEqual(sum(c[0] == "manual_execute_stage" for c in self.api.calls), 1)
 
     def test_waiting_after_ack_stays_unknown_until_controlled_get_recovery(self):
         manual = {"id": "stage-1", "stageName": "unit", "status": "PENDING_FOR_USER"}
@@ -1980,7 +2002,7 @@ class StageOwnParameterRerunTests(unittest.TestCase):
 
     def arrange(self, configuration_stages):
         self.api = _DeclaringApi(configuration_stages)
-        self.runtime = pinned_runtime(self.state, self.ledger, self.api)
+        self.runtime = pinned_runtime(self.state, self.ledger, self.api, sleeper=lambda _seconds: None)
         failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL", "stageConfId": 4875670}
         item = build(status="FAIL", stages=[failed])
         self.api.candidates = [item]

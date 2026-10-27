@@ -904,9 +904,17 @@ class IpipeRuntime:
             "stage_build_id": response_stage or None,
         })
         if not response_stage:
-            reconciled = self._reconcile_rerun(intent)
-            if reconciled is not None:
-                return reconciled
+            # The manual-execute endpoint acknowledges with `{code, entities, msg}` and no
+            # stage identity, and the stage listing reports the new start a moment later.
+            # Reading it once, immediately, left every manual stage as "outcome unknown"
+            # (BGW-1995, both pipelines), so the read-only confirmation is repeated a few
+            # times before giving up; it never re-sends the write.
+            for attempt in range(_RERUN_CONFIRM_POLLS):
+                reconciled = self._reconcile_rerun(intent)
+                if reconciled is not None:
+                    return reconciled
+                if attempt + 1 < _RERUN_CONFIRM_POLLS:
+                    self.sleeper(_RERUN_CONFIRM_INTERVAL)
             return _failure("RERUN_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
         try:
             current = self.api.build_by_id(build_id, **self._build_key(binding))
@@ -2468,6 +2476,11 @@ def _stage_id_from_jobs(value: dict[str, Any]) -> str:
         if isinstance(job, dict) and str(job.get("stageBuildId") or "").strip():
             return str(job["stageBuildId"])
     return ""
+
+
+# Read-only confirmations of a manual-stage execute whose response names no stage.
+_RERUN_CONFIRM_POLLS = 4
+_RERUN_CONFIRM_INTERVAL = 5
 
 
 def _rerun_response_stage(value: Any) -> str:

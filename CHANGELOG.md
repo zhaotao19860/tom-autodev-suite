@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-27 · 人工阶段执行后多读几次确认，不再一律"结果不明"
+
+- iPipe 人工阶段执行接口只回 `{code, entities, msg}`，不带 stage id；控制器立即读一次 stage 列表时开始时间还没更新，于是每次都报 `RERUN_RESPONSE_INVALID`/`CONTROLLER_STEP_FAILED`，需要人工 `--reconcile-only`（BGW-1995 在 348102 与 348101 上各发生一次）。`IpipeRuntime.rerun` 对无 stage 身份的确认改为最多 4 次只读确认、间隔 5 秒，仍从不重发写入。
+- 测试：`test_ipipe_runtime` +1；全量 1476 项通过。
+
 ## 2026-10-27 · SUBMIT 同时提交测试库；发布改走 BranchPipeline
 
 - 测试库提交丢失：任务同时改了业务库和测试库时，描述符 `revision_set` 记录两份 commit、G7 卡片也列出两个仓库，但 `_submit` 只推主仓库（业务库），测试库 commit 留在本地（BGW-1995 run 160c6840 的 qa `8c68089` 从未进 iCode，QA 504074 产不出新用例）。新增 `IcodeRuntime.submit_companion`（同一描述符、同一 G7 校验，推 revision_set 中非主仓库那一份）和 `orchestrator._companion_binding/_submit_companion`，`_submit` 先推测试库再推业务库并转 IPIPE；回执存为 `companion-submission`。已越过 SUBMIT 的旧 run 用 `submit-companion RUN_ID --task T` 补提，不改 run 状态。
