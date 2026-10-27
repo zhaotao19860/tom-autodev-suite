@@ -124,6 +124,35 @@ Do not treat a filled `get_bgwagent` as proof the job replaced the tool; the job
 consume it after updating `bgw_auto`. Tokens stay in `~/.tom-autodev/credentials/irepo-tokens.yaml`
 and are redacted in evidence.
 
+### Release path (BranchPipeline `348101`)
+
+After the CR merges, iCode starts x86bgw **BranchPipeline `348101`** on the target branch for
+the merged revision. That pipeline, not ChangePipeline `348102`, performs the release. Its
+stages, in order: 编译 → 扫描 → **自动化回归测试** (MANUAL) → 系统测试功能回归 (MANUAL) →
+**提测** (MANUAL, `APP_TEST_REQUEST`) → 准出审核 → 测试准出 (QA confirms on the platform) →
+**发布** (MANUAL, `AGILE_RELEASE`).
+
+| Stage | Declared input | Filled with |
+|---|---|---|
+| 自动化回归测试 (stageConf `5002481`) | `get_bgwagent` (stage `paramBeans`/`inParamsMap`; `required: false`, default `" "`) | Same rule as above. The job runs `cd tool; eval ${get_bgwagent}; tar -zxvf output.tar.gz`, so an empty value breaks every case even though the platform says "not required" |
+| 提测 | none in stage config; the job carries card, iTest plan, QA owner, module/commit | Platform-derived from the merged CR and card |
+| 发布 | none | — |
+
+Measured on 2026-10-27 (BGW-1995): BGW-1918's released build 273787582 filled
+`get_bgwagent` with a bgwagent `nodes/<id>` compile product because bgwagent changed in that
+requirement; an unchanged bgwagent uses its BranchPipeline `releases/<version>` product.
+The release evidence is the 发布 job's own detail (`version`, `revision`, `branch`,
+`releaseOutputHttpUrl`); `/api/agile/getReleaseInfo` answers 404 on this gateway.
+
+**Reading declarations — lessons from BGW-1995.** A stage's inputs are declared in the
+pipeline *configuration* (`stages[].paramBeans` / `inParamsMap`, and job configuration),
+not in a build's `stageBuild.manualParams`, which is `null` for every stage of 348101
+including the one that requires `get_bgwagent`. Never report a stage as parameterless
+from `manualParams`, a stage detail, or one build's run record; read the live pipeline
+configuration (`get_pipeline_by_id(..., brief=False)`), and confirm against a successfully
+released build's job log of the same pipeline when unsure. `required: false` is not proof
+that a value may be empty — read how the job consumes it.
+
 ## Parent Scheduling Contract
 
 Return this knowledge to `tom-autodev`. The parent:

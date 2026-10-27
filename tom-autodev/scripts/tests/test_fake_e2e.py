@@ -142,6 +142,18 @@ class FakeIcodeRuntime:
         self.state.receipt(claim["intent"]["intent_id"], response, response["evidence_refs"])
         return response
 
+    def submit_companion(self, change_set, approval, companion_path):
+        # The real runtime pushes the revision_set entry the descriptor does not; the fake
+        # records it the same way so a task changing both repositories reaches IPIPE.
+        entry = next(item for item in change_set["revision_set"].values()
+                     if not (item["module"] == change_set["module"]
+                             and item["revision"] == change_set["commit_revision"]))
+        self.companions = getattr(self, "companions", []) + [entry]
+        return {"ok": True, "reason_code": "OK", "run_id": self.run_id,
+                "module": entry["module"], "commit_revision": entry["revision"],
+                "target_branch": entry["branch"], "change_number": "43",
+                "cr_url": "https://icode.example/cr/43"}
+
 
 class StatefulKuTransport:
     skip_preflight = True
@@ -1040,12 +1052,17 @@ class FakeE2ETests(unittest.TestCase):
         # After the operator approves that descriptor, the worker submits to iCode itself
         # (fake runtime here) and the single-task frontier advances to IPIPE.
         self._approval(run_id, "G7", need["approval_input_hash"])
+        icode = FakeIcodeRuntime(self.orchestrator.state, run_id)
         done = worker_driver.execute_controller(
-            self.orchestrator, run_id, knowledge_sync=knowledge,
-            icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
+            self.orchestrator, run_id, knowledge_sync=knowledge, icode_runtime=icode,
         )
         self.assertTrue(done["ok"], done)
         self.assertEqual(self.orchestrator.next(run_id)["controller"], "ipipe")
+        # The task changed both repositories, so the test commit went to iCode too, under
+        # the same G7 (BGW-1995: it used to stay local).
+        self.assertEqual([entry["module"] for entry in getattr(icode, "companions", [])],
+                         [need.get("detail", {}).get("test_module") or
+                          self.orchestrator._runtime_profile(run_id)["profile"]["test_repo"]["module"]])
 
 
     def _drive_to_ipipe(self, card):

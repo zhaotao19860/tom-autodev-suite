@@ -288,6 +288,9 @@ _PARAMETER_ALIASES = {
 
 _BGW_MANUAL_STAGE_NAMES = {
     "P0新case回归", "P0新case回归测试", "p0级自动化回归测试",
+    # BranchPipeline 348101 (release path): declares `get_bgwagent` in the stage's own
+    # paramBeans/inParamsMap; its job runs `eval ${get_bgwagent}`, so it cannot be empty.
+    "自动化回归测试",
 }
 
 

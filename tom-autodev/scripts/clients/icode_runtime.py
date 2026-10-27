@@ -190,7 +190,76 @@ class IcodeRuntime:
             return blocked
         if drift is not None:
             return drift
+        return self._push(change_set, approval, preflight)
 
+    @guard_execution
+    def submit_companion(
+        self, change_set: dict[str, Any], approval: dict[str, Any], companion_path: Any,
+    ) -> dict[str, Any]:
+        """Push the test-repository commit that travels with a reviewed business change set.
+
+        A task that changes both repositories has one reviewed descriptor, whose
+        `revision_set` names both commits and whose G7 card lists both repositories, but
+        `submit` pushes only the descriptor's primary (business) repository. The test
+        commit stayed local, so the QA pipeline never saw the product cases the Review
+        accepted. This pushes that second commit under the same G7 and the same reviewed
+        bytes: the descriptor is validated exactly as `submit` validates it, and the
+        companion is the revision_set entry the primary is not.
+        """
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
+        invalid = self._validate_change_set(change_set)
+        if invalid is not None:
+            return invalid
+        approval_result = _approved_record(
+            self.approvals, approval, run_id=self.run_id, action="G7", input_hash=change_set["input_hash"]
+        )
+        if approval_result is not None:
+            return approval_result
+        entries = [entry for entry in change_set["revision_set"].values()
+                   if not (entry.get("module") == change_set["module"]
+                           and entry.get("revision") == change_set["commit_revision"])]
+        if len(entries) != 1:
+            return _failure("COMPANION_NOT_FOUND")
+        entry = entries[0]
+        companion = {
+            **change_set,
+            "change_set_id": f"{change_set['change_set_id']}:companion:{entry['module']}",
+            "repo_path": str(Path(companion_path).expanduser().resolve()),
+            "module": entry["module"],
+            "target_branch": entry["branch"],
+            "commit_revision": entry["revision"],
+            "submission_mode": "create_new_cr",
+        }
+        for field in ("existing_cr", "change_id"):
+            companion.pop(field, None)
+        repo_path = Path(companion["repo_path"])
+        preflight = self.preflight(repo_path)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
+        if preflight.get("reason_code") != "OK":
+            return preflight
+        if preflight["module"] != companion["module"] or preflight["target_branch"] != companion["target_branch"]:
+            return _failure("CHANGE_SET_WORKTREE_MISMATCH")
+        if preflight["revision"] != companion["commit_revision"]:
+            return _failure("STALE_BASELINE")
+        unpushable = _unpushable_commit(repo_path, companion)
+        if unpushable is not None:
+            return unpushable
+        drift = self._remote_drift(repo_path, companion)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return blocked
+        if drift is not None:
+            return drift
+        return self._push(companion, approval, preflight)
+
+    def _push(
+        self, change_set: dict[str, Any], approval: dict[str, Any], preflight: dict[str, Any],
+    ) -> dict[str, Any]:
+        repo_path = Path(change_set["repo_path"]).expanduser().resolve()
         payload = {
             "run_id": self.run_id,
             "change_set_id": change_set["change_set_id"],

@@ -3643,6 +3643,13 @@ def main(argv: list[str] | None = None) -> int:
     advance.add_argument("--evidence", help="其余证据上下文 JSON：workspace 收据、revision、环境指纹")
     advance.add_argument("--approval-id", help="省略则取该门最近一条 APPROVE 台账")
 
+    companion = subparsers.add_parser(
+        "submit-companion",
+        help="补提已获 G7、但未推送的测试库提交（同一描述符、同一 G7，不改 run 状态）")
+    companion.add_argument("run_id")
+    companion.add_argument("--task", required=True)
+    companion.add_argument("--approval-id")
+    companion.add_argument("--icode-skill", default="/Users/tom/.comate/skills/.system/icode")
     submit = subparsers.add_parser("submit", help="把已评审并获 G7 的变更集提交到 iCode")
     submit.add_argument("run_id")
     submit.add_argument("--task", required=True, help="要提交的任务 id，例如 T3")
@@ -4130,6 +4137,9 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "submit":
         result = _submit(orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
+    elif args.command == "submit-companion":
+        result = _submit_missing_companion(
+            orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
     elif args.command == "abandon-intent":
         result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor,
                                  args.local_error_proven)
@@ -4224,18 +4234,144 @@ def _submit(
     if approval is None:
         return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id,
                 "input_hash": descriptor["input_hash"]}
+    companion = _companion_binding(orchestrator, run_id, task_id, profile, descriptor, rows)
+    if isinstance(companion, dict) and companion.get("ok") is False:
+        return companion
+    bindings = {descriptor["repo_path"]: binding}
+    if companion is not None:
+        bindings[companion["worktree_path"]] = companion
     runtime = icode_runtime if icode_runtime is not None else orchestrator.icode_runtime(
         run_id,
-        worktree_bindings={descriptor["repo_path"]: binding},
+        worktree_bindings=bindings,
         owner=descriptor["owner"],
         system_skill_path=icode_skill,
         argv_transport=ProcessTransport(),
         submission_policy=profile.get("submission_policy"),
     )
+    if companion is not None:
+        # The test commit is pushed first and under the same G7: the transition to IPIPE
+        # happens inside submit_to_ipipe, and it must not happen while the reviewed test
+        # cases are still only in a local worktree.
+        pushed = _submit_companion(orchestrator, run_id, runtime, descriptor, approval,
+                                   companion["worktree_path"])
+        if not pushed.get("ok"):
+            return pushed
     return _settle_consumed_approval(
         orchestrator, run_id, approval.get("approval_id"), "submit",
         orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime),
     )
+
+
+def _companion_binding(
+    orchestrator: Any, run_id: str, task_id: str, profile: dict[str, Any],
+    descriptor: dict[str, Any], rows: Any,
+) -> dict[str, Any] | None:
+    """The owned worktree of the revision_set entry the descriptor does not push.
+
+    None when that repository has no new commit (its revision is still the owned
+    baseline): a task that changes only one repository has nothing to carry along.
+    """
+    from submit_descriptor import owned_row
+
+    entries = [entry for entry in (descriptor.get("revision_set") or {}).values()
+               if not (entry.get("module") == descriptor["module"]
+                       and entry.get("revision") == descriptor["commit_revision"])]
+    if len(entries) != 1:
+        return None
+    entry = entries[0]
+    repositories = [*(profile.get("business_repos") or []), profile.get("test_repo") or {}]
+    repository = next((item for item in repositories
+                       if isinstance(item, dict) and item.get("module") == entry["module"]), None)
+    row = owned_row(rows, task_id, repository.get("path")) if isinstance(repository, dict) else None
+    if not isinstance(row, dict):
+        return {"ok": False, "reason_code": "WORKTREE_NOT_OWNED", "run_id": run_id,
+                "task_id": task_id, "module": entry["module"]}
+    if entry["revision"] == row["baseline_revision"]:
+        return None
+    from submit_descriptor import _matching_clean_worktree
+    path = _matching_clean_worktree(row["worktree_path"], entry["revision"]) or row["worktree_path"]
+    return {
+        "run_id": run_id,
+        "baseline_revision": row["baseline_revision"],
+        "module": repository["module"],
+        "target_branch": repository["branch"],
+        "repo_path": row["repo_path"],
+        "task_id": task_id,
+        "owner_token": row["owner_token"],
+        "worktree_path": str(Path(path).expanduser().resolve()),
+        "ownership_worktree_path": row["worktree_path"],
+    }
+
+
+def _submit_companion(
+    orchestrator: Any, run_id: str, runtime: Any, descriptor: dict[str, Any],
+    approval: dict[str, Any], worktree_path: str,
+) -> dict[str, Any]:
+    """Push the companion commit and archive its receipt next to the primary's."""
+    submit = getattr(runtime, "submit_companion", None)
+    if not callable(submit):
+        return {"ok": False, "reason_code": "ICODE_RUNTIME_MISMATCH", "run_id": run_id}
+    pushed = submit(descriptor, approval, worktree_path)
+    if not isinstance(pushed, dict) or not pushed.get("ok"):
+        return pushed if isinstance(pushed, dict) else {
+            "ok": False, "reason_code": "ICODE_RECEIPT_INVALID", "run_id": run_id}
+    content = json.dumps(pushed, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    orchestrator.artifacts.put(run_id, "companion-submission", content, {
+        "change_set_id": descriptor["change_set_id"],
+        "revision_set_id": descriptor["revision_set_id"],
+        "module": pushed.get("module"),
+        "commit_revision": pushed.get("commit_revision"),
+    })
+    return pushed
+
+
+def _submit_missing_companion(
+    orchestrator: Any, run_id: str, task_id: str, approval_id: str | None, icode_skill: str,
+) -> dict[str, Any]:
+    """Recover a run whose G7-approved test commit was never pushed.
+
+    Before `_submit` carried the companion, a task changing both repositories reached
+    IPIPE with only the business CR. The descriptor and its G7 still name the test
+    commit, so pushing it under that same approval is the write the G7 authorized; the
+    run state is not touched.
+    """
+    from cli_transport import ProcessTransport
+    from pipeline_plan import current_descriptors
+    from submit_descriptor import _ownership_rows
+
+    entry = current_descriptors(orchestrator, run_id).get(task_id)
+    if not isinstance(entry, dict):
+        return {"ok": False, "reason_code": "CHANGE_SET_MISSING", "run_id": run_id}
+    artifact = entry["artifact"]
+    descriptor = {**entry["descriptor"], "input_hash": artifact["sha256"],
+                  "reviewed_artifact_id": artifact["artifact_id"]}
+    approval = _g7_approval(orchestrator, run_id, approval_id, descriptor["input_hash"])
+    if approval is None or approval.get("effective_decision") != "APPROVE":
+        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id,
+                "input_hash": descriptor["input_hash"]}
+    pinned = orchestrator._runtime_profile(run_id)
+    if not pinned.get("ok"):
+        return pinned
+    profile = pinned["profile"]
+    companion = _companion_binding(orchestrator, run_id, task_id, profile, descriptor,
+                                   _ownership_rows(orchestrator, run_id))
+    if companion is None:
+        return {"ok": True, "reason_code": "NO_COMPANION", "run_id": run_id}
+    if companion.get("ok") is False:
+        return companion
+    runtime = orchestrator.icode_runtime(
+        run_id,
+        worktree_bindings={companion["worktree_path"]: companion},
+        owner=descriptor["owner"],
+        system_skill_path=icode_skill,
+        argv_transport=ProcessTransport(),
+        submission_policy=profile.get("submission_policy"),
+    )
+    return _submit_companion(orchestrator, run_id, runtime, descriptor,
+                             {"approval_id": approval["approval_id"],
+                              "input_hash": descriptor["input_hash"]},
+                             companion["worktree_path"])
 
 
 def _replayed_submit_intent(
@@ -4293,7 +4429,7 @@ def _cli_exit_code(result: Any) -> int:
     reason = result.get("reason_code")
     return 0 if reason in {
         None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
-        "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT",
+        "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT", "NO_COMPANION",
         "PARKED", "WORK_CARD_RECONCILED", "WORK_CARD_ABANDONED",
         "CHANGE_SET_PREPARED",
     } else 1

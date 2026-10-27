@@ -304,6 +304,63 @@ class IcodeRuntimeTests(unittest.TestCase):
         result = self.runtime(worktree_bindings={str(self.source_repo.resolve()): forged}).preflight(self.source_repo)
         self.assertEqual(result["reason_code"], "WORKTREE_NOT_OWNED")
 
+    def _companion_repo(self):
+        source = self.root / "repo-tests"
+        source.mkdir()
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "dev@example.test"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "dev"], check=True)
+        (source / "case.py").write_text("a\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(source), "add", "case.py"], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm",
+                        "CARD-1 base\n\nChange-Id: Icccccccccccccccccccccccccccccccccccccccc"], check=True)
+        base = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        workspace = self.workspaces.create(source, "run-1", "task-1",
+                                           {"baseline_status": "READY", "baseline_revision": base})
+        tree = Path(workspace["worktree_path"])
+        (tree / "case.py").write_text("b\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(tree), "add", "case.py"], check=True)
+        subprocess.run(["git", "-C", str(tree), "commit", "-qm",
+                        "CARD-1 cases\n\nChange-Id: Idddddddddddddddddddddddddddddddddddddddd"], check=True)
+        revision = subprocess.check_output(["git", "-C", str(tree), "rev-parse", "HEAD"], text=True).strip()
+        binding = {
+            "run_id": "run-1", "baseline_revision": base, "module": "baidu/team/repo-tests",
+            "target_branch": "main", "repo_path": str(source.resolve()), "task_id": "task-1",
+            "owner_token": workspace["owner_token"], "worktree_path": str(tree.resolve()),
+        }
+        return tree, revision, binding
+
+    def test_companion_test_commit_is_pushed_under_the_same_g7(self):
+        # BGW-1995: a task changing both repositories pushed only the business commit;
+        # the reviewed product cases stayed local and the QA pipeline never saw them.
+        tree, revision, binding = self._companion_repo()
+        change = self.change_set()
+        change["revision_set"]["test"]["revision"] = revision
+        change = self.persist_reviewed_change_set(change)
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = [{
+            "_number": 77, "current_revision": revision, "branch": "main",
+            "owner": {"username": "dev"}, "subject": "CARD-1 cases",
+            "url": "https://icode.baidu.com/myreview/changes/77", "project": "baidu/team/repo-tests",
+        }]
+        runtime = self.runtime(worktree_bindings={str(tree.resolve()): binding})
+        self.transport.on_push = None
+        pushed = runtime.submit_companion(change, approval, tree)
+        self.assertEqual(pushed["reason_code"], "OK", pushed)
+        self.assertEqual(pushed["module"], "baidu/team/repo-tests")
+        self.assertEqual(pushed["commit_revision"], revision)
+
+    def test_companion_needs_the_g7_of_the_descriptor(self):
+        tree, revision, binding = self._companion_repo()
+        change = self.change_set()
+        change["revision_set"]["test"]["revision"] = revision
+        change = self.persist_reviewed_change_set(change)
+        wrong = approved(self.ledger, "run-1", "G8", change["input_hash"])
+        runtime = self.runtime(worktree_bindings={str(tree.resolve()): binding})
+        refused = runtime.submit_companion(change, wrong, tree)
+        self.assertEqual(refused["reason_code"], "APPROVAL_GATE_MISMATCH")
+        self.assertFalse(any(_is_push(call[0]) for call in self.transport.calls))
+
     def test_submit_requires_reviewed_exact_revision_set_and_run_bound_g7(self):
         change = self.change_set()
         change.pop("reviewed_artifact_id")

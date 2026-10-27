@@ -82,7 +82,12 @@ query-only recovery for unknown outcomes. Changed modules require this run's own
 Never fall back to arbitrary historical compile, latest build, or a fixed URL.
 
 Read stage, job/build declarations and upstream dependency inputs even when
-`manualParams` is empty. A profile mapping is not a declaration. Override declared
+`manualParams` is empty: declarations live in the live pipeline configuration
+(`stages[].paramBeans`/`inParamsMap`, job config), and a build's `manualParams` is `null`
+even for a stage whose job cannot run without its input. Never tell the user a stage
+takes no parameters from `manualParams` or one build record, and do not trust
+`required: false` -- read how the job consumes the value. A profile mapping is not a
+declaration. Override declared
 task inputs only when the adapter proves exact scope/precedence without changing
 the pipeline template. The current HTTP adapter cannot prove job override or
 compile-only triggering and explicitly blocks with `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`
@@ -161,6 +166,22 @@ operator as `BAIDU_CC_USERNAME`. The adapter accepts the skill's bounded debug p
 the JSON response, while still rejecting non-JSON output from other CLI adapters. If the KU
 entry point or identity is unavailable, report that concrete prerequisite instead of collapsing
 it into `KU_QUERY_UNKNOWN`.
+
+A task that changes both the business and the test repository has one reviewed
+descriptor whose `revision_set` names both commits; SUBMIT pushes the business commit and
+the test commit (`submit_companion`) under that same G7, and the test push happens first.
+Never treat "the run reached IPIPE" as proof the test commit is in iCode: check the test
+repository's remote branch. A run that predates this pushed only the business commit;
+recover it with `submit-companion RUN_ID --task TASK` (same descriptor, same G7, no state
+change).
+
+The release of a merged CR is the target branch's **BranchPipeline**, not the
+ChangePipeline that verified it. After G9 the release controller binds that BranchPipeline
+build of the exact merged revision and moves it through its manual stages with the same
+parameter-discovery + G8 path as any manual stage; the release is verified from the
+BranchPipeline `AGILE_RELEASE` job (version, revision, branch, product URL). A stage that
+notifies people outside the run (test request, test release confirmation) still needs the
+named owner on the platform; report it as waiting, do not bypass it.
 
 Approval settlement creates one durable, hash-bound resume handoff containing `approval_id`, `run_id`, `input_hash`, the source event, and the next action. In a live Comate turn, register `scripts/ide_turn_hook.py` as the `Stop` hook in `~/.comate/hooks.json` or `~/.comate/hooks.local.json`: after a valid APPROVE it returns a blocking continuation with `additionalContext`, so Comate resumes without a manual `继续`. The hook only hands control back to Comate; it never executes a phase or external write. Replays are idempotent and stale, rejected, expired, mismatched, or completed handoffs are ignored. `SessionEnd` is fire-and-forget and cannot create a new Agent turn, so an ended session receives the existing 如流 fallback notice; `orchestrator.py notify-ide-turn` remains the manual notification path.
 

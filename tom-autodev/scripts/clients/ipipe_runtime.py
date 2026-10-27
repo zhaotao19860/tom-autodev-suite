@@ -1844,6 +1844,27 @@ class IpipeRuntime:
         if not _build_passed(_status(current), self._mark_expression_skips(stages)):
             return _failure("PIPELINE_NOT_SUCCESSFUL")
         try:
+            branch = self._branch_release(binding)
+        except Exception as error:
+            return _failure(_transport_reason(error, "RELEASE_QUERY_FAILED"))
+        if branch.get("reason_code") != "BRANCH_PIPELINE_UNSUPPORTED":
+            if not branch.get("ok"):
+                return branch
+            refs = _build_evidence(build_id, binding) + [
+                f"ipipe:branch-build/{branch['branch_build_id']}",
+                f"ipipe:release/{branch['release_id']}",
+            ]
+            return {
+                "ok": True, "reason_code": "OK", "status": "SUCCESS", "run_id": self.run_id,
+                "build_id": build_id, "release_id": branch["release_id"],
+                "release_version": branch.get("version"),
+                "release_product_url": branch.get("product_url"),
+                "revision_set_id": binding["revision_set_id"],
+                "release_rule": binding["release_rule"],
+                "environment_fingerprint": binding["environment_fingerprint"],
+                "evidence_refs": refs,
+            }
+        try:
             releases = self.api.release_info(binding["module"], binding["target_branch"])
         except Exception as error:
             return _failure(_transport_reason(error, "RELEASE_QUERY_FAILED"))
@@ -1886,6 +1907,97 @@ class IpipeRuntime:
             "environment_fingerprint": binding["environment_fingerprint"],
             "evidence_refs": refs,
         }
+
+    def branch_release_build(self, binding: dict[str, Any]) -> dict[str, Any]:
+        """The target branch's BranchPipeline build of exactly this revision, if one exists.
+
+        A merged CR is released by the module's BranchPipeline, not by the ChangePipeline
+        that verified it, so the release is looked for there. `BRANCH_PIPELINE_UNSUPPORTED`
+        means this adapter cannot name that pipeline and the legacy release listing applies.
+        """
+        lookup = getattr(self.api, "pipelines_by_module", None)
+        if not callable(lookup):
+            return _failure("BRANCH_PIPELINE_UNSUPPORTED")
+        module = binding["module"]
+        revision = (binding.get("revision_map") or {}).get(module)
+        ids = {
+            str(item.get("id") or item.get("pipelineConfId") or "")
+            for item in lookup(module) or []
+            if isinstance(item, dict)
+            and (item.get("pipelineName") or item.get("name")) == "BranchPipeline"
+        }
+        if len(ids) != 1 or "" in ids or not _nonempty(revision):
+            return _failure("BRANCH_PIPELINE_UNSUPPORTED")
+        pipeline_id = next(iter(ids))
+        builds = [
+            item for item in self.api.builds_by_revision(module, revision, pipeline_id) or []
+            if isinstance(item, dict)
+            and str(item.get("branch") or (item.get("trigger") or {}).get("branch") or "")
+            == binding["target_branch"]
+            and str((item.get("trigger") or {}).get("revision") or item.get("revision") or "")
+            == revision
+        ]
+        if not builds:
+            return _failure("RELEASE_WAITING", status="RELEASE_WAITING",
+                            branch_pipeline_id=pipeline_id, branch_build_id=None)
+        # The newest build of this exact revision: iPipe build ids are increasing numbers.
+        build = max(builds, key=lambda item: (len(_build_id(item)), _build_id(item)))
+        return {"ok": True, "reason_code": "OK", "branch_pipeline_id": pipeline_id,
+                "branch_build_id": _build_id(build), "build": build,
+                "context": {**binding, "pipeline_id": pipeline_id}}
+
+    def _branch_release(self, binding: dict[str, Any]) -> dict[str, Any]:
+        """Read the release from the BranchPipeline's own AGILE_RELEASE job.
+
+        `/api/agile/getReleaseInfo` answers 404 on the real gateway for every branch; the
+        release stage's job detail carries the version, source revision, branch and the
+        product URL, so that is the evidence read here. No exact successful release job
+        means the release has not happened yet (`RELEASE_WAITING`), with the branch build
+        named so the release path can advance its manual stages.
+        """
+        found = self.branch_release_build(binding)
+        if not found.get("ok"):
+            return found
+        module = binding["module"]
+        revision = binding["revision_map"][module]
+        stages = [_normalize_stage(stage)
+                  for stage in self._build_stages(found["branch_build_id"], found["build"])]
+        for stage in stages:
+            if stage.get("status") not in _SUCCESS:
+                continue
+            detail = self.api.stage_detail(str(stage["stage_build_id"]))
+            for job in _real_jobs(detail):
+                real = job.get("realJobBuild") if isinstance(job.get("realJobBuild"), dict) else job
+                if (job.get("jobType") == "AGILE_RELEASE"
+                        and str(job.get("status") or "").upper() in _SUCCESS
+                        and real.get("revision") == revision
+                        and real.get("branch") == binding["target_branch"]
+                        and _nonempty(real.get("version"))):
+                    return {"ok": True, "reason_code": "OK",
+                            "release_id": str(real.get("id") or real["version"]),
+                            "version": real["version"],
+                            "product_url": real.get("releaseOutputHttpUrl"),
+                            "branch_build_id": found["branch_build_id"],
+                            "branch_pipeline_id": found["branch_pipeline_id"]}
+        return _failure("RELEASE_WAITING", status="RELEASE_WAITING",
+                        branch_pipeline_id=found["branch_pipeline_id"],
+                        branch_build_id=found["branch_build_id"])
+
+    def bind_branch_release_build(self, build_id: str) -> dict[str, Any]:
+        """Own the BranchPipeline build that releases this ChangePipeline build's revision.
+
+        Its stages are then visible to the ordinary manual-stage path (parameter
+        discovery, G8, rerun, reconcile) exactly like a ChangePipeline stage.
+        """
+        binding = self._load_build_binding(build_id)
+        if binding is None:
+            return _failure("BUILD_OWNERSHIP_UNVERIFIED")
+        found = self.branch_release_build(binding)
+        if not found.get("ok"):
+            return found
+        self._bind_build(found["branch_build_id"], found["context"], found["build"])
+        return {"ok": True, "reason_code": "OK", "branch_build_id": found["branch_build_id"],
+                "branch_pipeline_id": found["branch_pipeline_id"]}
 
     def verify_release_of_build(self, build_id: str) -> dict[str, Any]:
         """Verify a build against its OWN recorded binding — per-module independent release
@@ -2557,6 +2669,18 @@ def _build_passed(aggregate: str, stages: list[dict[str, Any]]) -> bool:
         return False
     return aggregate in _SUCCESS or len(ran) < len(stages) or any(
         stage.get("status") in _SKIPPED for stage in ran)
+
+
+def _real_jobs(detail: Any) -> list[dict[str, Any]]:
+    """The job entries of a stage detail response (`entities.realJobBuilds`, grouped)."""
+    entities = detail.get("entities") if isinstance(detail, dict) else None
+    groups = (entities or {}).get("realJobBuilds") if isinstance(entities, dict) else None
+    jobs: list[dict[str, Any]] = []
+    for group in groups or []:
+        for job in group if isinstance(group, list) else [group]:
+            if isinstance(job, dict):
+                jobs.append(job)
+    return jobs
 
 
 def _job_skip_reasons(detail: Any) -> list[str]:

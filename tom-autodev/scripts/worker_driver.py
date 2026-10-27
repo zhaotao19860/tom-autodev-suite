@@ -1474,6 +1474,10 @@ def _execute_release(
         if isinstance(runtime, dict):
             return runtime
         verified = _verify_required_releases(orchestrator, run_id, runtime, {})
+        if verified.get("parked") == "RELEASE_WAITING":
+            advanced = _advance_branch_release(orchestrator, run_id, runtime, verified)
+            if advanced is not None:
+                return advanced
         if verified.get("reason_code") != "RELEASES_VERIFIED":
             return verified
         ingested = protocol.ingest_release_evidence(
@@ -1524,6 +1528,42 @@ def _execute_release(
     landed = orchestrator.status(run_id).get("state")
     return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
             "build_id": build_id, "release_id": verified.get("release_id"), "result": ingested}
+
+
+def _advance_branch_release(
+    orchestrator: Any, run_id: str, runtime: Any, waiting: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Move the BranchPipeline that releases a merged CR through its manual stages.
+
+    G9 approved releasing this build, but the release itself is the target branch's
+    BranchPipeline: after the CR merges, the platform starts that pipeline and it stops at
+    manual stages (regression, test request, release). Each manual stage goes through the
+    same path a ChangePipeline manual stage does -- parameters discovered from the live
+    pipeline declaration, a hash-bound G8, the guarded rerun -- so nothing is typed by
+    hand and nothing runs without approval. Returns None when there is nothing to drive.
+    """
+    detail = waiting.get("detail") or {}
+    build_id = waiting.get("build_id")
+    if not detail.get("branch_build_id") or not isinstance(build_id, str):
+        return None
+    bound = runtime.bind_branch_release_build(build_id)
+    if not bound.get("ok"):
+        return None
+    branch_build = bound["branch_build_id"]
+    deadline = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    observed = runtime.monitor_once(branch_build, deadline)
+    if observed.get("status") == "MANUAL_WAIT" and observed.get("stage_build_id"):
+        prepared = _prepare_manual_stage(
+            orchestrator, runtime, run_id, str(observed["stage_build_id"]),
+            waiting.get("module") or "",
+        )
+        return {**prepared, "controller": "release", "branch_build_id": branch_build}
+    if observed.get("status") == "FAILURE":
+        return {"ok": False, "reason_code": "BRANCH_RELEASE_FAILED", "run_id": run_id,
+                "branch_build_id": branch_build, "monitor": observed}
+    return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "RELEASE_WAITING",
+            "controller": "release", "branch_build_id": branch_build,
+            "monitor_status": observed.get("status")}
 
 
 def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, Any]) -> dict[str, Any]:

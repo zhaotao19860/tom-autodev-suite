@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-27 · SUBMIT 同时提交测试库；发布改走 BranchPipeline
+
+- 测试库提交丢失：任务同时改了业务库和测试库时，描述符 `revision_set` 记录两份 commit、G7 卡片也列出两个仓库，但 `_submit` 只推主仓库（业务库），测试库 commit 留在本地（BGW-1995 run 160c6840 的 qa `8c68089` 从未进 iCode，QA 504074 产不出新用例）。新增 `IcodeRuntime.submit_companion`（同一描述符、同一 G7 校验，推 revision_set 中非主仓库那一份）和 `orchestrator._companion_binding/_submit_companion`，`_submit` 先推测试库再推业务库并转 IPIPE；回执存为 `companion-submission`。已越过 SUBMIT 的旧 run 用 `submit-companion RUN_ID --task T` 补提，不改 run 状态。
+- 发布核验：`/api/agile/getReleaseInfo` 在真实网关一律 404。`verify_release` 先查目标分支 BranchPipeline 对本次 revision 的 build，读其 `AGILE_RELEASE` job 的 version/revision/branch/产物 URL 作为发布证据；查不到 BranchPipeline 的适配器回退旧接口。未发布时返回 `RELEASE_WAITING` 并带上 branch build。
+- 发布推进：`worker_driver._advance_branch_release` 在 G9 后绑定该 BranchPipeline build，人工阶段（自动化回归测试/系统测试/提测/发布）复用 `_prepare_manual_stage`：参数按实时流水线配置发现、按冻结策略推导、每步 G8、结果不明只读对账。`stage_parameters` 把 BranchPipeline 的「自动化回归测试」登记为 `get_bgwagent` 的已知人工阶段。
+- 文档：`tom-autodev/SKILL.md`、`tom-project-bgw/references/runtime-topology.md` 写明参数声明来自流水线配置而非 `manualParams`、`required:false` 不等于可为空、测试库提交与 BranchPipeline 发布路径（来自本次误判：曾把 `get_bgwagent` 必填阶段说成无参数）。
+- 测试：`test_icode_runtime` +2、`test_ipipe_runtime` +2、`test_fake_e2e` 断言测试库同时提交；全量 1475 项通过。
+
 ## 2026-10-27 · iPipe：流水线表达式跳过的 stage 不算缺证据
 
 - 现象：BGW-1995 run 160c6840 的 build 275535376 在 x86bgw ChangePipeline(348102) 上编译、单测、P0 回归全部通过，但 `P0新case回归`、`系统测试p0级功能回归` 被流水线跳过表达式对 dpdk-2011 分支固定跳过（`skipByStage: EXPRESSION`），平台整单报 `SKIPPED`；`monitor` 只认 SUCC 类整单状态且要求每个 stage 有运行 job，run 永远停在 MONITORING。

@@ -1321,6 +1321,43 @@ class IpipeRuntimeTests(unittest.TestCase):
             self.runtime.verify_release_of_build("build-unknown")["reason_code"],
             "BUILD_OWNERSHIP_UNVERIFIED")
 
+    def _branch_pipeline_fixture(self, release_status="SUCC", revision="app-rev"):
+        self.bind_build(status="SUCCESS")
+        self.api.stages["build-1"] = [{"id": "stage-1", "status": "SUCCESS"}]
+        self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        self.api.pipelines_by_module = lambda module: [
+            {"id": 900, "pipelineName": "BranchPipeline"}, {"id": "pipe-1", "pipelineName": "ChangePipeline"}]
+        branch_build = {"id": "branch-1", "pipelineConfId": "900", "module": "baidu/team/app",
+                        "branch": "main", "status": "SUCCEEDING",
+                        "trigger": {"branch": "main", "revision": "app-rev"}}
+        original = self.api.builds_by_revision
+        self.api.builds_by_revision = lambda module, rev, pid: (
+            [branch_build] if str(pid) == "900" else original(module, rev, pid))
+        self.api.builds["branch-1"] = branch_build
+        self.api.stages["branch-1"] = [{"id": "rel-stage", "stageName": "发布", "status": release_status}]
+        self.api.details["rel-stage"] = {"entities": {"realJobBuilds": [[{
+            "id": 5, "jobType": "AGILE_RELEASE", "status": release_status,
+            "realJobBuild": {"id": 77, "version": "26.10.27.1", "revision": revision, "branch": "main",
+                             "releaseOutputHttpUrl": "https://irepo.example/app/releases/26.10.27.1/files"}}]]}}
+
+    def test_release_is_read_from_the_branch_pipeline_release_job(self):
+        # The gateway answers 404 for /api/agile/getReleaseInfo; the BranchPipeline's own
+        # AGILE_RELEASE job carries the version, revision and product of the release.
+        self._branch_pipeline_fixture()
+        released = self.runtime.verify_release_of_build("build-1")
+        self.assertEqual(released["reason_code"], "OK", released)
+        self.assertEqual(released["release_version"], "26.10.27.1")
+        self.assertIn("ipipe:branch-build/branch-1", released["evidence_refs"])
+
+    def test_branch_release_of_another_revision_or_not_yet_released_waits(self):
+        self._branch_pipeline_fixture(revision="older-rev")
+        self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_WAITING")
+        self._branch_pipeline_fixture(release_status="WAITTING")
+        waiting = self.runtime.verify_release_of_build("build-1")
+        self.assertEqual(waiting["reason_code"], "RELEASE_WAITING")
+        self.assertEqual(waiting["branch_build_id"], "branch-1")
+
     def test_verify_release_requires_current_successful_build_and_nonempty_successful_stages(self):
         self.bind_build(status="SUCCESS")
         exact_release = {
