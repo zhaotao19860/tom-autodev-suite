@@ -262,6 +262,27 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(ie.intent_state(self.state, self.intent()), ie.UNKNOWN)
         self.assertEqual(self.posts(), 1)
 
+    def test_a_read_only_adoption_survives_a_failed_confirmation_read(self):
+        # Codex round 6: a fresh claim adopts an old build; the GET fails; the replay
+        # must still find the adopted build, without any trigger POST.
+        old = {**build("build-3"), "triggerTime": 1_000_000_000_000}
+        self.api.candidates.append(old)
+        original = self.api.build_by_id
+        calls = {"n": 0}
+
+        def flaky(build_id, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("GET failed")
+            return original(build_id, **kwargs)
+        self.api.builds["build-3"] = old
+        self.api.build_by_id = flaky
+        self.assertFalse(self.trigger().get("ok"))
+        replay = self.trigger()
+        self.assertTrue(replay.get("ok"), replay)
+        self.assertEqual(replay["build_id"], "build-3")
+        self.assertEqual(self.posts(), 0)
+
     def test_a_build_started_before_the_intent_is_not_its_answer(self):
         self.api.trigger_result = TimeoutError("no answer")
         self.trigger()

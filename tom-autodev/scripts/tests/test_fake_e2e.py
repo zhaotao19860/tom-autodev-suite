@@ -1072,6 +1072,22 @@ class FakeE2ETests(unittest.TestCase):
         self.assertTrue(self.orchestrator.recovery.resume(
             run_id, held_for_diagnosis=frozenset({held["intent_id"]}))["retry_allowed"])
 
+    def test_v2_publish_keeps_guard_refusals(self):
+        # Codex round 6: a policy-drift refusal is not a KU outage and is not pinned.
+        run_id, _knowledge = self._run_to_workspace("BGW-595", "bgw", "I15ClP2KW4ZGAK")
+        protocol = self.orchestrator.phase_protocol()
+
+        class Drifted:
+            def publish_phase(self, *_a, **_k):
+                return {"ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT"}
+
+        protocol.knowledge = Drifted()
+        artifact = {"phase": "SPEC", "content_hash": "d" * 64}
+        self.assertEqual(protocol._publish(run_id, artifact, scope="ku_only")["reason_code"],
+                         "WORKFLOW_SPEC_DRIFT")
+        self.assertIsNone(self.orchestrator.state.idempotency_result(
+            f"knowledge.deferred:{run_id}:{'d' * 64}:ku_only"))
+
     def test_continue_reconciles_g5_saved_draft_through_real_ku_client(self):
         # The evidence contract v1 path: a KU receipt still gates the phase for runs
         # started before MVP §5 (dual read).

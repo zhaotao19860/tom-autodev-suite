@@ -923,6 +923,32 @@ class IcodeRuntimeTests(unittest.TestCase):
                             "SUBMIT_CONFIRMED_ABSENT")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
+    def test_a_writer_whose_intent_was_closed_while_paused_never_pushes(self):
+        # Codex round 6: another invocation proved absence while this one was paused.
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        runtime = self.runtime()
+        original = runtime._materialize_cli_repository
+
+        def pause_then_resume(repo_path, change_set):
+            key = f"icode.submit:run-1:{change['change_set_id']}:{change['revision_set_id']}"
+            intent = self.state.intent_by_idempotency_key(key)
+            self.state.receipt(intent["intent_id"], {"ok": False, "intent_state": "CONFIRMED_ABSENT"}, [])
+            return original(repo_path, change_set)
+        runtime._materialize_cli_repository = pause_then_resume
+        self.assertEqual(runtime.submit(change, approval)["reason_code"], "SUBMIT_INTENT_CLOSED")
+        self.assertFalse(any(_is_push(call[0]) for call in self.transport.calls))
+
+    def test_an_announced_dispatch_fences_an_absence_verdict(self):
+        import intent_executor as ie
+        change = self.change_set()
+        key = f"icode.submit:run-1:{change['change_set_id']}:{change['revision_set_id']}"
+        intent = self.state.claim_intent("run-1", "icode.submit", key, {})["intent"]
+        self.state.record_external_observation(intent["intent_id"], {"operation": "icode.submit.dispatch"})
+        result = self.runtime()._answer(intent, ie.Verdict.absent(checked="listing"))
+        self.assertEqual(result["intent_state"], ie.UNKNOWN)
+        self.assertIsNone(self.state.result_by_idempotency_key(key))
+
     def test_a_push_that_may_still_be_running_is_never_absent(self):
         from datetime import datetime, timedelta, timezone
         change = self.change_set()

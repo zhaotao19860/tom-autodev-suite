@@ -85,6 +85,9 @@ def _redriven_by_publish(operation: Any) -> bool:
     return base in _PUBLISH_REDRIVEN_OPERATIONS
 
 
+_GUARD_REFUSALS = frozenset({"WORKFLOW_SPEC_DRIFT", "PROFILE_CONFLICT", "PROFILE_BINDING_REQUIRED"})
+
+
 def _knowledge_side_channel(operation: Any) -> bool:
     return isinstance(operation, str) and operation.split(".", 1)[0] in {"icafe", "ku", "knowledge"}
 
@@ -1682,6 +1685,10 @@ class PhaseProtocol:
             receipt = self.knowledge.publish_phase(run_id, artifact, scope=scope)
         except Exception as error:  # noqa: BLE001 - side channel only under v2
             receipt = {"ok": False, "reason_code": type(error).__name__}
+        if isinstance(receipt, dict) and receipt.get("reason_code") in _GUARD_REFUSALS:
+            # A control-plane guard (policy or profile drift) is not a KU outage: it
+            # stops the phase, and nothing is pinned for it.
+            return receipt
         if isinstance(receipt, dict) and receipt.get("ok") and self._receipt_error(
                 run_id, {"phase": artifact.get("phase"), "content_hash": artifact.get("content_hash")},
                 receipt) is None:

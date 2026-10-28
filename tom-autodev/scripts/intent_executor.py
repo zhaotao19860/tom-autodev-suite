@@ -153,6 +153,8 @@ def settle(
     state_store: Any,
     intent: dict[str, Any],
     verdict: Verdict,
+    *,
+    fence: tuple[str, str] | None = None,
 ) -> Verdict:
     """Persist a non-confirmed verdict; CONFIRMED is persisted by the operation's receipt.
 
@@ -169,9 +171,15 @@ def settle(
         written = state_store.receipt_unless_ambiguous(intent["intent_id"], {
             "ok": False, "reason_code": "INTENT_CONFIRMED_ABSENT",
             "intent_state": CONFIRMED_ABSENT, **verdict.evidence,
-        }, [])
+        }, [], fence=fence)
         if written is None:
-            return sticky_ambiguous(state_store, intent) or Verdict.ambiguous()
+            sticky = sticky_ambiguous(state_store, intent)
+            if sticky is not None:
+                return sticky
+            # Fenced: a writer may still be dispatching. Not absent; not decided either.
+            unknown = Verdict.unknown(fenced=True)
+            record_state(state_store, intent["intent_id"], unknown)
+            return unknown
         landed = written.get("response") or {}
         if landed.get("intent_state") != CONFIRMED_ABSENT:
             # A confirmation landed first; it is the answer.
@@ -189,6 +197,7 @@ def answer(
     unknown_reason: str,
     ambiguous_reason: str,
     absent_reason: str = "INTENT_CONFIRMED_ABSENT",
+    fence: tuple[str, str] | None = None,
 ) -> dict[str, Any]:
     """Persist a verdict and turn it into the caller-facing result of the write.
 
@@ -197,7 +206,7 @@ def answer(
     """
     if verdict.state == REFUSED:
         return dict(verdict.result or {})
-    verdict = settle(state_store, intent, verdict)
+    verdict = settle(state_store, intent, verdict, fence=fence)
     base = {"ok": False, "intent_id": intent["intent_id"], "intent_state": verdict.state}
     if verdict.state == CONFIRMED:
         return verdict.result or {}

@@ -388,6 +388,14 @@ class IcodeRuntime:
             blocked = self._profile_error()
             if blocked is not None:
                 return blocked
+            # Fence: announce the dispatch, then make sure nobody closed this intent
+            # meanwhile (a read-back after the absence grace). The absence write refuses
+            # while this marker is recent, so either order of the two is safe.
+            self.state.record_external_observation(intent["intent_id"], {
+                "operation": _SUBMIT_DISPATCH_MARKER})
+            if self.state.result_by_idempotency_key(intent["idempotency_key"]) is not None:
+                return _failure("SUBMIT_INTENT_CLOSED", intent_id=intent["intent_id"],
+                                retry_allowed=False)
             pushed = _run(
                 self.transport,
                 [
@@ -426,9 +434,15 @@ class IcodeRuntime:
         self, intent: dict[str, Any], verdict: "intent_executor.Verdict",
         unknown_reason: str = "QUERY_REQUIRED",
     ) -> dict[str, Any]:
+        from datetime import timedelta
+        # An absence may only free the target when no dispatch was announced within the
+        # longest a push can still be running.
+        since = (self.clock().astimezone(timezone.utc)
+                 - timedelta(seconds=_SUBMIT_PUSH_TIMEOUT_SECONDS + 60)).isoformat()
         return intent_executor.answer(
             self.state, intent, verdict, unknown_reason=unknown_reason,
             ambiguous_reason="CR_IDENTITY_AMBIGUOUS", absent_reason="SUBMIT_CONFIRMED_ABSENT",
+            fence=(_SUBMIT_DISPATCH_MARKER, since),
         )
 
     def _submit_verdict(
@@ -922,6 +936,7 @@ _SUBMIT_PUSH_TIMEOUT_SECONDS = 600
 # push can still be in flight, plus the listing's lag. An absent verdict frees the change
 # set for another push.
 _SUBMIT_ABSENCE_GRACE_SECONDS = _SUBMIT_PUSH_TIMEOUT_SECONDS + 300
+_SUBMIT_DISPATCH_MARKER = "icode.submit.dispatch"
 
 
 def _default_candidates() -> list[str]:

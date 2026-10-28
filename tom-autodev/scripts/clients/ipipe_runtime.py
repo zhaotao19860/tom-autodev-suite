@@ -226,7 +226,15 @@ class IpipeRuntime:
             # An earlier process claimed this trigger and may have sent it; now two
             # builds of these revisions exist and which one it started cannot be told.
             return self._settled_write(intent, self._trigger_ambiguous(existing), "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
+        adopted = self._adopted_build(intent)
+        if claim["status"] == "EXISTING" and adopted and existing.get("reason_code") == "BUILD_QUERY_REQUIRED":
+            # This intent adopted an existing build and never sent a trigger; its own
+            # choice, not the creation-time filter, identifies the build.
+            existing = {"reason_code": "OK", "build_id": adopted}
         if existing.get("reason_code") == "OK":
+            if claim["status"] == "CLAIMED":
+                self.state.record_external_observation(intent["intent_id"], {
+                    "operation": "ipipe.trigger.adopt", "build_id": existing["build_id"]})
             try:
                 candidate = self.api.build_by_id(existing["build_id"], **self._build_key(context))
             except Exception as error:
@@ -2254,6 +2262,14 @@ class IpipeRuntime:
             # A concurrent reconcile recorded AMBIGUOUS first; that verdict stands.
             return _ambiguity_stands(intent_id)
         return written["response"]
+
+    def _adopted_build(self, intent: dict[str, Any]) -> str | None:
+        """The build a fresh claim adopted without sending a trigger, if it recorded one."""
+        for item in self.state.external_observations(self.run_id, intent_id=intent["intent_id"]):
+            observed = item.get("observation") or {}
+            if observed.get("operation") == "ipipe.trigger.adopt" and observed.get("build_id"):
+                return str(observed["build_id"])
+        return None
 
     def _trigger_verdict(
         self, intent: dict[str, Any], profile: dict[str, Any], revision_set: dict[str, Any],

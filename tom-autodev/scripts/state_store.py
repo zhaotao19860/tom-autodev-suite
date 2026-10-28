@@ -720,6 +720,7 @@ class StateStore:
 
     def receipt_unless_ambiguous(
         self, intent_id: str, response: dict[str, Any], evidence_refs: list[str],
+        *, fence: tuple[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """`receipt`, unless an AMBIGUOUS intent.state observation already exists (None).
 
@@ -738,6 +739,15 @@ class StateStore:
             for row in rows:
                 observed = json.loads(row["observation_json"])
                 if observed.get("operation") == "intent.state" and observed.get("state") == "AMBIGUOUS":
+                    return None
+            if fence is not None:
+                # `fence = (operation, since)`: a writer announced a dispatch after `since`
+                # and may still be sending; nothing that frees the target is written.
+                operation, since = fence
+                recent = connection.execute(
+                    "SELECT observation_json, created_at FROM external_observations "
+                    "WHERE intent_id = ? AND created_at > ?", (intent_id, since)).fetchall()
+                if any(json.loads(r["observation_json"]).get("operation") == operation for r in recent):
                     return None
             return self._receipt_in(connection, intent_id, response, evidence_refs)
 

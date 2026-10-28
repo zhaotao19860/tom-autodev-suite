@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 评审修复第 6 轮（Codex 3 条 P1；GPT-6.1-Sol 未发现 P0/P1/P2）
+
+- iCode 写入围栏：push 前记 `icode.submit.dispatch` 观察并复查该 intent 是否已被关闭（已关闭返回 `SUBMIT_INTENT_CLOSED`，不 push）；`CONFIRMED_ABSENT` 写入与"push 超时窗口内的 dispatch 标记"在同一事务判定，标记存在时只记 UNKNOWN。两个顺序都不会出现第二次 push。
+- v2 发布遇控制面守卫（`WORKFLOW_SPEC_DRIFT`、`PROFILE_*`）原样返回，不转成延后、不固定决定。
+- trigger 全新 claim 采纳既有 build 时记 `ipipe.trigger.adopt`；确认读失败后的重放按该记录找回 build，不被创建时间过滤掉，也不发 POST。
+- 测试：新增 4 项；全量通过。
+
 ## 2026-10-28 · MVP 评审修复第 5 轮（Codex 1 条 P1、3 条 P2 + GPT-6.1-Sol 1 条 P1、1 条 P2，P1 为同一问题）
 
 - iPipe rerun / rebuild / trigger 三条成功回执改走 `receipt_unless_ambiguous`，并发对账已记 AMBIGUOUS 时不再被成功回执覆盖（返回 `INTENT_AMBIGUOUS`）。
