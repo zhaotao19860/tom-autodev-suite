@@ -352,6 +352,8 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 
 ### 第 2 步：合同逐个合入（约 2~3 周）
 
+**进展：** 3.1 的状态机与 iPipe 人工 stage 执行已迁入（`intent_executor.py`）。其余 5 种操作（iCode 新 CR / 追加 patchset、iPipe trigger、rebuild、BranchPipeline 发布）待迁；迁完后 3.1 才算完成。
+
 顺序：**3.1 → 第 5 节证据合同 v2（双读）→ 3.2 → 3.3 → 第 2 节 scope 授权**。每个合同单独一个批次：实现 → fixture 场景（含 DERIVED 负例）→ 真实 run 验证 → 下一个。scope 授权放最后，因为它依赖 3.2/3.3 的 attempt 和 plan 结构。
 
 这些属于"状态机/授权/持久化/发布绑定的实质变更"，按退出标准第 5 节，每批对同一固定基线取两份独立评审，最多两轮修复→复核。

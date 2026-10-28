@@ -1,0 +1,22 @@
+{
+ "captured_at": "2026-10-28T03:01:27+00:00",
+ "content_sha256": "19efaa3a575a1c95b89d3586f486390006127d76ed65cf045733d6d9bce49ea2",
+ "derived_from": {
+  "change": "values filled; only the key set and the missing stage id are recorded facts",
+  "fixture_id": null,
+  "source": "external_observations of 5 ipipe.rerun intents on run 160c6840 (response_keys [code, entities, msg], stage_build_id null)"
+ },
+ "endpoint": "manual_execute_stage",
+ "fixture_id": "derived-manual-execute-ack-without-identity",
+ "origin": "DERIVED",
+ "platform": "ipipe",
+ "redaction": "derived; no live fields",
+ "response": {
+  "code": 0,
+  "entities": null,
+  "msg": "success"
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "build/275700446",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

@@ -16,6 +16,7 @@ import yaml
 
 from approval_ledger import ApprovalLedger, gate_of
 import build_markers
+import intent_executor
 from clients.ipipe_client import IpipeTransportError
 from phase_protocol import _registered_pipeline
 from profile_repin import pinned_hash, record_for
@@ -832,10 +833,7 @@ class IpipeRuntime:
                 self.approvals, approval, existing["payload"], run_id=self.run_id
             ):
                 return _failure("RERUN_CONFLICT")
-            reconciled = self._reconcile_rerun(existing)
-            if reconciled is not None:
-                return reconciled
-            return _failure("QUERY_REQUIRED", intent_id=existing["intent_id"], retry_allowed=False)
+            return self._settled_rerun(existing, self._rerun_verdict(existing), "QUERY_REQUIRED")
 
         stage_bound = self._rerun_binding(stage_build_id, parameters)
         if not stage_bound.get("ok"):
@@ -859,6 +857,11 @@ class IpipeRuntime:
         # without one is an unknown outcome: stacking another POST on it could run the
         # stage twice, so the only way forward is the GET-only reconcile.
         for prior in self._rerun_intents(stage_build_id, exclude_key=key):
+            if intent_executor.intent_state(self.state, prior) == intent_executor.AMBIGUOUS:
+                return _failure(
+                    "INTENT_AMBIGUOUS", intent_id=prior["intent_id"],
+                    approval_id=prior["payload"].get("approval_id"), retry_allowed=False,
+                )
             if self.state.result_by_idempotency_key(prior["idempotency_key"]) is None:
                 return _failure(
                     "QUERY_REQUIRED",
@@ -947,13 +950,12 @@ class IpipeRuntime:
             # Reading it once, immediately, left every manual stage as "outcome unknown"
             # (BGW-1995, both pipelines), so the read-only confirmation is repeated a few
             # times before giving up; it never re-sends the write.
-            for attempt in range(_RERUN_CONFIRM_POLLS):
-                reconciled = self._reconcile_rerun(intent)
-                if reconciled is not None:
-                    return reconciled
-                if attempt + 1 < _RERUN_CONFIRM_POLLS:
-                    self.sleeper(_RERUN_CONFIRM_INTERVAL)
-            return _failure("RERUN_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
+            verdict = intent_executor.confirm(
+                lambda: self._rerun_verdict(intent),
+                polls=_RERUN_CONFIRM_POLLS, interval=_RERUN_CONFIRM_INTERVAL,
+                sleeper=self.sleeper,
+            )
+            return self._settled_rerun(intent, verdict, "RERUN_RESPONSE_INVALID")
         try:
             current = self.api.build_by_id(build_id, **self._build_key(binding))
         except Exception as error:
@@ -1257,9 +1259,46 @@ class IpipeRuntime:
         blocked = self._profile_error()
         if blocked is not None:
             return blocked
-        return self._reconcile_rerun(intent) or _failure(
-            "QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False
-        )
+        return self._settled_rerun(intent, self._rerun_verdict(intent), "QUERY_REQUIRED")
+
+    def _rerun_verdict(self, intent: dict[str, Any]) -> "intent_executor.Verdict":
+        """Contract 3.1 for an iPipe manual-stage execute or failed-stage rerun.
+
+        Identity is the stage build id (the platform reuses it when a manual stage is
+        continued in place, allocates a successor when a finished one is re-run). A
+        read-back that saves the receipt is CONFIRMED. An unchanged stage is never ABSENT
+        on its own: the request may still be queued, so it stays UNKNOWN until a person
+        decides (`abandon-intent`). Two unclaimed successors that both started after the
+        intent are AMBIGUOUS: which one this write produced cannot be told.
+        """
+        if intent_executor.intent_state(self.state, intent) == intent_executor.AMBIGUOUS:
+            return intent_executor.Verdict.ambiguous()
+        reconciled = self._reconcile_rerun(intent)
+        if reconciled is None:
+            return intent_executor.Verdict.unknown()
+        if reconciled.get("ok") is True:
+            return intent_executor.Verdict.confirmed(reconciled)
+        if reconciled.get("reason_code") == "RERUN_SUCCESSOR_AMBIGUOUS":
+            return intent_executor.Verdict.ambiguous(
+                candidates=reconciled.get("candidates") or [])
+        return intent_executor.Verdict.unknown(reconciled)
+
+    def _settled_rerun(
+        self, intent: dict[str, Any], verdict: "intent_executor.Verdict", unknown_reason: str,
+    ) -> dict[str, Any]:
+        """Persist the verdict and answer the caller in the runtime's usual shape."""
+        intent_executor.settle(self.state, intent, verdict)
+        if verdict.state == intent_executor.CONFIRMED:
+            return verdict.result or {}
+        if verdict.state == intent_executor.AMBIGUOUS:
+            return _failure("INTENT_AMBIGUOUS", intent_id=intent["intent_id"],
+                            intent_state=verdict.state, retry_allowed=False,
+                            candidates=verdict.evidence.get("candidates", []))
+        result = dict(verdict.result) if verdict.result else _failure(
+            unknown_reason, intent_id=intent["intent_id"], retry_allowed=False)
+        if result.get("reason_code") in {None, ""}:
+            result["reason_code"] = unknown_reason
+        return {**result, "intent_state": verdict.state}
 
     def _claimed_rerun_stages(self, intent_id: str) -> dict[str, Any]:
         """Stage builds other rerun intents of this run already receipted as started.
@@ -1349,16 +1388,18 @@ class IpipeRuntime:
         # A successor already receipted by another rerun intent is that attempt's run,
         # not evidence for this one.
         claimed = self._claimed_rerun_stages(intent["intent_id"])
-        successor = next(
-            (
-                item for item in normalized
-                if item["stage_build_id"] != payload["stage_build_id"]
-                and item["stage_build_id"] not in claimed
-                and _same_stage(requested, item)
-                and _rerun_started(item, since=intent.get("created_at"))
-            ),
-            None,
-        )
+        successors = [
+            item for item in normalized
+            if item["stage_build_id"] != payload["stage_build_id"]
+            and item["stage_build_id"] not in claimed
+            and _same_stage(requested, item)
+            and _rerun_started(item, since=intent.get("created_at"))
+        ]
+        if len(successors) > 1:
+            return _failure("RERUN_SUCCESSOR_AMBIGUOUS", intent_id=intent["intent_id"],
+                            candidates=sorted(item["stage_build_id"] for item in successors),
+                            retry_allowed=False)
+        successor = successors[0] if successors else None
         if successor is None:
             return self._unstarted_verdict(intent, payload, requested, current_stage, stages)
         blocked = self._profile_error()

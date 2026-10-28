@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 合同 3.1：IntentExecutor 状态机，先迁 iPipe 人工 stage 执行
+
+- 新增 `intent_executor.py`：外部写的状态 `CLAIMED / UNKNOWN / CONFIRMED / CONFIRMED_ABSENT / AMBIGUOUS / ABANDONED_LOCAL / ABANDONED`，从已有的 receipt 和 `intent.state` observation 推导，不加表、不改历史数据。`CONFIRMED_ABSENT` 写成 receipt（释放目标，可重试）；`UNKNOWN` / `AMBIGUOUS` 只写 observation，目标继续被 `claim_exclusive_intent` 的前缀互斥挡住。`AMBIGUOUS` 对自动化是终态，reconcile 不会把它读成别的状态。
+- iPipe 人工 stage 执行 / 失败重跑接入：无身份回执的有限次只读确认改为 `intent_executor.confirm`；`reconcile_rerun` 和重放路径走同一个 `_rerun_verdict`。新判定：同一 stage 有两个以上未被认领、且都在 intent 之后开始的 successor → `INTENT_AMBIGUOUS`，不再取第一个；已有 AMBIGUOUS 的 stage 拒绝新 G8 写入。人工 stage 不会被自动判 ABSENT（请求可能还在排队），仍需人工 `abandon-intent`。
+- 返回结果新增 `intent_state` 字段；原有 reason code（`RERUN_RESPONSE_INVALID`、`QUERY_REQUIRED`、`RERUN_NOT_STARTED_UNPROVEN`）不变，旧 run 不受影响。
+- DERIVED fixture 2 份：无身份回执（来源：BGW-1995 五次真实执行的 observation `response_keys [code, entities, msg]`）、回归未完时「发布」显示 PENDING（由最终 stage 列表回退）。
+- 测试：新增 `test_intent_executor.py` 13 项；全量 1509 通过。
+
 ## 2026-10-28 · MVP 第 1 步：watcher 感知代码版本、真实平台 fixture
 
 - watcher 感知代码版本（`code_version.py`）：`watch-approvals` / `watch-ipipe` 启动时记下控制面源码（非测试 `.py`）的内容 hash，每轮比对，变了就以 `CODE_VERSION_CHANGED` 正常退出，由 `supervise.sh` 拉起新代码。起因：旧 watcher 跑旧代码，10-25 误报 8.4 万条 `WORKFLOW_SPEC_DRIFT`，10-27 再次发生。
