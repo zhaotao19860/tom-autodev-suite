@@ -9,12 +9,15 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 import yaml
 
+import intent_executor
 from approval_ledger import ApprovalLedger, gate_of
 from artifact_store import ArtifactStore
 from profile_repin import pinned_hash, record_for
@@ -45,7 +48,11 @@ class IcodeRuntime:
         owner: str = "",
         submission_policy: str | None = None,
         profile_hash: str | None = None,
+        clock: Callable[[], datetime] | None = None,
+        sleeper: Callable[[float], Any] | None = None,
     ):
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.sleeper = sleeper or time.sleep
         self.state = state_store
         self.approvals = approval_ledger
         self.artifacts = artifact_store
@@ -312,6 +319,10 @@ class IcodeRuntime:
             return dict(completed["receipt"]["response"])
         intent = claim["intent"]
         cli = preflight["cli"]
+        if claim["status"] == "EXISTING" and not abandoned:
+            # An earlier process claimed this submission and may have pushed it: only a
+            # read-back may settle it (contract 3.1), never another push.
+            return self._answer(intent, self._submit_verdict(intent, cli, repo_path, change_set))
         reconciliation = self._reconcile(cli, repo_path, change_set)
         blocked = self._profile_error()
         if blocked is not None:
@@ -336,8 +347,14 @@ class IcodeRuntime:
         # refused and the caller is sent to query instead. An *abandoned* lineage whose
         # reconcile says the CR does not exist is that query, already answered: the write
         # demonstrably did not land, so this attempt may proceed.
-        if claim["status"] == "EXISTING" and not abandoned:
-            return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
+        if reconciliation.get("reason_code") == "CR_APPEND_ALLOWED":
+            # What the append target pointed at before the push: the evidence that a
+            # later read-back still showing it means the patchset never landed.
+            self.state.record_external_observation(intent["intent_id"], {
+                "operation": "icode.submit.precheck",
+                "change_number": str((reconciliation.get("change") or {}).get("_number") or ""),
+                "current_revision": (reconciliation.get("change") or {}).get("current_revision"),
+            })
         if self.submission_policy == "one_cr_per_repo" and reconciliation.get("reason_code") == "CR_NOT_FOUND":
             sibling = self._open_card_cr(cli, repo_path, change_set)
             blocked = self._profile_error()
@@ -377,7 +394,8 @@ class IcodeRuntime:
                 timeout=600,
             )
         except Exception:
-            return _failure("SUBMIT_RESULT_UNKNOWN", intent_id=intent["intent_id"], retry_allowed=False)
+            return self._answer(intent, intent_executor.Verdict.unknown(
+                _failure("SUBMIT_RESULT_UNKNOWN")))
         finally:
             if mirror is not None:
                 shutil.rmtree(str(mirror), ignore_errors=True)
@@ -393,12 +411,89 @@ class IcodeRuntime:
             )
             self.state.receipt(intent["intent_id"], failure, [])
             return failure
+        verdict = intent_executor.confirm(
+            lambda: self._submit_verdict(intent, cli, repo_path, change_set, after_push=True),
+            polls=_SUBMIT_CONFIRM_POLLS, interval=_SUBMIT_CONFIRM_INTERVAL, sleeper=self.sleeper,
+        )
+        return self._answer(intent, verdict, unknown_reason="SUBMIT_CONFIRMATION_REQUIRED")
+
+    def _answer(
+        self, intent: dict[str, Any], verdict: "intent_executor.Verdict",
+        unknown_reason: str = "QUERY_REQUIRED",
+    ) -> dict[str, Any]:
+        return intent_executor.answer(
+            self.state, intent, verdict, unknown_reason=unknown_reason,
+            ambiguous_reason="CR_IDENTITY_AMBIGUOUS", absent_reason="SUBMIT_CONFIRMED_ABSENT",
+        )
+
+    def _submit_verdict(
+        self, intent: dict[str, Any], cli: str, repo_path: Path, change_set: dict[str, Any],
+        *, after_push: bool = False,
+    ) -> "intent_executor.Verdict":
+        """Contract 3.1 for iCode: new CR by Change-Id / commit, appended patchset by CR + sha.
+
+        - The exact CR (the reviewed commit, on the target branch, owned and titled for
+          the card; for an append, on the named CR) is CONFIRMED and receipted.
+        - A CR that carries this commit or Change-Id but is not that exact CR -- the
+          append target moved to a foreign patchset, two CRs for one Change-Id -- is
+          AMBIGUOUS: whether this push landed cannot be told, so a person decides.
+        - CONFIRMED_ABSENT only on a complete listing, a grace period after the claim:
+          a new CR's commit appears nowhere; an append target still shows the patchset
+          it had before the push. Anything else stays UNKNOWN.
+        """
+        sticky = intent_executor.sticky_ambiguous(self.state, intent)
+        if sticky is not None:
+            return sticky
         reconciliation = self._reconcile(cli, repo_path, change_set)
-        if reconciliation.get("reason_code") == "OK":
-            return self._receipt(intent["intent_id"], change_set, reconciliation["change"], key)
-        if reconciliation.get("reason_code") == "CR_IDENTITY_CONFLICT":
-            return reconciliation
-        return _failure("SUBMIT_CONFIRMATION_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
+        blocked = self._profile_error()
+        if blocked is not None:
+            return intent_executor.Verdict.refused(blocked)
+        reason = reconciliation.get("reason_code")
+        if reason == "OK":
+            key = intent["idempotency_key"]
+            receipt = self._receipt(intent["intent_id"], change_set, reconciliation["change"], key)
+            if receipt.get("ok") is True:
+                return intent_executor.Verdict.confirmed(receipt)
+            if receipt.get("reason_code") != "CR_RECEIPT_INVALID":
+                return intent_executor.Verdict.refused(receipt)
+            return intent_executor.Verdict.unknown(receipt)
+        if reason == "CR_IDENTITY_CONFLICT":
+            return intent_executor.Verdict.ambiguous(candidates=reconciliation.get("candidates", []))
+        if reason not in {"CR_NOT_FOUND", "CR_APPEND_ALLOWED"} or not reconciliation.get("complete"):
+            return intent_executor.Verdict.unknown(reconciliation)
+        appending = change_set.get("submission_mode") == "append_existing_cr"
+        if appending and reason == "CR_APPEND_ALLOWED":
+            before = [
+                (item.get("observation") or {}).get("current_revision")
+                for item in self.state.external_observations(self.run_id, intent_id=intent["intent_id"])
+                if (item.get("observation") or {}).get("operation") == "icode.submit.precheck"
+            ]
+            now = (reconciliation.get("change") or {}).get("current_revision")
+            if before and before[-1] and now not in {before[-1], change_set["commit_revision"]}:
+                # Someone else uploaded a patchset over the target: whether ours went
+                # in first and was buried cannot be told from the CR alone.
+                return intent_executor.Verdict.ambiguous(
+                    candidates=[str((reconciliation.get("change") or {}).get("_number") or "")],
+                    precheck_revision=before[-1], current_revision=now)
+            if (not after_push and self._absence_grace_elapsed(intent)
+                    and before and before[-1] and now == before[-1]):
+                return intent_executor.Verdict.absent(
+                    checked="append target unchanged since precheck", current_revision=now)
+            return intent_executor.Verdict.unknown()
+        if after_push or not self._absence_grace_elapsed(intent):
+            return intent_executor.Verdict.unknown()
+        if not appending and reason == "CR_NOT_FOUND":
+            return intent_executor.Verdict.absent(checked="get_repo_reviews NEW, complete")
+        return intent_executor.Verdict.unknown()
+
+    def _absence_grace_elapsed(self, intent: dict[str, Any]) -> bool:
+        try:
+            created = datetime.fromisoformat(str(intent.get("created_at")).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (self.clock() - created).total_seconds() >= _SUBMIT_ABSENCE_GRACE_SECONDS
 
     def _materialize_cli_repository(
         self, repo_path: Path, change_set: dict[str, Any]
@@ -675,6 +770,8 @@ class IcodeRuntime:
         try:
             decoded = json.loads(result["stdout"])
             changes = decoded.get("data", {}).get("changes", [])
+            # A listing with more pages cannot prove a CR is absent.
+            complete = decoded.get("data", {}).get("hasMore") is not True
         except (AttributeError, json.JSONDecodeError):
             return _failure("CR_RESPONSE_INVALID")
         if not isinstance(changes, list):
@@ -713,10 +810,11 @@ class IcodeRuntime:
                 and number == str(change_set.get("existing_cr"))
                 and change.get("change_id") == change_set.get("change_id")
             ):
-                return {"reason_code": "CR_APPEND_ALLOWED", "change": change}
+                return {"reason_code": "CR_APPEND_ALLOWED", "change": change, "complete": complete}
         if related:
-            return _failure("CR_IDENTITY_CONFLICT")
-        return _failure("CR_NOT_FOUND")
+            return _failure("CR_IDENTITY_CONFLICT", candidates=sorted(
+                str(item.get("_number") or item.get("number") or "") for item in related))
+        return _failure("CR_NOT_FOUND", complete=complete)
 
     def _receipt(
         self,
@@ -768,6 +866,13 @@ class IcodeRuntime:
         }
         self.state.receipt(intent_id, response, response["evidence_refs"])
         return response
+
+
+_SUBMIT_CONFIRM_POLLS = 3
+_SUBMIT_CONFIRM_INTERVAL = 5
+# How long after the claim a read-back may call a submission absent: the listing can lag
+# a push by a few seconds, and an absent verdict frees the change set for another push.
+_SUBMIT_ABSENCE_GRACE_SECONDS = 300
 
 
 def _default_candidates() -> list[str]:

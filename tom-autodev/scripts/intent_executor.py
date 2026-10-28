@@ -43,6 +43,10 @@ BLOCKING = frozenset({CLAIMED, UNKNOWN, AMBIGUOUS})
 RETRYABLE = frozenset({CONFIRMED_ABSENT, ABANDONED_LOCAL})
 
 STATE_OBSERVATION = "intent.state"
+# Not an intent state: the read-back was stopped by a control-plane guard (profile drift,
+# say) and nothing may be written for it. `confirm` stops on it; `answer` returns the
+# guard's own result untouched.
+REFUSED = "REFUSED"
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,10 @@ class Verdict:
     @staticmethod
     def absent(**evidence: Any) -> "Verdict":
         return Verdict(CONFIRMED_ABSENT, None, evidence)
+
+    @staticmethod
+    def refused(result: dict[str, Any]) -> "Verdict":
+        return Verdict(REFUSED, result)
 
 
 def intent_state(state_store: Any, intent: dict[str, Any]) -> str:
@@ -162,3 +170,36 @@ def settle(
         return verdict
     record_state(state_store, intent["intent_id"], verdict)
     return verdict
+
+
+def answer(
+    state_store: Any,
+    intent: dict[str, Any],
+    verdict: Verdict,
+    *,
+    unknown_reason: str,
+    ambiguous_reason: str,
+    absent_reason: str = "INTENT_CONFIRMED_ABSENT",
+) -> dict[str, Any]:
+    """Persist a verdict and turn it into the caller-facing result of the write.
+
+    CONFIRMED returns the operation's own receipt. The others keep each operation's
+    historic reason code, with `intent_state` added so callers can tell the states apart.
+    """
+    if verdict.state == REFUSED:
+        return dict(verdict.result or {})
+    settle(state_store, intent, verdict)
+    base = {"ok": False, "intent_id": intent["intent_id"], "intent_state": verdict.state}
+    if verdict.state == CONFIRMED:
+        return verdict.result or {}
+    if verdict.state == AMBIGUOUS:
+        return {**base, "reason_code": ambiguous_reason, "retry_allowed": False,
+                "candidates": verdict.evidence.get("candidates", [])}
+    if verdict.state == CONFIRMED_ABSENT:
+        return {**base, "reason_code": absent_reason, "retry_allowed": True}
+    result = dict(verdict.result) if verdict.result else {}
+    if not result.get("reason_code"):
+        result["reason_code"] = unknown_reason
+    return {**base, "retry_allowed": False, **result, "intent_state": verdict.state,
+            "intent_id": intent["intent_id"]}
+

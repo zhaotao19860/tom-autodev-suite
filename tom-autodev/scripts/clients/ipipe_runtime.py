@@ -1296,18 +1296,9 @@ class IpipeRuntime:
         ambiguous_reason: str = "INTENT_AMBIGUOUS",
     ) -> dict[str, Any]:
         """Persist the verdict and answer the caller in the runtime's usual shape (any write)."""
-        intent_executor.settle(self.state, intent, verdict)
-        if verdict.state == intent_executor.CONFIRMED:
-            return verdict.result or {}
-        if verdict.state == intent_executor.AMBIGUOUS:
-            return _failure(ambiguous_reason, intent_id=intent["intent_id"],
-                            intent_state=verdict.state, retry_allowed=False,
-                            candidates=verdict.evidence.get("candidates", []))
-        result = dict(verdict.result) if verdict.result else _failure(
-            unknown_reason, intent_id=intent["intent_id"], retry_allowed=False)
-        if result.get("reason_code") in {None, ""}:
-            result["reason_code"] = unknown_reason
-        return {**result, "intent_state": verdict.state}
+        return intent_executor.answer(self.state, intent, verdict,
+                                      unknown_reason=unknown_reason,
+                                      ambiguous_reason=ambiguous_reason)
 
     def _claimed_rerun_stages(self, intent_id: str) -> dict[str, Any]:
         """Stage builds other rerun intents of this run already receipted as started.

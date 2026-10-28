@@ -4,6 +4,16 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 合同 3.1：iCode 新 CR 与追加 patchset 迁入 IntentExecutor
+
+- 身份确认（`IcodeRuntime._submit_verdict`）：新 CR 按 commit sha / Change-Id 找到的确切 CR（目标分支、owner、卡片标题都对）→ CONFIRMED；追加 patchset 按 CR 号 + 当前 patchset sha → CONFIRMED。
+- AMBIGUOUS（`CR_IDENTITY_AMBIGUOUS`，带 `candidates`，之后保持不变）：同一 commit / Change-Id 对应的 CR 不是确切那一个（例如两个 CR）；追加时目标 CR 在 precheck 之后被别人改成了另一个 patchset。原来这两种分别报 `CR_IDENTITY_CONFLICT` / `SUBMIT_CONFIRMATION_REQUIRED`，之后再提交返回 `QUERY_REQUIRED`，无法区分。
+- CONFIRMED_ABSENT（`SUBMIT_CONFIRMED_ABSENT`，`retry_allowed: true`）：仅在 claim 后 5 分钟以上、且 NEW 列表完整（`hasMore` 不为 true）时：新 CR 的 commit 在列表里不存在，或追加目标仍停在 precheck 记录的 patchset。结果写成 receipt，下一次提交按已有的 `:after:` 链开新 intent，可以再 push 一次。push 之后的即时确认不会判 ABSENT。
+- push 成功但 CR 列表滞后时，改为最多 3 次只读确认（间隔 5 秒），不再直接报 `SUBMIT_CONFIRMATION_REQUIRED`。
+- 新增 `Verdict.refused`：profile 漂移等守卫拦下确认时，原样返回守卫结果，不写任何状态记录（保持 `test_icode_profile_guard` 的"漂移时不写入"）。
+- `intent_executor.answer` 统一把 verdict 转成调用方结果，iPipe 和 iCode 共用；`_superseded_external_receipt` 把 CONFIRMED_ABSENT 视同可接续的已关闭尝试。
+- 测试：iCode 新增 5 项，替换 1 项；全量 1517 通过。
+
 ## 2026-10-28 · MVP 合同 3.1：iPipe trigger 与 rebuild 迁入 IntentExecutor
 
 - trigger：回执不带 build id 时不再直接报 `TRIGGER_RESPONSE_INVALID`，改为按冻结 revision 有限次只读回查（`_trigger_verdict`）；恰好一个 build → CONFIRMED，两个以上 → AMBIGUOUS（`BUILD_AMBIGUOUS`，带 `candidates`），都没有 → 保持 UNKNOWN。超时/异常后同样走这个判定。已经 AMBIGUOUS 的 trigger intent 重放时直接返回记录的候选，不采纳任何一个、不再 POST。

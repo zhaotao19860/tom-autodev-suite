@@ -118,6 +118,7 @@ class IcodeRuntimeTests(unittest.TestCase):
             "binary_candidates": ["/fake/icode"],
             "executable_resolver": lambda value: value,
             "owner": "dev",
+            "sleeper": lambda _seconds: None,
         }
         values.update(changes)
         return IcodeRuntime(**values)
@@ -802,21 +803,103 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(second["reason_code"], "OK")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
-    def test_append_target_moved_to_a_foreign_revision_is_not_confirmed(self):
+    def test_append_target_moved_to_a_foreign_revision_is_ambiguous(self):
+        # Contract 3.1/3.2: the CR changed between precheck and confirmation.
         change = self.append_change_set()
         approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
         self.transport.changes = [self.append_target(self.revision)]
-        # Someone else uploaded a different patchset over the target CR meanwhile.
         self.transport.on_push = lambda: self.transport.changes.__setitem__(
-            0, self.append_target("e" * 40)
-        )
-
-        first = self.runtime().submit(change, approval)
+            0, self.append_target("e" * 40))
+        first = self.runtime(sleeper=lambda _s: None).submit(change, approval)
+        self.assertEqual(first["reason_code"], "CR_IDENTITY_AMBIGUOUS", first)
+        self.assertEqual(first["intent_state"], "AMBIGUOUS")
         second = self.runtime().submit(change, approval)
-
-        self.assertEqual(first["reason_code"], "SUBMIT_CONFIRMATION_REQUIRED")
-        self.assertEqual(second["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(second["reason_code"], "CR_IDENTITY_AMBIGUOUS")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_a_push_whose_cr_appears_late_is_confirmed_by_reading_back(self):
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        listings = []
+
+        def push_then_lag():
+            listings.append("pushed")
+        self.transport.on_push = push_then_lag
+        sleeps = []
+
+        def sleeper(seconds):
+            sleeps.append(seconds)
+            self.transport.changes = [{
+                "_number": 55, "current_revision": change["commit_revision"], "branch": "main",
+                "owner": {"username": "dev"}, "subject": "CARD-1 change",
+                "url": "https://icode.example/cr/55",
+            }]
+        result = self.runtime(sleeper=sleeper).submit(change, approval)
+        self.assertEqual(result["reason_code"], "OK", result)
+        self.assertEqual(result["change_number"], "55")
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_two_crs_for_one_change_are_ambiguous_and_sticky(self):
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = TimeoutError("unknown")
+
+        def two_crs():
+            self.transport.changes = [
+                {"_number": n, "current_revision": change["commit_revision"], "branch": other,
+                 "owner": {"username": "dev"}, "subject": "CARD-1 change",
+                 "url": f"https://icode.example/cr/{n}"}
+                for n, other in ((56, "release"), (57, "hotfix"))]
+        self.transport.on_push = two_crs
+        self.runtime().submit(change, approval)
+        again = self.runtime().submit(change, approval)
+        self.assertEqual(again["reason_code"], "CR_IDENTITY_AMBIGUOUS", again)
+        self.assertEqual(again["candidates"], ["56", "57"])
+        self.transport.changes = []
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"],
+                         "CR_IDENTITY_AMBIGUOUS")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_an_unknown_new_cr_absent_after_the_grace_period_frees_one_more_push(self):
+        from datetime import datetime, timedelta, timezone
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = TimeoutError("unknown")
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"],
+                         "SUBMIT_RESULT_UNKNOWN")
+        # Too soon: still unknown, no second push.
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=10)
+        absent = self.runtime(clock=later).submit(change, approval)
+        self.assertEqual(absent["reason_code"], "SUBMIT_CONFIRMED_ABSENT", absent)
+        self.assertTrue(absent["retry_allowed"])
+        self.transport.push_result = {"returncode": 0, "stdout": "submitted"}
+        self.transport.on_push = lambda: self.transport.changes.append({
+            "_number": 58, "current_revision": change["commit_revision"], "branch": "main",
+            "owner": {"username": "dev"}, "subject": "CARD-1 change",
+            "url": "https://icode.example/cr/58"})
+        retried = self.runtime().submit(change, approval)
+        self.assertEqual(retried["reason_code"], "OK", retried)
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 2)
+
+    def test_an_incomplete_listing_never_proves_absence(self):
+        from datetime import datetime, timedelta, timezone
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = TimeoutError("unknown")
+        self.runtime().submit(change, approval)
+        original = self.transport.run
+
+        def paged(argv, **kwargs):
+            result = original(argv, **kwargs)
+            if "get_repo_reviews" in argv:
+                result = {**result, "stdout": json.dumps({"data": {"changes": [], "hasMore": True}})}
+            return result
+        self.transport.run = paged
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=10)
+        self.assertEqual(self.runtime(clock=later).submit(change, approval)["reason_code"],
+                         "CR_NOT_FOUND")
 
     def test_append_target_missing_is_cr_required_not_found_without_push(self):
         change = self.append_change_set()

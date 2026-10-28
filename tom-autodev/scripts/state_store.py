@@ -1983,6 +1983,9 @@ def _superseded_external_receipt(response: Any) -> bool:
         return False
     if response.get("abandoned") is True:
         return True
+    # Read back and proven not to have happened (intent_executor CONFIRMED_ABSENT).
+    if response.get("intent_state") == "CONFIRMED_ABSENT":
+        return True
     return (
         response.get("ok") is False
         and response.get("reason_code") == "SUBMIT_REJECTED"
