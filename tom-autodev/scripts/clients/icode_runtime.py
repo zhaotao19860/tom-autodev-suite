@@ -319,9 +319,11 @@ class IcodeRuntime:
             return dict(completed["receipt"]["response"])
         intent = claim["intent"]
         cli = preflight["cli"]
-        if claim["status"] == "EXISTING" and not abandoned:
+        if claim["status"] == "EXISTING":
             # An earlier process claimed this submission and may have pushed it: only a
-            # read-back may settle it (contract 3.1), never another push.
+            # read-back may settle it (contract 3.1), never another push. That holds for a
+            # successor of an absent or abandoned attempt too: what grants a dispatch is
+            # this intent being new, not its ancestor being closed.
             return self._answer(intent, self._submit_verdict(intent, cli, repo_path, change_set))
         reconciliation = self._reconcile(cli, repo_path, change_set)
         blocked = self._profile_error()

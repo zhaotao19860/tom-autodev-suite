@@ -885,6 +885,23 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(retried["reason_code"], "OK", retried)
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 2)
 
+    def test_an_unknown_successor_of_an_absent_attempt_is_never_pushed_again(self):
+        # GPT-6.1-Sol round 3: the :after: successor is EXISTING on replay and only reconciles.
+        from datetime import datetime, timedelta, timezone
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = TimeoutError("unknown")
+        self.runtime().submit(change, approval)
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=20)
+        self.assertEqual(self.runtime(clock=later).submit(change, approval)["reason_code"],
+                         "SUBMIT_CONFIRMED_ABSENT")
+        self.runtime(clock=later).submit(change, approval)  # successor push, unknown again
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 2)
+        # The successor is EXISTING now: replays within its own grace only reconcile.
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"],
+                         "QUERY_REQUIRED")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 2)
+
     def test_a_push_that_may_still_be_running_is_never_absent(self):
         from datetime import datetime, timedelta, timezone
         change = self.change_set()

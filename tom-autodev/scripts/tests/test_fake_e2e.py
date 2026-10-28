@@ -1037,6 +1037,41 @@ class FakeE2ETests(unittest.TestCase):
         rows = submission_set.evaluate(state, run, ["CS-9", "CS-9:companion:tests"], "RS-9", "CS-9")
         self.assertEqual(rows["status"], submission_set.PARTIAL)
 
+    def test_round3_v2_side_channel_and_partial_diagnosis_on_the_real_paths(self):
+        # Codex round 3: a published decision is pinned; Recovery honours the v2 side
+        # channel; a PARTIAL routes to DIAGNOSE through the real route_failure while its
+        # AMBIGUOUS intent stays open and keeps blocking its target.
+        run_id, _knowledge = self._run_to_workspace("BGW-594", "bgw", "I15ClP2KW4ZGAK")
+        protocol = self.orchestrator.phase_protocol()
+        state = self.orchestrator.state
+
+        class Published:
+            def publish_phase(self, run, artifact, **_kwargs):
+                return {"ok": True, "run_id": run, "artifact_hash": artifact["content_hash"],
+                        "child_doc_id": "d1", "child_url": "https://ku.baidu-int.com/x/d1",
+                        "child_version": "1", "comment_id": None, "evidence_refs": ["ku:d1/1"]}
+
+        class Broken:
+            def publish_phase(self, *_a, **_k):
+                raise TimeoutError("KU down")
+
+        artifact = {"phase": "SPEC", "content_hash": "e" * 64}
+        protocol.knowledge = Published()
+        first = protocol._publish(run_id, artifact, scope="ku_only")
+        self.assertFalse(first.get("deferred"), first)
+        protocol.knowledge = Broken()
+        self.assertEqual(protocol._publish(run_id, artifact, scope="ku_only"), first)
+
+        state.claim_intent(run_id, "ku.document.create", "ku-x", {})
+        self.assertTrue(self.orchestrator.recovery.resume(run_id)["retry_allowed"])
+
+        held = state.claim_intent(run_id, "icode.submit", "icode.submit:x:CS:RS", {})["intent"]
+        from intent_executor import Verdict, settle
+        settle(state, held, Verdict.ambiguous(candidates=["1", "2"]))
+        self.assertFalse(self.orchestrator.recovery.resume(run_id)["retry_allowed"])
+        self.assertTrue(self.orchestrator.recovery.resume(
+            run_id, held_for_diagnosis=frozenset({held["intent_id"]}))["retry_allowed"])
+
     def test_continue_reconciles_g5_saved_draft_through_real_ku_client(self):
         # The evidence contract v1 path: a KU receipt still gates the phase for runs
         # started before MVP §5 (dual read).

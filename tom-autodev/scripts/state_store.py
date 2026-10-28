@@ -718,12 +718,35 @@ class StateStore:
         }
         return {"operation": row["operation"], "intent": intent, "receipt": receipt}
 
+    def receipt_unless_ambiguous(
+        self, intent_id: str, response: dict[str, Any], evidence_refs: list[str],
+    ) -> dict[str, Any] | None:
+        """`receipt`, unless an AMBIGUOUS intent.state observation already exists (None)."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT observation_json FROM external_observations WHERE intent_id = ?",
+                (intent_id,)).fetchall()
+            for row in rows:
+                observed = json.loads(row["observation_json"])
+                if observed.get("operation") == "intent.state" and observed.get("state") == "AMBIGUOUS":
+                    return None
+            return self._receipt_in(connection, intent_id, response, evidence_refs)
+
     def receipt(
         self,
         intent_id: str,
         response: dict[str, Any],
         evidence_refs: list[str],
     ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._receipt_in(connection, intent_id, response, evidence_refs)
+
+    def _receipt_in(
+        self, connection: Any, intent_id: str, response: dict[str, Any], evidence_refs: list[str],
+    ) -> dict[str, Any]:
+        """Write one receipt inside the caller's open transaction."""
         evidence_refs = validate_evidence_refs(evidence_refs)
         evidence_json = json.dumps(
             evidence_refs, ensure_ascii=False, separators=(",", ":")
@@ -731,8 +754,7 @@ class StateStore:
         # A receipt may quote what the platform said; credentials in it are redacted
         # (exact loaded token values and token shapes) before anything is written.
         response_json = _encode(redact_secrets(response))
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        if True:
             intent = connection.execute(
                 "SELECT * FROM external_intents WHERE intent_id = ?", (intent_id,)
             ).fetchone()
@@ -774,7 +796,7 @@ class StateStore:
             row = connection.execute(
                 "SELECT * FROM receipts WHERE intent_id = ?", (intent_id,)
             ).fetchone()
-        return _receipt_row(row)
+            return _receipt_row(row)
 
     def abandon_intent(
         self, intent_id: str, reason: str, actor: str, *, local_error_proven: bool = False

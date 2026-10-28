@@ -32,6 +32,14 @@ class StateMachineTests(unittest.TestCase):
             "run-1", "ipipe.rerun", "ipipe.rerun:run-1:stage-1:b", {"x": 2},
             exclusive_prefix="ipipe.rerun:run-1:stage-1")
 
+    def test_a_stale_absence_never_releases_a_recorded_ambiguity(self):
+        # Codex round 3: two reconciles race; the AMBIGUOUS one lands first.
+        ie.settle(self.state, self.intent, ie.Verdict.ambiguous(candidates=["1", "2"]))
+        result = ie.settle(self.state, self.intent, ie.Verdict.absent(checked="stale listing"))
+        self.assertEqual(result.state, ie.AMBIGUOUS)
+        self.assertEqual(ie.intent_state(self.state, self.intent), ie.AMBIGUOUS)
+        self.assertNotEqual(self.claim_again()["status"], "CLAIMED")
+
     def test_a_fresh_claim_is_claimed_and_holds_the_target(self):
         self.assertEqual(ie.intent_state(self.state, self.intent), ie.CLAIMED)
         self.assertEqual(self.claim_again()["status"], "BLOCKED")

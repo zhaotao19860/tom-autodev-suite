@@ -18,11 +18,24 @@ class Recovery:
         self.state = StateStore(database_path)
         self.locks = LockManager(database_path, clock=clock)
 
-    def resume(self, run_id: str) -> dict[str, Any]:
-        """Inspect a checkpoint; READY does not mean a child phase was executed."""
+    def resume(self, run_id: str, *, held_for_diagnosis: frozenset[str] = frozenset()) -> dict[str, Any]:
+        """Inspect a checkpoint; READY does not mean a child phase was executed.
+
+        Under evidence contract v2 an open KU/iCafe write is a side channel and blocks
+        nothing. `held_for_diagnosis` names intents a failure route may carry into
+        DIAGNOSE unresolved (contract 3.2 PARTIAL): they stay open and keep blocking every
+        write to their target, they just do not stop the run from being diagnosed.
+        """
+        import workflow_spec
         events = self.state.events(run_id)
         checkpoint = events[-1] if events else None
-        uncertain = self.state.pending_intents(run_id)
+        side_channel = workflow_spec.run_evidence_contract(events) == "v2"
+        uncertain = [
+            intent for intent in self.state.pending_intents(run_id)
+            if intent["intent_id"] not in held_for_diagnosis
+            and not (side_channel and isinstance(intent.get("operation"), str)
+                     and intent["operation"].split(".", 1)[0] in {"icafe", "ku", "knowledge"})
+        ]
         actions = []
         for intent in uncertain:
             action = {

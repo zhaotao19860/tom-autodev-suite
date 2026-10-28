@@ -1491,7 +1491,16 @@ class Orchestrator:
         current = self.status(run_id)
         if current["state"] == "RUN_NOT_FOUND":
             return current
-        recovery_block = self._recovery_block(run_id, current["state"])
+        # A PARTIAL submission routes to DIAGNOSE with its AMBIGUOUS/UNKNOWN repositories
+        # still open: diagnosis is how a person gets to decide them. Only those intents of
+        # this exact SUBMIT_PARTIAL evidence are let through; nothing is released.
+        held = frozenset()
+        if reason_code == "SUBMIT_PARTIAL" and current["state"] == "SUBMIT":
+            held = frozenset(
+                row["intent_id"] for row in
+                ((evidence.get("submission_set") or {}).get("repositories") or [])
+                if isinstance(row, dict) and isinstance(row.get("intent_id"), str))
+        recovery_block = self._recovery_block(run_id, current["state"], held_for_diagnosis=held)
         if recovery_block is not None:
             return recovery_block
         routed_evidence = dict(evidence)
@@ -1597,8 +1606,10 @@ class Orchestrator:
             )
         return context
 
-    def _recovery_block(self, run_id: str, current_state: str) -> dict[str, Any] | None:
-        recovery = self.recovery.resume(run_id)
+    def _recovery_block(
+        self, run_id: str, current_state: str, *, held_for_diagnosis: frozenset[str] = frozenset(),
+    ) -> dict[str, Any] | None:
+        recovery = self.recovery.resume(run_id, held_for_diagnosis=held_for_diagnosis)
         if recovery["retry_allowed"]:
             return None
         return {
@@ -1914,9 +1925,13 @@ class Orchestrator:
         # repository listed for it confirmed with a CR. Checked here, at the boundary that
         # owns the transition, not by the caller's ordering.
         import submission_set
+        required = _attempt_change_set_ids(self, run_id, change_set)
+        if change_set_ids is not None and not set(required) <= set(change_set_ids):
+            return {"ok": False, "reason_code": "SUBMISSION_SET_MISMATCH", "run_id": run_id,
+                    "required": required, "given": sorted(change_set_ids)}
         aggregate = submission_set.evaluate(
-            self.state, run_id, list(change_set_ids or [change_set_id]), revision_set_id,
-            change_set_id)
+            self.state, run_id, sorted(set(required) | set(change_set_ids or [])),
+            revision_set_id, change_set_id)
         if aggregate["status"] != submission_set.SUBMITTED:
             return {"ok": False, "reason_code": "SUBMISSION_SET_INCOMPLETE", "run_id": run_id,
                     "retry_allowed": aggregate["status"] == submission_set.PENDING,
@@ -4294,6 +4309,40 @@ def _submit(
     return _settle_consumed_approval(
         orchestrator, run_id, approval.get("approval_id"), "submit", result,
     )
+
+
+def _attempt_change_set_ids(orchestrator: Any, run_id: str, change_set: dict[str, Any]) -> list[str]:
+    """Every repository the approved descriptor carries a new commit for (contract 3.2).
+
+    The revision_set entry the descriptor does not push is a companion exactly when its
+    revision is not the owned baseline of that repository -- the rule `_companion_binding`
+    applies -- so the set is derived here from the descriptor and ownership, not taken from
+    the caller. A descriptor is only built from owned worktrees of both repositories
+    (`build_and_archive`), so an entry without an ownership row cannot come from the
+    approved path; it is left to the caller's list rather than invented here.
+    """
+    from submit_descriptor import _ownership_rows, owned_row
+
+    ids = [change_set["change_set_id"]]
+    entries = [entry for entry in (change_set.get("revision_set") or {}).values()
+               if isinstance(entry, dict) and not (
+                   entry.get("module") == change_set.get("module")
+                   and entry.get("revision") == change_set.get("commit_revision"))]
+    if not entries:
+        return ids
+    pinned = orchestrator._runtime_profile(run_id)
+    profile = pinned.get("profile") or {} if pinned.get("ok") else {}
+    repositories = [*(profile.get("business_repos") or []), profile.get("test_repo") or {}]
+    rows = _ownership_rows(orchestrator, run_id)
+    for entry in entries:
+        repository = next((item for item in repositories if isinstance(item, dict)
+                           and item.get("module") == entry.get("module")), None)
+        row = (owned_row(rows, change_set.get("task_id"), repository.get("path"))
+               if isinstance(repository, dict) and change_set.get("task_id") else None)
+        if not isinstance(row, dict) or entry.get("revision") == row.get("baseline_revision"):
+            continue
+        ids.append(f"{change_set['change_set_id']}:companion:{entry['module']}")
+    return ids
 
 
 def _route_partial(result: dict[str, Any], orchestrator: Any, run_id: str) -> dict[str, Any]:

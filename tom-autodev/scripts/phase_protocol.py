@@ -1668,9 +1668,9 @@ class PhaseProtocol:
         """
         if self._evidence_contract(run_id) != "v2":
             return self.knowledge.publish_phase(run_id, artifact, scope=scope)
-        # A completion interrupted after the deferred envelope was stored retries with the
-        # same decision; a KU that recovered meanwhile would otherwise yield a different
-        # envelope for the same action (ARTIFACT_CONFLICT).
+        # A completion interrupted after its envelope was stored retries with the same
+        # decision, published or deferred; a KU that recovered (or failed) meanwhile would
+        # otherwise yield a different envelope for the same action (ARTIFACT_CONFLICT).
         deferral_key = f"knowledge.deferred:{run_id}:{artifact.get('content_hash')}:{scope}"
         decided = self.state.idempotency_result(deferral_key)
         if isinstance(decided, dict):
@@ -1682,7 +1682,9 @@ class PhaseProtocol:
         if isinstance(receipt, dict) and receipt.get("ok") and self._receipt_error(
                 run_id, {"phase": artifact.get("phase"), "content_hash": artifact.get("content_hash")},
                 receipt) is None:
-            return receipt
+            # Pinned like a deferral: a replay during a later KU outage must not turn an
+            # already stored, published envelope into a deferred one.
+            return self.state.save_idempotency_result(deferral_key, receipt)
         reason = receipt.get("reason_code") if isinstance(receipt, dict) else None
         _log.warning("knowledge publish deferred for run %s phase %s: %s",
                      run_id, artifact.get("phase"), reason)

@@ -4,6 +4,15 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 评审修复第 3 轮（Codex gpt-6-astra 4 条 P1 + GPT-6.1-Sol 2 条 P1、1 条 P2）
+
+- iCode：`claim` 为 EXISTING 的提交一律只对账，`:after:` 后继 intent 不再因祖先已缺席/放弃而再次 push。
+- `settle` 写 `CONFIRMED_ABSENT` 与 AMBIGUOUS 检查在同一事务（`StateStore.receipt_unless_ambiguous`）；并发对账已记 AMBIGUOUS 时陈旧的缺席结论被丢弃。
+- v2：发布成功的回执也按 artifact 固定（与延后同一个 key），重放时 KU 故障不会把已发布的 envelope 改成延后；`Recovery.resume` 同样豁免 v2 的 KU/iCafe intent，WORKSPACE→PLAN 等控制器迁移不再被它们卡住。
+- 合同 3.2：`submit_to_ipipe` 自己从获批 descriptor 与 worktree ownership 推导必须提交的仓库，调用方只能加不能减（缺漏返回 `SUBMISSION_SET_MISMATCH`）；`route_failure("SUBMIT_PARTIAL")` 只对该 PARTIAL 证据里列出的 intent 放行进入 DIAGNOSE，intent 本身不关闭、继续阻断同目标写。
+- 测试：新增 4 项（真实 `route_failure`/`Recovery` 路径）；全量 1552 通过。
+- 修复迭代 3 次已用完，未再发起评审。
+
 ## 2026-10-28 · MVP 评审修复第 2 轮（Codex gpt-6-astra + comatecli GPT-6.1-Sol；opus 5.5 本轮无新问题）
 
 - iCode：`CONFIRMED_ABSENT` 宽限期改为 push_cr 超时（600 s）+ 300 s，push 仍可能在进行时并发 reconcile 不会判缺席后重推（Codex P1）。

@@ -164,10 +164,14 @@ def settle(
     if verdict.state == AMBIGUOUS and sticky_ambiguous(state_store, intent) is not None:
         return verdict  # recorded once; the first evidence stands
     if verdict.state == CONFIRMED_ABSENT:
-        state_store.receipt(intent["intent_id"], {
+        # Checked and written in one transaction: a concurrent reconcile that recorded
+        # AMBIGUOUS first wins, and this stale absence is dropped.
+        written = state_store.receipt_unless_ambiguous(intent["intent_id"], {
             "ok": False, "reason_code": "INTENT_CONFIRMED_ABSENT",
             "intent_state": CONFIRMED_ABSENT, **verdict.evidence,
         }, [])
+        if written is None:
+            return sticky_ambiguous(state_store, intent) or Verdict.ambiguous()
         return verdict
     record_state(state_store, intent["intent_id"], verdict)
     return verdict
@@ -189,7 +193,7 @@ def answer(
     """
     if verdict.state == REFUSED:
         return dict(verdict.result or {})
-    settle(state_store, intent, verdict)
+    verdict = settle(state_store, intent, verdict)
     base = {"ok": False, "intent_id": intent["intent_id"], "intent_state": verdict.state}
     if verdict.state == CONFIRMED:
         return verdict.result or {}
