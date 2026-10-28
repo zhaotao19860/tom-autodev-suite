@@ -220,6 +220,57 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(self.posts(), 1)
 
 
+class StagePlanTests(unittest.TestCase):
+    """Contract 3.3: a manual-stage G8 binds the build's shape and the live configuration."""
+
+    def setUp(self):
+        import test_ipipe_runtime as base
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.state = StateStore(root / "state.sqlite")
+        self.ledger = ApprovalLedger(root / "approvals.sqlite")
+        self.api = FakeApi()
+        self.api.pipeline = {**self.api.pipeline, "stages": [
+            {"stageConfId": "c1", "stageName": "unit", "paramBeans": [], "groupJobs": [[
+                {"jobConfId": "j1", "jobType": "AGILE_SHELL"}]]}]}
+        self.runtime = pinned_runtime(self.state, self.ledger, self.api, sleeper=lambda _s: None)
+        manual = {"id": "stage-1", "stageName": "unit", "stageConfId": "c1", "status": "PENDING_FOR_USER"}
+        item = build(status="RUNNING", stages=[manual])
+        self.api.candidates = [item]
+        self.api.builds["build-1"] = item
+        self.runtime.discover(base.PROFILE, base.REVISIONS)
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_the_g8_binds_both_snapshots(self):
+        bound = self.runtime.rerun_input_hash("stage-1")
+        self.assertEqual(set(bound["binding"]["stage_plan"]), {"build_hash", "config_hash"})
+
+    def test_a_configuration_edited_after_approval_voids_it(self):
+        approval = approved(self.ledger, "G8", self.runtime.rerun_input_hash("stage-1")["input_hash"])
+        self.api.pipeline["stages"][0]["paramBeans"] = [{"name": "get_bgwagent", "required": False}]
+        result = self.runtime.rerun("stage-1", approval)
+        self.assertFalse(result["ok"])
+        self.assertFalse(any(c[0] == "manual_execute_stage" for c in self.api.calls))
+
+    def test_an_unchanged_pipeline_runs_under_the_approval(self):
+        approval = approved(self.ledger, "G8", self.runtime.rerun_input_hash("stage-1")["input_hash"])
+        self.runtime.rerun("stage-1", approval)
+        self.assertEqual(sum(c[0] == "manual_execute_stage" for c in self.api.calls), 1)
+
+    def test_config_hash_is_stable_and_ignores_unrelated_fields(self):
+        import stage_plan
+        conf = response("bgw1995-branch-pipeline-conf-348101")
+        noisy = {**conf, "stages": [{**s, "lastModifiedUser": "someone"} for s in conf["stages"]]}
+        self.assertEqual(stage_plan.config_hash(conf), stage_plan.config_hash(noisy))
+        edited = {**conf, "stages": [
+            {**s, "paramBeans": []} if s["stageName"] == "自动化回归测试" else s
+            for s in conf["stages"]]}
+        self.assertNotEqual(stage_plan.config_hash(conf), stage_plan.config_hash(edited))
+
+
 class EarlyReleaseFixtureTests(unittest.TestCase):
     def test_release_shown_pending_while_regression_runs_is_not_the_stage_to_drive(self):
         stages = [_normalize_stage(s) for s in

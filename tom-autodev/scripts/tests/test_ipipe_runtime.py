@@ -150,7 +150,7 @@ class FakeApi:
         self.on_trigger = None
         self.on_rerun = None
 
-    def get_pipeline_by_id(self, pipeline_id):
+    def get_pipeline_by_id(self, pipeline_id, brief=True):
         self.calls.append(("get_pipeline_by_id", pipeline_id))
         return self.pipeline
 

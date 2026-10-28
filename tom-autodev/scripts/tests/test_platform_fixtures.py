@@ -113,10 +113,17 @@ class RecordedBranchPipelineTests(unittest.TestCase):
                     self.api.get_pipeline_by_id("348101", brief=False)["stages"]}
         self.assertNotIn(str(stage["stageConfId"]), conf_ids)
         self.assertEqual(stage_parameters.declared_names(stage)["names"], [])
-        # Current behaviour, to be changed by contract 3.3: the live-config lookup fails
-        # closed instead of using the build's own explicit empty declaration.
+        # Contract 3.3: the build's own explicit empty declaration is used, and flagged.
+        declared = stage_parameters.dependency_declaration(
+            stage, detail["entities"], self.api.get_pipeline_by_id("348101"))
+        self.assertTrue(declared["ok"], declared)
+        self.assertEqual(declared["names"], [])
+        self.assertTrue(declared["config_stage_missing"])
+        self.assertEqual(declared["configuration_source"], "build_snapshot")
+        # Without an explicit empty declaration it stays unknown.
+        unknown = {**stage, "hasDynamicParams": True}
         self.assertEqual(stage_parameters.dependency_declaration(
-            stage, detail["entities"], self.api.get_pipeline_by_id("348101"))["reason_code"],
+            unknown, detail["entities"], self.api.get_pipeline_by_id("348101"))["reason_code"],
             "STAGE_PARAMETERS_UNKNOWN")
 
     def test_release_identity_comes_from_the_agile_release_job(self):

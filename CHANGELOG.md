@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 合同 3.3：stage plan 快照绑定进人工 stage 的 G8
+
+- 新增 `stage_plan.py`（`stage-plan.v1`）：build 自身的 stage 形状（id、配置 id、名称、顺序）和实时配置中 stage 运行依赖的部分（stage 身份、上游、`paramBeans` 名称与 required、`inParamsMap` 键、job 的 id 与类型）分别规范化后 sha256。无关字段（修改人、时间）不进 hash。
+- 人工 stage 的 G8 binding 新增 `stage_plan: {build_hash, config_hash}`；执行前重新读取，两次之间配置被改则 hash 不匹配，执行被拒，需新 G8。每个 stage 的 G8 仍单独消费（已有的 approval-id 维度 rerun key 即 nonce）。
+- 配置里已删除、但 build 快照仍带着的 stage：以 build 自身的显式空声明为准（`configuration_source: build_snapshot`、`config_stage_missing: true`），不再报 `STAGE_PARAMETERS_UNKNOWN`；非显式空声明仍是未知（BGW-1995「系统测试功能回归」的场景）。
+- 测试：stage plan 4 项、配置删 stage 的回放测试改为新行为；全量 1529 通过。
+
 ## 2026-10-28 · MVP 合同 3.2：多仓提交聚合状态
 
 - 新增 `submission_set.py`：一次提交 attempt =（change_set_id, revision_set_id），按各仓 iCode intent 的持久状态推导聚合状态：`SUBMITTED`（每仓都 CONFIRMED 且有 CR 号，只记录一次、只写一次）/ `PARTIAL`（有仓已确认，另一仓 AMBIGUOUS 或被拒）/ `PENDING`（未决或未尝试）。重试沿 `:after:` 链，取每仓最新的 intent。

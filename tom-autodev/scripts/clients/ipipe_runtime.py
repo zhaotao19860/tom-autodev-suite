@@ -716,11 +716,13 @@ class IpipeRuntime:
         # approving it then approves the wrong step. The live listing decides, and the G8
         # binds the predecessors it saw, so an approval granted too early never matches.
         ready_after = None
+        plan_binding = None
         if stage["status"] in _MANUAL:
             readiness = self._manual_stage_readiness(stage_binding)
             if not readiness.get("ok"):
                 return readiness
             ready_after = readiness["ready_after"]
+            plan_binding = readiness.get("stage_plan")
         rerunnable = stage["status"] in _FAILURE | _MANUAL
         # A stage whose jobs all exited zero while their logs report failed cases is a
         # failure the platform calls a success. Refusing to re-run it left the only remedy
@@ -757,6 +759,7 @@ class IpipeRuntime:
                 **({"parameter_declaration": declaration} if declaration else {}),
                 **({"product_proofs": proofs} if proofs else {}),
                 **({"ready_after": ready_after} if ready_after else {}),
+                **({"stage_plan": plan_binding} if plan_binding else {}),
             },
         }
 
@@ -782,10 +785,25 @@ class IpipeRuntime:
                              "status": item["status"]} for item in pending],
                 retry_allowed=True,
             )
+        # Contract 3.3: the approval also binds the build's stage shape and the live
+        # configuration the stage runs under. Both are re-read for the write, so a
+        # configuration edited between the G8 and the POST changes the hash and the
+        # approval no longer matches.
+        import stage_plan
+        plan = {"build_hash": stage_plan.build_hash(stages)}
+        pipeline_id = str((stage_binding.get("context") or {}).get("pipeline_id") or "")
+        reader = getattr(self.api, "get_pipeline_by_id", None)
+        if pipeline_id and callable(reader):
+            try:
+                configuration = reader(pipeline_id, brief=False)
+            except Exception as error:
+                return _failure(_transport_reason(error, "STAGE_QUERY_FAILED"))
+            if isinstance(configuration, dict) and configuration.get("stages"):
+                plan["config_hash"] = stage_plan.config_hash(configuration)
         return {"ok": True, "ready_after": [
             {"stage_build_id": item["stage_build_id"], "status": item["status"]}
             for item in earlier
-        ]}
+        ], "stage_plan": plan}
 
     def rerun_input_hash(
         self, stage_build_id: str, *, parameters: dict[str, Any] | None = None

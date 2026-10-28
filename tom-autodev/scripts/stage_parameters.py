@@ -114,6 +114,20 @@ def dependency_declaration(stage: dict[str, Any], detail: dict[str, Any],
     stages = configuration.get("stages") or []
     selected = [s for s in stages if isinstance(s, dict)
                 and str(s.get("stageConfId")) == str(stage.get("stageConfId"))]
+    if not selected and any(isinstance(s, dict) for s in stages):
+        # Contract 3.3: the build's own snapshot decides which stages exist. The live
+        # configuration lost this stage after the build started (BGW-1995: QA removed
+        # 系统测试功能回归 from 348101 mid-run), so the build's explicit declaration is
+        # the only one there is. An explicit empty one (manualParams null +
+        # hasDynamicParams false) is parameterless; anything else stays unknown.
+        own = declared_names(stage)
+        if own.get("ok") and not own["names"]:
+            return {"ok": True, "reason_code": "OK", "names": [],
+                    "requires_job_override": False, "declarations": {},
+                    "dependency_chain": [], "configuration_source": "build_snapshot",
+                    "config_stage_missing": True}
+        return {"ok": False, "reason_code": "STAGE_PARAMETERS_UNKNOWN",
+                "config_stage_missing": True}
     if len(selected) != 1:
         return {"ok": False, "reason_code": "STAGE_PARAMETERS_UNKNOWN"}
     conf = selected[0]
