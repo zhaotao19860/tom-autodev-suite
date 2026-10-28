@@ -283,6 +283,28 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(replay["build_id"], "build-3")
         self.assertEqual(self.posts(), 0)
 
+    def test_a_recorded_adoption_wins_over_a_newer_build(self):
+        # Codex round 7: the adopted build A stays the identity even when B appears.
+        old = {**build("build-3"), "triggerTime": 1_000_000_000_000}
+        self.api.candidates.append(old)
+        self.api.builds["build-3"] = old
+        original = self.api.build_by_id
+        calls = {"n": 0}
+
+        def flaky(build_id, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("GET failed")
+            return original(build_id, **kwargs)
+        self.api.build_by_id = flaky
+        self.assertFalse(self.trigger().get("ok"))
+        newer = {**build("build-4"), "triggerTime": 4_000_000_000_000}
+        self.api.candidates.append(newer)
+        self.api.builds["build-4"] = newer
+        replay = self.trigger()
+        self.assertEqual(replay.get("build_id"), "build-3", replay)
+        self.assertEqual(self.posts(), 0)
+
     def test_a_build_started_before_the_intent_is_not_its_answer(self):
         self.api.trigger_result = TimeoutError("no answer")
         self.trigger()

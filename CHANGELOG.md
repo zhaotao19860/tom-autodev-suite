@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 评审修复第 7 轮（Codex 2 条 P1、1 条 P2；GPT-6.1-Sol 连续两轮未发现问题）
+
+- iCode 目标级围栏：push 前若同一 run 中同仓库同分支还有未决（CLAIMED/UNKNOWN/AMBIGUOUS）的其他提交，返回 `TARGET_INTENT_UNRESOLVED` 不推；PARTIAL 诊断豁免只放行诊断，不放行新的写。
+- dispatch 围栏窗口改为完整的缺席宽限期（push 超时 + 列表延迟），从 dispatch 起算。
+- trigger 重放时先看已记录的只读采纳，再做 discovery；新出现的 build 不会顶替它。
+- 测试：新增 3 项；全量 1577 通过。
+
 ## 2026-10-28 · MVP 评审修复第 6 轮（Codex 3 条 P1；GPT-6.1-Sol 未发现 P0/P1/P2）
 
 - iCode 写入围栏：push 前记 `icode.submit.dispatch` 观察并复查该 intent 是否已被关闭（已关闭返回 `SUBMIT_INTENT_CLOSED`，不 push）；`CONFIRMED_ABSENT` 写入与"push 超时窗口内的 dispatch 标记"在同一事务判定，标记存在时只记 UNKNOWN。两个顺序都不会出现第二次 push。

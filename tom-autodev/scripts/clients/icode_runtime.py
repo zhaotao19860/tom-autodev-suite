@@ -388,6 +388,13 @@ class IcodeRuntime:
             blocked = self._profile_error()
             if blocked is not None:
                 return blocked
+            # Target fence: an unresolved submission (UNKNOWN / AMBIGUOUS / unanswered
+            # claim) of another change set to the same repository and branch holds it.
+            # Diagnosis may proceed past it; a new push may not.
+            held = self._unresolved_on_target(intent, change_set)
+            if held:
+                return _failure("TARGET_INTENT_UNRESOLVED", intent_id=intent["intent_id"],
+                                blocking_intents=held, retry_allowed=False)
             # Fence: announce the dispatch, then make sure nobody closed this intent
             # meanwhile (a read-back after the absence grace). The absence write refuses
             # while this marker is recent, so either order of the two is safe.
@@ -436,9 +443,9 @@ class IcodeRuntime:
     ) -> dict[str, Any]:
         from datetime import timedelta
         # An absence may only free the target when no dispatch was announced within the
-        # longest a push can still be running.
+        # full grace (push timeout + listing lag), counted from the dispatch itself.
         since = (self.clock().astimezone(timezone.utc)
-                 - timedelta(seconds=_SUBMIT_PUSH_TIMEOUT_SECONDS + 60)).isoformat()
+                 - timedelta(seconds=_SUBMIT_ABSENCE_GRACE_SECONDS)).isoformat()
         return intent_executor.answer(
             self.state, intent, verdict, unknown_reason=unknown_reason,
             ambiguous_reason="CR_IDENTITY_AMBIGUOUS", absent_reason="SUBMIT_CONFIRMED_ABSENT",
@@ -539,6 +546,18 @@ class IcodeRuntime:
                 ):
                     found.add(str(change.get("_number") or change.get("number") or ""))
         return sorted(found)
+
+    def _unresolved_on_target(self, intent: dict[str, Any], change_set: dict[str, Any]) -> list[str]:
+        held = []
+        for other in self.state.pending_intents(self.run_id):
+            payload = other.get("payload") or {}
+            if (other["intent_id"] == intent["intent_id"] or other.get("operation") != "icode.submit"
+                    or payload.get("module") != change_set["module"]
+                    or payload.get("target_branch") != change_set["target_branch"]):
+                continue
+            if intent_executor.intent_state(self.state, other) in intent_executor.BLOCKING:
+                held.append(other["intent_id"])
+        return held
 
     def _absence_grace_elapsed(self, intent: dict[str, Any]) -> bool:
         try:

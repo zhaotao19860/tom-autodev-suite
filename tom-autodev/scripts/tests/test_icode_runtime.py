@@ -949,6 +949,30 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["intent_state"], ie.UNKNOWN)
         self.assertIsNone(self.state.result_by_idempotency_key(key))
 
+    def test_an_unresolved_submission_to_the_same_target_fences_a_new_change_set(self):
+        # Codex round 7: a repaired change set cannot push past an AMBIGUOUS sibling.
+        import intent_executor as ie
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        other = self.state.claim_intent("run-1", "icode.submit", "icode.submit:run-1:OLD:RS", {
+            "module": change["module"], "target_branch": change["target_branch"]})["intent"]
+        ie.settle(self.state, other, ie.Verdict.ambiguous(candidates=["7", "8"]))
+        result = self.runtime().submit(change, approval)
+        self.assertEqual(result["reason_code"], "TARGET_INTENT_UNRESOLVED", result)
+        self.assertFalse(any(_is_push(call[0]) for call in self.transport.calls))
+
+    def test_the_dispatch_fence_lasts_the_full_grace_from_the_dispatch(self):
+        import intent_executor as ie
+        from datetime import datetime, timedelta, timezone
+        change = self.change_set()
+        key = f"icode.submit:run-1:{change['change_set_id']}:{change['revision_set_id']}"
+        intent = self.state.claim_intent("run-1", "icode.submit", key, {})["intent"]
+        self.state.record_external_observation(intent["intent_id"], {"operation": "icode.submit.dispatch"})
+        # 12 minutes after the dispatch: past the old 660 s fence, inside the 900 s grace.
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=12)
+        result = self.runtime(clock=later)._answer(intent, ie.Verdict.absent(checked="listing"))
+        self.assertEqual(result["intent_state"], ie.UNKNOWN)
+
     def test_a_push_that_may_still_be_running_is_never_absent(self):
         from datetime import datetime, timedelta, timezone
         change = self.change_set()

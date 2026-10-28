@@ -219,18 +219,19 @@ class IpipeRuntime:
         # A fresh claim may still adopt a build of these revisions that already exists (no
         # write is sent for it); a replayed claim may have sent one, so only builds started
         # after its intent can be that write's answer.
-        existing = (self.discover(profile, revision_set, context["module"], since=intent.get("created_at"))
-                    if claim["status"] == "EXISTING"
-                    else self.discover(profile, revision_set, context["module"]))
+        adopted = self._adopted_build(intent) if claim["status"] == "EXISTING" else None
+        if adopted:
+            # This intent adopted an existing build and never sent a trigger; its own
+            # recorded choice is its identity, whatever newer builds appeared since.
+            existing = {"reason_code": "OK", "build_id": adopted}
+        elif claim["status"] == "EXISTING":
+            existing = self.discover(profile, revision_set, context["module"], since=intent.get("created_at"))
+        else:
+            existing = self.discover(profile, revision_set, context["module"])
         if existing.get("reason_code") == "BUILD_AMBIGUOUS" and claim["status"] == "EXISTING":
             # An earlier process claimed this trigger and may have sent it; now two
             # builds of these revisions exist and which one it started cannot be told.
             return self._settled_write(intent, self._trigger_ambiguous(existing), "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
-        adopted = self._adopted_build(intent)
-        if claim["status"] == "EXISTING" and adopted and existing.get("reason_code") == "BUILD_QUERY_REQUIRED":
-            # This intent adopted an existing build and never sent a trigger; its own
-            # choice, not the creation-time filter, identifies the build.
-            existing = {"reason_code": "OK", "build_id": adopted}
         if existing.get("reason_code") == "OK":
             if claim["status"] == "CLAIMED":
                 self.state.record_external_observation(intent["intent_id"], {
