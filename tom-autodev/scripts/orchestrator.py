@@ -4430,6 +4430,7 @@ def _cli_exit_code(result: Any) -> int:
     return 0 if reason in {
         None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
         "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT", "NO_COMPANION",
+        "CODE_VERSION_CHANGED",
         "PARKED", "WORK_CARD_RECONCILED", "WORK_CARD_ABANDONED",
         "CHANGE_SET_PREPARED",
     } else 1
@@ -4989,15 +4990,18 @@ def _content_hash_of(content: Any) -> str:
 def _watch_approvals(orchestrator: Orchestrator, interval: float, once: bool) -> dict[str, Any]:
     """Keep landing 如流 decisions while the operator is away from the CLI."""
     from approval_watch import ApprovalWatcher
+    from code_version import changed_since, fingerprint
 
+    started = fingerprint()
     watcher = ApprovalWatcher(
         orchestrator,
         lambda: _infoflow_approval_client(orchestrator),
         _infoflow_notify_client(orchestrator),
         reporter=lambda outcome: print(json.dumps(outcome, ensure_ascii=False, sort_keys=True), flush=True),
+        code_changed=None if once else changed_since(started),
     )
     settled = watcher.run(interval, iterations=1 if once else None)
-    return {"ok": True, "reason_code": "OK", "settled": settled}
+    return _watch_result(settled, watcher, started)
 
 
 def _watch_ipipe(orchestrator: Orchestrator, interval: float, once: bool) -> dict[str, Any]:
@@ -5007,13 +5011,25 @@ def _watch_ipipe(orchestrator: Orchestrator, interval: float, once: bool) -> dic
     def runtime(run_id: str) -> Any:
         return _cli_ipipe_runtime(orchestrator, run_id)
 
+    from code_version import changed_since, fingerprint
+
+    started = fingerprint()
     watcher = IpipeWatcher(
         orchestrator,
         runtime,
         _infoflow_notify_client(orchestrator),
         reporter=lambda outcome: print(json.dumps(outcome, ensure_ascii=False, sort_keys=True), flush=True),
+        code_changed=None if once else changed_since(started),
     )
     settled = watcher.run(interval, iterations=1 if once else None)
+    return _watch_result(settled, watcher, started)
+
+
+def _watch_result(settled: list[Any], watcher: Any, started: str) -> dict[str, Any]:
+    """A watcher that stopped because its code changed exits cleanly for the supervisor."""
+    if getattr(watcher, "stopped_for_code_change", False):
+        return {"ok": True, "reason_code": "CODE_VERSION_CHANGED", "settled": settled,
+                "started_code_version": started}
     return {"ok": True, "reason_code": "OK", "settled": settled}
 
 

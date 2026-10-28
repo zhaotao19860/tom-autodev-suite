@@ -56,8 +56,12 @@ class IpipeWatcher:
         reporter: Any | None = None,
         clock: Any | None = None,
         window_seconds: int = 120,
+        code_changed: Any | None = None,
     ):
         self.orchestrator = orchestrator
+        # Same contract as ApprovalWatcher: stop once the code on disk changed.
+        self.code_changed = code_changed
+        self.stopped_for_code_change = False
         self.runtime_factory = runtime_factory
         self.notify_client = notify_client
         self.sleeper = sleeper or time.sleep
@@ -69,6 +73,9 @@ class IpipeWatcher:
         settled: list[dict[str, Any]] = []
         count = 0
         while iterations is None or count < iterations:
+            if self.code_changed is not None and self.code_changed():
+                self.stopped_for_code_change = True
+                break
             settled.extend(self.tick())
             count += 1
             if iterations is None or count < iterations:

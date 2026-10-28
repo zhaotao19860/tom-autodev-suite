@@ -82,8 +82,13 @@ class ApprovalWatcher:
         reporter: Any | None = None,
         clock: Any | None = None,
         reissue: bool = True,
+        code_changed: Any | None = None,
     ):
         self.orchestrator = orchestrator
+        # Returns True once the control-plane code on disk differs from what this
+        # process started with; the loop then stops so the supervisor runs new code.
+        self.code_changed = code_changed
+        self.stopped_for_code_change = False
         self.client_factory = client_factory
         self.notify_client = notify_client
         self.sleeper = sleeper or time.sleep
@@ -378,6 +383,9 @@ class ApprovalWatcher:
         settled = []
         rounds = 0
         while iterations is None or rounds < iterations:
+            if self.code_changed is not None and self.code_changed():
+                self.stopped_for_code_change = True
+                break
             settled += self.tick()
             rounds += 1
             if iterations is not None and rounds >= iterations:
