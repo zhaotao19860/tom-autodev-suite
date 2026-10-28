@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 合同 3.1 完成：BranchPipeline 发布身份
+
+- 「发布」stage 的执行本身已经是人工 stage 执行（走 IntentExecutor）。发布身份读取 `_branch_release` 改为收集全部匹配的 AGILE_RELEASE job：同一 revision + branch 有两个以上 release → `RELEASE_AMBIGUOUS`（带 `candidates`），不取第一个；worker 遇到它按失败停下，不写 RELEASE_SUCCESS。
+- 合同 3.1 的 6 种写操作全部接入状态机。
+
 ## 2026-10-28 · MVP 合同 3.1：iCode 新 CR 与追加 patchset 迁入 IntentExecutor
 
 - 身份确认（`IcodeRuntime._submit_verdict`）：新 CR 按 commit sha / Change-Id 找到的确切 CR（目标分支、owner、卡片标题都对）→ CONFIRMED；追加 patchset 按 CR 号 + 当前 patchset sha → CONFIRMED。

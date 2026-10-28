@@ -134,6 +134,30 @@ class RecordedBranchPipelineTests(unittest.TestCase):
         self.assertEqual(found["branch_build_id"], "275700446")
         self.assertTrue(found["product_url"].endswith("/releases/26.10.20.1/files"))
 
+    def test_two_releases_of_the_same_revision_are_ambiguous(self):
+        # DERIVED from the recorded release detail: a second AGILE_RELEASE of a9715d5.
+        import copy
+        recorded = response("bgw1995-branch-release-detail")
+        second = copy.deepcopy(recorded["entities"]["realJobBuilds"][0][0])
+        second["realJobBuild"]["id"] = 15480417
+        second["realJobBuild"]["version"] = "26.10.20.2"
+        recorded["entities"]["realJobBuilds"][0].append(second)
+        self.api.details["649960675"] = None
+        original = self.api.stage_detail
+        self.api.stage_detail = lambda stage_id: (
+            recorded if str(stage_id) == "649960675" else original(stage_id))
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        runtime = IpipeRuntime(StateStore(root / "s.sqlite"), ApprovalLedger(root / "a.sqlite"),
+                               "run-1", self.api, validated_profile={})
+        found = runtime._branch_release({
+            "module": "baidu/sysip/x86bgw", "target_branch": BRANCH,
+            "revision_map": {"baidu/sysip/x86bgw": REVISION},
+        })
+        self.assertEqual(found["reason_code"], "RELEASE_AMBIGUOUS", found)
+        self.assertEqual(found["candidates"], ["15480416", "15480417"])
+
     def test_the_release_listing_endpoint_is_absent_on_the_gateway(self):
         with self.assertRaises(IpipeTransportError) as raised:
             self.api.release_info("baidu/sysip/x86bgw", BRANCH)

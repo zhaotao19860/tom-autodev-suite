@@ -2064,6 +2064,11 @@ class IpipeRuntime:
         revision = binding["revision_map"][module]
         stages = [_normalize_stage(stage)
                   for stage in self._build_stages(found["branch_build_id"], found["build"])]
+        # Contract 3.1, BranchPipeline release: identity is the AGILE_RELEASE job's release
+        # id + revision + branch. Every matching release is collected, not the first one:
+        # two releases of this revision cannot both be this run's, and picking one would
+        # bind the run to a version it may not have produced.
+        releases: dict[str, dict[str, Any]] = {}
         for stage in stages:
             if stage.get("status") not in _SUCCESS:
                 continue
@@ -2075,12 +2080,19 @@ class IpipeRuntime:
                         and real.get("revision") == revision
                         and real.get("branch") == binding["target_branch"]
                         and _nonempty(real.get("version"))):
-                    return {"ok": True, "reason_code": "OK",
-                            "release_id": str(real.get("id") or real["version"]),
-                            "version": real["version"],
-                            "product_url": real.get("releaseOutputHttpUrl"),
-                            "branch_build_id": found["branch_build_id"],
-                            "branch_pipeline_id": found["branch_pipeline_id"]}
+                    release_id = str(real.get("id") or real["version"])
+                    releases.setdefault(release_id, {
+                        "ok": True, "reason_code": "OK", "release_id": release_id,
+                        "version": real["version"],
+                        "product_url": real.get("releaseOutputHttpUrl"),
+                        "branch_build_id": found["branch_build_id"],
+                        "branch_pipeline_id": found["branch_pipeline_id"]})
+        if len(releases) > 1:
+            return _failure("RELEASE_AMBIGUOUS", status="RELEASE_AMBIGUOUS", intent_state="AMBIGUOUS",
+                            candidates=sorted(releases), retry_allowed=False,
+                            branch_build_id=found["branch_build_id"])
+        if releases:
+            return next(iter(releases.values()))
         return _failure("RELEASE_WAITING", status="RELEASE_WAITING",
                         branch_pipeline_id=found["branch_pipeline_id"],
                         branch_build_id=found["branch_build_id"])
