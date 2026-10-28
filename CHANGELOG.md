@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 评审修复第 2 轮（Codex gpt-6-astra + comatecli GPT-6.1-Sol；opus 5.5 本轮无新问题）
+
+- iCode：`CONFIRMED_ABSENT` 宽限期改为 push_cr 超时（600 s）+ 300 s，push 仍可能在进行时并发 reconcile 不会判缺席后重推（Codex P1）。
+- 证据合同 v2：同一 artifact 的延后决定持久化（`knowledge.deferred:{run}:{hash}:{scope}`），完成中途中断后重试不会因 KU 恢复得到不同 envelope 而 `ARTIFACT_CONFLICT`；v2 run 中所有 KU/iCafe intent（含 `icafe.comment.create`）都不再阻塞 `RECOVERY_REQUIRED`（Codex P1 ×2）。
+- 合同 3.2：`submit_to_ipipe` 自身在归档 submission、迁入 IPIPE 前按完整 attempt 求聚合，非 SUBMITTED 返回 `SUBMISSION_SET_INCOMPLETE`；PARTIAL 结果经 `route_failure("SUBMIT_PARTIAL")` 幂等转 DIAGNOSE（GPT P1 + P2）。
+- trigger 归属改为正向时间证明：优先 `triggerTime`（创建时间），否则 `startTime`；无可用时间或早于 intent 创建的（含"早创建、晚启动"的排队 build）一律不采纳，保持 UNKNOWN（GPT P1）。平台时钟对齐仍用本地 intent 时间 ±120 s，记账。
+- 测试：新增 7 项；全量 1549 通过。
+
 ## 2026-10-28 · MVP 评审修复第 1 轮（comatecli；Codex 两次因网关 403 未产出）
 
 - P1 iCode 新 CR 缺席：`_submit_verdict` 判 `CONFIRMED_ABSENT` 前除 NEW 外还查 MERGED / ABANDONED；有已关闭 CR 携带本 commit 或 Change-Id 判 AMBIGUOUS（不再重推），任一列表失败或未取完保持 UNKNOWN。

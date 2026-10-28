@@ -1780,8 +1780,13 @@ class Orchestrator:
         approval: dict[str, Any],
         *,
         icode_runtime: Any,
+        change_set_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Submit through the owned iCode boundary and form the IPIPE checkpoint."""
+        """Submit through the owned iCode boundary and form the IPIPE checkpoint.
+
+        `change_set_ids` lists every repository of the attempt (contract 3.2); the
+        checkpoint is formed only when all of them are confirmed.
+        """
         # This receipt is a pure return. Everything else, including runtime
         # preflight, must wait for a matching workflow policy before executing.
         if isinstance(change_set, dict) and isinstance(approval, dict):
@@ -1796,7 +1801,8 @@ class Orchestrator:
         if blocked is not None:
             return blocked
         try:
-            return self._submit_to_ipipe(run_id, change_set, approval, icode_runtime)
+            return self._submit_to_ipipe(run_id, change_set, approval, icode_runtime,
+                                         change_set_ids)
         except Exception:
             return {"ok": False, "reason_code": "SUBMISSION_BINDING_FAILED", "run_id": run_id}
 
@@ -1806,6 +1812,7 @@ class Orchestrator:
         change_set: Any,
         approval: Any,
         icode_runtime: Any,
+        change_set_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         if not isinstance(change_set, dict) or not isinstance(approval, dict):
             return {"ok": False, "reason_code": "INVALID_INPUT", "run_id": run_id}
@@ -1903,6 +1910,17 @@ class Orchestrator:
         )
         if binding_error is not None:
             return {"ok": False, "reason_code": binding_error, "run_id": run_id}
+        # Contract 3.2: the IPIPE checkpoint follows only a SUBMITTED attempt -- every
+        # repository listed for it confirmed with a CR. Checked here, at the boundary that
+        # owns the transition, not by the caller's ordering.
+        import submission_set
+        aggregate = submission_set.evaluate(
+            self.state, run_id, list(change_set_ids or [change_set_id]), revision_set_id,
+            change_set_id)
+        if aggregate["status"] != submission_set.SUBMITTED:
+            return {"ok": False, "reason_code": "SUBMISSION_SET_INCOMPLETE", "run_id": run_id,
+                    "retry_allowed": aggregate["status"] == submission_set.PENDING,
+                    "submission_set": aggregate}
         content = json.dumps(
             submitted, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
@@ -4263,18 +4281,33 @@ def _submit(
         pushed = _submit_companion(orchestrator, run_id, runtime, descriptor, approval,
                                    companion["worktree_path"])
         if not pushed.get("ok"):
-            return {**pushed, "submission_set": submission_set.evaluate(
+            return _route_partial({**pushed, "submission_set": submission_set.evaluate(
                 orchestrator.state, run_id, change_set_ids, descriptor["revision_set_id"],
-                descriptor["change_set_id"])}
-    result = orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime)
+                descriptor["change_set_id"])}, orchestrator, run_id)
+    result = orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime,
+                                          change_set_ids=change_set_ids)
     aggregate = submission_set.evaluate(
         orchestrator.state, run_id, change_set_ids, descriptor["revision_set_id"],
         descriptor["change_set_id"])
     if isinstance(result, dict):
-        result = {**result, "submission_set": aggregate}
+        result = _route_partial({**result, "submission_set": aggregate}, orchestrator, run_id)
     return _settle_consumed_approval(
         orchestrator, run_id, approval.get("approval_id"), "submit", result,
     )
+
+
+def _route_partial(result: dict[str, Any], orchestrator: Any, run_id: str) -> dict[str, Any]:
+    """Contract 3.2: a PARTIAL attempt goes to F (DIAGNOSE), once; PENDING stays in SUBMIT."""
+    aggregate = result.get("submission_set") or {}
+    if result.get("ok") or aggregate.get("status") != "PARTIAL":
+        return result
+    evidence = {"submission_set": {
+        "change_set_id": aggregate.get("change_set_id"),
+        "revision_set_id": aggregate.get("revision_set_id"),
+        "repositories": [{k: row.get(k) for k in ("change_set_id", "intent_id", "intent_state")}
+                         for row in aggregate.get("repositories", [])]}}
+    routed = orchestrator.route_failure(run_id, "SUBMIT_PARTIAL", evidence)
+    return {**result, "routed": routed}
 
 
 def _companion_binding(

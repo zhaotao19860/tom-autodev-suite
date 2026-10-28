@@ -85,6 +85,10 @@ def _redriven_by_publish(operation: Any) -> bool:
     return base in _PUBLISH_REDRIVEN_OPERATIONS
 
 
+def _knowledge_side_channel(operation: Any) -> bool:
+    return isinstance(operation, str) and operation.split(".", 1)[0] in {"icafe", "ku", "knowledge"}
+
+
 class PhaseProtocol:
     def __init__(
         self,
@@ -148,10 +152,14 @@ class PhaseProtocol:
         with no receipt, and the reconciliation that would have settled the intent sat
         behind this guard. The only way out was to call `publish_phase` by hand.
         """
+        side_channel = self._evidence_contract(run_id) == "v2"
         return [
             pending
             for pending in self.state.pending_intents(run_id)
             if not _redriven_by_publish(pending.get("operation"))
+            # Evidence contract v2: every KU/iCafe write is a side channel, including an
+            # iCafe comment whose creation stays unconfirmed; it never holds the run.
+            and not (side_channel and _knowledge_side_channel(pending.get("operation")))
         ]
 
     def _foreign_publish_intent(
@@ -1660,6 +1668,13 @@ class PhaseProtocol:
         """
         if self._evidence_contract(run_id) != "v2":
             return self.knowledge.publish_phase(run_id, artifact, scope=scope)
+        # A completion interrupted after the deferred envelope was stored retries with the
+        # same decision; a KU that recovered meanwhile would otherwise yield a different
+        # envelope for the same action (ARTIFACT_CONFLICT).
+        deferral_key = f"knowledge.deferred:{run_id}:{artifact.get('content_hash')}:{scope}"
+        decided = self.state.idempotency_result(deferral_key)
+        if isinstance(decided, dict):
+            return decided
         try:
             receipt = self.knowledge.publish_phase(run_id, artifact, scope=scope)
         except Exception as error:  # noqa: BLE001 - side channel only under v2
@@ -1671,13 +1686,13 @@ class PhaseProtocol:
         reason = receipt.get("reason_code") if isinstance(receipt, dict) else None
         _log.warning("knowledge publish deferred for run %s phase %s: %s",
                      run_id, artifact.get("phase"), reason)
-        return {
+        return self.state.save_idempotency_result(deferral_key, {
             "ok": True, "reason_code": "KNOWLEDGE_DEFERRED", "deferred": True,
             "deferred_reason": reason if isinstance(reason, str) else "UNKNOWN",
             "run_id": run_id, "artifact_hash": artifact.get("content_hash"),
             "child_doc_id": None, "child_url": None, "child_version": None,
             "comment_id": None, "evidence_refs": [_KNOWLEDGE_DEFERRED_REF], "scope": scope,
-        }
+        })
 
     def _receipt_error(self, run_id: str, envelope: dict[str, Any], receipt: Any) -> str | None:
         if (isinstance(receipt, dict) and receipt.get("deferred") is True

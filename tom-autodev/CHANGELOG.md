@@ -4,6 +4,7 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-10-28
 
+- MVP 评审修复第 2 轮：iCode 缺席宽限覆盖 push 超时；v2 延后决定持久化、KU/iCafe intent 不阻塞；`submit_to_ipipe` 边界强制聚合 SUBMITTED，PARTIAL 转 DIAGNOSE；trigger 归属需 `triggerTime`/`startTime` 正向证明。
 - MVP 评审修复第 1 轮：iCode 新 CR 缺席跨 NEW/MERGED/ABANDONED 判定；trigger 确认只认晚于 intent 的 build；多仓聚合 PARTIAL/冲突分类修正；`intent_state` 增加 REFUSED；scope 台账策略对齐与顺序无关；stage 配置快照纳入默认值、上游参数、job 组顺序与命令 hash；watcher 指纹覆盖 schemas。详见根 CHANGELOG 同日条目。
 
 ## 2026-10-25

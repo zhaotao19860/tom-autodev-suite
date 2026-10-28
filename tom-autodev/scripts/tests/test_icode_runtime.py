@@ -872,7 +872,7 @@ class IcodeRuntimeTests(unittest.TestCase):
                          "SUBMIT_RESULT_UNKNOWN")
         # Too soon: still unknown, no second push.
         self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
-        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=10)
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=20)
         absent = self.runtime(clock=later).submit(change, approval)
         self.assertEqual(absent["reason_code"], "SUBMIT_CONFIRMED_ABSENT", absent)
         self.assertTrue(absent["retry_allowed"])
@@ -885,6 +885,18 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(retried["reason_code"], "OK", retried)
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 2)
 
+    def test_a_push_that_may_still_be_running_is_never_absent(self):
+        from datetime import datetime, timedelta, timezone
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = TimeoutError("unknown")
+        self.runtime().submit(change, approval)
+        # Past the old 300 s grace but within push_cr's own 600 s timeout.
+        during = lambda: datetime.now(timezone.utc) + timedelta(minutes=8)
+        self.assertEqual(self.runtime(clock=during).submit(change, approval)["reason_code"],
+                         "QUERY_REQUIRED")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
     def test_a_merged_cr_carrying_the_commit_is_not_absence(self):
         from datetime import datetime, timedelta, timezone
         change = self.change_set()
@@ -894,7 +906,7 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.transport.changes = [{
             "_number": 59, "status": "MERGED", "current_revision": change["commit_revision"],
             "branch": "main", "owner": {"username": "dev"}, "subject": "CARD-1 change"}]
-        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=10)
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=20)
         result = self.runtime(clock=later).submit(change, approval)
         self.assertEqual(result["reason_code"], "CR_IDENTITY_AMBIGUOUS", result)
         self.assertEqual(result["candidates"], ["59"])
@@ -914,7 +926,7 @@ class IcodeRuntimeTests(unittest.TestCase):
                 result = {**result, "stdout": json.dumps({"data": {"changes": [], "hasMore": True}})}
             return result
         self.transport.run = paged
-        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=10)
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=20)
         self.assertEqual(self.runtime(clock=later).submit(change, approval)["reason_code"],
                          "CR_NOT_FOUND")
 

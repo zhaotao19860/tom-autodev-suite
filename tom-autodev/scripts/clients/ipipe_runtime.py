@@ -121,8 +121,10 @@ class IpipeRuntime:
             # Contract 3.1: confirming a trigger only counts builds started after its
             # intent; an older build of the same revisions (another run, a manual start)
             # is not the one this write produced.
+            # The build must *prove* it is newer: its trigger (creation) time when listed,
+            # else its start time. A build without a usable time is not attributable.
             for old_id in [key for key, item in unique.items()
-                           if _started_before(item, since, _REBUILD_CLOCK_SKEW_SECONDS)]:
+                           if not _created_after(item, since, _REBUILD_CLOCK_SKEW_SECONDS)]:
                 unique.pop(old_id)
         if not unique:
             return _failure("BUILD_QUERY_REQUIRED", retry_allowed=False)
@@ -3292,6 +3294,29 @@ def _valid_replay_approval(
         action="G8",
         input_hash=str(payload.get("input_hash") or ""),
     ) is None
+
+
+def _created_after(build: Any, since: Any, skew_seconds: float) -> bool:
+    """True only when the build states a trigger (else start) time after `since` - skew.
+
+    The trigger time is when the build was created; a build queued before the intent and
+    started after it is still someone else's. No usable time is no proof.
+    """
+    if not isinstance(build, dict):
+        return False
+    raw = build.get("triggerTime")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raw = build.get("startTime", build.get("buildTime"))
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return False
+    try:
+        floor = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    if floor.tzinfo is None:
+        floor = floor.replace(tzinfo=timezone.utc)
+    created = datetime.fromtimestamp(raw / 1000 if raw > 10**11 else raw, tz=timezone.utc)
+    return (created - floor).total_seconds() > -skew_seconds
 
 
 def _started_before(build: Any, since: Any, skew_seconds: float) -> bool:

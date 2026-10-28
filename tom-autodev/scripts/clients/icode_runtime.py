@@ -391,7 +391,7 @@ class IcodeRuntime:
                     "--branch", change_set["target_branch"],
                 ],
                 cwd=submit_repo,
-                timeout=600,
+                timeout=_SUBMIT_PUSH_TIMEOUT_SECONDS,
             )
         except Exception:
             return self._answer(intent, intent_executor.Verdict.unknown(
@@ -905,9 +905,13 @@ class IcodeRuntime:
 
 _SUBMIT_CONFIRM_POLLS = 3
 _SUBMIT_CONFIRM_INTERVAL = 5
-# How long after the claim a read-back may call a submission absent: the listing can lag
-# a push by a few seconds, and an absent verdict frees the change set for another push.
-_SUBMIT_ABSENCE_GRACE_SECONDS = 300
+# push_cr may run this long; until it has been killed, a concurrent read-back must not
+# call the push absent (no run lease fences the CLI submission path).
+_SUBMIT_PUSH_TIMEOUT_SECONDS = 600
+# How long after the claim a read-back may call a submission absent: past the longest a
+# push can still be in flight, plus the listing's lag. An absent verdict frees the change
+# set for another push.
+_SUBMIT_ABSENCE_GRACE_SECONDS = _SUBMIT_PUSH_TIMEOUT_SECONDS + 300
 
 
 def _default_candidates() -> list[str]:

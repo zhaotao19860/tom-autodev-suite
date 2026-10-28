@@ -1,4 +1,5 @@
 import copy
+import time
 import hashlib
 import json
 import subprocess
@@ -149,10 +150,17 @@ class FakeIcodeRuntime:
                      if not (item["module"] == change_set["module"]
                              and item["revision"] == change_set["commit_revision"]))
         self.companions = getattr(self, "companions", []) + [entry]
-        return {"ok": True, "reason_code": "OK", "run_id": self.run_id,
-                "module": entry["module"], "commit_revision": entry["revision"],
-                "target_branch": entry["branch"], "change_number": "43",
-                "cr_url": "https://icode.example/cr/43"}
+        response = {"ok": True, "reason_code": "OK", "run_id": self.run_id,
+                    "module": entry["module"], "commit_revision": entry["revision"],
+                    "target_branch": entry["branch"], "change_number": "43",
+                    "cr_url": "https://icode.example/cr/43"}
+        # Like the real runtime, the companion is its own icode.submit intent (contract 3.2).
+        key = (f"icode.submit:{self.run_id}:{change_set['change_set_id']}:companion:"
+               f"{entry['module']}:{change_set['revision_set_id']}")
+        claim = self.state.claim_intent(self.run_id, "icode.submit", key, {"module": entry["module"]})
+        if self.state.result_by_idempotency_key(key) is None:
+            self.state.receipt(claim["intent"]["intent_id"], response, ["icode-cr-43"])
+        return response
 
 
 class StatefulKuTransport:
@@ -988,6 +996,46 @@ class FakeE2ETests(unittest.TestCase):
         self.assertIsNone(plan["knowledge_doc_id"])
         self.assertIn("knowledge-deferred", plan["evidence_refs"])
         self.assertFalse(self.orchestrator.next(run_id)["completion_predicate"]["requires_ku_receipt"])
+
+    def test_evidence_contract_v2_deferral_stands_and_icafe_create_does_not_block(self):
+        # Codex round 2: a recovered KU must not replace a deferral already decided for the
+        # same artifact, and an unconfirmed iCafe comment creation never holds a v2 run.
+        run_id, _knowledge = self._run_to_workspace("BGW-593", "bgw", "I15ClP2KW4ZGAK")
+        protocol = self.orchestrator.phase_protocol()
+
+        class BrokenKu:
+            def publish_phase(self, *_args, **_kwargs):
+                raise TimeoutError("KU unreachable")
+
+        class HealthyKu:
+            def publish_phase(self, *_args, **_kwargs):
+                raise AssertionError("a decided deferral must not publish again")
+
+        artifact = {"phase": "PLAN", "content_hash": "f" * 64}
+        protocol.knowledge = BrokenKu()
+        first = protocol._publish(run_id, artifact, scope="both")
+        protocol.knowledge = HealthyKu()
+        self.assertEqual(protocol._publish(run_id, artifact, scope="both"), first)
+        self.orchestrator.state.claim_intent(run_id, "icafe.comment.create", "icafe-comment:x", {})
+        self.assertEqual(protocol._blocking_pending(run_id), [])
+
+    def test_submit_to_ipipe_refuses_an_attempt_whose_companion_is_not_confirmed(self):
+        # GPT-6.1-Sol round 2: the boundary that owns SUBMIT -> IPIPE checks the whole
+        # attempt itself; a caller's ordering is not the guard.
+        import submission_set
+        state = self.orchestrator.state
+        run = "run-x"
+        key = f"icode.submit:{run}:CS-9:RS-9"
+        primary = state.claim_intent(run, "icode.submit", key, {"module": "app"})["intent"]
+        state.receipt(primary["intent_id"], {"ok": True, "reason_code": "OK", "change_number": "1"}, [])
+        rows = submission_set.evaluate(state, run, ["CS-9", "CS-9:companion:tests"], "RS-9", "CS-9")
+        self.assertEqual(rows["status"], submission_set.PENDING)
+        state.claim_intent(run, "icode.submit", f"icode.submit:{run}:CS-9:companion:tests:RS-9", {})
+        from intent_executor import Verdict, settle
+        companion = next(i for i in state.all_intents(run) if "companion" in i["idempotency_key"])
+        settle(state, companion, Verdict.ambiguous(candidates=["5", "6"]))
+        rows = submission_set.evaluate(state, run, ["CS-9", "CS-9:companion:tests"], "RS-9", "CS-9")
+        self.assertEqual(rows["status"], submission_set.PARTIAL)
 
     def test_continue_reconciles_g5_saved_draft_through_real_ku_client(self):
         # The evidence contract v1 path: a KU receipt still gates the phase for runs
@@ -2203,6 +2251,16 @@ class FakeE2ETests(unittest.TestCase):
         self.assertTrue(built["ok"], built)
         change_set = built["descriptor"]
         g7 = self._approval(run_id, "G7", change_set["input_hash"])
+        # Contract 3.2 at the boundary: an attempt naming a repository with no confirmed
+        # CR never reaches IPIPE, whatever the caller did first.
+        incomplete = self.orchestrator.submit_to_ipipe(
+            run_id, change_set, g7,
+            icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
+            change_set_ids=[change_set["change_set_id"],
+                            f"{change_set['change_set_id']}:companion:never-pushed"],
+        )
+        self.assertEqual(incomplete["reason_code"], "SUBMISSION_SET_INCOMPLETE", incomplete)
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "SUBMIT")
         submitted = self.orchestrator.submit_to_ipipe(
             run_id, change_set, g7,
             icode_runtime=FakeIcodeRuntime(self.orchestrator.state, run_id),
@@ -2224,6 +2282,8 @@ class FakeE2ETests(unittest.TestCase):
             "revisions": {entry["module"]: entry["revision"] for entry in revisions["repositories"]},
             "params": copy.deepcopy(revisions["parameters"]), "status": "SUCCESS",
             "stageBuilds": [{"id": "stage-1", "stageName": "compile", "status": "SUCCESS"}],
+            # Real builds carry their trigger time; attributing one to a write needs it.
+            "triggerTime": int(time.time() * 1000) + 60_000,
         }
         api.candidates = []
         def crash_after_remote_trigger():

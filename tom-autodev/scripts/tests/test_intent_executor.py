@@ -175,8 +175,9 @@ class TriggerTests(unittest.TestCase):
 
     def test_an_answer_without_a_build_id_is_confirmed_by_reading_the_revision_back(self):
         self.api.trigger_result = {"code": 0, "msg": "ok"}
-        self.api.on_trigger = lambda: self.api.candidates.append(build("build-9"))
-        self.api.builds["build-9"] = build("build-9")
+        fresh = {**build("build-9"), "triggerTime": 4_000_000_000_000}
+        self.api.on_trigger = lambda: self.api.candidates.append(fresh)
+        self.api.builds["build-9"] = fresh
         result = self.trigger()
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["build_id"], "build-9")
@@ -188,8 +189,9 @@ class TriggerTests(unittest.TestCase):
 
         def two_builds():
             for build_id in ("build-8", "build-9"):
-                self.api.candidates.append(build(build_id))
-                self.api.builds[build_id] = build(build_id)
+                fresh = {**build(build_id), "triggerTime": 4_000_000_000_000}
+                self.api.candidates.append(fresh)
+                self.api.builds[build_id] = fresh
         self.api.on_trigger = two_builds
         result = self.trigger()
         self.assertEqual(result["reason_code"], "BUILD_AMBIGUOUS", result)
@@ -209,6 +211,18 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(self.trigger()["reason_code"], "QUERY_REQUIRED")
         self.assertEqual(self.posts(), 1)
 
+    def test_a_build_without_a_time_or_queued_before_the_intent_is_not_its_answer(self):
+        self.api.trigger_result = TimeoutError("no answer")
+        self.trigger()
+        untimed = build("build-5")
+        queued = {**build("build-4"), "triggerTime": 1_000_000_000_000, "startTime": 4_000_000_000_000}
+        for item in (untimed, queued):
+            self.api.candidates.append(item)
+            self.api.builds[item["id"]] = item
+        self.assertEqual(self.trigger()["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(ie.intent_state(self.state, self.intent()), ie.UNKNOWN)
+        self.assertEqual(self.posts(), 1)
+
     def test_a_build_started_before_the_intent_is_not_its_answer(self):
         self.api.trigger_result = TimeoutError("no answer")
         self.trigger()
@@ -222,8 +236,9 @@ class TriggerTests(unittest.TestCase):
     def test_an_unanswered_trigger_whose_build_appears_later_is_confirmed_on_replay(self):
         self.api.trigger_result = TimeoutError("no answer")
         self.trigger()
-        self.api.candidates.append(build("build-7"))
-        self.api.builds["build-7"] = build("build-7")
+        fresh = {**build("build-7"), "triggerTime": 4_000_000_000_000}
+        self.api.candidates.append(fresh)
+        self.api.builds["build-7"] = fresh
         replay = self.trigger()
         self.assertTrue(replay["ok"], replay)
         self.assertEqual(ie.intent_state(self.state, self.intent()), ie.CONFIRMED)

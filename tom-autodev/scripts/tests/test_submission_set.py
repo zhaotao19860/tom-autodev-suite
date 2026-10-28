@@ -93,5 +93,33 @@ class SubmissionSetTests(unittest.TestCase):
         self.assertEqual(self.evaluate()["status"], ss.SUBMITTED)
 
 
+class RoutePartialTests(unittest.TestCase):
+    """A PARTIAL attempt goes to F (DIAGNOSE); PENDING and successes are left alone."""
+
+    class Orchestrator:
+        def __init__(self):
+            self.routed = []
+
+        def route_failure(self, run_id, reason_code, evidence):
+            self.routed.append((run_id, reason_code, evidence))
+            return {"ok": True, "state": "DIAGNOSE"}
+
+    def test_partial_routes_once_with_the_repository_states(self):
+        from orchestrator import _route_partial
+        orch = self.Orchestrator()
+        result = {"ok": False, "reason_code": "CR_IDENTITY_AMBIGUOUS", "submission_set": {
+            "status": ss.PARTIAL, "change_set_id": PRIMARY, "revision_set_id": REVSET,
+            "repositories": [{"change_set_id": PRIMARY, "intent_id": "i1", "intent_state": "AMBIGUOUS"}]}}
+        routed = _route_partial(result, orch, RUN)
+        self.assertEqual(routed["routed"]["state"], "DIAGNOSE")
+        self.assertEqual([r[1] for r in orch.routed], ["SUBMIT_PARTIAL"])
+
+    def test_pending_and_success_are_not_routed(self):
+        from orchestrator import _route_partial
+        orch = self.Orchestrator()
+        _route_partial({"ok": False, "submission_set": {"status": ss.PENDING}}, orch, RUN)
+        _route_partial({"ok": True, "submission_set": {"status": ss.SUBMITTED}}, orch, RUN)
+        self.assertEqual(orch.routed, [])
+
 if __name__ == "__main__":
     unittest.main()
