@@ -1,0 +1,271 @@
+{
+ "captured_at": "2026-10-28T03:57:53+00:00",
+ "content_sha256": "32b6964c4356b8a85cf06d8d8721bdc59e1ac2c4ae082981b010097ea48bcd02",
+ "derived_from": null,
+ "endpoint": "get_pipeline_by_id",
+ "fixture_id": "bgw1995-branch-pipeline-conf-348101",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "id": 348101,
+  "name": "BranchPipeline",
+  "stages": [
+   {
+    "groupJobs": [
+     [
+      {
+       "jobConfId": 9905520,
+       "jobName": "编译",
+       "jobType": "AGILE_COMPILE",
+       "realJob": {}
+      }
+     ]
+    ],
+    "inParamsMap": {},
+    "paramBeans": [],
+    "pipelineConfId": 348101,
+    "stageConfId": 5002479,
+    "stageName": "编译",
+    "upstreamStageId": 0
+   },
+   {
+    "groupJobs": [
+     [
+      {
+       "jobConfId": 9905523,
+       "jobName": "啄木鸟扫描",
+       "jobType": "zhuomuniao",
+       "realJob": {}
+      }
+     ],
+     [
+      {
+       "jobConfId": 9905522,
+       "jobName": "Bugbye代码扫描",
+       "jobType": "NEW_BUGBYE",
+       "realJob": {}
+      }
+     ],
+     [
+      {
+       "jobConfId": 9905521,
+       "jobName": "猫头鹰源码安全扫描",
+       "jobType": "AGILE_MAO_TOU_YING",
+       "realJob": {}
+      }
+     ]
+    ],
+    "inParamsMap": {},
+    "paramBeans": [],
+    "pipelineConfId": 348101,
+    "stageConfId": 5002480,
+    "stageName": "扫描",
+    "upstreamStageId": 5002479
+   },
+   {
+    "groupJobs": [
+     [
+      {
+       "jobConfId": 9905530,
+       "jobName": "400G环境搭建",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": "${AGILE_PRODUCT_HTTP_URL} ${True} ${path1} ${pid} ${pid2} ${x86bgw_path}"
+        }
+       }
+      },
+      {
+       "jobConfId": 9905531,
+       "jobName": "400G p0回归自动化测试",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": "${a} ${b} ${c} ${d} ${get_bgwagent} ${p} ${path} ${pid_test2} ${ratio1} ${ratio2} ${ratio3} ${ratio4}"
+        }
+       }
+      }
+     ],
+     [
+      {
+       "jobConfId": 9905526,
+       "jobName": "100G环境搭建",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": "${AGILE_PRODUCT_HTTP_URL} ${True} ${path1} ${pid} ${pid2} ${x86bgw_path}"
+        }
+       }
+      },
+      {
+       "jobConfId": 9905527,
+       "jobName": "100G p0回归自动化测试",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": "${a} ${b} ${c} ${d} ${get_bgwagent} ${i} ${p} ${path} ${pid_dataflow} ${pid_python} ${pid_test3} ${ratio1} ${ratio2} ${ratio3} ${ratio4}"
+        }
+       }
+      },
+      {
+       "jobConfId": 9905528,
+       "jobName": "ACL功能p0回归",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": "${path}"
+        }
+       }
+      },
+      {
+       "jobConfId": 9905529,
+       "jobName": "100G上传覆盖率",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": ""
+        }
+       }
+      }
+     ],
+     [
+      {
+       "jobConfId": 9905524,
+       "jobName": "25G 环境搭建-sep5",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": "${AGILE_PRODUCT_HTTP_URL} ${path1} ${pid} ${x86bgw_path}"
+        }
+       }
+      },
+      {
+       "jobConfId": 9905525,
+       "jobName": "运行自动化p0回归 case-sep6",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": "${a} ${b} ${c} ${d} ${get_bgwagent} ${i} ${p} ${path} ${pid_dataflow} ${pid_python} ${pid_test3} ${ratio1} ${ratio2} ${ratio3} ${ratio4}"
+        }
+       }
+      },
+      {
+       "jobConfId": 14531521,
+       "jobName": "25G上传覆盖率",
+       "jobType": "AGILE_SHELL",
+       "realJob": {
+        "shellConf": {
+         "command": ""
+        }
+       }
+      }
+     ]
+    ],
+    "inParamsMap": {
+     "get_bgwagent": null
+    },
+    "paramBeans": [
+     {
+      "defaultValue": " ",
+      "isDynamic": false,
+      "name": "get_bgwagent",
+      "required": false,
+      "type": "TEXTAREA",
+      "upStageParam": false
+     }
+    ],
+    "pipelineConfId": 348101,
+    "stageConfId": 5002481,
+    "stageName": "自动化回归测试",
+    "upstreamStageId": 5002480
+   },
+   {
+    "groupJobs": [
+     [
+      {
+       "jobConfId": 9905532,
+       "jobName": "提测",
+       "jobType": "APP_TEST_REQUEST",
+       "realJob": {}
+      }
+     ]
+    ],
+    "inParamsMap": {},
+    "paramBeans": [],
+    "pipelineConfId": 348101,
+    "stageConfId": 5002482,
+    "stageName": "提测",
+    "upstreamStageId": 5002481
+   },
+   {
+    "groupJobs": [
+     [
+      {
+       "jobConfId": 9905533,
+       "jobName": "准出审核",
+       "jobType": "acg-release-check",
+       "realJob": {}
+      }
+     ]
+    ],
+    "inParamsMap": {
+     "Job_skip_key": null
+    },
+    "paramBeans": [
+     {
+      "defaultValue": "1",
+      "isDynamic": false,
+      "name": "Job_skip_key",
+      "required": false,
+      "type": "TEXT",
+      "upStageParam": false
+     }
+    ],
+    "pipelineConfId": 348101,
+    "stageConfId": 5002483,
+    "stageName": "准出审核",
+    "upstreamStageId": 5002482
+   },
+   {
+    "groupJobs": [
+     [
+      {
+       "jobConfId": 9905534,
+       "jobName": "测试准出",
+       "jobType": "APP_TEST_PERMIT_OUT",
+       "realJob": {}
+      }
+     ]
+    ],
+    "inParamsMap": {},
+    "paramBeans": [],
+    "pipelineConfId": 348101,
+    "stageConfId": 5002484,
+    "stageName": "测试准出",
+    "upstreamStageId": 5002483
+   },
+   {
+    "groupJobs": [
+     [
+      {
+       "jobConfId": 9905535,
+       "jobName": "发布",
+       "jobType": "AGILE_RELEASE",
+       "realJob": {}
+      }
+     ]
+    ],
+    "inParamsMap": {},
+    "paramBeans": [],
+    "pipelineConfId": 348101,
+    "stageConfId": 5002485,
+    "stageName": "发布",
+    "upstreamStageId": 5002484
+   }
+  ]
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "pipeline/348101",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

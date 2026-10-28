@@ -340,13 +340,15 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 
 第 0 步已完成。后续：push 上述 commit 和 `pre-mvp` tag（待用户确认），再进入第 1 步。
 
-### 第 1 步：watcher 版本感知 + fixture（约 1 周）
+### 第 1 步：watcher 版本感知 + fixture（已完成，2026-10-28）
 
 1. watcher 启动时记录代码版本（git HEAD + 控制面文件 hash），每轮比对，不一致即退出，由 supervisor 拉起新代码；
 2. 第 6 节：录制 BGW-1995 的 RECORDED fixture，fake API 增加回放模式；现有发布段测试至少各有一条改为回放；
 3. 不改状态机、不改审批语义、workflow spec hash 不变。
 
 验收：全量测试通过；回放 fixture 的发布段场景（表达式跳过、无身份回执、发布提前 PENDING、配置删除 stage）通过。
+
+**结果：** `e52fc0a` watcher 版本感知；fixture 12 份（全部 RECORDED），回放测试 9 项，全量 1496 通过。无身份回执和「发布」提前 PENDING 的原始响应已过时无法补录：前者只留有 observation（`response_keys: [code, entities, msg]`），后者 build 已结束；两者在第 2 步合同 3.1 / 3.3 实现时按 observation 派生为 DERIVED fixture，并在下一个真实 run 中补录。
 
 ### 第 2 步：合同逐个合入（约 2~3 周）
 

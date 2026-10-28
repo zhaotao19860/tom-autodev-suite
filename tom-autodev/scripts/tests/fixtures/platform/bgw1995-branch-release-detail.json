@@ -1,0 +1,56 @@
+{
+ "captured_at": "2026-10-28T03:57:52+00:00",
+ "content_sha256": "e7f75c063ab1e13c6b2a36c13aeb841f022b07f7befffeaa52b84cd156ff7a28",
+ "derived_from": null,
+ "endpoint": "stage_detail",
+ "fixture_id": "bgw1995-branch-release-detail",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "code": 200,
+  "entities": {
+   "realJobBuilds": [
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793156492000,
+      "id": 1039636050,
+      "jobConfId": 9905535,
+      "jobName": "发布",
+      "jobType": "AGILE_RELEASE",
+      "realJobBuild": {
+       "branch": "x86bgw-dpdk-2011-syncookie",
+       "id": 15480416,
+       "module": "baidu/sysip/x86bgw",
+       "releaseOutputHttpUrl": "https://irepo.baidu-int.com/rest/prod/v3/baidu/sysip/x86bgw/releases/26.10.20.1/files",
+       "releaseStatus": "SUCCESS",
+       "revision": "a9715d5bc29cd61e6d4f5feb38d36061ea16da4f",
+       "version": "26.10.20.1"
+      },
+      "realJobBuildId": 480069753,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649960675,
+      "startTime": 1793156482000,
+      "status": "SUCC"
+     }
+    ]
+   ],
+   "stageBuild": {
+    "hasDynamicParams": false,
+    "manualParams": null,
+    "pipelineBuildId": 275700446,
+    "pipelineConfId": 348101,
+    "stageBuildId": 649960675,
+    "stageConfId": 5002485,
+    "stageName": "发布",
+    "startTime": 1793156482000,
+    "status": "SUCC"
+   }
+  },
+  "msg": null
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "stage/649960675",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

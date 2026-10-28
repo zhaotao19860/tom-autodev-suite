@@ -1,0 +1,92 @@
+{
+ "captured_at": "2026-10-28T03:57:51+00:00",
+ "content_sha256": "e8353d6ca999dbc9e411830046325d7034c813926d570be35d83d7efddacc6c3",
+ "derived_from": null,
+ "endpoint": "stage_detail",
+ "fixture_id": "bgw1995-change-unit-partial-skip",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "code": 200,
+  "entities": {
+   "realJobBuilds": [
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793001580000,
+      "id": 1039054832,
+      "jobConfId": 14130068,
+      "jobName": "25G单测",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615686,
+      "startTime": 1793001580000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793001580000,
+      "id": 1039054834,
+      "jobConfId": 14459471,
+      "jobName": "25G上传覆盖率",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615686,
+      "startTime": 1793001580000,
+      "status": "SKIPPED"
+     }
+    ],
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793001792000,
+      "id": 1039054830,
+      "jobConfId": 9638654,
+      "jobName": "100G单测",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": {},
+      "realJobBuildId": 479522976,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649615686,
+      "startTime": 1793001580000,
+      "status": "SUCC"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793001816000,
+      "id": 1039054831,
+      "jobConfId": 9638655,
+      "jobName": "100G上传覆盖率",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": {},
+      "realJobBuildId": 479525151,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649615686,
+      "startTime": 1793001792000,
+      "status": "SUCC"
+     }
+    ]
+   ],
+   "stageBuild": {
+    "hasDynamicParams": false,
+    "manualParams": null,
+    "pipelineBuildId": 275535376,
+    "pipelineConfId": 348102,
+    "stageBuildId": 649615686,
+    "stageConfId": 4875669,
+    "stageName": "单测",
+    "startTime": 1793001580000,
+    "status": "SKIPPED"
+   }
+  },
+  "msg": null
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "stage/649615686",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

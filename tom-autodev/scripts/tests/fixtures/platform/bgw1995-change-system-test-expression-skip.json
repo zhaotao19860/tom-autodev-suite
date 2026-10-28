@@ -1,0 +1,48 @@
+{
+ "captured_at": "2026-10-28T03:57:51+00:00",
+ "content_sha256": "42c1df414cad82a85bed4b70f7db4b0a0b46e5db1733ab3aa8bbdb53c761fe91",
+ "derived_from": null,
+ "endpoint": "stage_detail",
+ "fixture_id": "bgw1995-change-system-test-expression-skip",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "code": 200,
+  "entities": {
+   "realJobBuilds": [
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793073215000,
+      "id": 1039054854,
+      "jobConfId": 11735221,
+      "jobName": "系统测试p0级功能回归",
+      "jobType": "AGILE_TITANS_ITP",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615694,
+      "startTime": 1793073215000,
+      "status": "SKIPPED"
+     }
+    ]
+   ],
+   "stageBuild": {
+    "hasDynamicParams": false,
+    "manualParams": null,
+    "pipelineBuildId": 275535376,
+    "pipelineConfId": 348102,
+    "stageBuildId": 649615694,
+    "stageConfId": 5993103,
+    "stageName": "系统测试p0级功能回归",
+    "startTime": 1793073215000,
+    "status": "SKIPPED"
+   }
+  },
+  "msg": null
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "stage/649615694",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

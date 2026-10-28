@@ -1,0 +1,48 @@
+{
+ "captured_at": "2026-10-28T03:57:52+00:00",
+ "content_sha256": "754efb27f792d667b99959482e46554c1bc1bb0620c505b657125a74564cdebb",
+ "derived_from": null,
+ "endpoint": "stage_detail",
+ "fixture_id": "bgw1995-branch-config-deleted-stage-detail",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "code": 200,
+  "entities": {
+   "realJobBuilds": [
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793154999000,
+      "id": 1039636046,
+      "jobConfId": 11735155,
+      "jobName": "系统测试功能回归",
+      "jobType": "AGILE_TITANS_ITP",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649960671,
+      "startTime": 1793154999000,
+      "status": "SKIPPED"
+     }
+    ]
+   ],
+   "stageBuild": {
+    "hasDynamicParams": false,
+    "manualParams": null,
+    "pipelineBuildId": 275700446,
+    "pipelineConfId": 348101,
+    "stageBuildId": 649960671,
+    "stageConfId": 5993070,
+    "stageName": "系统测试功能回归",
+    "startTime": 1793154999000,
+    "status": "SKIPPED"
+   }
+  },
+  "msg": null
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "stage/649960671",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

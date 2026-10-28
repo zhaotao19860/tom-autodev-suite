@@ -1,0 +1,19 @@
+{
+ "captured_at": "2026-10-28T03:57:53+00:00",
+ "content_sha256": "6943c5dc50eccae8f99ce02051cc949b0722323eaade938fb1c2299d771ed4db",
+ "derived_from": null,
+ "endpoint": "release_info",
+ "fixture_id": "gateway-get-release-info-404",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "error": {
+   "reason_code": "OBJECT_NOT_FOUND",
+   "status": 404
+  }
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "release_info/baidu/sysip/x86bgw",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

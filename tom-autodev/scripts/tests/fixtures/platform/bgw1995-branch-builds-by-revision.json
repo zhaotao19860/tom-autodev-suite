@@ -1,0 +1,76 @@
+{
+ "captured_at": "2026-10-28T03:57:52+00:00",
+ "content_sha256": "dd4cfaf14e471f60de1fb62cc8e2f73d536bbca7cdcef3d9cb81932a73330b69",
+ "derived_from": null,
+ "endpoint": "builds_by_revision",
+ "fixture_id": "bgw1995-branch-builds-by-revision",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": [
+  {
+   "branch": "x86bgw-dpdk-2011-syncookie",
+   "id": 275700446,
+   "module": "baidu/sysip/x86bgw",
+   "name": "BranchPipeline",
+   "pipelineConfId": 348101,
+   "pipelineType": "MODULE",
+   "stageBuilds": [
+    {
+     "id": 649960668,
+     "stageName": "编译",
+     "status": "SUCC"
+    },
+    {
+     "id": 649960669,
+     "stageName": "扫描",
+     "status": "SKIPPED"
+    },
+    {
+     "id": 649960670,
+     "stageName": "自动化回归测试",
+     "status": "SKIPPED"
+    },
+    {
+     "id": 649960671,
+     "stageName": "系统测试功能回归",
+     "status": "SKIPPED"
+    },
+    {
+     "id": 649960672,
+     "stageName": "提测",
+     "status": "SUCC"
+    },
+    {
+     "id": 649960673,
+     "stageName": "准出审核",
+     "status": "SKIPPED"
+    },
+    {
+     "id": 649960674,
+     "stageName": "测试准出",
+     "status": "SUCC"
+    },
+    {
+     "id": 649960675,
+     "stageName": "发布",
+     "status": "SUCC"
+    }
+   ],
+   "startTime": 1793081891000,
+   "status": "SUCC",
+   "trigger": {
+    "branch": "x86bgw-dpdk-2011-syncookie",
+    "id": 275738945,
+    "module": "baidu/sysip/x86bgw",
+    "revision": "a9715d5bc29cd61e6d4f5feb38d36061ea16da4f",
+    "svnType": "BRANCHES",
+    "triggerMode": "GERRIT",
+    "triggerTime": 1793081873000
+   }
+  }
+ ],
+ "schema": "platform-fixture.v1",
+ "source_object": "revision/a9715d5bc29cd61e6d4f5feb38d36061ea16da4f",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

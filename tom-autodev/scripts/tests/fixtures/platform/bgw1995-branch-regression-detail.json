@@ -1,0 +1,164 @@
+{
+ "captured_at": "2026-10-28T03:57:52+00:00",
+ "content_sha256": "b7796e438a92ebe7672058fade10ae240af407fd50c3aba79579944f8223934b",
+ "derived_from": null,
+ "endpoint": "stage_detail",
+ "fixture_id": "bgw1995-branch-regression-detail",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "code": 200,
+  "entities": {
+   "realJobBuilds": [
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793092696000,
+      "id": 1039636044,
+      "jobConfId": 9905530,
+      "jobName": "400G环境搭建",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649960670,
+      "startTime": 1793092696000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793092696000,
+      "id": 1039636045,
+      "jobConfId": 9905531,
+      "jobName": "400G p0回归自动化测试",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649960670,
+      "startTime": 1793092696000,
+      "status": "SKIPPED"
+     }
+    ],
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793092839000,
+      "id": 1039636040,
+      "jobConfId": 9905526,
+      "jobName": "100G环境搭建",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": {},
+      "realJobBuildId": 479885619,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649960670,
+      "startTime": 1793092696000,
+      "status": "SUCC"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793150209000,
+      "id": 1039636041,
+      "jobConfId": 9905527,
+      "jobName": "100G p0回归自动化测试",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": {},
+      "realJobBuildId": 479886755,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649960670,
+      "startTime": 1793092839000,
+      "status": "SUCC"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793150210000,
+      "id": 1039636042,
+      "jobConfId": 9905528,
+      "jobName": "ACL功能p0回归",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649960670,
+      "startTime": 1793150210000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793150252000,
+      "id": 1039636043,
+      "jobConfId": 9905529,
+      "jobName": "100G上传覆盖率",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": {},
+      "realJobBuildId": 480044908,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649960670,
+      "startTime": 1793150210000,
+      "status": "SUCC"
+     }
+    ],
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793092696000,
+      "id": 1039636037,
+      "jobConfId": 9905524,
+      "jobName": "25G 环境搭建-sep5",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649960670,
+      "startTime": 1793092696000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793092696000,
+      "id": 1039636038,
+      "jobConfId": 9905525,
+      "jobName": "运行自动化p0回归 case-sep6",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649960670,
+      "startTime": 1793092696000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793092696000,
+      "id": 1039636039,
+      "jobConfId": 14531521,
+      "jobName": "25G上传覆盖率",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649960670,
+      "startTime": 1793092696000,
+      "status": "SKIPPED"
+     }
+    ]
+   ],
+   "stageBuild": {
+    "hasDynamicParams": false,
+    "manualParams": null,
+    "pipelineBuildId": 275700446,
+    "pipelineConfId": 348101,
+    "stageBuildId": 649960670,
+    "stageConfId": 5002481,
+    "stageName": "自动化回归测试",
+    "startTime": 1793092695000,
+    "status": "SKIPPED"
+   }
+  },
+  "msg": null
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "stage/649960670",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

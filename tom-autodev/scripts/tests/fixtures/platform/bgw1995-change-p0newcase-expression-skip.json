@@ -1,0 +1,48 @@
+{
+ "captured_at": "2026-10-28T03:57:51+00:00",
+ "content_sha256": "dd406dacbf358221bd6726f32368d0c83ed6bf5b53a66455c55c93c7d19f3556",
+ "derived_from": null,
+ "endpoint": "stage_detail",
+ "fixture_id": "bgw1995-change-p0newcase-expression-skip",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "code": 200,
+  "entities": {
+   "realJobBuilds": [
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793028428000,
+      "id": 1039054852,
+      "jobConfId": 15647767,
+      "jobName": "P0新功能调试",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615692,
+      "startTime": 1793028428000,
+      "status": "SKIPPED"
+     }
+    ]
+   ],
+   "stageBuild": {
+    "hasDynamicParams": false,
+    "manualParams": null,
+    "pipelineBuildId": 275535376,
+    "pipelineConfId": 348102,
+    "stageBuildId": 649615692,
+    "stageConfId": 8175789,
+    "stageName": "P0新case回归",
+    "startTime": 1793028427000,
+    "status": "SKIPPED"
+   }
+  },
+  "msg": null
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "stage/649615692",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}

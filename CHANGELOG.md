@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 第 1 步：watcher 感知代码版本、真实平台 fixture
+
+- watcher 感知代码版本（`code_version.py`）：`watch-approvals` / `watch-ipipe` 启动时记下控制面源码（非测试 `.py`）的内容 hash，每轮比对，变了就以 `CODE_VERSION_CHANGED` 正常退出，由 `supervise.sh` 拉起新代码。起因：旧 watcher 跑旧代码，10-25 误报 8.4 万条 `WORKFLOW_SPEC_DRIFT`，10-27 再次发生。
+- 真实平台 fixture（`tests/fixtures/platform/`，`platform-fixture.v1`）：`record.py` 只读录制 BGW-1995 的 12 份 iPipe 响应，按端点白名单只留结构和身份字段，不含人员、主机、日志链接和凭据（仓库是公开的）；每份带 `content_sha256`、`origin`、来源对象。`tests/platform_fixtures.py` 回放并校验 hash。
+- `test_platform_fixtures.py` 用这些真实响应验证：表达式跳过（只有整 stage 全 EXPRESSION 才算，单测、p0级自动化回归测试这类部分跳过的仍需通过）、参数在配置 `paramBeans` 而 `manualParams=null`、配置中已删除的 stage（当前 fail-closed，合同 3.3 将改）、发布身份来自 `AGILE_RELEASE` job、`getReleaseInfo` 404。
+- 不改状态机、审批语义和 workflow spec hash。全量 1496 通过。
+
 ## 2026-10-27 · 早到的人工阶段 G8 在执行层失效
 
 - 上一条只修了 worker 的选择；已批出去的错误 G8（c52c3b33…，「发布」）仍然有效：它的 input hash 只绑定 stage 本身，回归一跑完 worker 就会拿它执行发布。

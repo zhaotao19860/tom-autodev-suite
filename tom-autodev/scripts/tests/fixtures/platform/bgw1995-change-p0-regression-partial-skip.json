@@ -1,0 +1,194 @@
+{
+ "captured_at": "2026-10-28T03:57:51+00:00",
+ "content_sha256": "ce8e170ecd48ac1be83e8466aebd59ea49cfd5392a684d386cb71eeee8c7db08",
+ "derived_from": null,
+ "endpoint": "stage_detail",
+ "fixture_id": "bgw1995-change-p0-regression-partial-skip",
+ "origin": "RECORDED",
+ "platform": "ipipe",
+ "redaction": "endpoint whitelist (record.py) + redact_secrets",
+ "response": {
+  "code": 200,
+  "entities": {
+   "realJobBuilds": [
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054846,
+      "jobConfId": 9638664,
+      "jobName": "25G 环境搭建（启动 BGW）",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054847,
+      "jobConfId": 9638665,
+      "jobName": "运行 p0回归自动化 case",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054848,
+      "jobConfId": 9638666,
+      "jobName": "P0自动化case-异常报文攻击",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     }
+    ],
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002191000,
+      "id": 1039054842,
+      "jobConfId": 9638661,
+      "jobName": "100G非打桩环境搭建",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": {},
+      "realJobBuildId": 479526999,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SUCC"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793028427000,
+      "id": 1039054844,
+      "jobConfId": 9638662,
+      "jobName": "非cov版本P0回归测试",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": {},
+      "realJobBuildId": 479527978,
+      "skipByStage": "EXECUTE",
+      "stageBuildId": 649615688,
+      "startTime": 1793002191000,
+      "status": "SUCC"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793028427000,
+      "id": 1039054845,
+      "jobConfId": 9638663,
+      "jobName": "docker P0级自动化用例回归",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793028427000,
+      "status": "SKIPPED"
+     }
+    ],
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054839,
+      "jobConfId": 9638659,
+      "jobName": "400G非打桩环境搭建",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054840,
+      "jobConfId": 9638660,
+      "jobName": "P0回归",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     }
+    ],
+    [
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054835,
+      "jobConfId": 9638656,
+      "jobName": "100G非打桩环境搭建",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054837,
+      "jobConfId": 9638657,
+      "jobName": "非cov版本P0回归测试,maybe faster",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     },
+     {
+      "enableManualSkip": true,
+      "endTime": 1793002049000,
+      "id": 1039054838,
+      "jobConfId": 9638658,
+      "jobName": "docker P0级自动化用例回归",
+      "jobType": "AGILE_SHELL",
+      "realJobBuild": null,
+      "realJobBuildId": -2,
+      "skipByStage": "EXPRESSION",
+      "stageBuildId": 649615688,
+      "startTime": 1793002049000,
+      "status": "SKIPPED"
+     }
+    ]
+   ],
+   "stageBuild": {
+    "hasDynamicParams": false,
+    "manualParams": null,
+    "pipelineBuildId": 275535376,
+    "pipelineConfId": 348102,
+    "stageBuildId": 649615688,
+    "stageConfId": 4875670,
+    "stageName": "p0级自动化回归测试",
+    "startTime": 1793002049000,
+    "status": "SKIPPED"
+   }
+  },
+  "msg": null
+ },
+ "schema": "platform-fixture.v1",
+ "source_object": "stage/649615688",
+ "source_run_id": "160c6840b08842108174d08b7b6d0823"
+}
