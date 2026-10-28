@@ -121,5 +121,23 @@ class RoutePartialTests(unittest.TestCase):
         _route_partial({"ok": True, "submission_set": {"status": ss.SUBMITTED}}, orch, RUN)
         self.assertEqual(orch.routed, [])
 
+class PartialHeldTests(unittest.TestCase):
+    """Codex round 4: the PARTIAL exemption lasts while the run is out of SUBMIT."""
+
+    def events(self, last_state):
+        route = {"state": "DIAGNOSE", "payload": {"reason_code": "SUBMIT_PARTIAL", "evidence": {
+            "submission_set": {"repositories": [{"intent_id": "i-amb", "intent_state": "AMBIGUOUS"}]}}}}
+        return [{"state": "SUBMIT", "payload": {}}, route] + (
+            [{"state": last_state, "payload": {}}] if last_state else [])
+
+    def test_held_in_diagnosis_and_later_phases(self):
+        from recovery import partial_held
+        self.assertEqual(partial_held(self.events(None)), frozenset({"i-amb"}))
+        self.assertEqual(partial_held(self.events("IMPLEMENT")), frozenset({"i-amb"}))
+
+    def test_back_in_submit_the_intent_holds_the_run_again(self):
+        from recovery import partial_held
+        self.assertEqual(partial_held(self.events("SUBMIT")), frozenset())
+
 if __name__ == "__main__":
     unittest.main()

@@ -721,9 +721,17 @@ class StateStore:
     def receipt_unless_ambiguous(
         self, intent_id: str, response: dict[str, Any], evidence_refs: list[str],
     ) -> dict[str, Any] | None:
-        """`receipt`, unless an AMBIGUOUS intent.state observation already exists (None)."""
+        """`receipt`, unless an AMBIGUOUS intent.state observation already exists (None).
+
+        An existing receipt is returned as it stands, whatever this call carried: the
+        first terminal verdict wins (a stale absence after a confirmation, or vice versa).
+        """
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM receipts WHERE intent_id = ?", (intent_id,)).fetchone()
+            if existing is not None:
+                return _receipt_row(existing)
             rows = connection.execute(
                 "SELECT observation_json FROM external_observations WHERE intent_id = ?",
                 (intent_id,)).fetchall()

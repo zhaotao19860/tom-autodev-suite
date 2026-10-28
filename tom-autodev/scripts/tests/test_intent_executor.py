@@ -40,6 +40,27 @@ class StateMachineTests(unittest.TestCase):
         self.assertEqual(ie.intent_state(self.state, self.intent), ie.AMBIGUOUS)
         self.assertNotEqual(self.claim_again()["status"], "CLAIMED")
 
+    def test_a_stale_absence_after_a_confirmation_returns_the_confirmation(self):
+        # GPT-6.1-Sol round 4: the first terminal receipt wins, no RECEIPT_CONFLICT.
+        self.state.receipt(self.intent["intent_id"], {"ok": True, "reason_code": "OK"}, [])
+        result = ie.settle(self.state, self.intent, ie.Verdict.absent(checked="stale"))
+        self.assertEqual(result.state, ie.CONFIRMED)
+        self.assertEqual(ie.intent_state(self.state, self.intent), ie.CONFIRMED)
+
+    def test_a_confirmation_after_a_recorded_ambiguity_is_dropped(self):
+        ie.settle(self.state, self.intent, ie.Verdict.ambiguous(candidates=["1", "2"]))
+        self.assertIsNone(self.state.receipt_unless_ambiguous(
+            self.intent["intent_id"], {"ok": True, "reason_code": "OK"}, []))
+        self.assertEqual(ie.intent_state(self.state, self.intent), ie.AMBIGUOUS)
+
+    def test_a_build_s_embedded_trigger_time_decides_attribution(self):
+        from clients.ipipe_runtime import _created_after
+        since = "2026-10-28T10:00:00+00:00"
+        queued = {"trigger": {"triggerTime": 1793170000000}, "startTime": 4_000_000_000_000}
+        self.assertFalse(_created_after(queued, since, 120))  # created 2026-10-27, started later
+        fresh = {"trigger": {"triggerTime": 4_000_000_000_000}}
+        self.assertTrue(_created_after(fresh, since, 120))  # no start time yet, still attributable
+
     def test_a_fresh_claim_is_claimed_and_holds_the_target(self):
         self.assertEqual(ie.intent_state(self.state, self.intent), ie.CLAIMED)
         self.assertEqual(self.claim_again()["status"], "BLOCKED")

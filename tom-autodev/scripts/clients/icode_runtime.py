@@ -806,10 +806,11 @@ class IcodeRuntime:
             return _failure("CR_QUERY_FAILED")
         try:
             decoded = json.loads(result["stdout"])
-            changes = decoded.get("data", {}).get("changes", [])
+            # No explicit `data.changes` list (an error envelope, say) is not "no CRs".
+            changes = decoded["data"]["changes"]
             # A listing with more pages cannot prove a CR is absent.
-            complete = decoded.get("data", {}).get("hasMore") is not True
-        except (AttributeError, json.JSONDecodeError):
+            complete = decoded["data"].get("hasMore") is not True
+        except (AttributeError, KeyError, TypeError, json.JSONDecodeError):
             return _failure("CR_RESPONSE_INVALID")
         if not isinstance(changes, list):
             return _failure("CR_RESPONSE_INVALID")
@@ -901,8 +902,12 @@ class IcodeRuntime:
                 ],
             ],
         }
-        self.state.receipt(intent_id, response, response["evidence_refs"])
-        return response
+        written = self.state.receipt_unless_ambiguous(intent_id, response, response["evidence_refs"])
+        if written is None:
+            # A concurrent reconcile recorded AMBIGUOUS first; that verdict stands.
+            return _failure("CR_IDENTITY_AMBIGUOUS", intent_id=intent_id, retry_allowed=False,
+                            intent_state=intent_executor.AMBIGUOUS)
+        return written["response"]
 
 
 _SUBMIT_CONFIRM_POLLS = 3

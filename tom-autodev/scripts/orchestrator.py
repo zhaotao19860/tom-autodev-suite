@@ -1853,6 +1853,12 @@ class Orchestrator:
         pinned = self._runtime_profile(run_id)
         if not pinned.get("ok"):
             return pinned
+        # Contract 3.2: a caller list that omits a required repository is refused before
+        # anything is pushed, not after the primary CR exists.
+        required = _attempt_change_set_ids(self, run_id, change_set)
+        if change_set_ids is not None and not set(required) <= set(change_set_ids):
+            return {"ok": False, "reason_code": "SUBMISSION_SET_MISMATCH", "run_id": run_id,
+                    "required": required, "given": sorted(change_set_ids)}
         submitted = icode_runtime.submit(change_set, approval)
         if not isinstance(submitted, dict) or submitted.get("reason_code") != "OK" or not submitted.get("ok"):
             return submitted if isinstance(submitted, dict) else {
@@ -1925,10 +1931,6 @@ class Orchestrator:
         # repository listed for it confirmed with a CR. Checked here, at the boundary that
         # owns the transition, not by the caller's ordering.
         import submission_set
-        required = _attempt_change_set_ids(self, run_id, change_set)
-        if change_set_ids is not None and not set(required) <= set(change_set_ids):
-            return {"ok": False, "reason_code": "SUBMISSION_SET_MISMATCH", "run_id": run_id,
-                    "required": required, "given": sorted(change_set_ids)}
         aggregate = submission_set.evaluate(
             self.state, run_id, sorted(set(required) | set(change_set_ids or [])),
             revision_set_id, change_set_id)

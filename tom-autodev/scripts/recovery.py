@@ -8,6 +8,26 @@ from lock_manager import LockManager
 from state_store import StateStore
 
 
+def partial_held(events: list[dict[str, Any]]) -> frozenset[str]:
+    """Intents a recorded SUBMIT_PARTIAL route carried into DIAGNOSE, while not in SUBMIT.
+
+    They stay open (no receipt) and keep blocking writes to their target through the
+    claim prefix; they only stop holding the run, so the diagnosis a person needs to
+    decide them can be produced. Back in SUBMIT they hold the run again.
+    """
+    if not events or events[-1].get("state") == "SUBMIT":
+        return frozenset()
+    held: set[str] = set()
+    for event in events:
+        payload = event.get("payload") or {}
+        if payload.get("reason_code") != "SUBMIT_PARTIAL":
+            continue
+        rows = ((payload.get("evidence") or {}).get("submission_set") or {}).get("repositories") or []
+        held.update(row["intent_id"] for row in rows
+                    if isinstance(row, dict) and isinstance(row.get("intent_id"), str))
+    return frozenset(held)
+
+
 class Recovery:
     def __init__(
         self,
@@ -30,6 +50,7 @@ class Recovery:
         events = self.state.events(run_id)
         checkpoint = events[-1] if events else None
         side_channel = workflow_spec.run_evidence_contract(events) == "v2"
+        held_for_diagnosis = held_for_diagnosis | partial_held(events)
         uncertain = [
             intent for intent in self.state.pending_intents(run_id)
             if intent["intent_id"] not in held_for_diagnosis

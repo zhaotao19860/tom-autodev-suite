@@ -931,6 +931,23 @@ class IpipeRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["reason_code"], "OK")
 
+    def test_a_failed_stage_rerun_is_refused_after_its_configuration_changes(self):
+        # GPT-6.1-Sol round 4: contract 3.3 binds failed-stage re-runs to the live config.
+        failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
+        self.bind_build(status="FAIL", stages=[failed])
+        self.api.stages["build-1"] = [failed]
+        self.api.pipeline = {**self.api.pipeline, "stages": [
+            {"stageConfId": "c1", "stageName": "unit", "groupJobs": [[
+                {"jobConfId": "j1", "realJob": {"shellConf": {"command": "make test"}}}]]}]}
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        hashed = self.runtime.rerun_input_hash("stage-1")
+        self.assertIn("config_hash", hashed["binding"]["stage_plan"])
+        approval = approved(self.ledger, "G8", hashed["input_hash"])
+        self.api.pipeline["stages"][0]["groupJobs"][0][0]["realJob"]["shellConf"]["command"] = "make other"
+        result = self.runtime.rerun("stage-1", approval)
+        self.assertEqual(result["reason_code"], "APPROVAL_INPUT_MISMATCH", result)
+        self.assertFalse(any(c[0] == "manual_execute_stage" for c in self.api.calls))
+
     def test_rerun_g8_hash_binds_complete_pipeline_and_environment_identity(self):
         failed = {"id": "stage-1", "stageName": "unit", "status": "FAIL"}
         self.bind_build(status="FAIL", stages=[failed])

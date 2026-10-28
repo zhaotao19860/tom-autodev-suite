@@ -172,6 +172,10 @@ def settle(
         }, [])
         if written is None:
             return sticky_ambiguous(state_store, intent) or Verdict.ambiguous()
+        landed = written.get("response") or {}
+        if landed.get("intent_state") != CONFIRMED_ABSENT:
+            # A confirmation landed first; it is the answer.
+            return Verdict.confirmed(landed)
         return verdict
     record_state(state_store, intent["intent_id"], verdict)
     return verdict

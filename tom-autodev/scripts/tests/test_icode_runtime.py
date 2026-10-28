@@ -902,6 +902,25 @@ class IcodeRuntimeTests(unittest.TestCase):
                          "QUERY_REQUIRED")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 2)
 
+    def test_an_error_envelope_never_proves_absence(self):
+        # Codex round 4: a NEW listing without data.changes is not "no CRs".
+        from datetime import datetime, timedelta, timezone
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = TimeoutError("unknown")
+        self.runtime().submit(change, approval)
+        original = self.transport.run
+
+        def broken(argv, **kwargs):
+            if "get_repo_reviews" in argv and "NEW" in argv:
+                return {"returncode": 0, "stdout": json.dumps({"code": 500, "msg": "err"}), "stderr": ""}
+            return original(argv, **kwargs)
+        self.transport.run = broken
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=20)
+        self.assertNotEqual(self.runtime(clock=later).submit(change, approval)["reason_code"],
+                            "SUBMIT_CONFIRMED_ABSENT")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
     def test_a_push_that_may_still_be_running_is_never_absent(self):
         from datetime import datetime, timedelta, timezone
         change = self.change_set()

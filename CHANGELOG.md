@@ -4,6 +4,17 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 评审修复第 4 轮（Codex 4 条 P1、1 条 P2 + GPT-6.1-Sol 1 条 P1、2 条 P2）
+
+- iCode 成功回执与缺席回执都经 `receipt_unless_ambiguous` 写入：已有 AMBIGUOUS 时不写，已有回执时返回已落的那份（先到的终态结论为准，不再 `RECEIPT_CONFLICT`）。
+- iCode NEW 列表缺 `data.changes`（错误信封）为 `CR_RESPONSE_INVALID`，不能证明缺席。
+- trigger 归属读取嵌套的 `trigger.triggerTime`（RECORDED fixture 的实际结构），其次顶层字段与 `startTime`。
+- 合同 3.3：失败 stage 重跑的 G8 也绑定实时配置 hash（同 build、同 stage id，配置是唯一会漂的部分）。
+- rerun / rebuild / trigger 的对账遇到 profile 守卫拒绝返回 REFUSED，不写 `intent.state`。
+- `submit_to_ipipe` 的仓库集合校验移到第一次 push 之前。
+- `SUBMIT_PARTIAL` 带入 DIAGNOSE 的未决 intent 在 run 离开 SUBMIT 期间持续豁免（`recovery.partial_held`，`PhaseProtocol._blocking_pending` 同样适用），回到 SUBMIT 后恢复阻断；intent 本身始终不关闭。
+- 测试：新增 7 项；全量 1559 通过。
+
 ## 2026-10-28 · MVP 评审修复第 3 轮（Codex gpt-6-astra 4 条 P1 + GPT-6.1-Sol 2 条 P1、1 条 P2）
 
 - iCode：`claim` 为 EXISTING 的提交一律只对账，`:after:` 后继 intent 不再因祖先已缺席/放弃而再次 push。

@@ -738,6 +738,16 @@ class IpipeRuntime:
                 return readiness
             ready_after = readiness["ready_after"]
             plan_binding = readiness.get("stage_plan")
+        elif stage["status"] in _FAILURE:
+            # Contract 3.3 binds every stage-executing write, not only manual ones: a
+            # failed stage re-run under an edited configuration is a different run. The
+            # re-run reuses the same build and stage id (already bound), so the live
+            # configuration is what can drift underneath the approval.
+            planned = self._plan_snapshot(stage_binding, [])
+            if "stage_plan" not in planned:
+                return planned
+            config_only = {k: v for k, v in planned["stage_plan"].items() if k == "config_hash"}
+            plan_binding = config_only or None
         rerunnable = stage["status"] in _FAILURE | _MANUAL
         # A stage whose jobs all exited zero while their logs report failed cases is a
         # failure the platform calls a success. Refusing to re-run it left the only remedy
@@ -800,6 +810,12 @@ class IpipeRuntime:
                              "status": item["status"]} for item in pending],
                 retry_allowed=True,
             )
+        return {"ok": True, "ready_after": [
+            {"stage_build_id": item["stage_build_id"], "status": item["status"]}
+            for item in earlier
+        ], **self._plan_snapshot(stage_binding, stages)}
+
+    def _plan_snapshot(self, stage_binding: dict[str, Any], stages: list[dict[str, Any]]) -> dict[str, Any]:
         # Contract 3.3: the approval also binds the build's stage shape and the live
         # configuration the stage runs under. Both are re-read for the write, so a
         # configuration edited between the G8 and the POST changes the hash and the
@@ -815,10 +831,7 @@ class IpipeRuntime:
                 return _failure(_transport_reason(error, "STAGE_QUERY_FAILED"))
             if isinstance(configuration, dict) and configuration.get("stages"):
                 plan["config_hash"] = stage_plan.config_hash(configuration)
-        return {"ok": True, "ready_after": [
-            {"stage_build_id": item["stage_build_id"], "status": item["status"]}
-            for item in earlier
-        ], "stage_plan": plan}
+        return {"stage_plan": plan}
 
     def rerun_input_hash(
         self, stage_build_id: str, *, parameters: dict[str, Any] | None = None
@@ -1315,6 +1328,10 @@ class IpipeRuntime:
         if sticky is not None:
             return sticky
         reconciled = self._reconcile_rerun(intent)
+        blocked = self._profile_error()
+        if blocked is not None:
+            # A control-plane guard (profile drift) stopped the read-back: no verdict.
+            return intent_executor.Verdict.refused(blocked)
         if reconciled is None:
             return intent_executor.Verdict.unknown()
         if reconciled.get("ok") is True:
@@ -1847,6 +1864,10 @@ class IpipeRuntime:
         if sticky is not None:
             return sticky
         reconciled = self._reconcile_rebuild(intent)
+        blocked = self._profile_error()
+        if blocked is not None:
+            # A control-plane guard (profile drift) stopped the read-back: no verdict.
+            return intent_executor.Verdict.refused(blocked)
         if reconciled is None:
             return intent_executor.Verdict.unknown()
         if reconciled.get("ok") is True:
@@ -2234,6 +2255,9 @@ class IpipeRuntime:
         nothing is re-sent; none, or an unreadable listing, stays UNKNOWN.
         """
         found = self.discover(profile, revision_set, context["module"], since=intent.get("created_at"))
+        blocked = self._profile_error()
+        if blocked is not None:
+            return intent_executor.Verdict.refused(blocked)
         if found.get("reason_code") == "BUILD_AMBIGUOUS":
             return self._trigger_ambiguous(found)
         if found.get("reason_code") != "OK":
@@ -3304,7 +3328,10 @@ def _created_after(build: Any, since: Any, skew_seconds: float) -> bool:
     """
     if not isinstance(build, dict):
         return False
-    raw = build.get("triggerTime")
+    trigger = build.get("trigger") if isinstance(build.get("trigger"), dict) else {}
+    # The listing embeds the creation time as trigger.triggerTime (RECORDED fixture
+    # bgw1995-branch-builds-by-revision); a flattened record may carry it at top level.
+    raw = trigger.get("triggerTime", build.get("triggerTime"))
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raw = build.get("startTime", build.get("buildTime"))
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
