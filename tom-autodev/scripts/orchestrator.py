@@ -4252,17 +4252,28 @@ def _submit(
         argv_transport=ProcessTransport(),
         submission_policy=profile.get("submission_policy"),
     )
+    # Contract 3.2: every repository of the change set is its own iCode intent, and the
+    # attempt as a whole is SUBMITTED only once all of them are confirmed. The transition
+    # to IPIPE happens inside submit_to_ipipe, after the last push, so it can only follow
+    # a complete set; a partial one is reported as such and goes to F, never onward.
+    import submission_set
+    change_set_ids = [descriptor["change_set_id"]]
     if companion is not None:
-        # The test commit is pushed first and under the same G7: the transition to IPIPE
-        # happens inside submit_to_ipipe, and it must not happen while the reviewed test
-        # cases are still only in a local worktree.
+        change_set_ids.append(f"{descriptor['change_set_id']}:companion:{companion['module']}")
         pushed = _submit_companion(orchestrator, run_id, runtime, descriptor, approval,
                                    companion["worktree_path"])
         if not pushed.get("ok"):
-            return pushed
+            return {**pushed, "submission_set": submission_set.evaluate(
+                orchestrator.state, run_id, change_set_ids, descriptor["revision_set_id"],
+                descriptor["change_set_id"])}
+    result = orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime)
+    aggregate = submission_set.evaluate(
+        orchestrator.state, run_id, change_set_ids, descriptor["revision_set_id"],
+        descriptor["change_set_id"])
+    if isinstance(result, dict):
+        result = {**result, "submission_set": aggregate}
     return _settle_consumed_approval(
-        orchestrator, run_id, approval.get("approval_id"), "submit",
-        orchestrator.submit_to_ipipe(run_id, descriptor, approval, icode_runtime=runtime),
+        orchestrator, run_id, approval.get("approval_id"), "submit", result,
     )
 
 

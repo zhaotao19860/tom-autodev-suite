@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 合同 3.2：多仓提交聚合状态
+
+- 新增 `submission_set.py`：一次提交 attempt =（change_set_id, revision_set_id），按各仓 iCode intent 的持久状态推导聚合状态：`SUBMITTED`（每仓都 CONFIRMED 且有 CR 号，只记录一次、只写一次）/ `PARTIAL`（有仓已确认，另一仓 AMBIGUOUS 或被拒）/ `PENDING`（未决或未尝试）。重试沿 `:after:` 链，取每仓最新的 intent。
+- `_submit` 每次返回附带 `submission_set`。进入 IPIPE 的顺序保证不变：测试库先推，任一仓未成功就停在 SUBMIT；主仓推送确认后才在 `submit_to_ipipe` 里迁移。PARTIAL 只报告、不推进，由 F 决定。
+- 不可变 attempt：改代码产生新 change set 即新 attempt，旧 attempt 记录不改；旧 build 的 `SUPERSEDED` 沿用现有排除集。
+- 测试：`test_submission_set.py` 6 项；全量通过。
+
 ## 2026-10-28 · MVP §5：证据合同 v2（KU / iCafe 降为旁路，按 run 双读）
 
 - 新 run 的 INTAKE 固定 `evidence_contract: "v2"`，G0 hash 升到 `intake_hash_version: v3`（多绑定这一字段）；v1 / v2 的旧 INTAKE 照原样计算 hash，旧 run 不受影响。
