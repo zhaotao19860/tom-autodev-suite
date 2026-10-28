@@ -152,6 +152,10 @@ class ApprovalLedger:
         """
         if not gates or len({gate for gate, _ in gates}) != len(gates):
             raise ValueError("SCOPE_GATES_INVALID")
+        # One policy per listed gate, in the same order: an intersection over some other
+        # set of policies could admit someone who may not answer one of the gates.
+        if len(member_policies) != len(gates):
+            raise ValueError("SCOPE_POLICIES_MISALIGNED")
         members = scope_members(member_policies)
         if any(not members[channel] for channel in APPROVAL_CHANNELS):
             raise ValueError("SCOPE_MEMBERS_EMPTY")
@@ -194,6 +198,13 @@ class ApprovalLedger:
                     if existing["effective_decision"] not in (None, "APPROVE"):
                         raise ValueError("SCOPE_GATE_ALREADY_DECIDED")
                     if existing["effective_decision"] is None:
+                        # A pending per-gate card may have narrower members than the scope
+                        # card; satisfying it with the scope decision would bypass them.
+                        scoped = json.loads(row["member_policy_json"])
+                        own = json.loads(existing["member_policy_json"])
+                        if any(own.get(ch) and not set(scoped.get(ch) or []) <= set(own[ch])
+                               for ch in APPROVAL_CHANNELS):
+                            raise ValueError("SCOPE_GATE_POLICY_NARROWER")
                         c.execute("UPDATE approvals SET effective_decision='APPROVE',effective_channel=?,resolved_at=? WHERE approval_id=?",
                                   (channel, _now(), existing["approval_id"]))
                     derived.append(existing["approval_id"])
@@ -330,10 +341,10 @@ SCOPE_ACTION_PREFIX = "SCOPE:"
 
 
 def scope_hash(scope_name: str, gates: list[tuple[str, str]], policy_hash: str) -> str:
-    """The hash a scope card binds: its name, the ordered (gate, input_hash) list, the rules."""
+    """The hash a scope card binds: its name, the (gate, input_hash) set, the rules."""
     import hashlib
     body = json.dumps({"schema": SCOPE_SCHEMA, "scope": scope_name, "policy_hash": policy_hash,
-                       "gates": [[gate, input_hash] for gate, input_hash in gates]},
+                       "gates": sorted([gate, input_hash] for gate, input_hash in gates)},
                       sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(body.encode()).hexdigest()
 

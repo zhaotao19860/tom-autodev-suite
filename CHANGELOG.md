@@ -4,6 +4,18 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 评审修复第 1 轮（comatecli；Codex 两次因网关 403 未产出）
+
+- P1 iCode 新 CR 缺席：`_submit_verdict` 判 `CONFIRMED_ABSENT` 前除 NEW 外还查 MERGED / ABANDONED；有已关闭 CR 携带本 commit 或 Change-Id 判 AMBIGUOUS（不再重推），任一列表失败或未取完保持 UNKNOWN。
+- iPipe trigger 确认只认 `startTime` 晚于 intent（120 s 偏差）的 build；全新 claim 仍可采纳既有 build（不发写）。
+- 合同 3.2 聚合：任一仓 AMBIGUOUS / 拒绝即 PARTIAL（不再要求先有已确认的兄弟仓）；已确认但缺 CR 号为 PARTIAL + `RECEIPT_MISSING_CHANGE_NUMBER`；按 `live_idempotency_key` 取 live intent；SUBMITTED 记录冲突返回 `SUBMISSION_CONFLICT` 而非抛异常。
+- `intent_state`：ok False 且无状态标记的回执派生为 `REFUSED`，不再与 CONFIRMED 混用（仍不阻塞目标）。
+- scope 台账：成员策略须与门一一对齐（`SCOPE_POLICIES_MISALIGNED`）；`scope_hash` 对门列表排序，顺序不影响幂等；展开时遇到成员更窄的待批逐门卡拒绝（`SCOPE_GATE_POLICY_NARROWER`）。
+- 合同 3.3：`config_snapshot` 纳入 `upStageParam` / `defaultValue`、job 组顺序与每个 job 的 shell 命令 hash；G8 卡对"实时配置已删除此 stage"给出提示。
+- watcher 指纹覆盖 `schemas/*.json`。
+- 未改（记账）：stage `kind`（QA 只等待、发布只由 R' 消费）随 R 卡接入 worker 一起做；artifact_store 的 deferred 旁路只在 v2 run 产生，v1 不可达；trigger 10 分钟 ABSENT 窗口未加，未确认时保持 UNKNOWN（偏保守）。
+- 测试：新增 8 项；全量 1543 通过。
+
 ## 2026-10-28 · MVP §2：scope 授权（台账层）
 
 - `ApprovalLedger.request_scope`：一张卡代表多个门，卡的 input hash = `scope_hash`（`scope-approval.v1`：scope 名、按序的 (gate, input_hash) 列表、规则 hash）；有效审批人取各门成员策略的交集，交集为空时拒绝出卡（`SCOPE_MEMBERS_EMPTY`），退回逐门审批。

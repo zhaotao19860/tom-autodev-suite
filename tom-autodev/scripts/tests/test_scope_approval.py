@@ -20,7 +20,7 @@ class ScopeApprovalTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def card(self, gates=GATES, policies=(WIDE, NARROW)):
+    def card(self, gates=GATES, policies=(WIDE, NARROW, WIDE)):
         row = self.ledger.request_scope("C", gates, ["comate", "infoflow"], run_id="run-1",
                                         member_policies=list(policies), policy_hash="p1")
         for channel in ("comate", "infoflow"):
@@ -37,8 +37,33 @@ class ScopeApprovalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ledger.request_scope("C", GATES, ["comate", "infoflow"], run_id="run-1",
                                       member_policies=[{"comate": [ALICE], "infoflow": [ALICE]},
-                                                       {"comate": [BOB], "infoflow": [BOB]}],
+                                                       {"comate": [BOB], "infoflow": [BOB]},
+                                                       WIDE],
                                       policy_hash="p1")
+
+    def test_policies_must_align_one_per_gate(self):
+        with self.assertRaisesRegex(ValueError, "SCOPE_POLICIES_MISALIGNED"):
+            self.ledger.request_scope("C", GATES, ["comate", "infoflow"], run_id="run-1",
+                                      member_policies=[WIDE], policy_hash="p1")
+
+    def test_gate_order_does_not_change_the_scope_hash(self):
+        row = self.card()
+        self.approve(row)
+        derived = self.ledger.expand_scope(row["approval_id"], "C", list(reversed(GATES)),
+                                           run_id="run-1", policy_hash="p1")
+        self.assertEqual(len(derived), 3)
+
+    def test_a_pending_gate_with_narrower_members_is_not_satisfied(self):
+        self.ledger.request("G5", "b" * 64, ["comate", "infoflow"], run_id="run-1",
+                            member_policy={"comate": [BOB], "infoflow": [BOB]})
+        row = self.ledger.request_scope("C", GATES, ["comate", "infoflow"], run_id="run-1",
+                                        member_policies=[WIDE, WIDE, WIDE], policy_hash="p1")
+        for channel in ("comate", "infoflow"):
+            self.ledger.record_delivery(row["approval_id"], channel, {"request_id": channel},
+                                        payload_hash=row["input_hash"])
+        self.approve(row)
+        with self.assertRaisesRegex(ValueError, "SCOPE_GATE_POLICY_NARROWER"):
+            self.ledger.expand_scope(row["approval_id"], "C", GATES, run_id="run-1", policy_hash="p1")
 
     def test_only_an_intersection_member_may_answer(self):
         row = self.card()

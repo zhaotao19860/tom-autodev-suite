@@ -18,7 +18,11 @@ _ROOT = Path(__file__).resolve().parent
 
 
 def fingerprint(root: Path | None = None) -> str:
-    """Content hash of every non-test control-plane source file.
+    """Content hash of every non-test control-plane source file and schema.
+
+    Covers `*.py` under the scripts directory (tests excluded) and, for the installed
+    controller, the sibling `schemas/*.json` it validates artifacts against. Project
+    profiles are pinned per run and are deliberately not part of it.
 
     Content, not mtimes or git HEAD: a checkout of the same commit, or a touch, is not a
     change, while an uncommitted edit is one -- the process would be running code that
@@ -26,9 +30,12 @@ def fingerprint(root: Path | None = None) -> str:
     """
     base = Path(root) if root is not None else _ROOT
     digest = hashlib.sha256()
-    for path in sorted(base.rglob("*.py")):
-        relative = path.relative_to(base)
-        if relative.parts and relative.parts[0] in {"tests", "__pycache__"}:
+    files = sorted(base.rglob("*.py"))
+    if root is None:
+        files += sorted((base.parent / "schemas").glob("*.json"))
+    for path in files:
+        relative = Path(*path.relative_to(base.parent).parts) if root is None else path.relative_to(base)
+        if relative.parts and relative.parts[0 if root is not None else 1] in {"tests", "__pycache__"}:
             continue
         digest.update(str(relative).encode())
         digest.update(b"\0")

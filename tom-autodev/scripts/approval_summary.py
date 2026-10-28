@@ -348,6 +348,8 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
                     f"构建 {_text(binding.get('build_id'))}，阶段 {_text(binding.get('stage_build_id'))}"
                     f" {_text(declaration.get('stage_name'))}",
                     f"参数声明来源 {_text(declaration.get('source'))}",
+                    *(["注意：流水线实时配置已删除此 stage，按本次 build 自带的显式空声明执行"]
+                      if declaration.get("config_stage_missing") else []),
                     *(f"仓库 {_text(item.get('module'))}，分支 {_text(item.get('branch'))}，"
                       f"版本 {_text(item.get('revision'))}" for item in binding.get("repositories", [])),
                     *(f"参数 {name} = {value}" for name, value in material.get("parameters", {}).items()),

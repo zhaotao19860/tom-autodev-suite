@@ -483,8 +483,43 @@ class IcodeRuntime:
         if after_push or not self._absence_grace_elapsed(intent):
             return intent_executor.Verdict.unknown()
         if not appending and reason == "CR_NOT_FOUND":
-            return intent_executor.Verdict.absent(checked="get_repo_reviews NEW, complete")
+            # A CR that left NEW (merged, abandoned) is not in the open listing: absence
+            # needs every status. A closed CR carrying this commit or Change-Id means the
+            # push did land; whether its fate is ours to adopt is a person's call.
+            closed = self._closed_related(cli, repo_path, change_set)
+            if closed is None:
+                return intent_executor.Verdict.unknown()
+            if closed:
+                return intent_executor.Verdict.ambiguous(candidates=closed, checked="MERGED/ABANDONED")
+            return intent_executor.Verdict.absent(checked="get_repo_reviews NEW/MERGED/ABANDONED, complete")
         return intent_executor.Verdict.unknown()
+
+    def _closed_related(self, cli: str, repo_path: Path, change_set: dict[str, Any]) -> list[str] | None:
+        """CR numbers in MERGED/ABANDONED carrying this commit or Change-Id; None if unprovable."""
+        change_id = _commit_change_id(repo_path, change_set["commit_revision"])
+        found: set[str] = set()
+        for status in ("MERGED", "ABANDONED"):
+            try:
+                result = _run(
+                    self.transport,
+                    [cli, "api", "get_repo_reviews", "--repo", change_set["module"], "--status", status, "-o", "json"],
+                    cwd=repo_path,
+                    timeout=30,
+                )
+                decoded = json.loads(result["stdout"]) if result["returncode"] == 0 else None
+                data = decoded.get("data", {}) if isinstance(decoded, dict) else None
+            except Exception:
+                return None
+            changes = data.get("changes") if isinstance(data, dict) else None
+            if not isinstance(changes, list) or data.get("hasMore") is True:
+                return None
+            for change in changes:
+                if isinstance(change, dict) and (
+                    change.get("current_revision") == change_set["commit_revision"]
+                    or (change_id is not None and change.get("change_id") == change_id)
+                ):
+                    found.add(str(change.get("_number") or change.get("number") or ""))
+        return sorted(found)
 
     def _absence_grace_elapsed(self, intent: dict[str, Any]) -> bool:
         try:

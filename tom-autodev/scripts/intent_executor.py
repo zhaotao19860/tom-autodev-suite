@@ -43,9 +43,10 @@ BLOCKING = frozenset({CLAIMED, UNKNOWN, AMBIGUOUS})
 RETRYABLE = frozenset({CONFIRMED_ABSENT, ABANDONED_LOCAL})
 
 STATE_OBSERVATION = "intent.state"
-# Not an intent state: the read-back was stopped by a control-plane guard (profile drift,
-# say) and nothing may be written for it. `confirm` stops on it; `answer` returns the
-# guard's own result untouched.
+# As a verdict: the read-back was stopped by a control-plane guard (profile drift, say)
+# and nothing may be written for it; `confirm` stops on it and `answer` returns the
+# guard's own result untouched. As a derived intent state: a receipt recording a
+# platform refusal (ok False, no state marker) -- answered, not confirmed.
 REFUSED = "REFUSED"
 
 
@@ -90,9 +91,9 @@ def intent_state(state_store: Any, intent: dict[str, Any]) -> str:
                 return ABANDONED_LOCAL if response.get("local_error_proven") else ABANDONED
             if response.get("ok") is True:
                 return CONFIRMED
-        # A receipt with ok False and no state marker is a recorded platform refusal:
-        # the write was answered, so the target is no longer held by it.
-        return CONFIRMED
+        # A receipt with ok False and no state marker is a recorded platform refusal: the
+        # write was answered, so the target is no longer held, but nothing was confirmed.
+        return REFUSED
     recorded = [
         item.get("observation") or {}
         for item in state_store.external_observations(intent["run_id"], intent_id=intent["intent_id"])

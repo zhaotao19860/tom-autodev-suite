@@ -86,7 +86,8 @@ class IpipeRuntime:
 
     @guard_execution
     def discover(
-        self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None
+        self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None,
+        *, since: Any = None,
     ) -> dict[str, Any]:
         blocked = self._profile_error()
         if blocked is not None:
@@ -116,6 +117,13 @@ class IpipeRuntime:
         # for good, and the superseded one is exactly the one that must not be followed.
         for superseded_id in [key for key in unique if self.is_excluded(key)]:
             unique.pop(superseded_id)
+        if since is not None:
+            # Contract 3.1: confirming a trigger only counts builds started after its
+            # intent; an older build of the same revisions (another run, a manual start)
+            # is not the one this write produced.
+            for old_id in [key for key, item in unique.items()
+                           if _started_before(item, since, _REBUILD_CLOCK_SKEW_SECONDS)]:
+                unique.pop(old_id)
         if not unique:
             return _failure("BUILD_QUERY_REQUIRED", retry_allowed=False)
         if len(unique) != 1:
@@ -206,7 +214,12 @@ class IpipeRuntime:
         if sticky is not None:
             return self._settled_write(intent, sticky, "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
 
-        existing = self.discover(profile, revision_set, context["module"])
+        # A fresh claim may still adopt a build of these revisions that already exists (no
+        # write is sent for it); a replayed claim may have sent one, so only builds started
+        # after its intent can be that write's answer.
+        existing = (self.discover(profile, revision_set, context["module"], since=intent.get("created_at"))
+                    if claim["status"] == "EXISTING"
+                    else self.discover(profile, revision_set, context["module"]))
         if existing.get("reason_code") == "BUILD_AMBIGUOUS" and claim["status"] == "EXISTING":
             # An earlier process claimed this trigger and may have sent it; now two
             # builds of these revisions exist and which one it started cannot be told.
@@ -2218,7 +2231,7 @@ class IpipeRuntime:
         one is AMBIGUOUS -- the write may have started either, so neither is adopted and
         nothing is re-sent; none, or an unreadable listing, stays UNKNOWN.
         """
-        found = self.discover(profile, revision_set, context["module"])
+        found = self.discover(profile, revision_set, context["module"], since=intent.get("created_at"))
         if found.get("reason_code") == "BUILD_AMBIGUOUS":
             return self._trigger_ambiguous(found)
         if found.get("reason_code") != "OK":

@@ -56,6 +56,25 @@ class SubmissionSetTests(unittest.TestCase):
         self.assertEqual(record["status"], ss.PARTIAL)
         self.assertIn("REFUSED", {r["intent_state"] for r in record["repositories"]})
 
+    def test_an_ambiguous_repository_is_partial_even_without_a_confirmed_sibling(self):
+        ie.settle(self.state, self.claim(PRIMARY, "app"), ie.Verdict.ambiguous(candidates=["7", "8"]))
+        self.assertEqual(self.evaluate()["status"], ss.PARTIAL)
+
+    def test_a_confirmed_receipt_without_a_change_number_is_reported_not_pending(self):
+        self.confirm(self.claim(COMPANION, "tests"), "1")
+        intent = self.claim(PRIMARY, "app")
+        self.state.receipt(intent["intent_id"], {"ok": True, "reason_code": "OK"}, [])
+        record = self.evaluate()
+        self.assertEqual(record["status"], ss.PARTIAL)
+        self.assertEqual(record["reason_code"], "RECEIPT_MISSING_CHANGE_NUMBER")
+
+    def test_a_different_record_for_a_submitted_attempt_is_a_conflict(self):
+        self.confirm(self.claim(COMPANION, "tests"), "1")
+        self.confirm(self.claim(PRIMARY, "app"), "2")
+        self.state.save_idempotency_result(ss.attempt_key(RUN, PRIMARY, REVSET), {"status": "other"})
+        # The stored record wins the read; evaluate never overwrites it.
+        self.assertEqual(self.evaluate(), {"status": "other"})
+
     def test_all_confirmed_is_submitted_and_recorded_once(self):
         self.confirm(self.claim(COMPANION, "tests"), "1")
         self.confirm(self.claim(PRIMARY, "app"), "2")

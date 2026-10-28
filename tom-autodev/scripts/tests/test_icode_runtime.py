@@ -35,9 +35,11 @@ class FakeArgvTransport:
         if argv[-1] == "login":
             return {"returncode": self.login_code, "stdout": "", "stderr": "login failed"}
         if "get_repo_reviews" in argv:
+            status = argv[argv.index("--status") + 1] if "--status" in argv else "NEW"
+            changes = [c for c in self.changes if c.get("status", "NEW") == status]
             return {
                 "returncode": 0,
-                "stdout": json.dumps({"data": {"changes": self.changes}}),
+                "stdout": json.dumps({"data": {"changes": changes}}),
                 "stderr": "",
             }
         if "push_cr" in argv or any(str(part).startswith("refs/for/") or ":refs/for/" in str(part) for part in argv):
@@ -882,6 +884,21 @@ class IcodeRuntimeTests(unittest.TestCase):
         retried = self.runtime().submit(change, approval)
         self.assertEqual(retried["reason_code"], "OK", retried)
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 2)
+
+    def test_a_merged_cr_carrying_the_commit_is_not_absence(self):
+        from datetime import datetime, timedelta, timezone
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = TimeoutError("unknown")
+        self.runtime().submit(change, approval)
+        self.transport.changes = [{
+            "_number": 59, "status": "MERGED", "current_revision": change["commit_revision"],
+            "branch": "main", "owner": {"username": "dev"}, "subject": "CARD-1 change"}]
+        later = lambda: datetime.now(timezone.utc) + timedelta(minutes=10)
+        result = self.runtime(clock=later).submit(change, approval)
+        self.assertEqual(result["reason_code"], "CR_IDENTITY_AMBIGUOUS", result)
+        self.assertEqual(result["candidates"], ["59"])
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
     def test_an_incomplete_listing_never_proves_absence(self):
         from datetime import datetime, timedelta, timezone

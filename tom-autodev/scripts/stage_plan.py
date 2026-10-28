@@ -6,7 +6,8 @@ the pipeline cannot run against another:
 - the build's own stage list (which stages exist and in what order -- the build keeps
   the shape it started with even when the configuration is edited later), and
 - the live configuration of the stages, reduced to what a stage run consumes: identity,
-  order, declared parameters, job types.
+  order, declared parameters (with upstream binding and default), job groups in order,
+  job types and the hash of each job's shell command.
 
 Both are canonical JSON hashed with sha256, so the same pipeline always yields the same
 hash and any change to a declared parameter, a job or the stage order yields another.
@@ -26,6 +27,11 @@ def _hash(value: Any) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _command_hash(job: dict[str, Any]) -> str | None:
+    command = ((job.get("realJob") or {}).get("shellConf") or {}).get("command")
+    return hashlib.sha256(command.encode()).hexdigest() if isinstance(command, str) else None
+
+
 def config_snapshot(configuration: dict[str, Any]) -> list[dict[str, Any]]:
     """The parts of a pipeline configuration a manual stage run depends on."""
     stages = []
@@ -37,15 +43,19 @@ def config_snapshot(configuration: dict[str, Any]) -> list[dict[str, Any]]:
             "stageName": stage.get("stageName"),
             "upstreamStageId": str(stage.get("upstreamStageId") or ""),
             "paramBeans": sorted(
-                ({"name": p.get("name"), "required": bool(p.get("required"))}
+                ({"name": p.get("name"), "required": bool(p.get("required")),
+                  "upStageParam": p.get("upStageParam"), "defaultValue": p.get("defaultValue")}
                  for p in stage.get("paramBeans") or [] if isinstance(p, dict)),
                 key=lambda p: str(p["name"])),
             "inParamsMap": sorted(str(k) for k in (stage.get("inParamsMap") or {})),
-            "jobs": sorted(
-                ({"jobConfId": str(j.get("jobConfId") or ""), "jobType": j.get("jobType")}
-                 for group in stage.get("groupJobs") or [] for j in group
-                 if isinstance(j, dict)),
-                key=lambda j: j["jobConfId"]),
+            # Groups run in order and their jobs in parallel: keep the group sequence, and
+            # the shell command each job runs (a hash, so no secret lands in the snapshot).
+            "groups": [
+                sorted(({"jobConfId": str(j.get("jobConfId") or ""), "jobType": j.get("jobType"),
+                         "command_sha256": _command_hash(j)}
+                        for j in group if isinstance(j, dict)),
+                       key=lambda j: j["jobConfId"])
+                for group in stage.get("groupJobs") or [] if isinstance(group, list)],
         })
     return sorted(stages, key=lambda s: s["stageConfId"])
 

@@ -2,6 +2,10 @@
 
 tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套件根目录 [CHANGELOG.md](../CHANGELOG.md) 的同日条目。
 
+## 2026-10-28
+
+- MVP 评审修复第 1 轮：iCode 新 CR 缺席跨 NEW/MERGED/ABANDONED 判定；trigger 确认只认晚于 intent 的 build；多仓聚合 PARTIAL/冲突分类修正；`intent_state` 增加 REFUSED；scope 台账策略对齐与顺序无关；stage 配置快照纳入默认值、上游参数、job 组顺序与命令 hash；watcher 指纹覆盖 schemas。详见根 CHANGELOG 同日条目。
+
 ## 2026-10-25
 
 - B-23：同 stage/模块之后出现的 5xx 或缺状态码下载结果不再覆盖先前已证实的 403/404；只有成功下载才解除环境拦截（`environment_evidence.proven_dependency_failure`，测试 `test_b23_an_inconclusive_later_attempt_does_not_clear_a_proven_404`）。
