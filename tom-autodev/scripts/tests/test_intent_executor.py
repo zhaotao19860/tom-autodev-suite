@@ -147,6 +147,79 @@ class ManualStageExecuteTests(unittest.TestCase):
         self.assertEqual(ie.intent_state(self.state, self.intent()), ie.CONFIRMED)
 
 
+class TriggerTests(unittest.TestCase):
+    """iPipe trigger on the executor: identity is the one build of the frozen revisions."""
+
+    def setUp(self):
+        import test_ipipe_runtime as base
+        self.base = base
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.state = StateStore(root / "state.sqlite")
+        self.ledger = ApprovalLedger(root / "approvals.sqlite")
+        self.api = FakeApi()
+        self.runtime = pinned_runtime(self.state, self.ledger, self.api, sleeper=lambda _s: None)
+        self.approval = approved(self.ledger, "G7", base.canonical_hash(base.trigger_binding()))
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def trigger(self):
+        return self.runtime.trigger(self.base.PROFILE, self.base.REVISIONS, self.approval)
+
+    def intent(self):
+        return next(i for i in self.state.all_intents("run-1") if i["operation"] == "ipipe.trigger")
+
+    def posts(self):
+        return sum(c[0] == "trigger_by_revision" for c in self.api.calls)
+
+    def test_an_answer_without_a_build_id_is_confirmed_by_reading_the_revision_back(self):
+        self.api.trigger_result = {"code": 0, "msg": "ok"}
+        self.api.on_trigger = lambda: self.api.candidates.append(build("build-9"))
+        self.api.builds["build-9"] = build("build-9")
+        result = self.trigger()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["build_id"], "build-9")
+        self.assertEqual(ie.intent_state(self.state, self.intent()), ie.CONFIRMED)
+        self.assertEqual(self.posts(), 1)
+
+    def test_two_builds_of_the_revisions_after_an_identityless_answer_are_ambiguous(self):
+        self.api.trigger_result = {"code": 0, "msg": "ok"}
+
+        def two_builds():
+            for build_id in ("build-8", "build-9"):
+                self.api.candidates.append(build(build_id))
+                self.api.builds[build_id] = build(build_id)
+        self.api.on_trigger = two_builds
+        result = self.trigger()
+        self.assertEqual(result["reason_code"], "BUILD_AMBIGUOUS", result)
+        self.assertEqual(result["intent_state"], ie.AMBIGUOUS)
+        self.assertEqual(result["candidates"], ["build-8", "build-9"])
+        # Sticky: a replay neither adopts one of them nor posts again.
+        again = self.trigger()
+        self.assertEqual((again["reason_code"], again["candidates"]),
+                         ("BUILD_AMBIGUOUS", ["build-8", "build-9"]))
+        self.assertEqual(ie.intent_state(self.state, self.intent()), ie.AMBIGUOUS)
+        self.assertEqual(self.posts(), 1)
+
+    def test_an_unanswered_trigger_stays_unknown_without_a_second_post(self):
+        self.api.trigger_result = TimeoutError("no answer")
+        self.assertEqual(self.trigger()["reason_code"], "TRIGGER_RESULT_UNKNOWN")
+        self.assertEqual(ie.intent_state(self.state, self.intent()), ie.UNKNOWN)
+        self.assertEqual(self.trigger()["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(self.posts(), 1)
+
+    def test_an_unanswered_trigger_whose_build_appears_later_is_confirmed_on_replay(self):
+        self.api.trigger_result = TimeoutError("no answer")
+        self.trigger()
+        self.api.candidates.append(build("build-7"))
+        self.api.builds["build-7"] = build("build-7")
+        replay = self.trigger()
+        self.assertTrue(replay["ok"], replay)
+        self.assertEqual(ie.intent_state(self.state, self.intent()), ie.CONFIRMED)
+        self.assertEqual(self.posts(), 1)
+
+
 class EarlyReleaseFixtureTests(unittest.TestCase):
     def test_release_shown_pending_while_regression_runs_is_not_the_stage_to_drive(self):
         stages = [_normalize_stage(s) for s in

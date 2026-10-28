@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 合同 3.1：iPipe trigger 与 rebuild 迁入 IntentExecutor
+
+- trigger：回执不带 build id 时不再直接报 `TRIGGER_RESPONSE_INVALID`，改为按冻结 revision 有限次只读回查（`_trigger_verdict`）；恰好一个 build → CONFIRMED，两个以上 → AMBIGUOUS（`BUILD_AMBIGUOUS`，带 `candidates`），都没有 → 保持 UNKNOWN。超时/异常后同样走这个判定。已经 AMBIGUOUS 的 trigger intent 重放时直接返回记录的候选，不采纳任何一个、不再 POST。
+- rebuild：`_reconcile_rebuild` 的结果统一经 `_rebuild_verdict` 落成状态；无 build id 的回执改为有限次只读确认；前一次 rebuild 处于 AMBIGUOUS 时拒绝新 attempt。
+- 对外 reason code 保持不变（`BUILD_AMBIGUOUS`、`TRIGGER_RESULT_UNKNOWN`、`REBUILD_RESPONSE_INVALID`、`QUERY_REQUIRED`），新增 `intent_state` 字段；`discover` 的 `BUILD_AMBIGUOUS` 现在带候选列表。
+- `intent_executor.sticky_ambiguous`：AMBIGUOUS 只记录一次，后续读取沿用第一次的证据。
+- 测试：`test_intent_executor.py` 新增 trigger 4 项；全量 1513 通过。
+
 ## 2026-10-28 · MVP 合同 3.1：IntentExecutor 状态机，先迁 iPipe 人工 stage 执行
 
 - 新增 `intent_executor.py`：外部写的状态 `CLAIMED / UNKNOWN / CONFIRMED / CONFIRMED_ABSENT / AMBIGUOUS / ABANDONED_LOCAL / ABANDONED`，从已有的 receipt 和 `intent.state` observation 推导，不加表、不改历史数据。`CONFIRMED_ABSENT` 写成 receipt（释放目标，可重试）；`UNKNOWN` / `AMBIGUOUS` 只写 observation，目标继续被 `claim_exclusive_intent` 的前缀互斥挡住。`AMBIGUOUS` 对自动化是终态，reconcile 不会把它读成别的状态。

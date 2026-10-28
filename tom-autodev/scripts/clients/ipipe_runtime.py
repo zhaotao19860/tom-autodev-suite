@@ -119,7 +119,7 @@ class IpipeRuntime:
         if not unique:
             return _failure("BUILD_QUERY_REQUIRED", retry_allowed=False)
         if len(unique) != 1:
-            return _failure("BUILD_AMBIGUOUS", retry_allowed=False)
+            return _failure("BUILD_AMBIGUOUS", retry_allowed=False, candidates=sorted(unique))
         build_id, candidate = next(iter(unique.items()))
         blocked = self._profile_error()
         if blocked is not None:
@@ -202,8 +202,15 @@ class IpipeRuntime:
                 return self._rebuilt_response(context, replay)
             return replay
         intent = claim["intent"]
+        sticky = intent_executor.sticky_ambiguous(self.state, intent)
+        if sticky is not None:
+            return self._settled_write(intent, sticky, "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
 
         existing = self.discover(profile, revision_set, context["module"])
+        if existing.get("reason_code") == "BUILD_AMBIGUOUS" and claim["status"] == "EXISTING":
+            # An earlier process claimed this trigger and may have sent it; now two
+            # builds of these revisions exist and which one it started cannot be told.
+            return self._settled_write(intent, self._trigger_ambiguous(existing), "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
         if existing.get("reason_code") == "OK":
             try:
                 candidate = self.api.build_by_id(existing["build_id"], **self._build_key(context))
@@ -217,7 +224,7 @@ class IpipeRuntime:
         if existing.get("reason_code") != "BUILD_QUERY_REQUIRED":
             return {**existing, "intent_id": intent["intent_id"]}
         if claim["status"] == "EXISTING":
-            return _failure("QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False)
+            return self._settled_write(intent, intent_executor.Verdict.unknown(), "QUERY_REQUIRED")
 
         blocked = self._profile_error()
         if blocked is not None:
@@ -231,18 +238,18 @@ class IpipeRuntime:
                 return _failure(
                     error.reason_code, intent_id=intent["intent_id"], retry_allowed=False
                 )
-            reconciled = self.discover(profile, revision_set, context["module"])
-            if reconciled.get("reason_code") == "OK":
-                try:
-                    candidate = self.api.build_by_id(reconciled["build_id"], **self._build_key(context))
-                except Exception:
-                    candidate = None
-                if candidate is not None:
-                    return self._trigger_receipt(intent["intent_id"], context, candidate)
-            return _failure("TRIGGER_RESULT_UNKNOWN", intent_id=intent["intent_id"], retry_allowed=False)
+            verdict = self._trigger_verdict(intent, profile, revision_set, context)
+            return self._settled_write(intent, verdict, "TRIGGER_RESULT_UNKNOWN", "BUILD_AMBIGUOUS")
         build_id = str(result.get("id") or result.get("pipelineBuildId") or "") if isinstance(result, dict) else ""
         if not build_id:
-            return _failure("TRIGGER_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
+            # No build named in the answer: read the revision's builds back, a bounded
+            # number of times, and never POST again (contract 3.1, iPipe trigger).
+            verdict = intent_executor.confirm(
+                lambda: self._trigger_verdict(intent, profile, revision_set, context),
+                polls=_RERUN_CONFIRM_POLLS, interval=_RERUN_CONFIRM_INTERVAL,
+                sleeper=self.sleeper,
+            )
+            return self._settled_write(intent, verdict, "TRIGGER_RESPONSE_INVALID", "BUILD_AMBIGUOUS")
         try:
             candidate = self.api.build_by_id(build_id, **self._build_key(context))
         except Exception as error:
@@ -833,7 +840,7 @@ class IpipeRuntime:
                 self.approvals, approval, existing["payload"], run_id=self.run_id
             ):
                 return _failure("RERUN_CONFLICT")
-            return self._settled_rerun(existing, self._rerun_verdict(existing), "QUERY_REQUIRED")
+            return self._settled_write(existing, self._rerun_verdict(existing), "QUERY_REQUIRED")
 
         stage_bound = self._rerun_binding(stage_build_id, parameters)
         if not stage_bound.get("ok"):
@@ -955,7 +962,7 @@ class IpipeRuntime:
                 polls=_RERUN_CONFIRM_POLLS, interval=_RERUN_CONFIRM_INTERVAL,
                 sleeper=self.sleeper,
             )
-            return self._settled_rerun(intent, verdict, "RERUN_RESPONSE_INVALID")
+            return self._settled_write(intent, verdict, "RERUN_RESPONSE_INVALID")
         try:
             current = self.api.build_by_id(build_id, **self._build_key(binding))
         except Exception as error:
@@ -1259,7 +1266,7 @@ class IpipeRuntime:
         blocked = self._profile_error()
         if blocked is not None:
             return blocked
-        return self._settled_rerun(intent, self._rerun_verdict(intent), "QUERY_REQUIRED")
+        return self._settled_write(intent, self._rerun_verdict(intent), "QUERY_REQUIRED")
 
     def _rerun_verdict(self, intent: dict[str, Any]) -> "intent_executor.Verdict":
         """Contract 3.1 for an iPipe manual-stage execute or failed-stage rerun.
@@ -1271,8 +1278,9 @@ class IpipeRuntime:
         decides (`abandon-intent`). Two unclaimed successors that both started after the
         intent are AMBIGUOUS: which one this write produced cannot be told.
         """
-        if intent_executor.intent_state(self.state, intent) == intent_executor.AMBIGUOUS:
-            return intent_executor.Verdict.ambiguous()
+        sticky = intent_executor.sticky_ambiguous(self.state, intent)
+        if sticky is not None:
+            return sticky
         reconciled = self._reconcile_rerun(intent)
         if reconciled is None:
             return intent_executor.Verdict.unknown()
@@ -1283,15 +1291,16 @@ class IpipeRuntime:
                 candidates=reconciled.get("candidates") or [])
         return intent_executor.Verdict.unknown(reconciled)
 
-    def _settled_rerun(
+    def _settled_write(
         self, intent: dict[str, Any], verdict: "intent_executor.Verdict", unknown_reason: str,
+        ambiguous_reason: str = "INTENT_AMBIGUOUS",
     ) -> dict[str, Any]:
-        """Persist the verdict and answer the caller in the runtime's usual shape."""
+        """Persist the verdict and answer the caller in the runtime's usual shape (any write)."""
         intent_executor.settle(self.state, intent, verdict)
         if verdict.state == intent_executor.CONFIRMED:
             return verdict.result or {}
         if verdict.state == intent_executor.AMBIGUOUS:
-            return _failure("INTENT_AMBIGUOUS", intent_id=intent["intent_id"],
+            return _failure(ambiguous_reason, intent_id=intent["intent_id"],
                             intent_state=verdict.state, retry_allowed=False,
                             candidates=verdict.evidence.get("candidates", []))
         result = dict(verdict.result) if verdict.result else _failure(
@@ -1660,9 +1669,7 @@ class IpipeRuntime:
         if existing is not None:
             if existing["payload"] != payload:
                 return _failure("REBUILD_CONFLICT")
-            return self._reconcile_rebuild(existing) or _failure(
-                "QUERY_REQUIRED", intent_id=existing["intent_id"], retry_allowed=False
-            )
+            return self._settled_write(existing, self._rebuild_verdict(existing), "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
         # Fresh attempt: it has to be the next one, on a build that is still current, and
         # nothing earlier may be of unknown outcome (a second POST on top of it could
         # build the revisions twice).
@@ -1672,6 +1679,11 @@ class IpipeRuntime:
         if self.is_superseded(binding["original_build_id"]):
             return _failure("REBUILD_ORIGINAL_SUPERSEDED", retry_allowed=False)
         for prior in self._trigger_intents(context, exclude_key=key):
+            if intent_executor.intent_state(self.state, prior) == intent_executor.AMBIGUOUS:
+                return _failure(
+                    "BUILD_AMBIGUOUS", intent_id=prior["intent_id"], intent_state="AMBIGUOUS",
+                    approval_id=(prior.get("payload") or {}).get("approval_id"), retry_allowed=False,
+                )
             if self.state.result_by_idempotency_key(prior["idempotency_key"]) is None:
                 return _failure(
                     "QUERY_REQUIRED", intent_id=prior["intent_id"],
@@ -1730,10 +1742,7 @@ class IpipeRuntime:
                                 intent_closed=True)
             if isinstance(error, IpipeTransportError) and not error.transient:
                 return _failure(error.reason_code, intent_id=intent["intent_id"], retry_allowed=False)
-            reconciled = self._reconcile_rebuild(intent)
-            if reconciled is not None and reconciled.get("ok"):
-                return reconciled
-            return _failure("REBUILD_RESULT_UNKNOWN", intent_id=intent["intent_id"], retry_allowed=False)
+            return self._settled_write(intent, self._rebuild_verdict(intent), "REBUILD_RESULT_UNKNOWN", "BUILD_AMBIGUOUS")
         build_id = ""
         if isinstance(result, dict):
             build_id = str(result.get("id") or result.get("pipelineBuildId") or "")
@@ -1747,10 +1756,12 @@ class IpipeRuntime:
             "build_id": build_id or None,
         })
         if not build_id:
-            reconciled = self._reconcile_rebuild(intent)
-            if reconciled is not None:
-                return reconciled
-            return _failure("REBUILD_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
+            verdict = intent_executor.confirm(
+                lambda: self._rebuild_verdict(intent),
+                polls=_RERUN_CONFIRM_POLLS, interval=_RERUN_CONFIRM_INTERVAL,
+                sleeper=self.sleeper,
+            )
+            return self._settled_write(intent, verdict, "REBUILD_RESPONSE_INVALID", "BUILD_AMBIGUOUS")
         if build_id == binding["original_build_id"] or self._load_build_binding(build_id) is not None:
             return _failure("REBUILD_RESPONSE_INVALID", intent_id=intent["intent_id"], retry_allowed=False)
         try:
@@ -1803,9 +1814,22 @@ class IpipeRuntime:
         blocked = self._profile_error()
         if blocked is not None:
             return blocked
-        return self._reconcile_rebuild(intent) or _failure(
-            "QUERY_REQUIRED", intent_id=intent["intent_id"], retry_allowed=False
-        )
+        return self._settled_write(intent, self._rebuild_verdict(intent), "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
+
+    def _rebuild_verdict(self, intent: dict[str, Any]) -> "intent_executor.Verdict":
+        """Contract 3.1 for an iPipe rebuild: same identity rule as trigger, plus "newer
+        than the original build and started after the intent". Sticky once AMBIGUOUS."""
+        sticky = intent_executor.sticky_ambiguous(self.state, intent)
+        if sticky is not None:
+            return sticky
+        reconciled = self._reconcile_rebuild(intent)
+        if reconciled is None:
+            return intent_executor.Verdict.unknown()
+        if reconciled.get("ok") is True:
+            return intent_executor.Verdict.confirmed(reconciled)
+        if reconciled.get("reason_code") == "BUILD_AMBIGUOUS":
+            return intent_executor.Verdict.ambiguous(candidates=reconciled.get("candidates") or [])
+        return intent_executor.Verdict.unknown(reconciled)
 
     def _reconcile_rebuild(self, intent: dict[str, Any]) -> dict[str, Any] | None:
         """The one build this intent started, found by revision and time; never guessed.
@@ -2161,6 +2185,35 @@ class IpipeRuntime:
         }
         self.state.receipt(intent_id, response, response["evidence_refs"])
         return response
+
+    def _trigger_verdict(
+        self, intent: dict[str, Any], profile: dict[str, Any], revision_set: dict[str, Any],
+        context: dict[str, Any],
+    ) -> "intent_executor.Verdict":
+        """Contract 3.1 for an iPipe trigger: the build of these revisions, read back.
+
+        Identity is the one build `builds_by_revision` lists for the frozen revisions
+        (minus builds this run already superseded). Exactly one is CONFIRMED; more than
+        one is AMBIGUOUS -- the write may have started either, so neither is adopted and
+        nothing is re-sent; none, or an unreadable listing, stays UNKNOWN.
+        """
+        found = self.discover(profile, revision_set, context["module"])
+        if found.get("reason_code") == "BUILD_AMBIGUOUS":
+            return self._trigger_ambiguous(found)
+        if found.get("reason_code") != "OK":
+            return intent_executor.Verdict.unknown()
+        try:
+            candidate = self.api.build_by_id(found["build_id"], **self._build_key(context))
+        except Exception:
+            return intent_executor.Verdict.unknown()
+        receipt = self._trigger_receipt(intent["intent_id"], context, candidate)
+        if receipt.get("ok") is True:
+            return intent_executor.Verdict.confirmed(receipt)
+        return intent_executor.Verdict.unknown(receipt)
+
+    @staticmethod
+    def _trigger_ambiguous(found: dict[str, Any]) -> "intent_executor.Verdict":
+        return intent_executor.Verdict.ambiguous(candidates=found.get("candidates") or [])
 
     def _context(
         self, profile: dict[str, Any], revision_set: dict[str, Any], module: Any = None

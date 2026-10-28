@@ -97,6 +97,20 @@ def intent_state(state_store: Any, intent: dict[str, Any]) -> str:
     return CLAIMED
 
 
+def sticky_ambiguous(state_store: Any, intent: dict[str, Any]) -> Verdict | None:
+    """The recorded AMBIGUOUS verdict, with its evidence, if the intent already has one."""
+    recorded = [
+        item.get("observation") or {}
+        for item in state_store.external_observations(intent["run_id"], intent_id=intent["intent_id"])
+    ]
+    found = [o for o in recorded
+             if o.get("operation") == STATE_OBSERVATION and o.get("state") == AMBIGUOUS]
+    if not found:
+        return None
+    evidence = {k: v for k, v in found[0].items() if k not in {"operation", "state"}}
+    return Verdict(AMBIGUOUS, None, evidence)
+
+
 def record_state(state_store: Any, intent_id: str, verdict: Verdict) -> None:
     """Append the verdict of a read-back as an observation (never a receipt)."""
     state_store.record_external_observation(intent_id, {
@@ -138,6 +152,8 @@ def settle(
     """
     if verdict.state == CONFIRMED:
         return verdict
+    if verdict.state == AMBIGUOUS and sticky_ambiguous(state_store, intent) is not None:
+        return verdict  # recorded once; the first evidence stands
     if verdict.state == CONFIRMED_ABSENT:
         state_store.receipt(intent["intent_id"], {
             "ok": False, "reason_code": "INTENT_CONFIRMED_ABSENT",
