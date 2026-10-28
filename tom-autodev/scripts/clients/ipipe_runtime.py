@@ -986,10 +986,13 @@ class IpipeRuntime:
                 return _failure(
                     error.reason_code, intent_id=intent["intent_id"], retry_allowed=False
                 )
-            reconciled = self._reconcile_rerun(intent)
-            if reconciled is not None and reconciled.get("reason_code") in {"OK", "REVISION_MISMATCH"}:
-                return reconciled
-            return _failure("RERUN_RESULT_UNKNOWN", intent_id=intent["intent_id"], retry_allowed=False)
+            # Same read-back as the identityless path, so an AMBIGUOUS outcome is recorded
+            # (sticky) instead of being dropped as a bare unknown.
+            verdict = self._rerun_verdict(intent)
+            if verdict.state == intent_executor.UNKNOWN and isinstance(verdict.result, dict) \
+                    and verdict.result.get("reason_code") == "REVISION_MISMATCH":
+                return verdict.result
+            return self._settled_write(intent, verdict, "RERUN_RESULT_UNKNOWN")
         response_stage = _rerun_response_stage(response)
         self.state.record_external_observation(intent["intent_id"], {
             "operation": "ipipe.rerun.response",
@@ -1221,8 +1224,11 @@ class IpipeRuntime:
             "revision_set_id": payload["revision_set_id"],
             "evidence_refs": evidence_refs,
         }
-        self.state.receipt(intent_id, receipt, receipt["evidence_refs"])
-        return receipt
+        written = self.state.receipt_unless_ambiguous(intent_id, receipt, receipt["evidence_refs"])
+        if written is None:
+            # A concurrent reconcile recorded AMBIGUOUS first; that verdict stands.
+            return _ambiguity_stands(intent_id)
+        return written["response"]
 
     def _rerun_key(self, stage_build_id: str, approval: Any) -> str:
         """Idempotency key of one authorised attempt on a stage.
@@ -1933,8 +1939,11 @@ class IpipeRuntime:
             "ci_type": ci_type if isinstance(ci_type, str) else None,
             "evidence_refs": _build_evidence(build_id, owned),
         }
-        self.state.receipt(intent_id, response, response["evidence_refs"])
-        return response
+        written = self.state.receipt_unless_ambiguous(intent_id, response, response["evidence_refs"])
+        if written is None:
+            # A concurrent reconcile recorded AMBIGUOUS first; that verdict stands.
+            return _ambiguity_stands(intent_id)
+        return written["response"]
 
     def bind_stages(self, build_id: str) -> dict[str, Any]:
         """Record stage ownership for an owned build with GET only (what `monitor` does
@@ -2240,8 +2249,11 @@ class IpipeRuntime:
             "environment_fingerprint": context["environment_fingerprint"],
             "evidence_refs": _build_evidence(build_id, context),
         }
-        self.state.receipt(intent_id, response, response["evidence_refs"])
-        return response
+        written = self.state.receipt_unless_ambiguous(intent_id, response, response["evidence_refs"])
+        if written is None:
+            # A concurrent reconcile recorded AMBIGUOUS first; that verdict stands.
+            return _ambiguity_stands(intent_id)
+        return written["response"]
 
     def _trigger_verdict(
         self, intent: dict[str, Any], profile: dict[str, Any], revision_set: dict[str, Any],
@@ -3318,6 +3330,11 @@ def _valid_replay_approval(
         action="G8",
         input_hash=str(payload.get("input_hash") or ""),
     ) is None
+
+
+def _ambiguity_stands(intent_id: str) -> dict[str, Any]:
+    return _failure("INTENT_AMBIGUOUS", intent_id=intent_id, retry_allowed=False,
+                    intent_state=intent_executor.AMBIGUOUS)
 
 
 def _created_after(build: Any, since: Any, skew_seconds: float) -> bool:

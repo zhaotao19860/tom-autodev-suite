@@ -332,7 +332,10 @@ class IcodeRuntime:
         if reconciliation.get("reason_code") == "OK":
             return self._receipt(intent["intent_id"], change_set, reconciliation["change"], key)
         if reconciliation.get("reason_code") == "CR_IDENTITY_CONFLICT":
-            return reconciliation
+            # Recorded, not just returned: the attempt then aggregates as PARTIAL and goes
+            # to diagnosis, instead of sitting CLAIMED behind the recovery guard.
+            return self._answer(intent, intent_executor.Verdict.ambiguous(
+                candidates=reconciliation.get("candidates", [])))
         if reconciliation.get("reason_code") not in ("CR_NOT_FOUND", "CR_APPEND_ALLOWED"):
             return {**reconciliation, "intent_id": intent["intent_id"], "retry_allowed": False}
         if (

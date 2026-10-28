@@ -4,6 +4,16 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP 评审修复第 5 轮（Codex 1 条 P1、3 条 P2 + GPT-6.1-Sol 1 条 P1、1 条 P2，P1 为同一问题）
+
+- iPipe rerun / rebuild / trigger 三条成功回执改走 `receipt_unless_ambiguous`，并发对账已记 AMBIGUOUS 时不再被成功回执覆盖（返回 `INTENT_AMBIGUOUS`）。
+- rerun 派发抛出超时/瞬时错误后的对账改走 `_rerun_verdict` + `_settled_write`，AMBIGUOUS 结论会落盘并保持粘滞。
+- iCode 首次预对账发现身份冲突时记为 AMBIGUOUS（原样返回 `CR_IDENTITY_CONFLICT` 改为 `CR_IDENTITY_AMBIGUOUS`），多仓聚合即为 PARTIAL、可转诊断。
+- scope 台账接受补发的 `SCOPE:<名>#retry-N` 卡展开（按 `gate_of` 归一）。
+- v2 发布决定写入冲突时读回先写者的结论，并发完成不再抛 `ValueError`。
+- 记账：`ipipe-rebuild` 执行与对账入口尚未加 run lease（原子回执已关闭其主要后果）。
+- 测试：新增 3 项；全量 1570 通过。
+
 ## 2026-10-28 · MVP 评审修复第 4 轮（Codex 4 条 P1、1 条 P2 + GPT-6.1-Sol 1 条 P1、2 条 P2）
 
 - iCode 成功回执与缺席回执都经 `receipt_unless_ambiguous` 写入：已有 AMBIGUOUS 时不写，已有回执时返回已落的那份（先到的终态结论为准，不再 `RECEIPT_CONFLICT`）。

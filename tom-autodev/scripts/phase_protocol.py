@@ -1687,17 +1687,24 @@ class PhaseProtocol:
                 receipt) is None:
             # Pinned like a deferral: a replay during a later KU outage must not turn an
             # already stored, published envelope into a deferred one.
-            return self.state.save_idempotency_result(deferral_key, receipt)
+            return self._pin_decision(deferral_key, receipt)
         reason = receipt.get("reason_code") if isinstance(receipt, dict) else None
         _log.warning("knowledge publish deferred for run %s phase %s: %s",
                      run_id, artifact.get("phase"), reason)
-        return self.state.save_idempotency_result(deferral_key, {
+        return self._pin_decision(deferral_key, {
             "ok": True, "reason_code": "KNOWLEDGE_DEFERRED", "deferred": True,
             "deferred_reason": reason if isinstance(reason, str) else "UNKNOWN",
             "run_id": run_id, "artifact_hash": artifact.get("content_hash"),
             "child_doc_id": None, "child_url": None, "child_version": None,
             "comment_id": None, "evidence_refs": [_KNOWLEDGE_DEFERRED_REF], "scope": scope,
         })
+
+    def _pin_decision(self, key: str, decision: dict[str, Any]) -> dict[str, Any]:
+        """First writer wins: a racing completion that decided otherwise takes the winner."""
+        try:
+            return self.state.save_idempotency_result(key, decision)
+        except ValueError:
+            return self.state.idempotency_result(key)
 
     def _receipt_error(self, run_id: str, envelope: dict[str, Any], receipt: Any) -> str | None:
         if (isinstance(receipt, dict) and receipt.get("deferred") is True

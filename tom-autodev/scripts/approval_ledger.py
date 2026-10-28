@@ -180,7 +180,7 @@ class ApprovalLedger:
             row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
             if row is None:
                 raise ValueError("APPROVAL_NOT_FOUND")
-            if row["run_id"] != run_id or row["action"] != f"{SCOPE_ACTION_PREFIX}{scope_name}":
+            if row["run_id"] != run_id or gate_of(row["action"]) != f"{SCOPE_ACTION_PREFIX}{scope_name}":
                 raise ValueError("SCOPE_MISMATCH")
             if row["input_hash"] != scope_hash(scope_name, gates, policy_hash):
                 raise ValueError("SCOPE_HASH_MISMATCH")

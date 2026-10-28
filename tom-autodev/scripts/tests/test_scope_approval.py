@@ -108,5 +108,19 @@ class ScopeApprovalTests(unittest.TestCase):
             self.ledger.expand_scope(row["approval_id"], "C", GATES, run_id="run-1", policy_hash="p1")
 
 
+class ScopeReissueTests(ScopeApprovalTests):
+    def test_a_reissued_scope_card_expands(self):
+        # Codex round 5: SCOPE:C#retry-1 carries the same scope hash and may be consumed.
+        from approval_ledger import scope_hash
+        bound = scope_hash("C", GATES, "p1")
+        row = self.ledger.request("SCOPE:C#retry-1", bound, ["comate", "infoflow"], run_id="run-1",
+                                  member_policy=NARROW)
+        for channel in ("comate", "infoflow"):
+            self.ledger.record_delivery(row["approval_id"], channel, {"request_id": channel},
+                                        payload_hash=bound)
+        self.approve(row)
+        self.assertEqual(len(self.ledger.expand_scope(row["approval_id"], "C", GATES,
+                                                      run_id="run-1", policy_hash="p1")), 3)
+
 if __name__ == "__main__":
     unittest.main()

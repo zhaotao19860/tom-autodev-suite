@@ -4,6 +4,7 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-10-28
 
+- MVP 评审修复第 5 轮：iPipe 成功回执原子判定；rerun 异常对账落盘；iCode 首次身份冲突记 AMBIGUOUS；scope 补发卡可展开；并发发布决定先写者为准。
 - MVP 评审修复第 4 轮：成功/缺席回执原子判定；错误信封不证明缺席；trigger 读嵌套 triggerTime；失败重跑绑定配置 hash；守卫拒绝不写状态；集合校验前移；PARTIAL 豁免延续到诊断。
 - MVP 评审修复第 3 轮：后继提交只对账；缺席与 AMBIGUOUS 原子判定；v2 发布成功也固定、Recovery 同样豁免旁路；IPIPE 边界自推仓库集合，PARTIAL 带未决 intent 转 DIAGNOSE。
 - MVP 评审修复第 2 轮：iCode 缺席宽限覆盖 push 超时；v2 延后决定持久化、KU/iCafe intent 不阻塞；`submit_to_ipipe` 边界强制聚合 SUBMITTED，PARTIAL 转 DIAGNOSE；trigger 归属需 `triggerTime`/`startTime` 正向证明。

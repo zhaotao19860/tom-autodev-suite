@@ -503,7 +503,9 @@ class IcodeRuntimeTests(unittest.TestCase):
             "owner": {"username": "someone-else"}, "subject": "CARD-1 stale", "url": "https://icode.example/cr/42",
         }]
         result = self.runtime().submit(change, approval)
-        self.assertEqual(result["reason_code"], "CR_IDENTITY_CONFLICT")
+        # Recorded as AMBIGUOUS (contract 3.1), so the attempt aggregates PARTIAL.
+        self.assertEqual(result["reason_code"], "CR_IDENTITY_AMBIGUOUS")
+        self.assertEqual(result["intent_state"], "AMBIGUOUS")
         self.assertFalse(any(_is_push(call[0]) for call in self.transport.calls))
 
     def test_a_sibling_cr_for_the_same_card_does_not_block_this_submission(self):
@@ -541,7 +543,7 @@ class IcodeRuntimeTests(unittest.TestCase):
             "url": "https://icode.example/cr/42",
         }]
         blocked = self.runtime().submit(change, approval)
-        self.assertEqual(blocked["reason_code"], "CR_IDENTITY_CONFLICT")
+        self.assertEqual(blocked["reason_code"], "CR_IDENTITY_AMBIGUOUS")
         key = f"icode.submit:run-1:{change['change_set_id']}:{change['revision_set_id']}"
         self.state.abandon_intent(
             self.state.intent_by_idempotency_key(key)["intent_id"],

@@ -61,6 +61,16 @@ class StateMachineTests(unittest.TestCase):
         fresh = {"trigger": {"triggerTime": 4_000_000_000_000}}
         self.assertTrue(_created_after(fresh, since, 120))  # no start time yet, still attributable
 
+    def test_ipipe_confirmations_do_not_overwrite_a_recorded_ambiguity(self):
+        # Round 5: the rerun/trigger/rebuild receipt paths use the atomic guard.
+        import inspect
+        from clients import ipipe_runtime
+        source = inspect.getsource(ipipe_runtime)
+        self.assertNotIn("self.state.receipt(intent_id", source)
+        ie.settle(self.state, self.intent, ie.Verdict.ambiguous(candidates=["a", "b"]))
+        self.assertEqual(ipipe_runtime._ambiguity_stands("x")["intent_state"], ie.AMBIGUOUS)
+        self.assertIsNone(self.state.receipt_unless_ambiguous(self.intent["intent_id"], {"ok": True}, []))
+
     def test_a_fresh_claim_is_claimed_and_holds_the_target(self):
         self.assertEqual(ie.intent_state(self.state, self.intent), ie.CLAIMED)
         self.assertEqual(self.claim_again()["status"], "BLOCKED")
