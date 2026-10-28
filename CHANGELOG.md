@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-29 · MVP §7：LegacyRunProjector
+
+- 新增 `legacy_projector.py`：`status` / `context` 只读 events、artifacts、approval ledger，不调 live workflow spec、`next()`、migration、repin 或远端；`drill` 对库内全部 run 投影并与 `run_brief` 对照。
+- 本机演练：13 个历史 run（BGW-1956 / 1995 / 2019）13 个一致（state 相同，live 待批门 ⊆ 投影待批门）。
+- 删除旧模块的其他前提（真实场景矩阵、无非终态旧 run 等）仍未满足，本次不删任何代码。
+- 测试：`test_legacy_projector.py` 2 项。
+
 ## 2026-10-29 · MVP 评审修复第 8 轮（Codex 1 条 P1、1 条 P2）· 评审收口
 
 - 多仓 PARTIAL 只在有 AMBIGUOUS 仓库时转 DIAGNOSE；仅被平台拒绝（REFUSED）的保留在 SUBMIT，修好外部原因后同一 attempt 重试（拒绝回执被 supersede、重试链式接续，已确认的兄弟仓不重推）。
