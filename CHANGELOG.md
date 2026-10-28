@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-29 · MVP 评审修复第 8 轮（Codex 1 条 P1、1 条 P2）· 评审收口
+
+- 多仓 PARTIAL 只在有 AMBIGUOUS 仓库时转 DIAGNOSE；仅被平台拒绝（REFUSED）的保留在 SUBMIT，修好外部原因后同一 attempt 重试（拒绝回执被 supersede、重试链式接续，已确认的兄弟仓不重推）。
+- trigger 在 POST 前记 `ipipe.trigger.dispatch`；重放时只有确实派发过才按创建时间过滤，预检失败（未派发）的重放仍可只读采纳既有 build。新代码 claim 时记 `ipipe.trigger.claim`，旧 intent 无标记按"已派发"保守处理。
+- 评审收口：GPT-6.1-Sol 连续两轮（6、7）未发现问题；Codex 第 8 轮只剩恢复路径细节。剩余并发/中断交错改由 BGW-2019 真实运行验证，不再开新一轮静态评审。
+- 测试：新增 2 项；全量 1579 通过。
+
 ## 2026-10-28 · MVP 评审修复第 7 轮（Codex 2 条 P1、1 条 P2；GPT-6.1-Sol 连续两轮未发现问题）
 
 - iCode 目标级围栏：push 前若同一 run 中同仓库同分支还有未决（CLAIMED/UNKNOWN/AMBIGUOUS）的其他提交，返回 `TARGET_INTENT_UNRESOLVED` 不推；PARTIAL 诊断豁免只放行诊断，不放行新的写。

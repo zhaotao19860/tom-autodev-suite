@@ -212,6 +212,8 @@ class IpipeRuntime:
                 return self._rebuilt_response(context, replay)
             return replay
         intent = claim["intent"]
+        if claim["status"] == "CLAIMED":
+            self.state.record_external_observation(intent["intent_id"], {"operation": "ipipe.trigger.claim"})
         sticky = intent_executor.sticky_ambiguous(self.state, intent)
         if sticky is not None:
             return self._settled_write(intent, sticky, "QUERY_REQUIRED", "BUILD_AMBIGUOUS")
@@ -224,7 +226,7 @@ class IpipeRuntime:
             # This intent adopted an existing build and never sent a trigger; its own
             # recorded choice is its identity, whatever newer builds appeared since.
             existing = {"reason_code": "OK", "build_id": adopted}
-        elif claim["status"] == "EXISTING":
+        elif claim["status"] == "EXISTING" and self._trigger_dispatched(intent):
             existing = self.discover(profile, revision_set, context["module"], since=intent.get("created_at"))
         else:
             existing = self.discover(profile, revision_set, context["module"])
@@ -247,12 +249,15 @@ class IpipeRuntime:
             return self._trigger_receipt(intent["intent_id"], context, candidate)
         if existing.get("reason_code") != "BUILD_QUERY_REQUIRED":
             return {**existing, "intent_id": intent["intent_id"]}
-        if claim["status"] == "EXISTING":
+        if claim["status"] == "EXISTING" and self._trigger_dispatched(intent):
             return self._settled_write(intent, intent_executor.Verdict.unknown(), "QUERY_REQUIRED")
 
         blocked = self._profile_error()
         if blocked is not None:
             return blocked
+        # Recorded before the POST: a replay of a claim without it never sent anything,
+        # so it may still adopt an existing build or dispatch now.
+        self.state.record_external_observation(intent["intent_id"], {"operation": "ipipe.trigger.dispatch"})
         try:
             result = self.api.trigger_by_revision(
                 context["pipeline_id"], context["revision_map"][context["module"]], context["parameters"]
@@ -2263,6 +2268,21 @@ class IpipeRuntime:
             # A concurrent reconcile recorded AMBIGUOUS first; that verdict stands.
             return _ambiguity_stands(intent_id)
         return written["response"]
+
+    def _trigger_dispatched(self, intent: dict[str, Any]) -> bool:
+        """Whether this trigger intent announced a POST. Intents claimed before the marker
+        existed are treated as dispatched (the conservative reading)."""
+        observations = [(item.get("observation") or {}).get("operation")
+                        for item in self.state.external_observations(self.run_id, intent_id=intent["intent_id"])]
+        if "ipipe.trigger.dispatch" in observations:
+            return True
+        return not any(isinstance(op, str) and op.startswith("ipipe.trigger") for op in observations) \
+            and not self._marker_era(intent)
+
+    def _marker_era(self, intent: dict[str, Any]) -> bool:
+        # Intents claimed by this code carry a claim marker; older ones do not.
+        return any((item.get("observation") or {}).get("operation") == "ipipe.trigger.claim"
+                   for item in self.state.external_observations(self.run_id, intent_id=intent["intent_id"]))
 
     def _adopted_build(self, intent: dict[str, Any]) -> str | None:
         """The build a fresh claim adopted without sending a trigger, if it recorded one."""

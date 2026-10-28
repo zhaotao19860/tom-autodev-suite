@@ -2,6 +2,10 @@
 
 tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套件根目录 [CHANGELOG.md](../CHANGELOG.md) 的同日条目。
 
+## 2026-10-29
+
+- MVP 评审修复第 8 轮：REFUSED 的 PARTIAL 留在 SUBMIT 同 attempt 重试；trigger 记录是否已派发，预检失败的重放仍可采纳。评审收口，转真实运行验证。
+
 ## 2026-10-28
 
 - MVP 评审修复第 7 轮：iCode 同目标未决提交围栏；dispatch 围栏覆盖完整宽限；trigger 采纳优先于 discovery。

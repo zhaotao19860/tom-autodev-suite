@@ -4352,6 +4352,11 @@ def _route_partial(result: dict[str, Any], orchestrator: Any, run_id: str) -> di
     aggregate = result.get("submission_set") or {}
     if result.get("ok") or aggregate.get("status") != "PARTIAL":
         return result
+    # A refused push (permission, CLI) is retried in SUBMIT once the cause is fixed: the
+    # refusal receipt is superseded and the retry chains off it, keeping the confirmed
+    # sibling. Only an AMBIGUOUS repository needs a person, hence DIAGNOSE.
+    if not any(row.get("intent_state") == "AMBIGUOUS" for row in aggregate.get("repositories", [])):
+        return result
     evidence = {"submission_set": {
         "change_set_id": aggregate.get("change_set_id"),
         "revision_set_id": aggregate.get("revision_set_id"),

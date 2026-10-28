@@ -114,6 +114,14 @@ class RoutePartialTests(unittest.TestCase):
         self.assertEqual(routed["routed"]["state"], "DIAGNOSE")
         self.assertEqual([r[1] for r in orch.routed], ["SUBMIT_PARTIAL"])
 
+    def test_a_refused_partial_stays_in_submit_for_a_retry(self):
+        from orchestrator import _route_partial
+        orch = self.Orchestrator()
+        result = {"ok": False, "submission_set": {"status": ss.PARTIAL, "repositories": [
+            {"change_set_id": PRIMARY, "intent_id": "i1", "intent_state": "REFUSED"}]}}
+        self.assertNotIn("routed", _route_partial(result, orch, RUN))
+        self.assertEqual(orch.routed, [])
+
     def test_pending_and_success_are_not_routed(self):
         from orchestrator import _route_partial
         orch = self.Orchestrator()

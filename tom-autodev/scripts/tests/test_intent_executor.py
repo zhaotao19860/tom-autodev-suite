@@ -305,6 +305,22 @@ class TriggerTests(unittest.TestCase):
         self.assertEqual(replay.get("build_id"), "build-3", replay)
         self.assertEqual(self.posts(), 0)
 
+    def test_a_failed_precheck_replay_still_adopts_an_existing_build(self):
+        # Codex round 8: no POST was sent, so the creation-time filter does not apply.
+        old = {**build("build-2"), "triggerTime": 1_000_000_000_000}
+        self.api.builds["build-2"] = old
+        original = self.api.builds_by_revision
+
+        def failing(*a, **k):
+            raise TimeoutError("listing failed")
+        self.api.builds_by_revision = failing
+        self.assertFalse(self.trigger().get("ok"))
+        self.api.builds_by_revision = original
+        self.api.candidates.append(old)
+        replay = self.trigger()
+        self.assertEqual(replay.get("build_id"), "build-2", replay)
+        self.assertEqual(self.posts(), 0)
+
     def test_a_build_started_before_the_intent_is_not_its_answer(self):
         self.api.trigger_result = TimeoutError("no answer")
         self.trigger()
