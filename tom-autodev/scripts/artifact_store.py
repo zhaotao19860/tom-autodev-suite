@@ -526,6 +526,12 @@ def _validate_final_envelope(envelope: Any) -> None:
     url = envelope.get("knowledge_url")
     version = envelope.get("knowledge_version")
     comment_id = envelope.get("icafe_comment_id")
+    # Evidence contract v2 (MVP §5): the KU/iCafe write was deferred. The marker sits in
+    # the hashed envelope, so a deferred artifact is recognisable and cannot claim a
+    # document that does not exist.
+    if "knowledge-deferred" in references and doc_id is None and url is None \
+            and version is None and comment_id is None:
+        return
     if wants_ku:
         if not all(isinstance(value, str) and value for value in (doc_id, url, version)):
             raise ValueError("KNOWLEDGE_RECEIPT_INVALID")

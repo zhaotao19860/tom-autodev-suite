@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP §5：证据合同 v2（KU / iCafe 降为旁路，按 run 双读）
+
+- 新 run 的 INTAKE 固定 `evidence_contract: "v2"`，G0 hash 升到 `intake_hash_version: v3`（多绑定这一字段）；v1 / v2 的旧 INTAKE 照原样计算 hash，旧 run 不受影响。
+- v2 下 `PhaseProtocol._publish`：KU/iCafe 写入失败、抛异常或回读未确认时，换成 deferred receipt（`knowledge-deferred` 证据引用，KU/iCafe 字段为空），记日志后照常迁移状态；`_receipt_error` 接受同一 run、同一 artifact hash 的 deferred receipt；外来的未决 publish intent 不再阻断 v2 run。`ArtifactStore` 接受带 `knowledge-deferred` 且 KU/iCafe 字段全空的信封。completion predicate 的 `requires_ku_receipt` / `requires_icafe_receipt` 随合同版本变化。
+- v1 run 的行为不变：`test_continue_reconciles_g5_saved_draft_through_real_ku_client` 改为在 v1 run 上跑，仍要求 KU receipt；新增 v2 下 KU 不可达时照常推进的 e2e。
+- `references/phase-protocol.md` 的完成条件按合同版本改写。deferred 的文档由 run 结束后的 `backfill_knowledge` 归档（现有命令）。
+- 全量 1519 通过。
+
 ## 2026-10-28 · MVP 合同 3.1 完成：BranchPipeline 发布身份
 
 - 「发布」stage 的执行本身已经是人工 stage 执行（走 IntentExecutor）。发布身份读取 `_branch_release` 改为收集全部匹配的 AGILE_RELEASE job：同一 revision + branch 有两个以上 release → `RELEASE_AMBIGUOUS`（带 `candidates`），不取第一个；worker 遇到它按失败停下，不写 RELEASE_SUCCESS。

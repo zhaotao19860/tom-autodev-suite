@@ -176,7 +176,11 @@ class Orchestrator:
         payload["change_class"] = change_class
         payload["workflow_spec_hash"] = workflow_spec.canonical_hash()
         payload["workflow_modes"] = workflow_spec.run_workflow_modes(change_class)
-        payload["intake_hash_version"] = "v2"
+        # MVP §5: KU documents and iCafe comments no longer gate a phase; the local
+        # artifact and the approval ledger do. Pinned per run, so runs started before keep
+        # completing under v1 (dual read until they are all terminal).
+        payload["evidence_contract"] = workflow_spec.EVIDENCE_CONTRACT
+        payload["intake_hash_version"] = "v3"
         payload["g0_input_hash"] = intake_input_hash(payload)
         event = self.state.transition(
             run_id,

@@ -442,7 +442,7 @@ class FakeE2ETests(unittest.TestCase):
         )
         payload = self.orchestrator.state.events(started["run_id"])[0]["payload"]
         change_class = payload["change_class"]
-        self.assertEqual(payload["intake_hash_version"], "v2")
+        self.assertEqual(payload["intake_hash_version"], "v3")
         self.assertIn(change_class, workflow_spec.CHANGE_CLASSES)
         self.assertEqual(payload["workflow_spec_hash"], workflow_spec.canonical_hash())
         self.assertEqual(
@@ -944,11 +944,59 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(self.orchestrator.next(run_id)["controller"], "submit")
         return run_id, knowledge
 
+    def _as_evidence_contract_v1(self, run_id):
+        """Rewrite a fresh run's INTAKE as a pre-MVP run (KU/iCafe receipts gate phases)."""
+        import sqlite3
+        from collaboration import intake_input_hash
+        events = self.orchestrator.state.events(run_id)
+        payload = dict(events[0]["payload"])
+        payload.pop("evidence_contract", None)
+        payload["intake_hash_version"] = "v2"
+        payload["g0_input_hash"] = intake_input_hash(payload)
+        with sqlite3.connect(self.orchestrator.state.database_path) as connection:
+            connection.execute("UPDATE events SET payload_json = ? WHERE event_id = ?",
+                               (json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                           separators=(",", ":")), events[0]["event_id"]))
+
+    def test_evidence_contract_v2_advances_when_ku_publish_fails(self):
+        # MVP §5: for a new run the artifact and the approval are the evidence; a KU write
+        # that does not settle is deferred, not a stop.
+        run_id, knowledge = self._run_to_workspace("BGW-592", "bgw", "I15ClP2KW4ZGAK")
+        self.assertEqual(self.orchestrator.state.events(run_id)[0]["payload"]["evidence_contract"], "v2")
+        receipts = self._owned_workspace_receipts(run_id, "bgw")
+        binding = self.orchestrator.workspace_binding(run_id, receipts)
+        approval = self._approval(run_id, "G4", binding["input_hash"])
+        self.orchestrator.advance(run_id, "PLAN", {
+            "input_hash": binding["input_hash"], "approval_id": approval["approval_id"],
+            "artifacts": ["workspace", "task-plan"], "workspace_receipts": receipts,
+        })
+
+        class BrokenKu:
+            def publish_phase(self, *_args, **_kwargs):
+                raise TimeoutError("KU unreachable")
+
+        broken = BrokenKu()
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=broken)
+        action = self.orchestrator.next(run_id)
+        draft = self._phase_content(action, snapshot("BGW-592"), None)
+        need = worker_driver.submit_draft(
+            self.orchestrator, run_id, parked["producer_job"]["job_id"], draft, knowledge_sync=broken)
+        self._approval(run_id, "G4", need["approval_input_hash"])
+        worker_driver.advance(self.orchestrator, run_id, knowledge_sync=broken)
+        self.assertEqual(self.orchestrator.status(run_id)["state"], "IMPLEMENT")
+        plan = self.orchestrator.artifacts.latest_phase(run_id, "PLAN", "T-1")["envelope"]
+        self.assertIsNone(plan["knowledge_doc_id"])
+        self.assertIn("knowledge-deferred", plan["evidence_refs"])
+        self.assertFalse(self.orchestrator.next(run_id)["completion_predicate"]["requires_ku_receipt"])
+
     def test_continue_reconciles_g5_saved_draft_through_real_ku_client(self):
+        # The evidence contract v1 path: a KU receipt still gates the phase for runs
+        # started before MVP §5 (dual read).
         from agent_bridge import AgentBridge
         from clients.ku_client import KuClient
 
-        run_id, knowledge = self._run_to_workspace("BGW-591", "bgw", "I15ClP2KW4ZGAK")
+        run_id, knowledge = self._run_to_workspace("BGW-591", "bgw", "I15ClP2KW4ZGAK",
+                                                   evidence_contract_v1=True)
         receipts = self._owned_workspace_receipts(run_id, "bgw")
         binding = self.orchestrator.workspace_binding(run_id, receipts)
         approval = self._approval(run_id, "G4", binding["input_hash"])
@@ -2392,10 +2440,12 @@ class FakeE2ETests(unittest.TestCase):
         }
         return ku, cafe
 
-    def _run_to_workspace(self, card, project, parent):
+    def _run_to_workspace(self, card, project, parent, *, evidence_contract_v1=False):
         requirement = snapshot(card)
         started = self.orchestrator.start(card, project, requirement_snapshot=requirement)
         run_id = started["run_id"]
+        if evidence_contract_v1:
+            self._as_evidence_contract_v1(run_id)
         profile = yaml.safe_load(
             (self.root / "config" / "projects" / f"{project}.yaml").read_text(encoding="utf-8")
         )

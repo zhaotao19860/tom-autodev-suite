@@ -36,6 +36,9 @@ _INTAKE_PREREQUISITE_KEYS = (
 _INTAKE_PREREQUISITE_KEYS_V2 = _INTAKE_PREREQUISITE_KEYS + (
     "change_class", "workflow_spec_hash", "intake_hash_version",
 )
+# v3 also binds the evidence contract the run is completed under (MVP §5): which receipts
+# a phase needs before it may advance. v2 and v1 payloads hash exactly as before.
+_INTAKE_PREREQUISITE_KEYS_V3 = _INTAKE_PREREQUISITE_KEYS_V2 + ("evidence_contract",)
 _GROUP_TOPIC_MAX = 12
 # Failures the group client raises before it dispatches anything: the request was
 # rejected locally or the gateway was unreachable, so no group can exist yet.
@@ -145,11 +148,11 @@ def group_id_for_run(state_store: Any, run_id: Any) -> str | None:
 
 def intake_prerequisites(payload: Any) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
-    keys = (
-        _INTAKE_PREREQUISITE_KEYS_V2
-        if source.get("intake_hash_version") == "v2"
-        else _INTAKE_PREREQUISITE_KEYS
-    )
+    version = source.get("intake_hash_version")
+    keys = {
+        "v3": _INTAKE_PREREQUISITE_KEYS_V3,
+        "v2": _INTAKE_PREREQUISITE_KEYS_V2,
+    }.get(version, _INTAKE_PREREQUISITE_KEYS)
     return {key: source.get(key) for key in keys}
 
 

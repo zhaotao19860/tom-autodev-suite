@@ -170,7 +170,8 @@ class CollaborationSafetyTests(unittest.TestCase):
         self.assertNotIn("group_id", binding)
         # MEDIUM-001: the run's control policy is pinned into INTAKE and the G0 hash now
         # binds it (intake_hash_version v2 = the five prerequisites + class + spec version).
-        self.assertEqual(payload["intake_hash_version"], "v2")
+        self.assertEqual(payload["intake_hash_version"], "v3")
+        self.assertEqual(payload["evidence_contract"], "v2")
         self.assertEqual(payload["change_class"], "standard")
         self.assertEqual(payload["workflow_spec_hash"], workflow_spec.canonical_hash())
         self.assertEqual(
@@ -181,7 +182,7 @@ class CollaborationSafetyTests(unittest.TestCase):
             for key in (
                 "requirement_id", "project", "profile_hash", "requirement_snapshot",
                 "collaboration_binding", "change_class", "workflow_spec_hash",
-                "intake_hash_version",
+                "intake_hash_version", "evidence_contract",
             )
         }
         self.assertEqual(payload["g0_input_hash"], hashlib.sha256(

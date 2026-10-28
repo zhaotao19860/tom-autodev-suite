@@ -314,7 +314,8 @@ class PhaseProtocol:
             "source_evidence_refs": _source_evidence_refs(events, predecessor),
             "required_human_gate": human_gate,
             "allowed_side_effects": _allowed_side_effects(state, controller_definition is not None),
-            "completion_predicate": _completion_predicate(state, selected.get("schema")),
+            "completion_predicate": _completion_predicate(
+                state, selected.get("schema"), workflow_spec.run_evidence_contract(events)),
             "result_schema": selected.get("schema"),
             "target_state": target,
             **({"reentry": reentry} if reentry is not None else {}),
@@ -866,7 +867,8 @@ class PhaseProtocol:
                 "source_refs": validated["draft"].get("evidence_refs"),
             },
         )
-        foreign = self._foreign_publish_intent(run_id, title, envelope["content_hash"])
+        foreign = (None if self._evidence_contract(run_id) == "v2"
+                   else self._foreign_publish_intent(run_id, title, envelope["content_hash"]))
         if foreign is not None:
             return _failure(
                 "RECOVERY_REQUIRED",
@@ -874,7 +876,7 @@ class PhaseProtocol:
                 retry_allowed=False,
                 intent_id=foreign["intent_id"],
             )
-        receipt = self.knowledge.publish_phase(
+        receipt = self._publish(
             run_id,
             {
                 "title": title,
@@ -956,7 +958,7 @@ class PhaseProtocol:
                 "knowledge_receipt": {
                     "child_doc_id": receipt["child_doc_id"],
                     "child_version": receipt["child_version"],
-                    "comment_id": str(receipt["comment_id"]),
+                    "comment_id": _comment_id(receipt),
                     "evidence_refs": receipt["evidence_refs"],
                 },
                 "policy_decision": transition,
@@ -1645,7 +1647,44 @@ class PhaseProtocol:
         )
         return None if gate_check.get("passed") else gate_check.get("reason_code", "APPROVAL_REQUIRED")
 
+    def _evidence_contract(self, run_id: str) -> str:
+        return workflow_spec.run_evidence_contract(self.state.events(run_id))
+
+    def _publish(self, run_id: str, artifact: dict[str, Any], *, scope: str) -> Any:
+        """Publish a phase document; under evidence contract v2 a failure is deferred.
+
+        v1 runs keep the old contract: the KU/iCafe receipt gates the phase. v2 runs
+        (MVP §5) advance on the artifact and the approval alone; a publish that fails,
+        raises or stays unconfirmed is replaced by a deferred receipt, logged, and left
+        for the after-run archive. The open publish intent, if any, stays on record.
+        """
+        if self._evidence_contract(run_id) != "v2":
+            return self.knowledge.publish_phase(run_id, artifact, scope=scope)
+        try:
+            receipt = self.knowledge.publish_phase(run_id, artifact, scope=scope)
+        except Exception as error:  # noqa: BLE001 - side channel only under v2
+            receipt = {"ok": False, "reason_code": type(error).__name__}
+        if isinstance(receipt, dict) and receipt.get("ok") and self._receipt_error(
+                run_id, {"phase": artifact.get("phase"), "content_hash": artifact.get("content_hash")},
+                receipt) is None:
+            return receipt
+        reason = receipt.get("reason_code") if isinstance(receipt, dict) else None
+        _log.warning("knowledge publish deferred for run %s phase %s: %s",
+                     run_id, artifact.get("phase"), reason)
+        return {
+            "ok": True, "reason_code": "KNOWLEDGE_DEFERRED", "deferred": True,
+            "deferred_reason": reason if isinstance(reason, str) else "UNKNOWN",
+            "run_id": run_id, "artifact_hash": artifact.get("content_hash"),
+            "child_doc_id": None, "child_url": None, "child_version": None,
+            "comment_id": None, "evidence_refs": [_KNOWLEDGE_DEFERRED_REF], "scope": scope,
+        }
+
     def _receipt_error(self, run_id: str, envelope: dict[str, Any], receipt: Any) -> str | None:
+        if (isinstance(receipt, dict) and receipt.get("deferred") is True
+                and self._evidence_contract(run_id) == "v2"):
+            if receipt.get("run_id", run_id) != run_id or receipt.get("artifact_hash") != envelope["content_hash"]:
+                return "KU_RECEIPT_MISMATCH"
+            return None
         if not isinstance(receipt, dict) or not receipt.get("ok"):
             if isinstance(receipt, dict) and receipt.get("reason_code") in {"QUERY_REQUIRED", "RECOVERY_REQUIRED"}:
                 return "RECOVERY_REQUIRED"
@@ -2136,7 +2175,7 @@ class PhaseProtocol:
         }
         ipipe_title = f"08-ipipe-evidence/{content['build_id']}"
         ipipe_canonical = _canonical_json(content)
-        receipt = self.knowledge.publish_phase(run_id, {
+        receipt = self._publish(run_id, {
             "title": ipipe_title,
             "markdown": render_phase_markdown(
                 ipipe_title, content, content_hash, ipipe_canonical,
@@ -2160,7 +2199,7 @@ class PhaseProtocol:
             return _failure(receipt_error, run_id=run_id)
         final = {
             **draft, "knowledge_doc_id": receipt["child_doc_id"], "knowledge_url": receipt["child_url"],
-            "knowledge_version": receipt["child_version"], "icafe_comment_id": str(receipt["comment_id"]),
+            "knowledge_version": receipt["child_version"], "icafe_comment_id": _comment_id(receipt),
             "evidence_refs": _merge_evidence_refs(
                 draft["evidence_refs"], receipt["evidence_refs"]
             ),
@@ -2374,7 +2413,7 @@ class PhaseProtocol:
         # __RELEASE_INGEST_TAIL__
         title = f"09-release-evidence/{content['build_id']}"
         canonical = _canonical_json(content)
-        receipt = self.knowledge.publish_phase(run_id, {
+        receipt = self._publish(run_id, {
             "title": title,
             "markdown": render_phase_markdown(
                 title,
@@ -2399,7 +2438,7 @@ class PhaseProtocol:
             return _failure(receipt_error, run_id=run_id)
         final = {
             **draft, "knowledge_doc_id": receipt["child_doc_id"], "knowledge_url": receipt["child_url"],
-            "knowledge_version": receipt["child_version"], "icafe_comment_id": str(receipt["comment_id"]),
+            "knowledge_version": receipt["child_version"], "icafe_comment_id": _comment_id(receipt),
             "evidence_refs": _merge_evidence_refs(draft["evidence_refs"], receipt["evidence_refs"]),
         }
         stored = self.artifacts.put_envelope(final)
@@ -2891,6 +2930,15 @@ def _payload_value(payload: dict[str, Any], key: str) -> Any:
     return evidence.get(key) if isinstance(evidence, dict) else None
 
 
+# The marker a deferred (v2) phase artifact carries in place of KU/iCafe references.
+_KNOWLEDGE_DEFERRED_REF = "knowledge-deferred"
+
+
+def _comment_id(receipt: dict[str, Any]) -> str | None:
+    value = receipt.get("comment_id")
+    return None if value is None or value == "" else str(value)
+
+
 def _canonical_ku_url(value: Any, doc_id: Any) -> bool:
     if not isinstance(value, str) or not isinstance(doc_id, str) or not doc_id:
         return False
@@ -3084,15 +3132,18 @@ def _allowed_side_effects(state: str, controller: bool) -> list[str]:
     return ["artifact.write", "knowledge.publish", "icafe.comment", "state.transition"]
 
 
-def _completion_predicate(state: str, schema: str | None) -> dict[str, Any]:
+def _completion_predicate(state: str, schema: str | None, contract: str = "v1") -> dict[str, Any]:
+    # Evidence contract v2 (MVP §5): KU/iCafe are a side channel and gate nothing.
+    gated = schema is not None and contract != "v2"
     return {
         "state": state,
         "schema": schema,
         "accepts_phase_result": schema is not None,
         "requires_local_integrity": schema is not None,
-        "requires_ku_receipt": schema is not None,
-        "requires_icafe_receipt": schema is not None,
+        "requires_ku_receipt": gated,
+        "requires_icafe_receipt": gated,
         "requires_legal_transition": True,
+        "evidence_contract": contract,
     }
 
 

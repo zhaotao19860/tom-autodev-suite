@@ -457,6 +457,19 @@ _KNOWLEDGE_SCOPE: dict[str, str] = {
 _KNOWLEDGE_SCOPES = frozenset({"both", "ku_only", "icafe_only", "skip"})
 
 
+# Evidence contract for new runs (MVP §5). "v1" (absent on old runs): a phase completes
+# only with its KU / iCafe receipts. "v2": the artifact and the approval are the evidence;
+# KU and iCafe are a side channel -- a failed write is recorded as deferred and archived
+# after the run (`backfill_knowledge`), and never stops a state transition.
+EVIDENCE_CONTRACT = "v2"
+
+
+def run_evidence_contract(events: list[dict[str, Any]]) -> str:
+    payload = (events[0].get("payload") or {}) if events else {}
+    value = payload.get("evidence_contract") if isinstance(payload, dict) else None
+    return value if value in ("v1", "v2") else "v1"
+
+
 def knowledge_scope(state: str) -> str:
     """The KU/iCafe write scope for a phase artifact; "both" unless slimmed."""
     return _KNOWLEDGE_SCOPE.get(state, "both")
