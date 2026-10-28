@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-28 · MVP §2：scope 授权（台账层）
+
+- `ApprovalLedger.request_scope`：一张卡代表多个门，卡的 input hash = `scope_hash`（`scope-approval.v1`：scope 名、按序的 (gate, input_hash) 列表、规则 hash）；有效审批人取各门成员策略的交集，交集为空时拒绝出卡（`SCOPE_MEMBERS_EMPTY`），退回逐门审批。
+- `ApprovalLedger.expand_scope`：卡被批准后，为列出的每个门写一条派生同意（各自的 gate 与 input_hash，`effective_channel = scope:<approval_id>`），现有的门检查无需改动即可识别。防重放：artifact 或规则变了（scope hash 不匹配）一条都不写；重复展开幂等；已被停止 / 超时 / 需修改的门不会被覆盖（`SCOPE_GATE_ALREADY_DECIDED`）。
+- 尚未接入 worker：D/C/R 卡需要 prepare 段（中间门不再逐个找人批）改门的语义，按方案应在合同 3.1~3.3 经真实 run 验证后再接，见方案第 8 节。
+- 测试：`test_scope_approval.py` 6 项；全量通过。
+
 ## 2026-10-28 · MVP 合同 3.3：stage plan 快照绑定进人工 stage 的 G8
 
 - 新增 `stage_plan.py`（`stage-plan.v1`）：build 自身的 stage 形状（id、配置 id、名称、顺序）和实时配置中 stage 运行依赖的部分（stage 身份、上游、`paramBeans` 名称与 required、`inParamsMap` 键、job 的 id 与类型）分别规范化后 sha256。无关字段（修改人、时间）不进 hash。

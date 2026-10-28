@@ -140,6 +140,75 @@ class ApprovalLedger:
             "settled_elsewhere": False,
         }
 
+    def request_scope(
+        self, scope_name: str, gates: list[tuple[str, str]], channels: list[str], *,
+        run_id: str, member_policies: list[dict[str, list[str]]], policy_hash: str,
+        deadline_at: str | None = None,
+    ) -> dict[str, Any]:
+        """One card for several gates whose inputs all exist now (MVP §2, prepare → scope).
+
+        The card's own input hash is the scope hash, so it binds every listed gate input;
+        only people allowed on every listed gate may answer it. Refused when nobody is.
+        """
+        if not gates or len({gate for gate, _ in gates}) != len(gates):
+            raise ValueError("SCOPE_GATES_INVALID")
+        members = scope_members(member_policies)
+        if any(not members[channel] for channel in APPROVAL_CHANNELS):
+            raise ValueError("SCOPE_MEMBERS_EMPTY")
+        bound = scope_hash(scope_name, gates, policy_hash)
+        return self.request(f"{SCOPE_ACTION_PREFIX}{scope_name}", bound, channels, run_id=run_id,
+                            member_policy=members, deadline_at=deadline_at)
+
+    def expand_scope(
+        self, approval_id: str, scope_name: str, gates: list[tuple[str, str]], *,
+        run_id: str, policy_hash: str,
+    ) -> list[dict[str, Any]]:
+        """Write one derived APPROVE per listed gate for an approved scope card.
+
+        Each derived row carries its own gate and input hash and `scope:<approval_id>` as
+        its channel, so every existing gate check keeps working and the ledger shows where
+        the decision came from. Only the exact gates the card bound are written: a card
+        approved for one scope hash expands to nothing under another (replay guard), and
+        expanding twice is idempotent.
+        """
+        with self._connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+            if row is None:
+                raise ValueError("APPROVAL_NOT_FOUND")
+            if row["run_id"] != run_id or row["action"] != f"{SCOPE_ACTION_PREFIX}{scope_name}":
+                raise ValueError("SCOPE_MISMATCH")
+            if row["input_hash"] != scope_hash(scope_name, gates, policy_hash):
+                raise ValueError("SCOPE_HASH_MISMATCH")
+            if row["effective_decision"] != "APPROVE":
+                raise ValueError("SCOPE_NOT_APPROVED")
+            derived = []
+            channel = f"scope:{approval_id}"
+            for gate, input_hash in gates:
+                existing = c.execute(
+                    "SELECT * FROM approvals WHERE run_id=? AND action=? AND input_hash=?",
+                    (run_id, gate, input_hash)).fetchone()
+                if existing is not None:
+                    # A gate already stopped, timed out or sent back is not overridden by a
+                    # scope card; one already approved stays as it was.
+                    if existing["effective_decision"] not in (None, "APPROVE"):
+                        raise ValueError("SCOPE_GATE_ALREADY_DECIDED")
+                    if existing["effective_decision"] is None:
+                        c.execute("UPDATE approvals SET effective_decision='APPROVE',effective_channel=?,resolved_at=? WHERE approval_id=?",
+                                  (channel, _now(), existing["approval_id"]))
+                    derived.append(existing["approval_id"])
+                    continue
+                derived_id = uuid.uuid4().hex
+                c.execute(
+                    "INSERT INTO approvals(approval_id,run_id,action,input_hash,channels_json,member_policy_json,"
+                    "delivery_receipts_json,effective_decision,effective_channel,created_at,resolved_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (derived_id, run_id, gate, input_hash, row["channels_json"], row["member_policy_json"],
+                     "[]", "APPROVE", channel, _now(), _now()))
+                derived.append(derived_id)
+            rows = [c.execute("SELECT * FROM approvals WHERE approval_id=?", (i,)).fetchone() for i in derived]
+        return [_row(item) for item in rows]
+
     def timeout(self, approval_id: str, input_hash: str, *, run_id: str | None = None, state_store: Any | None = None, now: datetime | None = None) -> dict[str, Any]:
         observed = now or datetime.now(timezone.utc)
         with self._connect() as c:
@@ -255,6 +324,31 @@ class ApprovalLedger:
     def responses(self, approval_id: str) -> list[dict[str, Any]]:
         with self._connect() as c: rows=c.execute("SELECT * FROM approval_responses WHERE approval_id=? ORDER BY sequence",(approval_id,)).fetchall()
         return [{"response_id":x["response_id"],"approval_id":x["approval_id"],"decision":x["decision"],"input_hash":x["input_hash"],"channel":x["channel"],"responder":x["responder"],"effective":bool(x["effective"]),"conflict":bool(x["conflict"]),"valid":bool(x["valid"]),"rejected_reason":x["rejected_reason"],"late":bool(x["late"]),"received_at":x["received_at"]} for x in rows]
+
+SCOPE_SCHEMA = "scope-approval.v1"
+SCOPE_ACTION_PREFIX = "SCOPE:"
+
+
+def scope_hash(scope_name: str, gates: list[tuple[str, str]], policy_hash: str) -> str:
+    """The hash a scope card binds: its name, the ordered (gate, input_hash) list, the rules."""
+    import hashlib
+    body = json.dumps({"schema": SCOPE_SCHEMA, "scope": scope_name, "policy_hash": policy_hash,
+                       "gates": [[gate, input_hash] for gate, input_hash in gates]},
+                      sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def scope_members(policies: list[dict[str, list[str]]]) -> dict[str, list[str]]:
+    """Who may answer a card standing for several gates: the intersection per channel."""
+    result: dict[str, list[str]] = {}
+    for channel in APPROVAL_CHANNELS:
+        members: set[str] | None = None
+        for policy in policies:
+            current = set(policy.get(channel) or [])
+            members = current if members is None else members & current
+        result[channel] = sorted(members or [])
+    return result
+
 
 def _migrate(c: sqlite3.Connection) -> None:
     for table, fields in {"approvals":{"run_id":"TEXT NOT NULL DEFAULT 'legacy'","member_policy_json":"TEXT NOT NULL DEFAULT '{}'","delivery_receipts_json":"TEXT NOT NULL DEFAULT '[]'","deadline_at":"TEXT","timeout_at":"TEXT","heartbeat_at":"TEXT","delivery_failed_at":"TEXT","delivery_failure_json":"TEXT"},"approval_responses":{"responder":"TEXT","valid":"INTEGER NOT NULL DEFAULT 1","rejected_reason":"TEXT","late":"INTEGER NOT NULL DEFAULT 0"}}.items():
