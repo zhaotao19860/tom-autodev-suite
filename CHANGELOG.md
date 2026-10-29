@@ -12,6 +12,7 @@ suite had no version control before then.
 
 ## 2026-10-29 · BGW-2019 真实运行中修的问题
 
+- 提交阶段：已通过评审、但因兄弟任务修复离开 SUBMIT 而没建描述符的任务，仍计入待提交（`_latest_unsubmitted_reviewed_task` / `_submit_followup_state`），不再把 run 送回无事可做的 WORKSPACE（`WORKSPACE_TASK_REPO_UNRESOLVED`）；已误入的 WORKSPACE 由 `_recover_skipped_submit` 拉回 SUBMIT。未改动的仓库 HEAD 停在他人基线提交时，`_commit_if_dirty(baseline=...)` 不再判 `GIT_IDENTITY_MISMATCH`。
 - 同一 run 内 CODE_ONLY 修复已提交的任务：iCode 对账把本卡、同 owner、同分支、同 Change-Id 的已开 CR 识别为 `CR_APPEND_ALLOWED`（作为新 patchset 追加），不再判为 `CR_IDENTITY_CONFLICT`。G7 卡说明该追加情形；控制器门（G7/G8）的审批预览文件改为展示固定摘要，不再误写“材料缺失”。BGW-2019 修 qa 仓版本号时发现。
 - 仓库未配置 git 提交身份时：`_commit_if_dirty` 由未捕获的 `CalledProcessError` 改为返回 `GIT_IDENTITY_REQUIRED`；`WorkspaceManager.create` 在建工作树（G4 之前）就检查，避免计划批完后才在实现阶段失败。BGW-2019 的 bgwagent 仓发现。
 - 多任务 run 的第二个任务进入 WORKSPACE 时 G4 卡材料缺失（`APPROVAL_MATERIAL_MISSING`）：`approval_summary._workspace_context` 读取了全 run 的 ACTIVE 工作树，先命中上一任务的行。改为按 `task_id` 过滤（另两处查询按 `(task_id, repo_path)` 取值，本就正确）。
