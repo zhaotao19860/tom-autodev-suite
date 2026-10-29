@@ -5003,6 +5003,10 @@ def _approval_context(
                     ])
             else:
                 preview_lines.extend(content_lines(draft, None))
+        elif gate_payload.get("summary"):
+            # Controller gates (G7, G8, ...) have no DraftContent; their pinned summary
+            # is the material the card shows, so the preview shows it too.
+            preview_lines.extend(["## 审批内容", "", *(f"- {line}" for line in gate_payload["summary"])])
         else:
             preview_lines.extend(["## 材料缺失", "", "未找到与 input_hash 匹配的 DraftContent。"])
         preview = "\n".join(preview_lines).rstrip() + "\n"

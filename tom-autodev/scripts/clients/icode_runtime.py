@@ -885,6 +885,20 @@ class IcodeRuntime:
                 and change.get("change_id") == change_set.get("change_id")
             ):
                 return {"reason_code": "CR_APPEND_ALLOWED", "change": change, "complete": complete}
+            # A repair inside the same run: the reworked commit keeps the Change-Id of the
+            # CR this run already opened (same card, owner and branch), so the push lands
+            # as that CR's next patchset. Without this a CODE_ONLY repair of a submitted
+            # task read its own CR as a conflict (BGW-2019 T1, qa CR 123025198).
+            owner = change.get("owner") if isinstance(change.get("owner"), dict) else {}
+            if (
+                not appending
+                and change_id is not None and change.get("change_id") == change_id
+                and change.get("branch") == change_set["target_branch"]
+                and _same_account(owner.get("username"), change_set["owner"])
+                and _card_subject_matches(change.get("subject"), change_set["card_id"])
+                and sum(1 for item in related if item.get("change_id") == change_id) == 1
+            ):
+                return {"reason_code": "CR_APPEND_ALLOWED", "change": change, "complete": complete}
         if related:
             return _failure("CR_IDENTITY_CONFLICT", candidates=sorted(
                 str(item.get("_number") or item.get("number") or "") for item in related))

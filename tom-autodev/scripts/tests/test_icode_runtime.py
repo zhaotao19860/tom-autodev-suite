@@ -973,6 +973,20 @@ class IcodeRuntimeTests(unittest.TestCase):
         result = self.runtime(clock=later)._answer(intent, ie.Verdict.absent(checked="listing"))
         self.assertEqual(result["intent_state"], ie.UNKNOWN)
 
+    def test_a_repair_in_the_same_run_appends_to_the_cr_carrying_its_change_id(self):
+        # BGW-2019 T1: the CODE_ONLY repair keeps the commit's Change-Id; the open CR of
+        # this card with that Change-Id receives the new patchset instead of a conflict.
+        change = self.change_set()
+        reconcile = self.runtime()._reconcile
+        self.transport.changes = [{
+            "_number": 77, "current_revision": "0" * 40, "branch": change["target_branch"],
+            "change_id": "Iaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "owner": {"username": "dev"}, "subject": "CARD-1 change"}]
+        result = reconcile("icode", self.source_repo, change)
+        self.assertEqual(result["reason_code"], "CR_APPEND_ALLOWED", result)
+        self.transport.changes[0]["owner"] = {"username": "someone-else"}
+        self.assertEqual(reconcile("icode", self.source_repo, change)["reason_code"], "CR_IDENTITY_CONFLICT")
+
     def test_a_push_that_may_still_be_running_is_never_absent(self):
         from datetime import datetime, timedelta, timezone
         change = self.change_set()

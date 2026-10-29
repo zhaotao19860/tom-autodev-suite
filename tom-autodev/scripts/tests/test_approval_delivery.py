@@ -876,7 +876,7 @@ class ChangeSetSummaryTests(unittest.TestCase):
             "submission_mode": "create_new_cr",
             "revision_set": {},
         })
-        self.assertEqual(summary[0], "提交方式 新建 CR")
+        self.assertTrue(summary[0].startswith("提交方式 新建 CR"))
 
     def test_g7_submit_descriptor_can_identify_existing_cr_append(self):
         summary = content_summary({

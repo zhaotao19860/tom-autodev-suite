@@ -12,6 +12,7 @@ suite had no version control before then.
 
 ## 2026-10-29 · BGW-2019 真实运行中修的问题
 
+- 同一 run 内 CODE_ONLY 修复已提交的任务：iCode 对账把本卡、同 owner、同分支、同 Change-Id 的已开 CR 识别为 `CR_APPEND_ALLOWED`（作为新 patchset 追加），不再判为 `CR_IDENTITY_CONFLICT`。G7 卡说明该追加情形；控制器门（G7/G8）的审批预览文件改为展示固定摘要，不再误写“材料缺失”。BGW-2019 修 qa 仓版本号时发现。
 - 仓库未配置 git 提交身份时：`_commit_if_dirty` 由未捕获的 `CalledProcessError` 改为返回 `GIT_IDENTITY_REQUIRED`；`WorkspaceManager.create` 在建工作树（G4 之前）就检查，避免计划批完后才在实现阶段失败。BGW-2019 的 bgwagent 仓发现。
 - 多任务 run 的第二个任务进入 WORKSPACE 时 G4 卡材料缺失（`APPROVAL_MATERIAL_MISSING`）：`approval_summary._workspace_context` 读取了全 run 的 ACTIVE 工作树，先命中上一任务的行。改为按 `task_id` 过滤（另两处查询按 `(task_id, repo_path)` 取值，本就正确）。
 - PLAN 草稿校验失败时说明原因：`G4_INPUT_MISMATCH` 带 `expected_g4_input_hash`（应抄 PLAN action 自己的 `input_hash`，不是 WORKSPACE 的 G4 审批 hash）；`TASK_PLAN_MISMATCH` 带 `mismatched_fields` 与 DAG 节点的期望值。tom-plan SKILL.md 同步澄清。此前两处只返回原因码，生产方只能逐项猜。

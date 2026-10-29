@@ -1109,7 +1109,9 @@ def _submit_descriptor(content: dict[str, Any]) -> list[str]:
     if content.get("change_number") or content.get("existing_cr"):
         mode = "追加现有 CR"
     elif content.get("submission_mode") == "create_new_cr":
-        mode = "新建 CR"
+        # A repaired change set keeps its commits' Change-Ids, so a repository this run
+        # already submitted receives a new patchset on that CR (iCode decides at push).
+        mode = "新建 CR；若该仓库本 run 已有同 Change-Id 的 CR，则作为新 patchset 追加"
     else:
         mode = "提交前由 iCode 校验新建/追加"
     baselines = content.get("unchanged_baselines")
