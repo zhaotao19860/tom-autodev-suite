@@ -168,7 +168,7 @@ class ApprovalMaterialsTests(unittest.TestCase):
             "material_status": "PINNED",
             "_review_content": content,
         })
-        self.assertIn("Comate 选择已经完成", rendered)
+        self.assertIn("Agent 结构化选择已经完成", rendered)
         self.assertIn("Decision Log", rendered)
 
     def test_merged_g2_explains_dag_is_associated_not_separately_approved(self):
@@ -353,7 +353,7 @@ class ApprovalMaterialsTests(unittest.TestCase):
         ):
             orch = BriefFixture("INTAKE", action)
             snapshot = progress_snapshot.build(orch, "run-1")
-            self.assertEqual(snapshot["next_action"]["owner"], "Comate")
+            self.assertEqual(snapshot["next_action"]["owner"], "Agent")
             self.assertNotIn("APPROVE", progress_snapshot.render(snapshot))
             self.assertNotIn("处理G0审批", progress_snapshot.render(snapshot))
 

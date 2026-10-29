@@ -415,10 +415,10 @@ def _success_markdown(run_id: str, result: dict[str, Any], mention: Any = None) 
     lines += [
         f"**各阶段** {_stage_summary(result)}",
         "",
-        "**请在 Comate 里回复**",
+        "**请在驱动本 run 的 agent 会话里回复**",
         "继续",
         "",
-        "> 流水线证据已可落账，推进阶段需要 Comate 执行。",
+        "> 流水线证据已可落账，推进阶段需要 agent 执行。",
     ]
     return "\n".join(lines)
 
@@ -438,7 +438,7 @@ def _failure_markdown(run_id: str, result: dict[str, Any], mention: Any = None) 
         lines += ["", "**日志摘录**", "```", excerpt[:800], "```"]
     lines += [
         "",
-        "**请在 Comate 里回复**",
+        "**请在驱动本 run 的 agent 会话里回复**",
         "继续",
         "",
         "> 修复方案由 DIAGNOSE 阶段产出，后台进程不会自己改代码。",
@@ -483,7 +483,7 @@ def _release_success_markdown(run_id: str, result: dict[str, Any], mention: Any 
         f"**模块** {result.get('module') or '-'}",
         f"**release_id** `{result.get('release_id') or '-'}`",
         "",
-        "**请在 Comate 里回复**",
+        "**请在驱动本 run 的 agent 会话里回复**",
         "继续",
         "",
         "> watcher 只完成只读核验；G9 证据仍由 worker 继续落账。",

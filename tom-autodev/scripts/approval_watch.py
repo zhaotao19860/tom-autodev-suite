@@ -173,7 +173,7 @@ class ApprovalWatcher:
             brief = build(self.orchestrator, run_id)
             if brief["waiting_on"] or brief["in_flight"] or brief.get("blocked"):
                 continue
-            if brief["next"]["owner"] != "Comate":
+            if brief["next"]["owner"] != "Agent":
                 continue
             approval = self._approved_gate(run_id, brief.get("gate"), latest.get("created_at"))
             if approval is None:
@@ -795,10 +795,10 @@ def _resume_markdown(
         f"**当前阶段** {brief['state']}",
         f"**下一步** {brief['next']['text']}",
         "",
-        "**Comate 会自动续跑当前 run**",
+        "**驱动本 run 的 agent 会话会自动续跑**",
         "",
-        "> 该闸门已落账；若当前会话仍活跃，Stop Hook 会自动交回 Comate。",
-        "> 若会话已结束，请重新打开 Comate 后执行 `resume`。",
+        "> 该闸门已落账；若当前会话仍活跃，Stop Hook 会自动交回驱动本 run 的 agent 会话。",
+        "> 若会话已结束，请重新打开驱动本 run 的 agent（Comate / Claude Code / Codex）后执行 `resume`。",
         f"> run_id `{brief['run_id'][:12]}…`",
     ]
     progress = brief.get("progress")
@@ -855,7 +855,7 @@ def reap_stale_resume_handoffs(
 
 
 def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    """Hand one approved resume back to a live Comate turn.
+    """Hand one approved resume back to the live agent turn that drives the run.
 
     The hook only injects context and never executes a phase or external write.
     Completing the durable handoff makes repeated Stop callbacks idempotent.
@@ -884,6 +884,14 @@ def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[st
     if len(candidates) > 1:
         return {"ok": True, "reason_code": "MULTIPLE_RESUME_HANDOFFS"}
     handoff_id, run_id, data = sorted(candidates, key=lambda item: item[0])[0]
+    # Only the session that drives this run is resumed; any other session (another
+    # agent window, an unrelated task) would get a run it has no context for.
+    import agent_host
+    stopping = payload.get("session_id") if isinstance(payload.get("session_id"), str) else None
+    driver = agent_host.driver_session(orchestrator.state, run_id)
+    if not stopping or driver != stopping:
+        return {"ok": True, "reason_code": "NOT_DRIVER_SESSION", "run_id": run_id,
+                "driver_session": driver, "stopping_session": stopping}
     blocked = execution_guard(orchestrator.state, run_id)
     if blocked is not None:
         return blocked
@@ -932,14 +940,14 @@ def _ack_note(
     if decision == "REVISE" and revised is not None:
         return (
             f"已按意见登记重做（{' '.join(str(revised.get('feedback') or '').split())[:200]}）；"
-            "在 IDE 继续后，Comate 生成新版草案并重新发起本门。"
+            "在 IDE 继续后，Agent 生成新版草案并重新发起本门。"
         )
     if decision == "REVISE":
-        return "已选择需修改：保留 run 并重新进入当前阶段，Comate 将按审批重点生成新版材料并重新发起本门。"
+        return "已选择需修改：保留 run 并重新进入当前阶段，Agent 将按审批重点生成新版材料并重新发起本门。"
     if decision == "REJECT":
         return "已停止 run，不会继续后续阶段。"
     if decision == "APPROVE" and gate == "CHANGE_REQUEST":
-        return f"变更请求只授权回退本身：在 IDE 让 Comate 执行 `rewind --approval-id {approval['approval_id']}`。"
+        return f"变更请求只授权回退本身：在 agent 会话里执行 `rewind --approval-id {approval['approval_id']}`。"
     return None
 
 
@@ -966,8 +974,8 @@ def _ack_markdown(
         "REVISE_FEEDBACK": "已收到修改意见",
     }.get(decision, decision)
     following = {
-        "APPROVE": "审批已生效；另一渠道无需重复点击。若 IDE 会话仍在运行，会在下一轮自动接续；若会话已结束，请在 Comate 输入“继续”。",
-        "REVISE": "run 保留，Comate 按意见重做当前阶段并重新发起审批。",
+        "APPROVE": "审批已生效；另一渠道无需重复点击。若 IDE 会话仍在运行，会在下一轮自动接续；若会话已结束，请在驱动本 run 的 agent 会话输入“继续”。",
+        "REVISE": "run 保留，Agent 按意见重做当前阶段并重新发起审批。",
         "REJECT": "run 已停止，不会继续后续阶段。",
     }.get(decision, "请以审批账本和 run 状态为准。")
     if note:
@@ -1017,10 +1025,10 @@ def _ide_turn_markdown(brief: dict[str, Any], mention: Any = None) -> str:
         lines.append(f"**阶段闸门** {brief['gate']}（是否已批准以账本为准；本消息不是审批卡）")
     lines += [
         "",
-        "**请在 Comate 里回复**",
+        "**请在驱动本 run 的 agent 会话里回复**",
         "继续",
         "",
-        "> 流程停在这里是因为阶段推进需要 Comate 执行，现在没有等你决定的闸门。",
+        "> 流程停在这里是因为阶段推进需要 agent 执行，现在没有等你决定的闸门。",
         f"> run_id `{brief['run_id'][:12]}…`",
     ]
     return "\n".join(lines)

@@ -80,7 +80,7 @@ class RunBriefTests(unittest.TestCase):
         orch = BriefFixture("SPEC", {"ok": True, "phase": "SPEC", "child_skill": "tom-spec"})
         brief = run_brief.build(orch, "run-1")
         self.assertEqual(brief["status_label"], "待生成")
-        self.assertEqual(brief["next"]["owner"], "Comate")
+        self.assertEqual(brief["next"]["owner"], "Agent")
         rendered = run_brief.render(brief)
         self.assertIn("待生成", rendered)
         self.assertNotIn("input_hash", rendered)
@@ -143,7 +143,7 @@ class RunBriefTests(unittest.TestCase):
         orch = BriefFixture("INTAKE", {"ok": True, "phase": "INTAKE", "required_human_gate": "G0"})
         brief = run_brief.build(orch, "run-1")
         self.assertEqual(brief["status_label"], "待处理")
-        self.assertEqual(brief["next"]["owner"], "Comate")
+        self.assertEqual(brief["next"]["owner"], "Agent")
 
     def test_approved_candidate_is_ready_for_worker_continue_without_ids_or_hashes(self):
         approved = {"action": "G2", "approval_id": "approval-secret", "input_hash": "b" * 64,
@@ -167,7 +167,7 @@ class RunBriefTests(unittest.TestCase):
                             pending=[{"operation": "icode.submit", "intent_id": "intent-1"}])
         brief = run_brief.build(orch, "run-1")
         self.assertEqual(brief["status_label"], "待恢复")
-        self.assertEqual(brief["next"]["owner"], "Comate")
+        self.assertEqual(brief["next"]["owner"], "Agent")
         self.assertIn("icode.submit", brief["next"]["text"])
 
     def test_infoflow_recovery_explains_controlled_redelivery(self):
@@ -289,7 +289,7 @@ class RunBriefTests(unittest.TestCase):
         orch.state.transition(run_id, "INTAKE", {"requirement_id": "BGW-1", "project": "bgw"})
         summary = {"run_id": run_id, "state": "INTAKE", "status_label": "待处理",
                    "waiting_on": [], "in_flight": [], "blocked": None,
-                   "next": {"owner": "Comate", "text": "继续"}}
+                   "next": {"owner": "Agent", "text": "继续"}}
         with patch("orchestrator.Orchestrator", return_value=orch), \
              patch("run_brief.build", return_value=summary) as build, \
              patch("run_brief.render", return_value="摘要"):

@@ -115,9 +115,13 @@ def local_automation_status(
     """
     home_path = Path(home).expanduser() if home is not None else Path.home()
     scripts = Path(scripts_dir) if scripts_dir is not None else Path(__file__).resolve().parent
+    # The Stop hook may be registered with any supported code agent.
     hook_paths = [
         home_path / ".comate" / "hooks.json",
         home_path / ".comate" / "hooks.local.json",
+        home_path / ".claude" / "settings.json",
+        home_path / ".claude" / "settings.local.json",
+        home_path / ".codex" / "hooks.json",
     ]
     present = [path for path in hook_paths if path.is_file()]
     malformed: list[str] = []
@@ -294,8 +298,9 @@ class _IcodeProbe:
         binary_resolver: Any = shutil.which,
         transport: Any | None = None,
     ):
+        import agent_host
         self.skill_path = Path(skill_path).expanduser() if skill_path is not None else (
-            Path.home() / ".comate" / "skills" / ".system" / "icode"
+            Path(agent_host.skill_path("icode"))
         )
         self.binary_resolver = binary_resolver
         self.transport = transport or _ArgvQueryTransport()
@@ -349,8 +354,9 @@ class _ReviewProbe:
 class _InfoflowProbe:
     def __init__(self, transport: CliTransport, *, setup_path: Path | str | None = None):
         self.transport = transport
+        import agent_host
         self.setup_path = Path(setup_path).expanduser() if setup_path is not None else (
-            Path.home() / ".comate" / "skills" / "infoflow-message-group" / "scripts" / "setup.sh"
+            Path(agent_host.skill_path("infoflow-message-group")) / "scripts" / "setup.sh"
         )
 
     def query(self, _context: dict[str, Any]) -> dict[str, Any]:

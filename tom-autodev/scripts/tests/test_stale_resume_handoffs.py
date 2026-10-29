@@ -27,6 +27,8 @@ class StaleResumeHandoffTests(unittest.TestCase):
         self.state = self.orch.state
         # DIAGNOSE entry event, then the IPIPE event a rebuild appends.
         self.diagnose = self.state.transition(RUN, "DIAGNOSE", {"project": "bgw"})
+        self.state.save_idempotency_result(f"run.driver:{RUN}:20261029T000000Z:sess-1",
+                                           {"session_id": "sess-1"})
         self.counter = 0
 
     def _events(self):
@@ -206,14 +208,14 @@ class StaleResumeHandoffTests(unittest.TestCase):
         self._rebuild_scenario()
         current = self._approval("G9")
         self._handoff(current, self._events()[-1]["event_id"])
-        result = auto_resume_from_hook(self.orch, {"hook_event_name": "Stop"})
+        result = auto_resume_from_hook(self.orch, {"hook_event_name": "Stop", "session_id": "sess-1"})
         self.assertEqual(result["reason_code"], "AUTO_RESUME")
         self.assertEqual(result["approval_id"], current["approval_id"])
         self.assertEqual(self._open(), [])
 
     def test_stop_hook_with_only_stale_handoffs_reports_none(self):
         self._rebuild_scenario()
-        result = auto_resume_from_hook(self.orch, {"hook_event_name": "Stop"})
+        result = auto_resume_from_hook(self.orch, {"hook_event_name": "Stop", "session_id": "sess-1"})
         self.assertEqual(result["reason_code"], "NO_RESUME_HANDOFF")
         self.assertEqual(self._open(), [])
 

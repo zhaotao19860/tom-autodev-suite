@@ -4,7 +4,7 @@
 
 Tom Autodev 把一张 iCafe 需求卡推进到代码、独立产品测试、Review、iCode、iPipe 和发布确认。每个需求都有一个持久化 `run`，输入、产物、审批、锁、外部回执和恢复信息都会保存下来。
 
-适用环境：**Comate + iCafe / iCode / iPipe / KU / 如流**。Mac 负责源码、流程控制和 Review；编译、模拟器和业务测试在配置好的 iPipe runner 执行。
+适用环境：**任一 code agent（Comate / Claude Code / Codex）+ iCafe / iCode / iPipe / KU / 如流**。agent 相关的路径和会话识别集中在 `tom-autodev/scripts/agent_host.py`。Mac 负责源码、流程控制和 Review；编译、模拟器和业务测试在配置好的 iPipe runner 执行。
 
 下游下载产物按本 run 冻结 Change Set / pipeline_plan 判断模块是否 changed，不能用
 worktree clean 推断。未变模块取目标 branch 的 BranchPipeline 成功发布产物，验证实际源码
@@ -54,7 +54,7 @@ PLAN 阶段发现计划与已批准 Spec 冲突时，用 `report-producer-confli
 
 PLAN 的 `repositories[].path` 必须填 profile 的本地检出路径（绝对路径），不能写模块名（如 `baidu/sysip/x86bgw`）。G4 会校验该路径为非空绝对路径，否则以 `PLAN_REPOSITORY_MISMATCH` 拒绝；IMPLEMENT 的 `prepare_change_set` 仍按 profile 路径定位 worktree 做权威绑定。
 
-在 Comate 中可以直接使用卡片动作，不必手写 Python CLI：
+在任一 agent（Comate / Claude Code / Codex）中可以直接使用卡片动作，不必手写 Python CLI：
 
 ```text
 /tom-autodev BGW-1995 开始
@@ -107,7 +107,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 - 在如流提意见有三种方式，均有可视化回执：
   1）点“需修改”后直接在本群回复意见（不用带审批 ID，可分多条，到你对本审批再次回复或对别的审批选“需修改”为止）；网关收到后立即把该卡刷新为“已收到修改意见…”，watcher 再登记重做并回执；
   2）一次回复“需修改 <审批ID> <意见>”；
-  3）在 Comate 直接用 `/tom-autodev <卡片> 需修改 <意见>`：对当前待审批/已选需修改的门直接提意见并原地重做，无需先点如流按钮。
+  3）在驱动本 run 的 agent 会话里直接用 `/tom-autodev <卡片> 需修改 <意见>`：对当前待审批/已选需修改的门直接提意见并原地重做，无需先点如流按钮。
 - GRILL 之后的需求变更不会被吸收进 Spec/计划/代码：PLAN/IMPLEMENT 以
   `USER_REQUIREMENT_CHANGED` 上报，诊断只能路由 `GRILL`，G6 批准后回到决策日志重新取得
   G1 及之后各门；重做阶段的审批卡会列出已批准诊断的修复方向与修复计划。

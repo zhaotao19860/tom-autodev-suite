@@ -17,7 +17,7 @@ mode does not replace the business workflow, approvals or phase contracts below.
 
 Use this skill as the control-plane entry for a run. Keep project/language knowledge in child skills, put side effects behind approvals, and accept only iPipe execution evidence.
 
-This is a Comate-only entrypoint. There is no alternate host or entrypoint. The runtime has no standalone release component; release is an approved terminal controller action backed by remote evidence.
+The entrypoint is agent-neutral: Comate, Claude Code and Codex drive a run through the same `cli.py` commands and produce the same DraftContent. `scripts/agent_host.py` resolves where each agent installs skills (iCode, KU, 如流) and which session drives a run; `TOM_AUTODEV_AGENT` / `TOM_AUTODEV_<SKILL>_SKILL_DIR` override detection. The runtime has no standalone release component; release is an approved terminal controller action backed by remote evidence.
 
 ## Project Registration (Setup)
 
@@ -38,7 +38,7 @@ Use this as the ordinary command path; run commands from the suite root (or use 
 
 Confirm the project and iCafe card with the user before starting. If the card maps to multiple runs, show the candidates and ask which run to use; never pick one from recency or chat context. `process` reads the iCafe snapshot and starts/drives a new run only when no history exists; otherwise it continues the unique active run for the specified project. A terminal run returns `RUN_ALREADY_TERMINAL` without restarting; `PROJECT_MISMATCH` requires correcting the project. `start` + `drive` remains available for separate steps. A `PROJECT_NOT_READY` response means setup is required; see [`references/setup.md`](references/setup.md).
 
-### Comate command aliases
+### Chat command aliases (any agent)
 
 When the user writes `/tom-autodev CARD ACTION`, interpret the natural-language action
 according to [`references/chat-commands.md`](references/chat-commands.md):
@@ -126,7 +126,7 @@ hash. Re-read the saved candidate after approval; do not regenerate it or reques
 again. If blocked, report the actual missing input, permission, ownership, or evidence,
 not a fictitious runner. Status must distinguish `待生成` from `已批准待提交`. G4/G5 的已批准待提交是 complete-phase；G7 的已批准待提交是 cli.py submit，不是 complete-phase。
 
-Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; Comate and Infoflow share one `approval_id`, and the first valid response wins. Every approval card must identify the affected repository/module, target branch, and pinned revision; a multi-repository change lists one row per repository and revision. G7 cards must also state whether the operation creates a new CR or appends an existing one.
+Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan, diff, every repair, iCode submission, iPipe rerun/manual continuation, and release. Bind approvals to input hash; the agent session (ledger channel `comate`) and Infoflow share one `approval_id`, and the first valid response wins. Every approval card must identify the affected repository/module, target branch, and pinned revision; a multi-repository change lists one row per repository and revision. G7 cards must also state whether the operation creates a new CR or appends an existing one.
 
 All approval-facing text is Chinese by default: card titles, questions, material summaries,
 button labels, reply examples, timeout notices, resend notices, acknowledgements and
@@ -134,11 +134,11 @@ error prompts. Display `同意 <approval_id>`, `需修改 <approval_id> <中文�
 `停止 <approval_id>` for new approvals; the reject button reads `停止run`. Keep `APPROVE`,
 `REVISE`, `REJECT` and the historical `驳回` label only as internal ledger values and
 backward-compatible input aliases; never make new approvers translate an English command.
-A reviewer may also give the feedback to Comate directly with
+A reviewer may also give the feedback to the driving agent directly with
 `/tom-autodev CARD 需修改 <意见>`, which settles a still-pending gate as a REVISE on the
 comate channel and re-enters the phase in one step — no 如流 tap first.
 
-When a run needs a human decision, use Comate's structured question interface first:
+When a run needs a human decision, use the agent's structured question interface first (Comate questions, Claude Code `AskUserQuestion`, Codex prompts):
 show each blocking choice as a题目 with background, explicit options, recommendation,
 impact, evidence, and an `其他（请补充）` option when appropriate. Use multiple
 questions in one round only when they are independent; ask dependent questions in
@@ -183,7 +183,7 @@ BranchPipeline `AGILE_RELEASE` job (version, revision, branch, product URL). A s
 notifies people outside the run (test request, test release confirmation) still needs the
 named owner on the platform; report it as waiting, do not bypass it.
 
-Approval settlement creates one durable, hash-bound resume handoff containing `approval_id`, `run_id`, `input_hash`, the source event, and the next action. In a live Comate turn, register `scripts/ide_turn_hook.py` as the `Stop` hook in `~/.comate/hooks.json` or `~/.comate/hooks.local.json`: after a valid APPROVE it returns a blocking continuation with `additionalContext`, so Comate resumes without a manual `继续`. The hook only hands control back to Comate; it never executes a phase or external write. Replays are idempotent and stale, rejected, expired, mismatched, or completed handoffs are ignored. `SessionEnd` is fire-and-forget and cannot create a new Agent turn, so an ended session receives the existing 如流 fallback notice; `orchestrator.py notify-ide-turn` remains the manual notification path.
+Approval settlement creates one durable, hash-bound resume handoff containing `approval_id`, `run_id`, `input_hash`, the source event, and the next action. Register `scripts/ide_turn_hook.py` as the `Stop` hook of the agent you use (`~/.comate/hooks.json`, `~/.claude/settings.json`, or the Codex hook config): after a valid APPROVE it returns a blocking continuation with `additionalContext`, but **only to the session that drives the run** — `process` / `continue` / `drive` / `submit-draft` record the agent's session id (`CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`, `COMATE_SESSION_ID` or `TOM_AUTODEV_SESSION_ID`), and a Stop from any other session gets `NOT_DRIVER_SESSION` and only the 如流 reminder. The hook never executes a phase or external write. Replays are idempotent and stale, rejected, expired, mismatched, or completed handoffs are ignored. `SessionEnd` is fire-and-forget and cannot create a new Agent turn, so an ended session receives the existing 如流 fallback notice; `orchestrator.py notify-ide-turn` remains the manual notification path.
 
 Call `EvidenceGate` before every checkpoint or external side effect. Block on a changed input hash, missing artifact, unresolved finding, revision mismatch, stale environment fingerprint, or stale verification evidence.
 
@@ -296,7 +296,7 @@ Persist events, artifacts, approvals, locks, heartbeats, external results, and h
 
 After a terminal run, build `RunSummary` from durable events, approvals, phase artifacts, collaboration receipts, and iPipe evidence. It must redact secrets and nonessential personal data. A candidate optimization must identify root cause, exact target files, expected benefit, risk, rollback, and control-plane-only verification commands.
 
-Only a proposal created from archived run evidence may be applied. Bind a `G10` approval to the exact candidate hash, require an approved Comate/Infoflow ledger record, constrain every target to approved tom-autodev roots, and reject business-repository, project-profile, iPipe, or pipeline changes. Archive proposal and result through `KnowledgeSync`; rollback every changed file if validation fails. Never use G10 to modify a production repository, profile, or pipeline template.
+Only a proposal created from archived run evidence may be applied. Bind a `G10` approval to the exact candidate hash, require an approved agent/Infoflow ledger record, constrain every target to approved tom-autodev roots, and reject business-repository, project-profile, iPipe, or pipeline changes. Archive proposal and result through `KnowledgeSync`; rollback every changed file if validation fails. Never use G10 to modify a production repository, profile, or pipeline template.
 
 ## References
 

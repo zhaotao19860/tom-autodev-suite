@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_DESTINATIONS = [Path.home() / ".comate" / "skills", Path.home() / ".codex" / "skills"]
+# One skill root per supported code agent (Comate, Claude Code, Codex).
+DEFAULT_DESTINATIONS = [Path.home() / ".comate" / "skills", Path.home() / ".claude" / "skills",
+                        Path.home() / ".codex" / "skills"]
 
 
 def install_links(

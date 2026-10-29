@@ -58,7 +58,15 @@ def resolve_ku_binary(binary: str | None = None) -> str:
     if skill_dir:
         return os.path.join(skill_dir, "bin", "ku")
     discovered = shutil.which("ku")
-    return discovered or DEFAULT_KU_BINARY
+    if discovered:
+        return discovered
+    # Whichever code agent installed ku-doc-manage (Comate, Claude Code, Codex).
+    import agent_host
+    for name in ("ku-doc-manage",):
+        found = agent_host.find_skill(name)
+        if found is not None and (found / "bin" / "ku").exists():
+            return str(found / "bin" / "ku")
+    return DEFAULT_KU_BINARY
 
 
 def _git_email(path: Any) -> str:

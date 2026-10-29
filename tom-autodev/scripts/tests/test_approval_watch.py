@@ -586,7 +586,7 @@ class IdeTurnNoticeTests(unittest.TestCase):
     def test_gateless_stop_sends_one_notice_and_does_not_repeat(self):
         watch = self._patched({
             "run_id": "run-notice-1", "state": "REVIEW", "waiting_on": [], "gate": None,
-            "next": {"owner": "Comate", "text": "审查改动"},
+            "next": {"owner": "Agent", "text": "审查改动"},
         })
         state = self._State()
         orchestrator = self._Orchestrator(state)
@@ -605,7 +605,7 @@ class IdeTurnNoticeTests(unittest.TestCase):
         """A stop hook knows nothing about run ids, so the ledger has to supply them."""
         watch = self._patched({
             "run_id": "run-notice-4", "state": "IPIPE", "waiting_on": [], "gate": None,
-            "next": {"owner": "Comate", "text": "收流水线证据"},
+            "next": {"owner": "Agent", "text": "收流水线证据"},
         })
         state = self._State()
         state.latest = [
@@ -628,7 +628,7 @@ class IdeTurnNoticeTests(unittest.TestCase):
     def test_a_stop_survives_a_run_whose_notice_raises(self):
         watch = self._patched({
             "run_id": "run-notice-5", "state": "REVIEW", "waiting_on": [], "gate": None,
-            "next": {"owner": "Comate", "text": "审查改动"},
+            "next": {"owner": "Agent", "text": "审查改动"},
         })
         state = self._State()
         state.latest_states = lambda: [{"run_id": "run-notice-5", "state": "REVIEW"}]
@@ -663,7 +663,7 @@ class IdeTurnNoticeTests(unittest.TestCase):
         """The stop that stayed silent: a gate is named, but no card is out yet."""
         watch = self._patched({
             "run_id": "run-notice-3", "state": "IMPLEMENT", "waiting_on": [], "gate": "G5",
-            "next": {"owner": "Comate", "text": "生成改动集，完成后开 G5 门等你批"},
+            "next": {"owner": "Agent", "text": "生成改动集，完成后开 G5 门等你批"},
         })
         notify = self._Notify()
 
@@ -694,6 +694,11 @@ class AutoResumeHookTests(unittest.TestCase):
         def complete_handoff(self, handoff_id):
             self.completed.append(handoff_id)
             self.handoff = None
+
+        def idempotency_results_with_prefix(self, prefix):
+            if prefix == "run.driver:run-1:":
+                return [("run.driver:run-1:20261029T000000Z:sess-1", {"session_id": "sess-1"})]
+            return []
 
     class _Approvals:
         def __init__(self, approval):
@@ -734,6 +739,7 @@ class AutoResumeHookTests(unittest.TestCase):
         result = auto_resume_from_hook(orchestrator, {
             "hook_event_name": "Stop",
             "status": "completed",
+            "session_id": "sess-1",
         })
 
         self.assertEqual(result["reason_code"], "AUTO_RESUME")
@@ -748,9 +754,19 @@ class AutoResumeHookTests(unittest.TestCase):
         result = auto_resume_from_hook(orchestrator, {
             "hook_event_name": "Stop",
             "status": "completed",
+            "session_id": "sess-1",
         })
 
         self.assertEqual(result["reason_code"], "RESUME_HANDOFF_STALE")
+        self.assertEqual(orchestrator.state.completed, [])
+
+    def test_stop_hook_never_resumes_a_session_that_does_not_drive_the_run(self):
+        # A Stop in an unrelated session (another agent window) only gets reminders.
+        orchestrator = self._orchestrator()
+        for session in ("sess-2", None):
+            result = auto_resume_from_hook(orchestrator, {
+                "hook_event_name": "Stop", "status": "completed", "session_id": session})
+            self.assertEqual(result["reason_code"], "NOT_DRIVER_SESSION")
         self.assertEqual(orchestrator.state.completed, [])
 
     def test_cancelled_stop_never_consumes_resume_handoff(self):

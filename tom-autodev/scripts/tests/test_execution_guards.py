@@ -41,6 +41,8 @@ class ExecutionGuardTests(unittest.TestCase):
         self.run_id = "run-1"
         self.pin = workflow_spec.canonical_hash()
         self.owner.state.transition(self.run_id, "SUBMIT", {"workflow_spec_hash": self.pin})
+        self.owner.state.save_idempotency_result("run.driver:run-1:20261029T000000Z:sess-1",
+                                                 {"session_id": "sess-1"})
         self.calls = []
 
     def snapshot(self):
@@ -326,7 +328,7 @@ class ExecutionGuardTests(unittest.TestCase):
         self.owner.state.record_handoff(self.run_id, "handoff", {
             "kind": "APPROVAL_RESUME", "event_id": self.owner.state.events(self.run_id)[-1]["event_id"],
             "approval_id": approval["approval_id"], "input_hash": "hash"})
-        self.blocked(lambda: approval_watch.auto_resume_from_hook(self.owner, {"hook_event_name": "Stop"}))
+        self.blocked(lambda: approval_watch.auto_resume_from_hook(self.owner, {"hook_event_name": "Stop", "session_id": "sess-1"}))
 
     def test_approval_transport_cached_wait_cannot_persist_a_new_reply(self):
         transport = InfoflowApprovalTransport(self.owner.state, SimpleNamespace(send_markdown=lambda *args: {"message_key": "sent"}))

@@ -687,7 +687,7 @@ def _approval_markdown(
         f"停止 {approval_id}",
         "",
         *(["> 点卡片“需修改”后直接在本群回复修改意见即可（不用带审批 ID）；也可按上面格式一次回复。"
-           "也可以在 Comate 里直接说“/tom-autodev <卡片> 需修改 <意见>”，一步提意见并继续。"
+           "也可以在驱动本 run 的 agent 会话里直接说“/tom-autodev <卡片> 需修改 <意见>”，一步提意见并继续。"
            "“停止”则结束本 run。收到意见后自动登记重做，在 IDE 继续即生成新版草案并重新发起本门。"
            "历史“驳回”“REJECT”等回复仍兼容。"]
           if gate_of(action) in _REVISABLE_GATES else []),

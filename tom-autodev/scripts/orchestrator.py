@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import agent_host
 from execution_guard import execution_guard, guard_execution, migration_exempt
 
 import hashlib
@@ -3688,14 +3689,14 @@ def main(argv: list[str] | None = None) -> int:
     companion.add_argument("run_id")
     companion.add_argument("--task", required=True)
     companion.add_argument("--approval-id")
-    companion.add_argument("--icode-skill", default="/Users/tom/.comate/skills/.system/icode")
+    companion.add_argument("--icode-skill", default=None)
     submit = subparsers.add_parser("submit", help="把已评审并获 G7 的变更集提交到 iCode")
     submit.add_argument("run_id")
     submit.add_argument("--task", required=True, help="要提交的任务 id，例如 T3")
     submit.add_argument("--approval-id", help="省略则取该 run 最近一条 APPROVE 的 G7")
     submit.add_argument(
         "--icode-skill",
-        default="/Users/tom/.comate/skills/.system/icode",
+        default=None,
         help="system iCode skill 目录",
     )
 
@@ -3779,6 +3780,7 @@ def main(argv: list[str] | None = None) -> int:
                     "detail": "运行已结束；使用 status 查看结果，不自动重启",
                 }
             else:
+                agent_host.bind_driver(orchestrator.state, resolved["run_id"])
                 result = bridge.continue_run(resolved["run_id"])
                 result = _deliver_worker_approval(orchestrator, result)
         else:
@@ -3807,6 +3809,7 @@ def main(argv: list[str] | None = None) -> int:
                         "reason_code": "RUN_ALREADY_TERMINAL",
                     }
                 else:
+                    agent_host.bind_driver(orchestrator.state, started["run_id"])
                     result = bridge.drive(started["run_id"])
                     result = _deliver_worker_approval(orchestrator, result)
     elif args.command == "status":
@@ -3860,6 +3863,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "resume":
         result = orchestrator.resume(args.run_id)
     elif args.command in {"drive", "continue", "submit-draft", "report-producer-block", "report-producer-conflict"}:
+        from agent_bridge import resolve_run_target as _resolve_bound
+        _bound = _resolve_bound(orchestrator, args.target)
+        if _bound.get("ok"):
+            agent_host.bind_driver(orchestrator.state, _bound["run_id"])
         from agent_bridge import AgentBridge, resolve_run_target
 
         bridge = AgentBridge(
@@ -4283,7 +4290,7 @@ def _submit(
         run_id,
         worktree_bindings=bindings,
         owner=descriptor["owner"],
-        system_skill_path=icode_skill,
+        system_skill_path=icode_skill or agent_host.skill_path("icode"),
         argv_transport=ProcessTransport(),
         submission_policy=profile.get("submission_policy"),
     )
@@ -4468,7 +4475,7 @@ def _submit_missing_companion(
         run_id,
         worktree_bindings={companion["worktree_path"]: companion},
         owner=descriptor["owner"],
-        system_skill_path=icode_skill,
+        system_skill_path=icode_skill or agent_host.skill_path("icode"),
         argv_transport=ProcessTransport(),
         submission_policy=profile.get("submission_policy"),
     )

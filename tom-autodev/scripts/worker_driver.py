@@ -847,7 +847,7 @@ def _recover_merged_tasks(orchestrator: Any, run_id: str, action: dict[str, Any]
 @guard_execution
 def execute_controller(
     orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
-    icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+    icode_skill: str | None = None,
     icode_runtime: Any | None = None,
     ipipe_api: Any | None = None,
     collaboration_client: Any | None = None,
@@ -1624,7 +1624,7 @@ def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, A
 # systems and each keeps its own gate, so the loop parks on them for an explicit step.
 @guard_execution
 def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
-            max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+            max_steps: int = 32, icode_skill: str | None = None,
             icode_runtime: Any | None = None, ipipe_api: Any | None = None,
             collaboration_client: Any | None = None, locks: Any | None = None,
             owner_token: str | None = None) -> dict[str, Any]:
@@ -1662,7 +1662,7 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
 
 
 def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
-           max_steps: int = 32, icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+           max_steps: int = 32, icode_skill: str | None = None,
            icode_runtime: Any | None = None, ipipe_api: Any | None = None,
            collaboration_client: Any | None = None) -> dict[str, Any]:
     """Drive a run forward through every step the worker can take on its own, then park.
@@ -1803,7 +1803,7 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
 
 @guard_execution
 def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
-           icode_skill: str = "/Users/tom/.comate/skills/.system/icode",
+           icode_skill: str | None = None,
            icode_runtime: Any | None = None, ipipe_api: Any | None = None,
            collaboration_client: Any | None = None, locks: Any | None = None,
            owner_token: str | None = None) -> dict[str, Any]:

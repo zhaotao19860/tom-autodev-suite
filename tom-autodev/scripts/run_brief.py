@@ -346,21 +346,21 @@ def _next_step(
                 "text": (
                     f"如流审批投递结果未知（审批 {redelivery['approval_id']}，intent {intent}）。"
                     "如果你已确认没有收到，请回复“未收到，允许重发”，"
-                    "Comate 将绑定当前审批和 intent 做一次受控重发；不会创建新审批。"
+                    "Agent 将绑定当前审批和 intent 做一次受控重发；不会创建新审批。"
                 ),
             }
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
-        return {"owner": "Comate", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
+        return {"owner": "Agent", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
     # An approved change request replaces the phase gates still open, so applying it
     # comes before answering any of them.
     if approved and gate_of(approved.get("action") or "") == "CHANGE_REQUEST":
         return {
-            "owner": "Comate",
+            "owner": "Agent",
             "text": f"变更请求已批准；执行 rewind --approval-id {approved.get('approval_id')} 回到目标阶段",
         }
     if approved and approved.get("action") == "WORKFLOW_SPEC_MIGRATION":
         return {
-            "owner": "Comate",
+            "owner": "Agent",
             "text": "当前 workflow 迁移已批准待应用；调用 continue，由 worker 应用精确迁移后恢复",
         }
     if open_gates:
@@ -379,13 +379,13 @@ def _next_step(
     # the next step and the progress notice must not look like a prompt to
     # approve something that does not exist.
     if blocked == "APPROVAL_REQUIRED" and not open_gates:
-        return {"owner": "Comate", "text": "审批记录尚未创建；Comate先补齐本次审批材料并创建审批"}
+        return {"owner": "Agent", "text": "审批记录尚未创建；Agent 先补齐本次审批材料并创建审批"}
     if state == "ARCHITECTURE_REVIEW":
         return {
             "owner": "你",
             "text": (
                 "修复预算已用尽或同类失败反复出现，需要人决定回到哪个设计阶段："
-                "告诉 Comate 回到 GRILL / SPEC / TASKS 及原因，由它发起 rewind 变更请求审批"
+                "告诉 agent 回到 GRILL / SPEC / TASKS 及原因，由它发起 rewind 变更请求审批"
             ),
         }
     if rejected:
@@ -395,15 +395,15 @@ def _next_step(
             return {
                 "owner": "你",
                 "text": (
-                    f"{gate} 已标记需修改（审批 {approval_id}）。把修改意见告诉 Comate"
+                    f"{gate} 已标记需修改（审批 {approval_id}）。把修改意见告诉 agent"
                     f"（`/tom-autodev <卡片> 需修改 <意见>`，或在如流点「需修改」后直接回复意见），"
-                    f"Comate 会按意见重做草案并重新发起 {gate}；要回到更早阶段用 rewind，停止用 stop"
+                    f"Agent 会按意见重做草案并重新发起 {gate}；要回到更早阶段用 rewind，停止用 stop"
                 ),
             }
         from run_change import rewind_available
 
         way_back = (
-            "；如需改前面的设计，告诉 Comate 回到 GRILL/SPEC/TASKS 中哪个阶段，由它发起 rewind"
+            "；如需改前面的设计，告诉 agent 回到 GRILL/SPEC/TASKS 中哪个阶段，由它发起 rewind"
             if rewind_available(events or [], state) else ""
         )
         return {
@@ -419,11 +419,11 @@ def _next_step(
         gate = gate_of(approved.get("action") or action.get("required_human_gate"))
         if gate == "G7" or state == "SUBMIT":
             return {
-                "owner": "Comate",
+                "owner": "Agent",
                 "text": f"{approved['action']} 已批准待提交；调用 continue，由 worker 执行提交并继续",
             }
         return {
-            "owner": "Comate",
+            "owner": "Agent",
             "text": (
                 f"{approved['action']} 已批准待提交；调用 continue，由 worker 复用已保存内容并执行下一步"
             ),
@@ -432,7 +432,7 @@ def _next_step(
         return {
             "owner": "你",
             "text": (
-                f"决策日志仍有未答问题，尚未创建审批；先回答问题，Comate 再以同一 job "
+                f"决策日志仍有未答问题，尚未创建审批；先回答问题，Agent 再以同一 job "
                 f"{producer_job.get('job_id')} 重新提交草案"
             ),
         }
@@ -442,23 +442,23 @@ def _next_step(
             if action.get("required_human_gate")
             else "草案已保存；调用 continue，由控制器核验持久化结果并按阶段规则处理"
         )
-        return {"owner": "Comate", "text": text}
+        return {"owner": "Agent", "text": text}
     if action.get("child_skill") is not None:
         work = _WORK.get(state, state)
         skill = action.get("child_skill")
         return {
-            "owner": "Comate",
+            "owner": "Agent",
             "text": f"{work}，当前为待生成；调用 {skill} 生成内容后提交",
         }
     work = _WORK.get(state, state)
     gate = action.get("required_human_gate")
     if gate:
-        return {"owner": "Comate", "text": f"当前将进入 {gate}；审批记录尚未创建，继续处理材料"}
+        return {"owner": "Agent", "text": f"当前将进入 {gate}；审批记录尚未创建，继续处理材料"}
     if state == "IMPLEMENT":
         tail = "，当前为待生成；生成真实 change-set 后开 G5 门等你批"
     else:
         tail = f"，完成后开 {gate} 门等你批" if gate else ""
-    return {"owner": "Comate", "text": f"{work}{tail}"}
+    return {"owner": "Agent", "text": f"{work}{tail}"}
 
 
 def render(brief: dict[str, Any]) -> str:

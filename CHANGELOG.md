@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-29 · 工作流与 code agent 无关；Stop hook 只续跑驱动会话
+
+- 新增 `agent_host.py`：识别当前 agent（`TOM_AUTODEV_AGENT`，或 Claude Code / Codex / Comate 各自导出的环境变量），按 agent 顺序查找已安装 skill（iCode、ku-doc-manage、infoflow-message-group），可用 `TOM_AUTODEV_<SKILL>_SKILL_DIR` 覆盖。
+- 去掉写死的 `~/.comate/skills/.system/icode` 默认值（`submit` / `submit-companion` / worker），KU 与预检的如流脚本同样跨 agent 解析；`install_links` 默认安装到 Comate、Claude Code、Codex 三个 skill 根目录；预检识别三家的 Stop hook 配置。
+- 修复：Stop hook 会把"审批已通过，继续执行"注入到无关会话（例如在调研别的问题的 Claude 会话）。现在 `process` / `continue` / `drive` / `submit-draft` 记录驱动会话 id，hook 只对该会话自动续跑，其他会话返回 `NOT_DRIVER_SESSION`，只收如流提醒。
+- 用户可见提示由"Comate"改为"agent / 驱动本 run 的 agent 会话"；SKILL.md、tom-grill、README 去掉"仅 Comate"表述。信封中的 `host` 字段仍为 `comate`（表示控制面合同版本，不表示具体 agent，改动会使历史 artifact 失效）。
+- 测试：新增"非驱动会话不续跑"；全量 1587 通过。
+
 ## 2026-10-29 · changelog 规则覆盖所有改动仓库
 
 - `references/changelog-policy.md`：每个被改动的仓库（业务仓与产品测试仓、代码与纯文档）都要在同一 change-set 内写根目录 change log；补充 Keep a Changelog（`CHANGELOG.md` 的 `[Unreleased]`）格式。

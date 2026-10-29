@@ -22,12 +22,12 @@ A run may start from a plain card whose `acceptance` list is empty. Record every
 
 Follow the [producer contract](../tom-autodev/references/producer-contract.md) and [decision-log schema](../tom-autodev/schemas/decision-log.schema.json). When `context` carries `revision_context`, redo the previous draft against its instruction (see the producer contract). Return `decision-log` DraftContent; the parent creates the envelope, receipts and applicable gate. See [phase-specific rules](references/phase-contract.md).
 
-## Comate structured decision protocol
+## Structured decision protocol (any agent)
 
-When a human choice is required, make the choice explicit in Comate before submitting
+When a human choice is required, make the choice explicit in the driving agent (Comate, Claude Code or Codex) before submitting
 the DraftContent. Do not send a long paragraph that mixes background, alternatives,
 and the requested action. Use the structured question interface (`AskUserQuestion` or
-the equivalent Comate question tool) so the owner can see one clear题目 and its选项.
+the agent's own question tool, e.g. Claude Code `AskUserQuestion`) so the owner can see one clear题目 and its选项.
 
 Each question must have this shape:
 
@@ -71,7 +71,7 @@ Rules:
    snapshot is never edited.
 7. Submit a final `DECISIONS_RECORDED / COMPLETE` draft only when every required
    question has an answer. A partial round remains `UNRESOLVED / INCOMPLETE`.
-   The Comate answer is not G1 approval: only after the answered draft is submitted
+   The agent-side answer is not G1 approval: only after the answered draft is submitted
    may the worker create the hash-bound G1 approval.
 
 For BGW-style scope decisions, prefer this compact presentation:
@@ -87,7 +87,7 @@ D. 其他（请补充）
 影响：决定实现范围和验收标准。
 ```
 
-For the current syncookie-style case, the first Comate round should normally cover
+For the current syncookie-style case, the first question round should normally cover
 `修复策略` and `修改范围`; the next round can cover `回归验收` and `旁路措施`;
 the final round covers `灰度 / 发布边界`. Use concrete choices such as:
 
@@ -108,7 +108,7 @@ are a presentation example, not facts or a default answer.
 1. Read the requirement, acceptance points, attachments, current code, project rules, and knowledge references.
 2. Record a Decision Map only when scope, repository boundaries, test interface, environment ability, or release boundary is unclear.
 3. Verify facts independently. Add each unresolved human tradeoff to a queue ordered by dependency.
-4. Convert the queue into structured Comate questions. Group independent choices into one round, split dependent choices into rounds, and include checked evidence plus the consequence of each option. Do not ask again for a decision explicit in the request or approved input.
+4. Convert the queue into structured agent questions. Group independent choices into one round, split dependent choices into rounds, and include checked evidence plus the consequence of each option. Do not ask again for a decision explicit in the request or approved input.
 5. If acceptance criteria are missing, propose observable criteria grounded in the request and ask the owner to confirm or amend the group. Existing owner-supplied criteria are already intent, not a reason to repeat confirmation. Each criterion needs a test or named observation point; source-reading details belong in Spec evidence. When the parent supplies `acceptance-candidates` from a pinned KU directory, treat them as unconfirmed drafts and carry each accepted candidate's source into its evidence. Never silently promote inferred criteria.
 6. If no decision is required, return `NO_OPEN_DECISIONS`; do not invent a question to make the phase look complete.
 7. After each answer round, return the updated Decision Log, the remaining `choice_questions`, and changed assumptions; the controller invalidates affected downstream context. Do not mutate the original snapshot or state ledger.

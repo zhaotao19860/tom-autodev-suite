@@ -201,7 +201,7 @@ def _next_action(action: dict[str, Any], state: str) -> dict[str, str]:
         return {"owner": "-", "text": "运行已结束，无后续动作"}
     if not action.get("ok"):
         return {"owner": "-", "text": "状态证据不完整，请在 IDE 查看 status；不能据此认定待审批"}
-    return {"owner": "Comate", "text": f"继续处理 {state}"}
+    return {"owner": "Agent", "text": f"继续处理 {state}"}
 
 
 def _phases(current: str) -> list[dict[str, Any]]:
