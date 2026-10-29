@@ -2,6 +2,10 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-10-29
+
+- 第 7 步：changelog 条目扩展到本 change-set 改动的**每个**仓库（含产品测试仓、纯文档改动）；Keep a Changelog 格式的 `CHANGELOG.md` 记在 `[Unreleased]` 下。`prepare-change-set` 对有改动却无根目录 change log 的仓库返回 `CHANGELOG_ENTRY_MISSING:<role>`。
+
 ## 2026-10-25
 
 - 第 4 步：每个 CR 在冻结 baseline 之上只保留一个提交（iCode/Gerrit 拒绝多提交 push，HCK_F507）；resume 或 G5“需修改”

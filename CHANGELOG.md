@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-29 · changelog 规则覆盖所有改动仓库
+
+- `references/changelog-policy.md`：每个被改动的仓库（业务仓与产品测试仓、代码与纯文档）都要在同一 change-set 内写根目录 change log；补充 Keep a Changelog（`CHANGELOG.md` 的 `[Unreleased]`）格式。
+- `prepare-change-set` 强制：仓库有改动但根目录 `changelog` / `CHANGELOG.md` 等未改，返回 `CHANGELOG_ENTRY_MISSING:<role>`。
+- tom-implement 第 7 步、tom-review 核对项同步。测试：`test_prepare_changelog_guard.py` 5 项。
+
 ## 2026-10-29 · MVP §7：LegacyRunProjector
 
 - 新增 `legacy_projector.py`：`status` / `context` 只读 events、artifacts、approval ledger，不调 live workflow spec、`next()`、migration、repin 或远端；`drill` 对库内全部 run 投影并与 `run_brief` 对照。

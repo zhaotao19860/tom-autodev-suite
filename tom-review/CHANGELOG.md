@@ -2,6 +2,10 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-10-29
+
+- changelog 核对范围扩展到每个改动仓库（含产品测试仓、纯文档改动），缺失仍为 `CONFIRMED` 阻断项。
+
 ## 2026-10-25
 
 - Review Method 新增必读项：change-set 修改源码时按 `tom-autodev/references/changelog-policy.md` 核对每个改动仓库的

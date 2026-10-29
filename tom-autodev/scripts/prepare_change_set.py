@@ -61,6 +61,18 @@ def _diff(root: Path, baseline: str, revision: str) -> str:
         raise ValueError("DIFF_NOT_UTF8") from None
 
 
+# Root-level change logs the policy accepts (references/changelog-policy.md), any case.
+_CHANGELOG_NAMES = frozenset({"changelog", "changelog.md", "changes.md", "history.md"})
+
+
+def _missing_changelog(root: Path, baseline: str, revision: str) -> bool:
+    """True when the commit changes files but none of them is the repository's change log."""
+    names = [line for line in _git(root, "diff", "--name-only", baseline, revision)
+             .decode("utf-8", "replace").splitlines() if line]
+    return bool(names) and not any(
+        "/" not in name and name.lower() in _CHANGELOG_NAMES for name in names)
+
+
 def _commits_above_baseline(root: Path, baseline: str) -> int:
     """How many commits HEAD carries beyond ``baseline`` (0 for a no-op worktree).
 
@@ -230,6 +242,10 @@ def prepare(orchestrator: Any, run_id: str, job_id: str,
             # it at SUBMIT after both approvals were already spent.
             if _commits_above_baseline(root, baselines[role]) > 1:
                 raise ValueError("MULTIPLE_COMMITS_ABOVE_BASELINE")
+            # Every repository a change set touches records it in its own change log
+            # (business and product-test alike), so a change can be traced per repo.
+            if _missing_changelog(root, baselines[role], revision):
+                raise ValueError(f"CHANGELOG_ENTRY_MISSING:{role}")
             # query_ownership verifies that HEAD descends from this baseline.
             patches[role] = _diff(root, baselines[role], revision)
             revisions[role] = revision
