@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-29 · changelog 每次改动必须带新版本号
+
+- 规则（`references/changelog-policy.md`）：任何仓库、任何格式，每个 change-set 都要新增版本；Keep a Changelog 的 `CHANGELOG.md` 不再只写 `[Unreleased]`，而是在其下方插入新版本小节（如 `0.1.1 - <日期>`），`[Unreleased]` 模板保持不动；文档/测试改动按 PATCH 递增。
+- `prepare-change-set` 强制：根目录 change log 首个版本标题必须大于基线，否则 `CHANGELOG_VERSION_NOT_BUMPED:<role>`。tom-implement / tom-review 同步。
+- 起因：BGW-2019 的 qa 仓 CR 只在 `[Unreleased]` 下加了条目，没有版本号。
+
 ## 2026-10-29 · BGW-2019 真实运行中修的问题
 
 - 多任务 run 的第二个任务进入 WORKSPACE 时 G4 卡材料缺失（`APPROVAL_MATERIAL_MISSING`）：`approval_summary._workspace_context` 读取了全 run 的 ACTIVE 工作树，先命中上一任务的行。改为按 `task_id` 过滤（另两处查询按 `(task_id, repo_path)` 取值，本就正确）。

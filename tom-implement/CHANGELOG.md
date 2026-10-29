@@ -4,6 +4,7 @@
 
 ## 2026-10-29
 
+- 第 7 步：每个改动仓库的 changelog 条目都要带新版本号；Keep a Changelog 文件在 `[Unreleased]` 下方插入新版本小节。`prepare-change-set` 新增 `CHANGELOG_VERSION_NOT_BUMPED:<role>`。
 - 第 7 步：changelog 条目扩展到本 change-set 改动的**每个**仓库（含产品测试仓、纯文档改动）；Keep a Changelog 格式的 `CHANGELOG.md` 记在 `[Unreleased]` 下。`prepare-change-set` 对有改动却无根目录 change log 的仓库返回 `CHANGELOG_ENTRY_MISSING:<role>`。
 
 ## 2026-10-25

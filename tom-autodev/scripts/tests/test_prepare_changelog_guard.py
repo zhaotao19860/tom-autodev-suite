@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from prepare_change_set import _missing_changelog
+from prepare_change_set import _changelog_version_error, _missing_changelog, _top_version
 
 
 def _git(root, *args):
@@ -56,6 +56,20 @@ class ChangelogGuardTests(unittest.TestCase):
 
     def test_an_untouched_repository_needs_no_entry(self):
         self.assertFalse(_missing_changelog(self.root, self.baseline, self.baseline))
+
+
+    def test_an_entry_without_a_new_version_is_refused(self):
+        # BGW-2019: the qa CHANGELOG.md got an [Unreleased] bullet but no version.
+        base = _commit(self.root, {"CHANGELOG.md": "[Unreleased]\n---\n\n0.1.0 - 2018-10-24\n---\n"})
+        head = _commit(self.root, {"CHANGELOG.md": "[Unreleased]\n---\n- BGW-2019 x\n\n0.1.0 - 2018-10-24\n---\n"})
+        self.assertEqual(_changelog_version_error(self.root, base, head), "CHANGELOG_VERSION_NOT_BUMPED")
+
+    def test_a_bumped_version_passes_in_both_formats(self):
+        base = _commit(self.root, {"changelog": "2.1.10 2026-09-09 a <a@x>\n"})
+        head = _commit(self.root, {"changelog": "2.1.11 2026-10-29 b <b@x>\n    - BGW-2019\n\n2.1.10 2026-09-09 a <a@x>\n"})
+        self.assertIsNone(_changelog_version_error(self.root, base, head))
+        self.assertEqual(_top_version("[Unreleased]\n---\n\n0.1.1 - 2026-10-29\n---\n0.1.0 - 2018\n"), (0, 1, 1))
+        self.assertIsNone(_top_version("[0.1.0]: http://example\n"))
 
 
 if __name__ == "__main__":

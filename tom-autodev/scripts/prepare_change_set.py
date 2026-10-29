@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from contextlib import closing
 from pathlib import Path
@@ -63,6 +64,35 @@ def _diff(root: Path, baseline: str, revision: str) -> str:
 
 # Root-level change logs the policy accepts (references/changelog-policy.md), any case.
 _CHANGELOG_NAMES = frozenset({"changelog", "changelog.md", "changes.md", "history.md"})
+
+
+_VERSION_LINE = re.compile(r"^(?:#+\s*)?\[?(\d+)\.(\d+)\.(\d+)\]?(?!:)(?:\s|$)")
+
+
+def _top_version(text: str) -> tuple[int, int, int] | None:
+    """The first version heading of a change log (`2.1.11 2026-...`, `0.1.1 - ...`,
+    `## [0.1.1] - ...`); link-reference lines (`[0.1.1]: url`) are not headings."""
+    for line in text.splitlines():
+        found = _VERSION_LINE.match(line.strip())
+        if found:
+            return tuple(int(part) for part in found.groups())
+    return None
+
+
+def _changelog_version_error(root: Path, baseline: str, revision: str) -> str | None:
+    """Every change bumps the change log's version: a new top version above the old one."""
+    names = [line for line in _git(root, "diff", "--name-only", baseline, revision)
+             .decode("utf-8", "replace").splitlines() if line]
+    logs = [name for name in names if "/" not in name and name.lower() in _CHANGELOG_NAMES]
+    if not logs:
+        return None
+    name = logs[0]
+    new = _git(root, "show", f"{revision}:{name}").decode("utf-8", "replace")
+    old = _git(root, "show", f"{baseline}:{name}", check=False).decode("utf-8", "replace")
+    new_top, old_top = _top_version(new), _top_version(old)
+    if new_top is None or (old_top is not None and new_top <= old_top):
+        return "CHANGELOG_VERSION_NOT_BUMPED"
+    return None
 
 
 def _missing_changelog(root: Path, baseline: str, revision: str) -> bool:
@@ -246,6 +276,9 @@ def prepare(orchestrator: Any, run_id: str, job_id: str,
             # (business and product-test alike), so a change can be traced per repo.
             if _missing_changelog(root, baselines[role], revision):
                 raise ValueError(f"CHANGELOG_ENTRY_MISSING:{role}")
+            version_error = _changelog_version_error(root, baselines[role], revision)
+            if version_error:
+                raise ValueError(f"{version_error}:{role}")
             # query_ownership verifies that HEAD descends from this baseline.
             patches[role] = _diff(root, baselines[role], revision)
             revisions[role] = revision
