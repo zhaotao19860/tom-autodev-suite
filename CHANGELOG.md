@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-29 · BGW-2019 真实运行中修的问题
+
+- PLAN 草稿校验失败时说明原因：`G4_INPUT_MISMATCH` 带 `expected_g4_input_hash`（应抄 PLAN action 自己的 `input_hash`，不是 WORKSPACE 的 G4 审批 hash）；`TASK_PLAN_MISMATCH` 带 `mismatched_fields` 与 DAG 节点的期望值。tom-plan SKILL.md 同步澄清。此前两处只返回原因码，生产方只能逐项猜。
+
 ## 2026-10-29 · 工作流与 code agent 无关；Stop hook 只续跑驱动会话
 
 - 新增 `agent_host.py`：识别当前 agent（`TOM_AUTODEV_AGENT`，或 Claude Code / Codex / Comate 各自导出的环境变量），按 agent 顺序查找已安装 skill（iCode、ku-doc-manage、infoflow-message-group），可用 `TOM_AUTODEV_<SKILL>_SKILL_DIR` 覆盖。

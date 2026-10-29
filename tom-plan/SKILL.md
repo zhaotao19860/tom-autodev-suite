@@ -21,7 +21,7 @@ Consume the approved Spec, one frontier task, WorkspaceGate evidence, language/p
 - knowledge queries, blast-radius scope, Review scope, completion predicate, rollback, and excluded work;
 - ordered checklist items; encode the precondition, action and observable completion check inside the schema's `item` text. A checklist is not a persisted execution log.
 
-Use concrete names from pinned revisions. Copy `g4_input_hash` from the action and preserve the DAG's acceptance IDs, test IDs, fixtures and target module. Apply [behavior and test design](../tom-spec/references/behavior-and-tests.md) to assertions. For risky edits name the intermediate compatibility state and how implementation can recognize a completed step after interruption. If the plan conflicts with Spec, report `SPEC_CONFLICT` to the parent instead of reinterpreting it.
+Use concrete names from pinned revisions. Copy `g4_input_hash` from the PLAN action's own `input_hash` (not the WORKSPACE G4 approval hash) and preserve the DAG's acceptance IDs, test IDs, fixtures and target module. Apply [behavior and test design](../tom-spec/references/behavior-and-tests.md) to assertions. For risky edits name the intermediate compatibility state and how implementation can recognize a completed step after interruption. If the plan conflicts with Spec, report `SPEC_CONFLICT` to the parent instead of reinterpreting it.
 
 ## Gate
 

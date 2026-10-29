@@ -662,7 +662,9 @@ class PhaseProtocol:
             if node is None:
                 return _failure("TASK_PLAN_MISMATCH")
             if content.get("g4_input_hash") != action.get("input_hash"):
-                return _failure("G4_INPUT_MISMATCH", content_invalid=True)
+                # The PLAN action's own input hash, not the WORKSPACE G4 approval's.
+                return _failure("G4_INPUT_MISMATCH", content_invalid=True,
+                                expected_g4_input_hash=action.get("input_hash"))
             repository_revisions = {
                 item.get("role"): item.get("revision")
                 for item in content.get("repositories", []) if isinstance(item, dict)
@@ -685,12 +687,19 @@ class PhaseProtocol:
                 item.get("test_id") for item in content.get("tests", []) if isinstance(item, dict)
             }
             plan_fixtures = set(content.get("fixtures", []))
-            if (
-                plan_tests != set(node.get("test_ids", []))
-                or plan_fixtures != set(node.get("fixtures", []))
-                or set(content.get("acceptance_point_ids", [])) != set(node.get("acceptance_point_ids", []))
-            ):
-                return _failure("TASK_PLAN_MISMATCH", content_invalid=True)
+            # Name what differs from the DAG node, so the producer can fix it in one go.
+            mismatched = [field for field, ours, theirs in (
+                ("tests[].test_id", plan_tests, set(node.get("test_ids", []))),
+                ("fixtures", plan_fixtures, set(node.get("fixtures", []))),
+                ("acceptance_point_ids", set(content.get("acceptance_point_ids", [])),
+                 set(node.get("acceptance_point_ids", []))),
+            ) if ours != theirs]
+            if mismatched:
+                return _failure("TASK_PLAN_MISMATCH", content_invalid=True,
+                                mismatched_fields=mismatched,
+                                expected={"test_ids": sorted(node.get("test_ids", [])),
+                                          "fixtures": sorted(node.get("fixtures", [])),
+                                          "acceptance_point_ids": sorted(node.get("acceptance_point_ids", []))})
 
         if phase == "IMPLEMENT" and isinstance(predecessor_content, dict):
             baselines = {
