@@ -109,8 +109,12 @@ def _commit_if_dirty(root: Any, message: str, *, change_id: str | None = None) -
     one for a genuinely new commit, which is exactly the identity Gerrit wants.
     """
     if _git(root, "status", "--porcelain"):
-        name = _git(root, "config", "--get", "user.name")
-        email = _git(root, "config", "--get", "user.email")
+        # `git config --get` exits 1 for an unset key; that is a missing identity, not
+        # a crash (BGW-2019: bgwagent had no user.name configured).
+        identity = [subprocess.run(["git", "-C", str(root), "config", "--get", key],
+                                   capture_output=True, text=True).stdout.strip()
+                    for key in ("user.name", "user.email")]
+        name, email = identity
         if not name or not email:
             raise ValueError("GIT_IDENTITY_REQUIRED")
         subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)

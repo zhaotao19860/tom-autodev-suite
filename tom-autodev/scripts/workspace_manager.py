@@ -186,6 +186,12 @@ class WorkspaceManager:
         if not isinstance(revision, str) or not revision:
             return _create_failure(repo, run_id, task_id, "BASELINE_UNVERIFIED")
 
+        # The change set is committed in this repository's worktree with its own git
+        # identity (changelog-policy: the committing person, never a bot). Check it now,
+        # before G4, instead of failing at IMPLEMENT after the plan was approved.
+        if not _git(repo, "config", "--get", "user.name") or not _git(repo, "config", "--get", "user.email"):
+            return _create_failure(repo, run_id, task_id, "GIT_IDENTITY_REQUIRED")
+
         current_revision = _git(repo, "rev-parse", "HEAD")
         verified_revision = _git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}")
         if current_revision != revision or verified_revision != revision:
