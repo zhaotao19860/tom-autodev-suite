@@ -1205,6 +1205,16 @@ def _execute_ipipe(
             stage_id = stages[0].get("stage_build_id")
         if not stage_id:
             return {"ok": False, "reason_code": "STAGE_OWNERSHIP_UNVERIFIED", "run_id": run_id}
+        # A manual stage's inputs can be another changed module's product (x86bgw's p0
+        # regression takes get_bgwagent). Its build only becomes this run's -- and its
+        # product findable -- once adopted, which the one-module-per-step loop has not
+        # done yet. Adopting is read-only (no trigger, no approval).
+        from pipeline_plan import frozen_plan
+        events_reader = getattr(orchestrator.state, "events", None)
+        plan = (frozen_plan(events_reader(run_id)) if callable(events_reader) else None) or {}
+        for other in plan.get("required_modules") or []:
+            if other != module and callable(getattr(runtime, "discover", None)):
+                runtime.discover(profile, revision_set, other)
         return _prepare_manual_stage(orchestrator, runtime, run_id, str(stage_id), module)
     if status not in ("SUCCESS", "FAILURE"):
         # MANUAL_WAIT / TIMEOUT / TRANSIENT / INVALID: not the worker's call to make.
