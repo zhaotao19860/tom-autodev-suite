@@ -217,9 +217,11 @@ def _workspace_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[
         uri = f"file:{db}?mode=ro"
         with sqlite3.connect(uri, uri=True) as connection:
             connection.row_factory = sqlite3.Row
+            # Only this task's worktrees: a run with several tasks owns one set per task,
+            # and an earlier task's rows (still ACTIVE) would otherwise be read first.
             rows = connection.execute(
-                "SELECT * FROM worktree_ownership WHERE run_id = ? AND status = 'ACTIVE'",
-                (run_id,),
+                "SELECT * FROM worktree_ownership WHERE run_id = ? AND task_id = ? AND status = 'ACTIVE'",
+                (run_id, task_id),
             ).fetchall()
         repositories = {}
         business = profile.get("business_repos") if isinstance(profile.get("business_repos"), list) else []

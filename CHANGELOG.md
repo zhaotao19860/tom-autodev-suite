@@ -6,6 +6,7 @@ suite had no version control before then.
 
 ## 2026-10-29 · BGW-2019 真实运行中修的问题
 
+- 多任务 run 的第二个任务进入 WORKSPACE 时 G4 卡材料缺失（`APPROVAL_MATERIAL_MISSING`）：`approval_summary._workspace_context` 读取了全 run 的 ACTIVE 工作树，先命中上一任务的行。改为按 `task_id` 过滤（另两处查询按 `(task_id, repo_path)` 取值，本就正确）。
 - PLAN 草稿校验失败时说明原因：`G4_INPUT_MISMATCH` 带 `expected_g4_input_hash`（应抄 PLAN action 自己的 `input_hash`，不是 WORKSPACE 的 G4 审批 hash）；`TASK_PLAN_MISMATCH` 带 `mismatched_fields` 与 DAG 节点的期望值。tom-plan SKILL.md 同步澄清。此前两处只返回原因码，生产方只能逐项猜。
 
 ## 2026-10-29 · 工作流与 code agent 无关；Stop hook 只续跑驱动会话
