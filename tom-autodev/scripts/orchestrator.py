@@ -576,7 +576,12 @@ class Orchestrator:
         if not events:
             return None
         payload = events[-1].get("payload") if isinstance(events[-1].get("payload"), dict) else {}
-        if payload.get("previous_state") != "REVIEW":
+        if payload.get("previous_state") == "SUBMIT":
+            # Entered from SUBMIT although a reviewed task still owed iCode and nothing
+            # is left to plan: the followup missed a task without a descriptor.
+            if self.phase_protocol()._ready_task(run_id) is not None:
+                return None
+        elif payload.get("previous_state") != "REVIEW":
             return None
         task_id = _latest_unsubmitted_reviewed_task(self, run_id)
         if task_id is None:
@@ -2790,8 +2795,14 @@ def _current_pass_change_sets(orchestrator: Any, run_id: str) -> dict[str, str]:
 
 
 def _latest_unsubmitted_reviewed_task(orchestrator: Any, run_id: str) -> str | None:
-    """The newest DAG-covering PASS whose exact revision is not in iCode."""
-    unsubmitted = set(_current_pass_change_sets(orchestrator, run_id)) - _submitted_tasks(orchestrator, run_id)
+    """The newest DAG-covering PASS whose exact revision is not in iCode.
+
+    A task can pass Review and leave SUBMIT before its descriptor was built (the run
+    was routed to DIAGNOSE for a sibling's repair); its passing Review still counts.
+    """
+    reviewed = set(_current_pass_change_sets(orchestrator, run_id)) | set(
+        orchestrator.phase_protocol()._current_passing(run_id))
+    unsubmitted = reviewed - _submitted_tasks(orchestrator, run_id)
     if not unsubmitted:
         return None
     reviews = orchestrator.phase_protocol()._passing_reviews(run_id)
@@ -2802,7 +2813,10 @@ def _submit_followup_state(orchestrator: Any, run_id: str) -> str:
     outstanding = _outstanding_submissions(orchestrator, run_id)
     if not outstanding:
         return "IPIPE"
-    current = set(_current_pass_change_sets(orchestrator, run_id))
+    # Reviewed-but-unsubmitted tasks are SUBMIT's work whether or not their descriptor
+    # exists yet (BGW-2019 T2 passed Review, then the run left SUBMIT for T1's repair).
+    current = set(_current_pass_change_sets(orchestrator, run_id)) | set(
+        orchestrator.phase_protocol()._current_passing(run_id))
     if (set(outstanding) & current) - _submitted_tasks(orchestrator, run_id):
         return "SUBMIT"
     return "WORKSPACE"

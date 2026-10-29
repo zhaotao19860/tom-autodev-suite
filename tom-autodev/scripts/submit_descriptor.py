@@ -94,7 +94,8 @@ def _matching_clean_worktree(preferred: str, revision: str) -> str | None:
     return None
 
 
-def _commit_if_dirty(root: Any, message: str, *, change_id: str | None = None) -> str:
+def _commit_if_dirty(root: Any, message: str, *, change_id: str | None = None,
+                     baseline: str | None = None) -> str:
     """Commit with the repository's own identity, carrying a Change-Id.
 
     iCode refuses a push whose committer does not match the pushing account, so an
@@ -139,6 +140,11 @@ def _commit_if_dirty(root: Any, message: str, *, change_id: str | None = None) -
                 ["git", "-C", str(root), "commit", "-q", "--amend", "-m", amended],
                 check=True,
             )
+    revision = _git(root, "rev-parse", "HEAD")
+    if baseline is not None and revision == baseline:
+        # Nothing to push from this repository (its HEAD is the pinned baseline, someone
+        # else's commit): the pushability checks are about this run's own commit.
+        return revision
     revision = _require_pushable_head(root)
     if change_id is not None and _commit_change_id(root, revision) != change_id:
         raise ValueError("CHANGE_ID_MISMATCH")
@@ -331,10 +337,12 @@ def _build_and_archive(orchestrator: Any, run_id: str, task_id: str) -> dict[str
         business_revision = _commit_if_dirty(
             business_row["worktree_path"], message,
             change_id=desired_change_id if adopted and business_primary else None,
+            baseline=business_row["baseline_revision"],
         )
         test_revision = _commit_if_dirty(
             test_row["worktree_path"], message,
             change_id=desired_change_id if adopted and not business_primary else None,
+            baseline=test_row["baseline_revision"],
         )
     except ValueError as error:
         return {"ok": False, "reason_code": str(error), "task_id": task_id}

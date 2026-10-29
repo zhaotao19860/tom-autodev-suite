@@ -72,5 +72,13 @@ class ChangelogGuardTests(unittest.TestCase):
         self.assertIsNone(_top_version("[0.1.0]: http://example\n"))
 
 
+    def test_an_untouched_repository_at_someone_elses_baseline_is_not_an_identity_error(self):
+        # BGW-2019 T2: the qa worktree stayed at the baseline commit authored by another
+        # person; building the descriptor must not demand that commit be ours.
+        from submit_descriptor import _commit_if_dirty
+        _git(self.root, "config", "user.email", "someone-else@example.test")
+        self.assertEqual(_commit_if_dirty(self.root, "m", baseline=self.baseline), self.baseline)
+
+
 if __name__ == "__main__":
     unittest.main()
