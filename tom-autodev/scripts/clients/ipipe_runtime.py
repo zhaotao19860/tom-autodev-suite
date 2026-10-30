@@ -61,6 +61,7 @@ class IpipeRuntime:
         validated_profile: dict[str, Any] | None = None,
         profile_hash: str | None = None,
         log_reader: Callable[[str], dict[str, Any]] | None = None,
+        baseline_revisions: dict[str, str] | None = None,
     ):
         self.state = state_store
         self.approvals = approval_ledger
@@ -81,6 +82,10 @@ class IpipeRuntime:
         # only place those numbers exist is the log, so the log is read before a build is
         # called passing.
         self.log_reader = log_reader or _default_log_reader
+        # module -> the revision this run's worktree started from. A case that also fails
+        # in that baseline's own build was failing before the change and is not evidence
+        # against it.
+        self.baseline_revisions = dict(baseline_revisions or {})
         self._build_bindings: dict[str, dict[str, Any]] = {}
         self._stage_bindings: dict[str, dict[str, Any]] = {}
 
@@ -541,6 +546,14 @@ class IpipeRuntime:
                 ]
                 if not ratios and not failures:
                     continue
+                preexisting: list[str] = []
+                baseline = self._baseline_case_failures(stage, job) if failures else None
+                if baseline is not None:
+                    preexisting = sorted(set(failures) & set(baseline["failed_cases"]))
+                    failures = [case for case in failures if case not in baseline["failed_cases"]]
+                    if not failures:
+                        self._record_baseline_acceptance(stage, job, baseline, preexisting)
+                        continue
                 found.append({
                     "stage_build_id": stage.get("stage_build_id"),
                     "stage_name": stage.get("name"),
@@ -549,6 +562,8 @@ class IpipeRuntime:
                     "log_url": log_url,
                     "success_ratios": parsed.get("success_ratios") or [],
                     "failed_cases": failures[:40],
+                    **({"preexisting_cases": preexisting[:40],
+                        "baseline_build_id": baseline["build_id"]} if baseline else {}),
                     # Where to look next, straight from the log.
                     "agent_host": parsed.get("agent_host"),
                     "agent_ip": parsed.get("agent_ip"),
@@ -556,6 +571,93 @@ class IpipeRuntime:
                     "scripts": parsed.get("scripts") or [],
                 })
         return found
+
+    def _baseline_case_failures(
+        self, stage: dict[str, Any], job: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The cases the same job failed in a finished build of this module's baseline.
+
+        Only a build at exactly the worktree's baseline revision, of the same pipeline,
+        counts, and only its job with the same stage configuration and job name. None
+        means no comparable baseline was found, so every failed case still counts. The
+        answer is checkpointed, so a 30MB baseline log is read once per run.
+        """
+        owned = self._load_stage_binding(str(stage.get("stage_build_id") or ""))
+        context = (owned or {}).get("context") or {}
+        module = str(context.get("module") or "")
+        pipeline_id = str(context.get("pipeline_id") or "")
+        revision = self.baseline_revisions.get(module)
+        conf_id = str(stage.get("stage_conf_id") or "")
+        job_name = str(job.get("name") or "")
+        if not (module and pipeline_id and revision and conf_id and job_name):
+            return None
+        if revision == (context.get("revision_map") or {}).get(module):
+            return None
+        key = f"ipipe.case-baseline:{self.run_id}:{module}:{revision}:{conf_id}:{job_name}"
+        recorded = self.state.idempotency_result(key)
+        if isinstance(recorded, dict):
+            return recorded if recorded.get("build_id") else None
+        try:
+            builds = self.api.builds_by_revision(module, revision, pipeline_id)
+        except Exception:
+            return None
+        found: dict[str, Any] | None = None
+        for build in sorted(
+            (item for item in builds or [] if isinstance(item, dict)),
+            key=lambda item: str(_build_id(item)), reverse=True,
+        ):
+            # The revision listing embeds stages without their jobs; the stage endpoint
+            # has them. A stage whose 100G jobs were skipped reports SKIPPED overall.
+            try:
+                raws = self._build_stages(str(_build_id(build)), build)
+            except Exception:
+                continue
+            for raw in raws:
+                candidate = _normalize_stage(raw)
+                if candidate["stage_conf_id"] != conf_id or candidate["status"] not in _SUCCESS | _FAILURE | _SKIPPED:
+                    continue
+                for other in candidate["jobs"]:
+                    if other["name"] != job_name or other["status"] not in _SUCCESS | _FAILURE:
+                        continue
+                    url = other["log_url"] or self._stage_job_logs(
+                        candidate["stage_build_id"]).get(other["job_build_id"], "")
+                    parsed = self.log_reader(url) if url else None
+                    if not isinstance(parsed, dict) or not parsed.get("ok"):
+                        continue
+                    if not (parsed.get("case_results") or parsed.get("failed_cases")):
+                        continue
+                    found = {
+                        "build_id": str(_build_id(build)),
+                        "stage_build_id": candidate["stage_build_id"],
+                        "job_build_id": other["job_build_id"],
+                        "revision": revision,
+                        "failed_cases": sorted(_failed_case_names(parsed)),
+                    }
+                    break
+                if found:
+                    break
+            if found:
+                break
+        try:
+            self.state.save_idempotency_result(key, found or {"build_id": None})
+        except ValueError:
+            pass
+        return found
+
+    def _record_baseline_acceptance(
+        self, stage: dict[str, Any], job: dict[str, Any], baseline: dict[str, Any],
+        preexisting: list[str],
+    ) -> None:
+        """Audit why a job whose log reports failed cases still counts as passing."""
+        try:
+            self.state.save_idempotency_result(
+                f"ipipe.case-baseline-accepted:{self.run_id}:{job.get('job_build_id')}",
+                {"stage_build_id": stage.get("stage_build_id"), "job_build_id": job.get("job_build_id"),
+                 "job_name": job.get("name"), "baseline": {k: v for k, v in baseline.items() if k != "failed_cases"},
+                 "preexisting_cases": preexisting},
+            )
+        except ValueError:
+            pass
 
     def _mark_expression_skips(self, stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Flag the wholly skipped stages the pipeline's own skip expression ruled out.
@@ -3251,6 +3353,17 @@ def _normalize_error(text: Any) -> str:
     for index, value in enumerate(protected):
         normalized = normalized.replace(f"{marker}{index}\x00", value)
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _failed_case_names(parsed: dict[str, Any]) -> set[str]:
+    """Cases whose last reported result is a failure (a retried, then passing case is not)."""
+    last: dict[str, bool] = {}
+    for case in parsed.get("case_results") or []:
+        if isinstance(case, dict) and isinstance(case.get("case"), str):
+            last[case["case"]] = case.get("passed") is True
+    names = {name for name, passed in last.items() if not passed}
+    names.update(str(name) for name in parsed.get("failed_cases") or [] if name not in last)
+    return names
 
 
 def _case_failure_view(

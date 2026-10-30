@@ -615,6 +615,58 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(monitor(["case-a", "case-b"])["failure_signature"], observed["failure_signature"])
         self.assertNotEqual(monitor(["case-c"])["failure_signature"], observed["failure_signature"])
 
+    def _baseline_case_setup(self, current, baseline):
+        finished = {
+            "id": "stage-1", "stageConfId": 4875670, "stageName": "p0", "status": "SUCC",
+            "jobBuildBeans": [{"id": "job-1", "jobName": "p0-25G", "status": "SUCC",
+                               "logs": [{"url": "https://logonline.example/current"}]}],
+        }
+        self.bind_build(status="SUCCESS", stages=[finished])
+        self.api.stages["build-1"] = [finished]
+        self.api.candidates = [build("build-0", status="SUCCESS", stages=[{
+            "id": "stage-0", "stageConfId": 4875670, "stageName": "p0", "status": "SUCC",
+            "jobBuildBeans": [{"id": "job-0", "jobName": "p0-25G", "status": "SUCC",
+                               "logs": [{"url": "https://logonline.example/baseline"}]}],
+        }])]
+        logs = {
+            "https://logonline.example/current": {"ok": True, "success_ratios": [96.0], "failed_cases": current},
+            "https://logonline.example/baseline": {"ok": True, "success_ratios": [96.0], "failed_cases": baseline},
+        }
+        module = self.state.idempotency_result("ipipe.build-binding:run-1:build-1")["binding"]["module"]
+        runtime = pinned_runtime(self.state, self.ledger, self.api, log_reader=logs.__getitem__,
+                                 baseline_revisions={module: "baseline-rev"})
+        return runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+
+    def test_cases_that_also_fail_in_the_baseline_build_do_not_fail_the_change(self):
+        observed = self._baseline_case_setup(["case-a", "case-b"], ["case-a", "case-b", "case-c"])
+        self.assertEqual(observed["reason_code"], "OK", observed)
+        self.assertTrue(any(call[0] == "builds_by_revision" and call[2] == "baseline-rev"
+                            for call in self.api.calls))
+        accepted = self.state.idempotency_result("ipipe.case-baseline-accepted:run-1:job-1")
+        self.assertEqual(accepted["preexisting_cases"], ["case-a", "case-b"])
+
+    def test_a_case_failing_only_in_the_change_still_fails_it(self):
+        observed = self._baseline_case_setup(["case-a", "case-new"], ["case-a"])
+        self.assertEqual(observed["reason_code"], "JOB_SUCCEEDED_WITH_FAILED_CASES", observed)
+        failure = observed["case_failures"][0]
+        self.assertEqual(failure["failed_cases"], ["case-new"])
+        self.assertEqual(failure["preexisting_cases"], ["case-a"])
+        self.assertEqual(failure["baseline_build_id"], "build-0")
+
+    def test_without_a_baseline_every_failed_case_counts(self):
+        self.api.candidates = []
+        finished = {
+            "id": "stage-1", "stageConfId": 4875670, "stageName": "p0", "status": "SUCC",
+            "jobBuildBeans": [{"id": "job-1", "jobName": "p0-25G", "status": "SUCC",
+                               "logs": [{"url": "https://logonline.example/current"}]}],
+        }
+        self.bind_build(status="SUCCESS", stages=[finished])
+        self.api.stages["build-1"] = [finished]
+        runtime = pinned_runtime(self.state, self.ledger, self.api,
+                                 log_reader=lambda url: {"ok": True, "success_ratios": [96.0], "failed_cases": ["case-a"]})
+        observed = runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        self.assertEqual(observed["case_failures"][0]["failed_cases"], ["case-a"])
+
     def test_reexecuting_a_finished_stage_accepts_the_new_stage_build_it_allocates(self):
         # iPipe does not re-use the stage build id when a completed stage is executed
         # again: it allocates a new one for the same stage of the same build. Demanding

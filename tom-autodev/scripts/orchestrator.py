@@ -2059,6 +2059,7 @@ class Orchestrator:
             return pinned
         from clients.ipipe_runtime import IpipeRuntime
 
+        options.setdefault("baseline_revisions", self._baseline_revisions(run_id, pinned["profile"]))
         return IpipeRuntime(
             self.state,
             self.approvals,
@@ -2068,6 +2069,28 @@ class Orchestrator:
             profile_hash=pinned["profile_hash"],
             **options,
         )
+
+    def _baseline_revisions(self, run_id: str, profile: dict[str, Any]) -> dict[str, str]:
+        """module -> the single revision this run's worktrees of it started from."""
+        try:
+            from submit_descriptor import _ownership_rows
+
+            rows = _ownership_rows(self, run_id)
+        except Exception:  # noqa: BLE001 - no baseline only disables the comparison
+            return {}
+        repos = [*(profile.get("business_repos") or []), profile.get("test_repo") or {}]
+        module_of = {
+            str(Path(item["path"]).expanduser()): item["module"]
+            for item in repos if isinstance(item, dict) and item.get("path") and item.get("module")
+        }
+        found: dict[str, set[str]] = {}
+        for (_task, repo_path), row in rows.items():
+            module = module_of.get(str(Path(repo_path).expanduser()))
+            if module and row.get("baseline_revision"):
+                found.setdefault(module, set()).add(row["baseline_revision"])
+        # Two tasks that started the same repository from different commits leave no
+        # single baseline to compare with.
+        return {module: next(iter(values)) for module, values in found.items() if len(values) == 1}
 
     def _runtime_profile(self, run_id: str) -> dict[str, Any]:
         events = self.state.events(run_id)
