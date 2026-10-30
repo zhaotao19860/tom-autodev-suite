@@ -267,6 +267,41 @@ class ProductPolicyTests(unittest.TestCase):
         self.assertEqual(again["reason_code"], "JOB_PARAMETER_OVERRIDE_UNSUPPORTED")
         self.assertEqual(again["parameters"], ["get_bgwagent"])
 
+    def test_an_inherited_name_the_run_already_supplied_upstream_is_not_an_override(self):
+        # BGW-2019: P0新case回归 inherits get_bgwagent from p0级自动化回归测试, which this run
+        # executed under G8 with the verified bgwagent product. Only get_bgw_test_case,
+        # declared by the stage itself, is left to fill.
+        from clients.ipipe_runtime import IpipeRuntime
+        runtime = IpipeRuntime.__new__(IpipeRuntime)
+        bindings = {"s": {"build_id": "b", "context": {"pipeline_id": "p"}, "stage": {"stage_conf_id": "2"}},
+                    "up": {"build_id": "b", "context": {"pipeline_id": "p"}, "stage": {"stage_conf_id": "1"}}}
+        runtime._load_stage_binding = lambda sid: bindings.get(sid)
+        runtime.run_id = "run"
+        runtime.state = SimpleNamespace(external_results=lambda _run: [{
+            "intent": {"operation": "ipipe.rerun", "payload": {
+                "build_id": "b", "stage_build_id": "up", "parameters": {"get_bgwagent": "x"}}},
+            "receipt": {"response": {"ok": True}}}])
+        stage = {"stageBuildId": "s", "pipelineBuildId": "b", "pipelineConfId": "p",
+                 "stageConfId": 2, "stageName": "P0新case回归", "manualParams": None, "hasDynamicParams": False}
+        configuration = {"id": "p", "stages": [
+            {"stageConfId": 1, "paramBeans": [{"name": "get_bgwagent"}]},
+            {"stageConfId": 2, "stageName": "P0新case回归", "upstreamStageId": 1,
+             "paramBeans": [{"name": "get_bgw_test_case"}],
+             "groupJobs": [[{"jobConfId": 3, "realJob": {"shellConf": {
+                 "command": 'eval "${get_bgw_test_case}"; eval "${get_bgwagent}"'}}}]]}]}
+        runtime.api = SimpleNamespace(
+            get_pipeline_by_id=lambda *a, **k: configuration,
+            stage_detail=lambda _: {"entities": {"stageBuild": stage, "realJobBuilds": [[{"jobConfId": 3}]]}},
+            stage_job_override_capability=lambda: {"supported": False})
+        runtime.validated_profile = {"project_id": "bgw"}
+        result = runtime.stage_parameter_names("s")
+        self.assertEqual(result["names"], ["get_bgw_test_case"], result)
+        self.assertEqual(result["upstream_supplied"], {"get_bgwagent": "1"})
+        self.assertNotEqual(result.get("reason_code"), "JOB_PARAMETER_OVERRIDE_UNSUPPORTED")
+        # Without the upstream receipt the inherited name keeps blocking.
+        runtime.state = SimpleNamespace(external_results=lambda _run: [])
+        self.assertEqual(runtime.stage_parameter_names("s")["reason_code"], "JOB_PARAMETER_OVERRIDE_UNSUPPORTED")
+
     def _p0_stage_fixture(self, stage_name, *, inherited=True):
         """A stage identical in shape to test_real_shape_p0_blocks_before_g8_with_inherited_names,
         but parameterized on stage_name so both P0新case回归 (historical) and

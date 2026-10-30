@@ -113,6 +113,13 @@ Use the run's frozen changed status, not worktree clean, to select products:
 | `get_bgw_test_case` | `baidu/nsiqa/x86bgw` | QA ChangePipeline `504074` compile `productHttpUrl` | wget into `bgw_auto` |
 | `get_bgwagent` | `baidu/sysip/bgwagent` | Changed: owned exact candidate ChangePipeline `348142` compile; unchanged: target branch BranchPipeline `348141` successful releaseOutputHttpUrl | wget, then copy `output/bgwagent` over `bgw_auto/tool/bgwagent` |
 
+When `P0新case回归` runs after `p0级自动化回归测试` in the same build, it inherits
+`get_bgwagent` from that upstream stage: the control plane fills it there under G8 and
+then fills only `get_bgw_test_case` for `P0新case回归` (this run's QA ChangePipeline
+`504074` product). An upstream-triggered run that this control plane did not fill uses the
+configuration's hard-coded default product, which goes stale (BGW-2019: `nodes/102205340`
+answered 404); rerun the stage through G8 instead of treating that as a test result.
+
 Both inputs obey the frozen module policy. Verify branch/source revision/job identity
 and actual download. An unchanged module without a published product may only use an
 approved adapter-proven compile-only BranchPipeline operation; the current API cannot

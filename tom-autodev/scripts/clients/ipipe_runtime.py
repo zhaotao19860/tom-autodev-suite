@@ -644,6 +644,8 @@ class IpipeRuntime:
                 return _failure("STAGE_PARAMETER_IDENTITY_MISMATCH")
             result = dependency_declaration(stage, detail, configuration)
             if result.get("ok") and result.get("requires_job_override"):
+                result = self._drop_upstream_supplied(result, owned)
+            if result.get("ok") and result.get("requires_job_override"):
                 # Same decision `_rerun_binding` applies to the write: an inherited or
                 # job-level name cannot be carried by manual_execute_stage, so the G8
                 # material is refused here instead of looking executable until the write.
@@ -667,6 +669,56 @@ class IpipeRuntime:
             "stage_name": stage.get("stageName", ""),
             "source": "stageAndRealJobBuilds.stageBuild.manualParams",
         }
+
+    def _upstream_supplied(self, build_id: str) -> dict[str, str]:
+        """Parameter -> stage_conf_id this run already supplied by executing an upstream
+        stage of the same build (a confirmed rerun receipt with that parameter)."""
+        supplied: dict[str, str] = {}
+        reader = getattr(getattr(self, "state", None), "external_results", None)
+        for item in (reader(self.run_id) if callable(reader) else []):
+            intent = item.get("intent") or {}
+            response = (item.get("receipt") or {}).get("response")
+            if intent.get("operation") != "ipipe.rerun" or not (isinstance(response, dict) and response.get("ok") is True):
+                continue
+            payload = intent.get("payload") or {}
+            if str(payload.get("build_id") or "") != str(build_id):
+                continue
+            binding = self._load_stage_binding(str(payload.get("stage_build_id") or ""))
+            conf = str(((binding or {}).get("stage") or {}).get("stage_conf_id") or "")
+            for name in (payload.get("parameters") or {}):
+                if conf:
+                    supplied[str(name)] = conf
+        return supplied
+
+    def _drop_upstream_supplied(self, declaration: dict[str, Any], owned: dict[str, Any]) -> dict[str, Any]:
+        """Remove names declared only by an upstream stage that this run already filled.
+
+        `P0新case回归` consumes `get_bgwagent` declared by `p0级自动化回归测试`: the same
+        build's upstream stage, executed by this run under G8 with the verified product.
+        iPipe hands that value downstream, so the stage itself only fills what it declares
+        (`get_bgw_test_case`) through its own form. A name the run did not supply upstream
+        stays and keeps the override block.
+        """
+        supplied = self._upstream_supplied(str(owned.get("build_id") or ""))
+        chain = [str(item) for item in declaration.get("dependency_chain") or []]
+        own = chain[0] if chain else ""
+        declarations = dict(declaration.get("declarations") or {})
+        inherited = {}
+        for name in list(declaration.get("names") or []):
+            entries = declarations.get(name) or []
+            scopes = {str(e.get("scope", "")).removeprefix("stage:") for e in entries if isinstance(e, dict)}
+            if (name in supplied and scopes == {supplied[name]} and supplied[name] in chain
+                    and supplied[name] != own):
+                inherited[name] = supplied[name]
+        if not inherited:
+            return declaration
+        names = [name for name in declaration["names"] if name not in inherited]
+        for name in inherited:
+            declarations.pop(name, None)
+        return {**declaration, "names": names, "declarations": declarations,
+                "upstream_supplied": inherited,
+                "requires_job_override": bool(set(names) - set(
+                    n for n, e in declarations.items() if e == [{"source": "manualParams"}]))}
 
     def _rerun_binding(
         self, stage_build_id: str, parameters: dict[str, Any] | None

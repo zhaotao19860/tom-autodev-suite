@@ -1212,7 +1212,9 @@ def _execute_ipipe(
         from pipeline_plan import frozen_plan
         events_reader = getattr(orchestrator.state, "events", None)
         plan = (frozen_plan(events_reader(run_id)) if callable(events_reader) else None) or {}
-        for other in plan.get("required_modules") or []:
+        # Every changed module whose product a stage may consume: the required pipelines
+        # and the product-test package (get_bgw_test_case is QA ChangePipeline 504074's).
+        for other in adoptable_product_modules(plan):
             if other != module and callable(getattr(runtime, "discover", None)):
                 runtime.discover(profile, revision_set, other)
         return _prepare_manual_stage(orchestrator, runtime, run_id, str(stage_id), module)
@@ -1236,6 +1238,15 @@ def _execute_ipipe(
     landed = orchestrator.status(run_id).get("state")
     return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
             "build_id": build_id, "monitor_status": status, "module": module, "result": ingested}
+
+
+def adoptable_product_modules(plan: dict[str, Any]) -> list[str]:
+    """Changed modules of the frozen plan whose ChangePipeline build this run may adopt."""
+    modules = list(plan.get("required_modules") or [])
+    for name, entry in (plan.get("product_inputs") or {}).items():
+        if isinstance(entry, dict) and entry.get("changed") is True and name not in modules:
+            modules.append(name)
+    return modules
 
 
 def _prepare_manual_stage(

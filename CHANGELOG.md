@@ -12,6 +12,7 @@ suite had no version control before then.
 
 ## 2026-10-29 · BGW-2019 真实运行中修的问题
 
+- `P0新case回归` 的 `get_bgw_test_case`（上游自动触发时用了配置里写死的旧 qa 产物 node 102205340，404）：与 `get_bgwagent` 同一类问题。改为（1）准备人工 stage 前只读采纳所有已变更产物模块的 build（含 QA ChangePipeline 504074）；（2）下游 stage 继承的、且本 run 已在同一 build 的上游 stage 经 G8 填过的参数（`get_bgwagent`←`p0级自动化回归测试`）不再算作 job 覆盖，stage 只填自己声明的 `get_bgw_test_case`。未经本 run 上游填写的继承参数仍按 `JOB_PARAMETER_OVERRIDE_UNSUPPORTED` 阻断。
 - IPIPE 多模块：x86bgw 的人工 stage（p0 回归，参数 `get_bgwagent`）需要 bgwagent 的产物，但逐模块推进时 bgwagent 的 build 尚未被本 run 采纳，产物查找报 `PRODUCT_URL_NOT_PUBLISHED`。准备人工 stage 的 G8 前，先只读采纳其余必需模块在冻结版本上的 build（不触发、不审批）。
 - 提交阶段：已通过评审、但因兄弟任务修复离开 SUBMIT 而没建描述符的任务，仍计入待提交（`_latest_unsubmitted_reviewed_task` / `_submit_followup_state`），不再把 run 送回无事可做的 WORKSPACE（`WORKSPACE_TASK_REPO_UNRESOLVED`）；已误入的 WORKSPACE 由 `_recover_skipped_submit` 拉回 SUBMIT。未改动的仓库 HEAD 停在他人基线提交时，`_commit_if_dirty(baseline=...)` 不再判 `GIT_IDENTITY_MISMATCH`。
 - 同一 run 内 CODE_ONLY 修复已提交的任务：iCode 对账把本卡、同 owner、同分支、同 Change-Id 的已开 CR 识别为 `CR_APPEND_ALLOWED`（作为新 patchset 追加），不再判为 `CR_IDENTITY_CONFLICT`。G7 卡说明该追加情形；控制器门（G7/G8）的审批预览文件改为展示固定摘要，不再误写“材料缺失”。BGW-2019 修 qa 仓版本号时发现。
