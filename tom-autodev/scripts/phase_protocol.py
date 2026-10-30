@@ -950,6 +950,14 @@ class PhaseProtocol:
         # PLAN -> IMPLEMENT does, and IMPLEMENT's baselines are that Plan's. The
         # diagnosis' own source_revisions are the failed candidate, not a baseline.
         repair_plan_binding: dict[str, Any] | None = None
+        resume_binding: dict[str, Any] = {}
+        if action["phase"] == "DIAGNOSE" and target == "IPIPE":
+            entry = next((event for event in reversed(self.state.events(run_id))
+                          if event.get("state") == "IPIPE"), None)
+            if entry is None:
+                return _failure("IPIPE_ENTRY_MISSING", run_id=run_id)
+            resume_binding = {key: value for key, value in (entry.get("payload") or {}).items()
+                              if key not in {"previous_state", "policy_decision"}}
         if action["phase"] == "DIAGNOSE" and target == "IMPLEMENT":
             repair_plan_binding = plan_implement_binding(
                 self._accepted_plan(run_id, next_task_id or action.get("task_id"))
@@ -957,6 +965,7 @@ class PhaseProtocol:
             if repair_plan_binding is None:
                 return _failure("PLAN_PREDECESSOR_REQUIRED", run_id=run_id)
         event_payload = {
+                **resume_binding,
                 "previous_state": action["state"],
                 "source_event_id": action["source_event_id"],
                 "action_id": action_id,
@@ -1766,6 +1775,24 @@ class PhaseProtocol:
         return None
 
 
+    def _failed_stage_rerun(self, run_id: str, stage_id: Any) -> bool:
+        """A confirmed G8 rerun of `stage_id` exists, created after the failure evidence."""
+        if not isinstance(stage_id, str) or not stage_id:
+            return False
+        # The failure's time is when the run entered DIAGNOSE from IPIPE.
+        failed_at = next((event.get("created_at") or "" for event in reversed(self.state.events(run_id))
+                          if event.get("state") == "DIAGNOSE"
+                          and (event.get("payload") or {}).get("previous_state") == "IPIPE"), "")
+        for item in self.state.external_results(run_id):
+            intent = item.get("intent") or {}
+            response = (item.get("receipt") or {}).get("response")
+            if (intent.get("operation") == "ipipe.rerun"
+                    and (intent.get("payload") or {}).get("stage_build_id") == stage_id
+                    and isinstance(response, dict) and response.get("ok") is True
+                    and str(intent.get("created_at") or "") >= str(failed_at)):
+                return True
+        return False
+
     def _completion_target(
         self, action: dict[str, Any], envelope: dict[str, Any]
     ) -> tuple[str, str | None, str]:
@@ -1801,6 +1828,12 @@ class PhaseProtocol:
                 return "STOPPED", None, "ENVIRONMENT_REPAIR_FORBIDDEN"
             if route == "DIAGNOSIS_INCOMPLETE":
                 return "STOPPED", None, "DIAGNOSIS_INCOMPLETE"
+            if route == "IPIPE":
+                # Back to the pipeline only once the failed stage was re-run under G8
+                # after this failure; the environment was fixed, not the code.
+                if not self._failed_stage_rerun(action["run_id"], content.get("stage_id")):
+                    return "STOPPED", None, "IPIPE_RESUME_WITHOUT_RERUN"
+                return "IPIPE", None, "ENVIRONMENT_RESOLVED"
             if route != "REPAIR":
                 return route, None, "OK"
             # Deterministic cross-run guard (MEDIUM-004 / R-M5): even when the diagnosis

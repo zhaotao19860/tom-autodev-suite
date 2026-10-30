@@ -512,6 +512,10 @@ def _validate_diagnosis(instance: dict[str, Any]) -> list[SchemaIssue]:
     if (instance.get("classification") in ENVIRONMENT_FAILURE_CLASSES
             and instance.get("route") in ENVIRONMENT_FORBIDDEN_ROUTES):
         return [SchemaIssue("route", "inconsistent")]
+    # route IPIPE = the environment cause was resolved outside the code (the failed stage
+    # re-ran under G8); only an environment-class diagnosis may return to the pipeline.
+    if instance.get("route") == "IPIPE" and instance.get("classification") not in ENVIRONMENT_FAILURE_CLASSES:
+        return [SchemaIssue("classification", "inconsistent")]
     if instance.get("evidence_state") == "INSUFFICIENT":
         if instance.get("route") != "DIAGNOSIS_INCOMPLETE":
             return [SchemaIssue("route", "inconsistent")]

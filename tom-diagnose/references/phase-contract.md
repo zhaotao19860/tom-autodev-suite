@@ -22,3 +22,6 @@ For an iPipe failure, copy its exact `build_id`, `environment_fingerprint` and `
 When the user changed a requirement after G1 (the entry block or conflict says `USER_REQUIREMENT_CHANGED`, or the evidence shows it), keep `classification=USER_REQUIREMENT_CHANGED` and use `route=GRILL` (or `STOPPED`). Put the old and new rule in `comparison` and the decision-log change in `repair_direction`. The controller rejects any other route for that class, a relabelled class, and `route=GRILL` for anything else; on approval the direction and `repair_plan` reach GRILL as `revision_context`.
 
 The parent settles the applicable G6 and validates the route. The producer neither calls `repair_policy` with guessed history nor marks a FailureCase resolved; a verified repair result and its scope are required.
+
+For an environment-class failure (`ENV_UNSATISFIED`, `ENV_TRANSIENT`, `PIPELINE_TRANSIENT`, `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`, ...) whose cause was resolved outside the code and whose failed stage was already re-run under G8 after the failure, use `route=IPIPE`: no business patch, the run returns to the pipeline and continues with the remaining modules. The controller refuses `route=IPIPE` for a non-environment class, and stops the run (`IPIPE_RESUME_WITHOUT_RERUN`) when no confirmed G8 rerun of `stage_id` exists after the failure.
+
