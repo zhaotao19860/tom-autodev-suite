@@ -3819,7 +3819,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 agent_host.bind_driver(orchestrator.state, resolved["run_id"])
                 result = bridge.continue_run(resolved["run_id"])
-                result = _deliver_worker_approval(orchestrator, result)
+                result = _continue_preauthorized(orchestrator, bridge, resolved["run_id"],
+                                                 _deliver_worker_approval(orchestrator, result))
         else:
             from clients.icafe_client import CafeClient
 
@@ -3848,7 +3849,8 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     agent_host.bind_driver(orchestrator.state, started["run_id"])
                     result = bridge.drive(started["run_id"])
-                    result = _deliver_worker_approval(orchestrator, result)
+                    result = _continue_preauthorized(orchestrator, bridge, started["run_id"],
+                                                     _deliver_worker_approval(orchestrator, result))
     elif args.command == "status":
         from agent_bridge import resolve_status_target
         resolved = resolve_status_target(orchestrator, args.run_id)
@@ -3917,16 +3919,20 @@ def main(argv: list[str] | None = None) -> int:
             result = resolved
         elif args.command == "drive":
             result = bridge.drive(resolved["run_id"])
-            result = _deliver_worker_approval(orchestrator, result)
+            result = _continue_preauthorized(orchestrator, bridge, resolved["run_id"],
+                                             _deliver_worker_approval(orchestrator, result))
         elif args.command == "continue":
             result = bridge.continue_run(resolved["run_id"])
-            result = _deliver_worker_approval(orchestrator, result)
+            result = _continue_preauthorized(orchestrator, bridge, resolved["run_id"],
+                                             _deliver_worker_approval(orchestrator, result))
         elif args.command == "submit-draft":
             draft = _draft_content_file(args.draft_json)
             result = draft if draft.get("ok") is False else bridge.submit_draft(
                 resolved["run_id"], args.job_id, draft
             )
-            result = _deliver_worker_approval(orchestrator, {**result, "run_id": resolved["run_id"]})
+            result = _continue_preauthorized(
+                orchestrator, bridge, resolved["run_id"],
+                _deliver_worker_approval(orchestrator, {**result, "run_id": resolved["run_id"]}))
         elif args.command == "report-producer-block":
             report = _json_file(args.report_json)
             result = report if report.get("ok") is False else bridge.report_producer_block(
@@ -4639,7 +4645,7 @@ def _request_approval(
     )
     if "error" in context:
         return context["error"]
-    return orchestrator.request_infoflow_approval(
+    requested = orchestrator.request_infoflow_approval(
         run_id,
         action,
         input_hash,
@@ -4648,6 +4654,54 @@ def _request_approval(
         comate_client=ComateApprovalClient(),
         infoflow_client=_infoflow_approval_client(orchestrator),
     )
+    return _apply_preauthorization(orchestrator, run_id, requested)
+
+
+def _apply_preauthorization(
+    orchestrator: Orchestrator, run_id: str, requested: Any
+) -> Any:
+    """Answer a delivered, still-pending gate with APPROVE when a standing grant covers it.
+
+    Only after delivery reached both channels (the ledger refuses a response otherwise),
+    only for the card, project, gate and branches the grant names, and only before its
+    expiry. The response goes through the ledger like a click; the grant id is recorded.
+    """
+    import preauthorization
+
+    if not isinstance(requested, dict) or requested.get("effective_decision"):
+        return requested
+    approval_id = requested.get("approval_id")
+    if not isinstance(approval_id, str) or requested.get("delivery_failed_at"):
+        return requested
+    pinned = orchestrator._runtime_profile(run_id)
+    events = orchestrator.state.events(run_id)
+    intake = (events[0].get("payload") or {}) if events else {}
+    if not pinned.get("ok"):
+        return requested
+    grant = preauthorization.matching_grant(
+        orchestrator.config_root, card_id=intake.get("requirement_id"),
+        project=intake.get("project"), gate=requested.get("action"),
+        profile=pinned["profile"], member_policy=requested.get("member_policy") or {},
+    )
+    if grant is None:
+        return requested
+    outcome = orchestrator.approvals.receive(
+        approval_id, "APPROVE", requested["input_hash"], "comate", grant["responder"],
+        run_id=run_id, state_store=orchestrator.state,
+    )
+    if outcome.get("reason_code") != "OK":
+        return {**requested, "preauthorization_refused": outcome.get("reason_code")}
+    try:
+        orchestrator.state.save_idempotency_result(
+            f"approval.preauthorized:{run_id}:{approval_id}",
+            {"approval_id": approval_id, "action": requested.get("action"),
+             "input_hash": requested["input_hash"], "grant_id": grant["grant_id"],
+             "responder": grant["responder"]},
+        )
+    except ValueError:
+        pass
+    return {**(orchestrator.approvals.get(approval_id) or requested),
+            "preauthorized": grant["grant_id"]}
 
 
 def _reissue_approval(
@@ -5242,8 +5296,35 @@ def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any])
         return {
             **result, "ok": True, "reason_code": "PARKED", "parked": "APPROVAL_WAIT",
             "draft_saved": True, "approval": approval,
+            **({"preauthorized": approval["preauthorized"]} if approval.get("preauthorized") else {}),
         }
-    return {**result, "approval": approval}
+    return {**result, "approval": approval,
+            **({"preauthorized": approval["preauthorized"]} if approval.get("preauthorized") else {})}
+
+
+_PREAUTHORIZED_STEPS = 12
+
+
+def _continue_preauthorized(
+    orchestrator: Orchestrator, bridge: Any, run_id: str, result: Any
+) -> Any:
+    """Keep driving while each parked gate was answered by a standing grant.
+
+    A human-approved gate is consumed by the next `continue`; a preauthorized one is
+    answered in the same command, so the command continues itself, a bounded number of
+    times. It stops at the first ProducerJob, remote wait, block or unanswered gate.
+    """
+    answered = []
+    for _ in range(_PREAUTHORIZED_STEPS):
+        if not isinstance(result, dict) or not result.get("preauthorized"):
+            break
+        answered.append({"gate": (result.get("approval") or {}).get("action"),
+                         "approval_id": (result.get("approval") or {}).get("approval_id"),
+                         "grant_id": result["preauthorized"]})
+        result = _deliver_worker_approval(orchestrator, bridge.continue_run(run_id))
+    if answered and isinstance(result, dict):
+        result = {**result, "preauthorized_gates": answered}
+    return result
 
 
 def _cli_ipipe_transport(orchestrator: Orchestrator, run_id: str) -> Any:

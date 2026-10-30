@@ -170,3 +170,7 @@ python3 scripts/ask_infoflow.py wait RUN_ID DECISION_ID [--timeout 900]
 `ask` sends a button card to the run's collaboration group and records the question under `~/.tom-autodev/decisions/<decision_id>.json`; `wait` polls the journal and returns the tapped option. An answer counts only when it was tapped in that group after the question was asked and names one of the options that were offered.
 
 This is deliberately weaker than a gate and must never replace one: there is no ledger row, no bound `input_hash`, no deadline and no member policy behind it. Ask a real gate through `request-approval`. A `TIMEOUT` from `wait` is not a decision — fall back to asking in the IDE.
+
+## 测试卡的预授权（无人值守）
+
+仅用于不上线的测试卡（如 BGW-2019 及其专用分支）。审批人在本机 `~/.tom-autodev/preauthorizations.json`（运维配置，不进仓库）写一条 grant：卡号、项目、门号列表、允许的分支、代答人、到期时间。之后 worker 请求的每个门仍正常建台账、双渠道投递；投递齐全后，若 grant 覆盖该门（同卡、同项目、门号在列表内、profile 所有分支都在允许列表内、代答人是该门成员、未过期），以代答人身份经台账给出 APPROVE，并写审计 `approval.preauthorized:{run}:{approval_id}`（含 grant_id）。`process` / `continue` / `drive` / `submit-draft` 遇到被代答的门会在同一命令里自动续跑（最多 12 次），停在 ProducerJob、远程等待、阻断或未代答的门。哈希绑定、证据检查与门序不变；删掉该文件即恢复人工审批。真实需求不得配置 grant。

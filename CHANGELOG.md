@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-30 · 测试卡预授权：无人值守推进
+
+- 新增 `preauthorization.py`：本机 `~/.tom-autodev/preauthorizations.json` 里的 grant（卡号、项目、门号、允许分支、代答人、到期时间）覆盖的门，在双渠道投递完成后由代答人身份经台账 APPROVE，并写审计 `approval.preauthorized:{run}:{approval_id}`。profile 任一分支不在允许列表、过期、门号不符、代答人不是成员、投递不全时都不代答。
+- `process` / `continue` / `drive` / `submit-draft` 在被代答的门后同一命令内自动续跑（上限 12 次）。
+- 起因：BGW-2019 是不上线的测试卡，每个门等人点击，夜间和周末无法推进。`references/approval-policy.md` 同步，真实需求不得配置 grant。
+
 ## 2026-10-30 · MVP 验收口径：按独立 run 计数
 
 - `docs/MVP_CONVERGENCE_PLAN.md`：场景矩阵 S1~S7 与"至少 3 个到 RELEASE_SUCCESS"改为按独立 run 计数，可复用测试卡 BGW-2019 及其专用分支（上一个 run 终态后 `start --fresh`）；每个 run 须有自己的改动、CR 与 build；GRILL/SPEC 对不同需求类型的覆盖在 P 层记"未验证"；受控制造故障前须先向需求方说明中断点与遗留远程对象并获确认。
