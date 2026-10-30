@@ -111,6 +111,7 @@ Use the run's frozen changed status, not worktree clean, to select products:
 | Parameter | Module | Product | Consumed as |
 |---|---|---|---|
 | `get_bgw_test_case` | `baidu/nsiqa/x86bgw` | QA ChangePipeline `504074` compile `productHttpUrl` | wget into `bgw_auto` |
+| `get_bgw` | `baidu/sysip/x86bgw` | Changed: owned exact candidate x86bgw ChangePipeline `348102` compile `productHttpUrl` | bgwagent `348142` `p0级自动化回归测试`: wget, untar, start the BGW under test |
 | `get_bgwagent` | `baidu/sysip/bgwagent` | Changed: owned exact candidate ChangePipeline `348142` compile; unchanged: target branch BranchPipeline `348141` successful releaseOutputHttpUrl | wget, then copy `output/bgwagent` over `bgw_auto/tool/bgwagent` |
 
 When `P0新case回归` runs after `p0级自动化回归测试` in the same build, it inherits

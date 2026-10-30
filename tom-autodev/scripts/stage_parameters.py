@@ -297,6 +297,9 @@ def redacted(values: dict[str, Any]) -> dict[str, Any]:
 _PARAMETER_ALIASES = {
     "get_bgw_test_case": ("baidu/nsiqa/x86bgw",),
     "get_bgwagent": ("baidu/sysip/bgwagent",),
+    # bgwagent ChangePipeline 348142 `p0级自动化回归测试`: its jobs run `eval ${get_bgw}`
+    # and untar the x86bgw build output to start the BGW under test.
+    "get_bgw": ("baidu/sysip/x86bgw",),
 }
 
 

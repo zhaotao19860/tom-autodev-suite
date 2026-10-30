@@ -2127,7 +2127,7 @@ class PhaseProtocol:
 
     def ingest_ipipe_evidence(self, run_id: str, content: dict[str, Any]) -> dict[str, Any]:
         build_id = content.get("build_id") if isinstance(content, dict) else None
-        blocked = self._new_result_guard(run_id, f"ipipe-ingest:{run_id}:{build_id}")
+        blocked = self._new_result_guard(run_id, _ipipe_ingest_key(self.state.events(run_id), run_id, build_id))
         if blocked is not None:
             return blocked
         try:
@@ -2173,7 +2173,7 @@ class PhaseProtocol:
         if not isinstance(content, dict) or not isinstance(content.get("build_id"), str):
             return _failure("INVALID_INPUT", run_id=run_id)
         content_hash = _canonical_hash(content)
-        result_key = f"ipipe-ingest:{run_id}:{content['build_id']}"
+        result_key = _ipipe_ingest_key(self.state.events(run_id), run_id, content["build_id"])
         existing = self.state.idempotency_result(result_key)
         if existing is not None:
             if existing.get("ingest_hash") != content_hash:
@@ -3159,6 +3159,21 @@ def _auto_grill_decision_log(snapshot: dict[str, Any] | None) -> dict[str, Any]:
         "source_evidence": [f"icafe:{card_id}/snapshot"],
         "acceptance_delta": [],
     }
+
+
+def _ipipe_ingest_key(events: list[dict[str, Any]], run_id: str, build_id: str) -> str:
+    """One ingestion per build per pipeline pass.
+
+    A pass re-entered from DIAGNOSE after an environment fix (route IPIPE) reads the same
+    build again, whose re-run stage now has a new result; that is a new ingestion, keyed
+    on the re-entry event. Every other pass keeps the original per-build key.
+    """
+    base = f"ipipe-ingest:{run_id}:{build_id}"
+    entry = next((event for event in reversed(events) if event.get("state") == "IPIPE"), None)
+    payload = (entry or {}).get("payload") or {}
+    if payload.get("previous_state") == "DIAGNOSE" and not payload.get("rebuild"):
+        return f"{base}:resume:{entry['event_id']}"
+    return base
 
 
 def _ipipe_controller_binding(payload: Any) -> dict[str, Any]:
