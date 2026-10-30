@@ -11,7 +11,7 @@ v4 在 `mvp` 分支上，基于 `5c162d4`。本文件是计划，不是 MVP 验�
 
 ## 0. 目标、判据与不变量
 
-目标：**一张真实 BGW 需求从 iCafe 走到 RELEASE_SUCCESS**，再连续走通 2~4 张，覆盖单仓、双仓、RESTART、未知回执/环境失败四类场景。
+目标：**一张真实 BGW 需求从 iCafe 走到 RELEASE_SUCCESS**，再连续走通 2~4 个独立 run，覆盖单仓、双仓、RESTART、未知回执/环境失败四类场景。2026-10-30 起，这些 run 允许复用同一张测试卡 BGW-2019（见第 8 节第 3 步的口径说明）。
 
 验收按 [WORKFLOW_EXIT_CRITERIA.md](WORKFLOW_EXIT_CRITERIA.md) 的 C/M/P 三层分别给出，未测试的层写"未验证"。下表的数字是**实现预算和观察指标**，不是退出标准：
 
@@ -73,7 +73,7 @@ v4 在 `mvp` 分支上，基于 `5c162d4`。本文件是计划，不是 MVP 验�
 
 **卡数预期**：单 task 顺利路径 D、C、R、R' 共 4 张；BGW-1995 实际 14 次有效审批。
 
-**物理合并的触发条件**：scope 授权在 3 张真实卡上稳定，且仍有明确收益（例如内部状态切换本身反复出错）时，再新增 `design-bundle` / `build-bundle` schema 和子状态协议。
+**物理合并的触发条件**：scope 授权在 3 个真实独立 run 上稳定，且仍有明确收益（例如内部状态切换本身反复出错）时，再新增 `design-bundle` / `build-bundle` schema 和子状态协议。
 
 **change class**：MVP 默认跑 `standard`。`full` 保留（它是复杂/跨仓需求的分段 Spec/Tasks 路径，不只是多几个门）；`express` / `hotfix` 暂保留，统计真实使用频率后再决定。
 
@@ -378,9 +378,11 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 | S6 审批后续跑 / 中断恢复 | 中断恢复 | 在 claim 后、receipt 前杀进程，重启后 reconcile 到正确终态，无重复写 |
 | S7 未知回执 / 环境等待 | 未知结果、环境失败 | 至少一次 `UNKNOWN → CONFIRMED`、一次 `ENV_WAIT` 按 `recheck_after` 复查后离开或转 STOP |
 
-S1~S3 可以由同 1~3 张卡覆盖；S4、S6、S7 允许在这些卡里自然出现或受控制造（例如审批后人为中断 worker），但必须是真实平台上的真实 run。全程记录人工介入原因（模型产出质量 / 平台行为 / 控制面 bug），只修阻塞的控制面 bug。
+S1~S3 可以由同 1~3 个 run 覆盖；S4、S6、S7 允许在这些 run 里自然出现或受控制造（例如审批后人为中断 worker），但必须是真实平台上的真实 run。
 
-验收：P 层——S1~S7 每格有真实证据，至少 3 张卡到 RELEASE_SUCCESS；C 层——WF-01~WF-10 证据齐全。
+**口径（2026-10-30 调整）**：计数单位是独立 run，不是卡。各 run 可复用测试卡 BGW-2019 及其专用分支（x86bgw / bgwagent `x86bgw-dpdk-2011-autodev`、qa `pipline_case_autodev`，不上线），上一个 run 终态后用 `start --fresh` 开新 run，旧 run 记录全部保留；每个 run 须有自己的代码改动、CR 与 build。已知代价：GRILL/SPEC 的输入相近，覆盖不到不同类型的需求，这一项在 P 层记为"未验证"。受控制造故障（S4、S6 的中断、S5 的需求变更）前，须先向需求方说明中断点与会留下的远程对象，确认后执行。全程记录人工介入原因（模型产出质量 / 平台行为 / 控制面 bug），只修阻塞的控制面 bug。
+
+验收：P 层——S1~S7 每格有真实证据，至少 3 个独立 run 到 RELEASE_SUCCESS（可同卡）；C 层——WF-01~WF-10 证据齐全。
 
 ### 第 4 步：LegacyRunProjector 与删除（约 1~2 周）
 
@@ -390,7 +392,7 @@ S1~S3 可以由同 1~3 张卡覆盖；S4、S6、S7 允许在这些卡里自然�
 
 | 事项 | 触发条件 |
 |---|---|
-| 物理合并 DESIGN/BUILD | scope 授权在 3 张卡上稳定，且内部状态切换仍反复出错 |
+| 物理合并 DESIGN/BUILD | scope 授权在 3 个独立 run 上稳定，且内部状态切换仍反复出错 |
 | 迁移 Temporal | 调度、租约、轮询本身仍是主要故障来源（它解决不了 iPipe 身份、revision、stage 参数和发布证据语义） |
 | 删除 `express` / `hotfix` | 真实使用频率证明不需要差异化 |
 | 恢复 KU 阶段内发布 | 审批人明确需要在 KU 中读阶段文档 |

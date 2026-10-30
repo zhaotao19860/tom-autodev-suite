@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-30 · MVP 验收口径：按独立 run 计数
+
+- `docs/MVP_CONVERGENCE_PLAN.md`：场景矩阵 S1~S7 与"至少 3 个到 RELEASE_SUCCESS"改为按独立 run 计数，可复用测试卡 BGW-2019 及其专用分支（上一个 run 终态后 `start --fresh`）；每个 run 须有自己的改动、CR 与 build；GRILL/SPEC 对不同需求类型的覆盖在 P 层记"未验证"；受控制造故障前须先向需求方说明中断点与遗留远程对象并获确认。
+
 ## 2026-10-30 · 用例失败证据入账
 
 - 作业退出码为 0、但日志报告失败用例（`JOB_SUCCEEDED_WITH_FAILED_CASES`）时，监控结果此前是 FAILURE 却只有 SUCCESS 的 stage、且没有失败签名，入账被 schema 拒绝（`SCHEMA_INVALID`）。现在把日志报告失败的 job 及其 stage 记为 FAIL，并生成按失败用例名计算的签名（顺序无关，失败集合不同即不同根因）。
