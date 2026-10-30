@@ -931,14 +931,7 @@ class IpipeRuntime:
         failure_signature = stage.get("failure_signature") or _failure_signature(
             context.get("pipeline_id"), context.get("module"), [stage], []
         )
-        return {
-            "ok": True,
-            "reason_code": "OK",
-            "context": context,
-            "build_id": build_id,
-            "stage": stage,
-            "case_failures": silent,
-            "binding": {
+        binding = {
                 "operation": "ipipe.rerun",
                 "run_id": self.run_id,
                 "pipeline_id": context["pipeline_id"],
@@ -955,7 +948,30 @@ class IpipeRuntime:
                 **({"product_proofs": proofs} if proofs else {}),
                 **({"ready_after": ready_after} if ready_after else {}),
                 **({"stage_plan": plan_binding} if plan_binding else {}),
-            },
+            }
+        # A stage that finished again looks exactly as it did before the last approved
+        # re-run, so the next re-run would hash to the approval that run consumed and
+        # could never be approved anew. Only in that case the receipted attempts join the
+        # binding; any other binding (new parameters, new evidence) is already distinct.
+        used = _canonical_hash(binding)
+        prior = sorted(
+            item["intent_id"] for item in self._rerun_intents(stage_build_id, exclude_key="")
+            if ((self.state.result_by_idempotency_key(item["idempotency_key"]) or {})
+                .get("receipt", {}).get("response") or {}).get("ok") is True
+        )
+        if prior and any(
+            (item.get("payload") or {}).get("input_hash") == used
+            for item in self._rerun_intents(stage_build_id, exclude_key="")
+        ):
+            binding = {**binding, "prior_attempts": prior}
+        return {
+            "ok": True,
+            "reason_code": "OK",
+            "context": context,
+            "build_id": build_id,
+            "stage": stage,
+            "case_failures": silent,
+            "binding": binding,
         }
 
     def _manual_stage_readiness(self, stage_binding: dict[str, Any]) -> dict[str, Any]:

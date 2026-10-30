@@ -9,6 +9,7 @@ suite had no version control before then.
 - 作业退出码为 0、但日志报告失败用例（`JOB_SUCCEEDED_WITH_FAILED_CASES`）时，监控结果此前是 FAILURE 却只有 SUCCESS 的 stage、且没有失败签名，入账被 schema 拒绝（`SCHEMA_INVALID`）。现在把日志报告失败的 job 及其 stage 记为 FAIL，并生成按失败用例名计算的签名（顺序无关，失败集合不同即不同根因）。
 - `ipipe_logs` 单个日志读取上限由 8MB 提到 64MB：bgwagent `p0级自动化回归测试` 的作业日志约 34MB，超限后读不到用例结果。
 - 基线对比：作业日志里失败的用例，若在本 run 工作树基线修订（`worktree_ownership.baseline_revision`）的同流水线、同 stage 配置、同名 job 中也失败，视为既有失败，不再判本次改动失败；剩余全为既有失败时该 job 按通过处理，并写审计记录 `ipipe.case-baseline-accepted:{run}:{job}`。只剩新增失败时，`case_failures` 只列新增用例，另带 `preexisting_cases` 与 `baseline_build_id`。找不到可比基线（无该修订的构建、基线即候选修订、同仓多个基线）时，所有失败用例照旧计入。基线结果按 run 落检查点，大日志只读一次。
+- 同一 stage 经 G8 重跑后又以完全相同的方式结束时，下一次重跑的绑定与已消费的审批同哈希，永远无法再批。此时绑定加入已成功派发的历次尝试（`prior_attempts`），新 G8 得到新哈希；参数或证据不同的绑定保持原样。
 - BGW-2019 的 bgwagent p0 回归发现：68 个失败中 67 个与基线 build 270132995 相同，仅 `test_dsr_off_tcp_cfg_vs_006` 为新增（日志 `Connection reset by peer`）。
 
 ## 2026-10-29 · changelog 每次改动必须带新版本号

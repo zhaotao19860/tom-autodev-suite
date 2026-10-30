@@ -1185,6 +1185,23 @@ class IpipeRuntimeTests(unittest.TestCase):
             status="FAIL", stages=[{"id": "stage-1", "stageName": "unit", "status": "FAIL"}]
         )
 
+    def test_a_stage_that_fails_the_same_way_again_gets_a_new_g8_hash(self):
+        # After an approved re-run the stage can end exactly as before; the identical
+        # binding would hash to the consumed approval and could never be approved again.
+        self._failed_stage()
+        first_hash = self.runtime.rerun_input_hash("stage-1")["input_hash"]
+        first_approval = approved(self.ledger, "G8", first_hash)
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        self.assertEqual(self.runtime.rerun("stage-1", first_approval)["reason_code"], "OK")
+        self._finish_as_failed()
+        again = self.runtime.rerun_input_hash("stage-1")
+        self.assertNotEqual(again["input_hash"], first_hash)
+        self.assertEqual(len(again["binding"]["prior_attempts"]), 1)
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        second = self.runtime.rerun("stage-1", approved(self.ledger, "G8", again["input_hash"]))
+        self.assertEqual(second["reason_code"], "OK", second)
+        self.assertEqual(len(self._posts()), 2)
+
     def test_same_stage_can_be_rerun_again_under_a_new_g8_with_new_parameters(self):
         self._failed_stage()
         first_approval = self._g8()
