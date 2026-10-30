@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-30 · 用例失败证据入账
+
+- 作业退出码为 0、但日志报告失败用例（`JOB_SUCCEEDED_WITH_FAILED_CASES`）时，监控结果此前是 FAILURE 却只有 SUCCESS 的 stage、且没有失败签名，入账被 schema 拒绝（`SCHEMA_INVALID`）。现在把日志报告失败的 job 及其 stage 记为 FAIL，并生成按失败用例名计算的签名（顺序无关，失败集合不同即不同根因）。
+- `ipipe_logs` 单个日志读取上限由 8MB 提到 64MB：bgwagent `p0级自动化回归测试` 的作业日志约 34MB，超限后读不到用例结果。
+- BGW-2019 的 bgwagent p0 回归发现。
+
 ## 2026-10-29 · changelog 每次改动必须带新版本号
 
 - 规则（`references/changelog-policy.md`）：任何仓库、任何格式，每个 change-set 都要新增版本；Keep a Changelog 的 `CHANGELOG.md` 不再只写 `[Unreleased]`，而是在其下方插入新版本小节（如 `0.1.1 - <日期>`），`[Unreleased]` 模板保持不动；文档/测试改动按 PATCH 递增。

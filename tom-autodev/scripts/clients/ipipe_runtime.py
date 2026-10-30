@@ -352,14 +352,16 @@ class IpipeRuntime:
             if _build_passed(aggregate, self._mark_expression_skips(normalized_stages)):
                 silent = self._silent_case_failures(normalized_stages)
                 if silent:
+                    stages_out, signature = _case_failure_view(binding, normalized_stages, silent)
                     return {
                         "ok": False,
                         "reason_code": "JOB_SUCCEEDED_WITH_FAILED_CASES",
                         "status": "FAILURE",
                         "classification": "TEST_FAILURE",
                         "build_id": build_id,
-                        "stages": normalized_stages,
+                        "stages": stages_out,
                         "case_failures": silent,
+                        "failure_signature": signature,
                         "environment_fingerprint": binding["environment_fingerprint"],
                         "evidence_refs": _build_evidence(build_id, binding, normalized_stages),
                     }
@@ -3249,6 +3251,38 @@ def _normalize_error(text: Any) -> str:
     for index, value in enumerate(protected):
         normalized = normalized.replace(f"{marker}{index}\x00", value)
     return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _case_failure_view(
+    binding: dict[str, Any], stages: list[dict[str, Any]], silent: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], str]:
+    """Stages as evidence sees them when jobs exited zero but their logs report failed cases.
+
+    The platform calls those jobs successful; the evidence must not, or a FAILURE outcome
+    carries only SUCCESS stages and no signature and fails its own schema. The jobs named
+    in `silent` (and their stages) are reported FAIL, and the signature covers the failed
+    case names so a different set of failing cases is a different root cause.
+    """
+    failed_jobs = {str(item.get("job_build_id") or "") for item in silent}
+    failed_stages = {str(item.get("stage_build_id") or "") for item in silent}
+    view: list[dict[str, Any]] = []
+    for stage in stages:
+        if str(stage.get("stage_build_id") or "") not in failed_stages:
+            view.append(stage)
+            continue
+        jobs = [
+            {**job, "status": "FAIL"} if str(job.get("job_build_id") or "") in failed_jobs else job
+            for job in stage.get("jobs") or []
+        ]
+        view.append({**stage, "status": "FAIL", "jobs": jobs})
+    signed_jobs = [
+        {"name": item.get("job_name"), "status": "FAIL",
+         "message": "failed cases: " + ", ".join(sorted(str(case) for case in item.get("failed_cases") or []))}
+        for item in silent
+    ]
+    signed_stages = [stage for stage in view if str(stage.get("stage_build_id") or "") in failed_stages]
+    return view, _failure_signature(
+        binding.get("pipeline_id"), binding.get("module"), signed_stages, signed_jobs)
 
 
 def _failure_signature(

@@ -583,6 +583,38 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(found[0]["log_url"], "https://logonline.example/detail")
         self.assertEqual(found[0]["failed_cases"], ["case-1"])
 
+    def test_a_silent_case_failure_is_schema_consistent_evidence(self):
+        # Jobs exited zero but the log reports failed cases. The monitor outcome was a
+        # FAILURE carrying only SUCCESS stages and no signature, so ingest refused it.
+        from schema_validator import _validate_ipipe
+
+        finished = {
+            "id": "stage-1", "stageConfId": 4875670, "stageName": "p0", "status": "SUCC",
+            "jobBuildBeans": [{
+                "id": "job-1", "jobName": "p0-25G", "status": "SUCC",
+                "logs": [{"url": "https://logonline.example/silent"}],
+            }],
+        }
+        self.bind_build(status="SUCCESS", stages=[finished])
+        self.api.stages["build-1"] = [finished]
+
+        def monitor(cases):
+            runtime = pinned_runtime(
+                self.state, self.ledger, self.api,
+                log_reader=lambda url: {"ok": True, "success_ratios": [96.87], "failed_cases": cases},
+            )
+            return runtime.monitor(
+                "build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+
+        observed = monitor(["case-b", "case-a"])
+        self.assertEqual(observed["reason_code"], "JOB_SUCCEEDED_WITH_FAILED_CASES", observed)
+        self.assertEqual(observed["stages"][0]["status"], "FAIL")
+        self.assertEqual(observed["stages"][0]["jobs"][0]["status"], "FAIL")
+        self.assertEqual(_validate_ipipe(evidence_outcome(observed)), [])
+        # Order does not change the cause; a different failing set does.
+        self.assertEqual(monitor(["case-a", "case-b"])["failure_signature"], observed["failure_signature"])
+        self.assertNotEqual(monitor(["case-c"])["failure_signature"], observed["failure_signature"])
+
     def test_reexecuting_a_finished_stage_accepts_the_new_stage_build_it_allocates(self):
         # iPipe does not re-use the stage build id when a completed stage is executed
         # again: it allocates a new one for the same stage of the same build. Demanding

@@ -25,7 +25,7 @@ import re
 import subprocess
 from typing import Any, Callable
 
-_MAX_BYTES = 8 * 1024 * 1024
+_MAX_BYTES = 64 * 1024 * 1024  # bgwagent P0 logs reach ~34 MB (BGW-2019)
 _HOST = re.compile(r"Running on\s+(?P<host>[\w.-]+)\((?P<ip>[\d.]+)\)")
 _WORKSPACE = re.compile(r"in workspace\s+(?P<workspace>\S+)")
 _SCRIPT = re.compile(r"^\s*\+?\s*(?:cd\s+(?P<cd>\S+)|(?P<script>\S*(?:script/|\.sh\b)\S*)(?P<args>[^\n]*))$")
