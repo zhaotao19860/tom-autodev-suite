@@ -218,6 +218,13 @@ class StateStore:
                     draft_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS run_lineage (
+                    source_run_id TEXT PRIMARY KEY,
+                    target_run_id TEXT NOT NULL UNIQUE,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS failure_cases (
                     signature TEXT PRIMARY KEY,
                     classification TEXT,
@@ -458,6 +465,66 @@ class StateStore:
                 if isinstance(resolve_run, str) and resolve_run:
                     self._resolve_failure_cases_tx(connection, resolve_run)
         return {"status": "COMMITTED", "result": final_result}
+
+    def commit_restart(
+        self, source_run_id: str, expected_event_id: str, stop_payload: dict[str, Any] | None,
+        target_run_id: str, intake_payload: dict[str, Any], idempotency_key: str,
+        lineage: dict[str, Any], start_key: str, start_result: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Contract 3.4 in one transaction: CAS the source's checkpoint, stop it if it is
+        not stopped, insert the lineage row and the target's INTAKE. All or nothing."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            held = connection.execute(
+                "SELECT * FROM run_lineage WHERE source_run_id = ? OR idempotency_key = ?",
+                (source_run_id, idempotency_key),
+            ).fetchone()
+            if held is not None:
+                if held["idempotency_key"] == idempotency_key and held["source_run_id"] == source_run_id:
+                    return {"status": "REPLAY", "target_run_id": held["target_run_id"],
+                            "lineage": json.loads(held["payload_json"])}
+                return {"status": "LINEAGE_CONFLICT", "target_run_id": held["target_run_id"]}
+            current = connection.execute(
+                "SELECT event_id FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
+                (source_run_id,),
+            ).fetchone()
+            if current is None or current["event_id"] != expected_event_id:
+                return {"status": "SOURCE_EVENT_MISMATCH"}
+            created_at = _now()
+            if stop_payload is not None:
+                connection.execute(
+                    "INSERT INTO events(event_id, run_id, state, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (uuid.uuid4().hex, source_run_id, "STOPPED", _encode(stop_payload), created_at),
+                )
+            event_id = uuid.uuid4().hex
+            connection.execute(
+                "INSERT INTO events(event_id, run_id, state, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (event_id, target_run_id, "INTAKE", _encode(intake_payload), created_at),
+            )
+            connection.execute(
+                "INSERT INTO run_lineage(source_run_id, target_run_id, idempotency_key, created_at, payload_json)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (source_run_id, target_run_id, idempotency_key, created_at, _encode(lineage)),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO idempotency_results(idempotency_key, result_json, created_at) VALUES (?, ?, ?)",
+                (start_key, _encode({**start_result, "event_id": event_id}), created_at),
+            )
+        return {"status": "COMMITTED", "target_run_id": target_run_id, "event_id": event_id,
+                "lineage": lineage}
+
+    def lineage(self, run_id: str) -> dict[str, Any] | None:
+        """The lineage row where `run_id` is the source or the target, if any."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_lineage WHERE source_run_id = ? OR target_run_id = ?",
+                (run_id, run_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"source_run_id": row["source_run_id"], "target_run_id": row["target_run_id"],
+                "idempotency_key": row["idempotency_key"], "created_at": row["created_at"],
+                "payload": json.loads(row["payload_json"])}
 
     def intent(
         self,

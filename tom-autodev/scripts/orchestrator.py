@@ -91,7 +91,11 @@ class Orchestrator:
         change_class: str | None = None,
         require_requirement_profile: bool | None = None,
         fresh_token: str | None = None,
+        intake_extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Create a run. With `intake_extra` nothing is written: the prepared INTAKE
+        (run id, payload, idempotency key) is returned for a caller that commits it in its
+        own transaction (`restart-from`)."""
         if require_requirement_profile is None:
             require_requirement_profile = self.require_requirement_profiles
         configured_profile_path = (
@@ -144,7 +148,26 @@ class Orchestrator:
         existing = self.state.idempotency_result(idempotency_key)
         if existing is not None:
             return existing
+        prepared_intake = self._intake_event(
+            requirement_id, project, configured_profile_path, profile_hash, profile_result,
+            requirement_snapshot, change_class, idempotency_key,
+        )
+        if "payload" not in prepared_intake:
+            return prepared_intake
+        if intake_extra is not None:
+            return prepared_intake
+        run_id = prepared_intake["run_id"]
+        event = self.state.transition(run_id, "INTAKE", prepared_intake["payload"])
+        result = {**prepared_intake["result"], "event_id": event["event_id"]}
+        self.state.save_idempotency_result(idempotency_key, result)
+        return result
 
+    def _intake_event(
+        self, requirement_id: str, project: str, configured_profile_path: Path,
+        profile_hash: str, profile_result: dict[str, Any], requirement_snapshot: dict[str, Any],
+        change_class: str | None, idempotency_key: str,
+    ) -> dict[str, Any]:
+        """A new run's id and INTAKE payload, without writing anything."""
         run_id = uuid.uuid4().hex
         prepared = _collaboration_binding(
             run_id, requirement_id, project, profile_hash,
@@ -183,20 +206,13 @@ class Orchestrator:
         payload["evidence_contract"] = workflow_spec.EVIDENCE_CONTRACT
         payload["intake_hash_version"] = "v3"
         payload["g0_input_hash"] = intake_input_hash(payload)
-        event = self.state.transition(
-            run_id,
-            "INTAKE",
-            payload,
-        )
-        result = {
+        return {
             "run_id": run_id,
-            "state": "INTAKE",
-            "event_id": event["event_id"],
-            "project": project,
-            "requirement_id": requirement_id,
+            "payload": payload,
+            "idempotency_key": idempotency_key,
+            "result": {"run_id": run_id, "state": "INTAKE", "project": project,
+                       "requirement_id": requirement_id},
         }
-        self.state.save_idempotency_result(idempotency_key, result)
-        return result
 
     @guard_execution
     def adopt_code_only_repair(
@@ -3495,6 +3511,17 @@ def main(argv: list[str] | None = None) -> int:
     recover_change_set.add_argument("run_id")
     recover_change_set.add_argument("task_id")
     recover_change_set.add_argument("plan_artifact_id")
+    restart_from = subparsers.add_parser(
+        "restart-from",
+        help="合同 3.4：在新 run 中重开需求，记录 lineage（默认只读检查；--execute 才提交）",
+    )
+    restart_from.add_argument("source_run_id")
+    restart_from.add_argument("--reason", default="", help="重开原因（--execute 必填）")
+    restart_from.add_argument("--keep-open-crs", action="store_true",
+                              help="未合入的旧 CR 记为 KEPT_FOR_REFERENCE（不合入、保留）")
+    restart_from.add_argument("--accept-merged", action="store_true",
+                              help="已合入的旧 CR 记为 MERGED_ACCEPTED（人已确认其发布处置）")
+    restart_from.add_argument("--execute", action="store_true")
     adopt_repair = subparsers.add_parser(
         "adopt-code-only-repair",
         help="将已批准 CODE_ONLY 修复从旧终态 run 承接到新 run，直接进入 IMPLEMENT",
@@ -3953,6 +3980,25 @@ def main(argv: list[str] | None = None) -> int:
         result = orchestrator.recover_rebuilt_change_set(
             args.run_id, args.task_id, args.plan_artifact_id
         )
+    elif args.command == "restart-from":
+        import restart
+
+        options = {"keep_open_crs": args.keep_open_crs, "accept_merged": args.accept_merged,
+                   "build_status": _restart_build_status(orchestrator, args.source_run_id)}
+        if not args.execute:
+            result = restart.plan(orchestrator, args.source_run_id, **options)
+        else:
+            from clients.icafe_client import CafeClient
+
+            events = orchestrator.state.events(args.source_run_id)
+            card = ((events[0].get("payload") or {}).get("requirement_id")) if events else None
+            snapshot = CafeClient().snapshot(card) if card else None
+            if not isinstance(snapshot, dict) or snapshot.get("ok") is False:
+                result = {"ok": False, "reason_code": "ICAFE_SNAPSHOT_REQUIRED",
+                          "run_id": args.source_run_id, **(snapshot or {})}
+            else:
+                result = restart.execute(orchestrator, args.source_run_id, snapshot,
+                                         reason=args.reason, **options)
     elif args.command == "adopt-code-only-repair":
         result = orchestrator.adopt_code_only_repair(
             args.target_run_id,
@@ -5300,6 +5346,27 @@ def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any])
         }
     return {**result, "approval": approval,
             **({"preauthorized": approval["preauthorized"]} if approval.get("preauthorized") else {})}
+
+
+def _restart_build_status(orchestrator: Orchestrator, run_id: str) -> Any:
+    """build_id -> live iPipe status for `restart-from`, or None when it cannot be read."""
+    runtime = _cli_ipipe_runtime(orchestrator, run_id)
+    if isinstance(runtime, dict):
+        return lambda _build_id: None
+
+    def status(build_id: str) -> Any:
+        binding = runtime._load_build_binding(build_id)
+        if binding is None:
+            return None
+        try:
+            build = runtime.api.build_by_id(build_id, **runtime._build_key(binding))
+        except Exception:  # noqa: BLE001 - an unreadable build blocks the restart
+            return None
+        from clients.ipipe_runtime import _status
+
+        return _status(build) if isinstance(build, dict) else None
+
+    return status
 
 
 _PREAUTHORIZED_STEPS = 12

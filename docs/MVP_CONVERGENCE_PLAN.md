@@ -357,7 +357,7 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 **尚未完成、需要真实 run 或人决定的部分：**
 
 1. scope 授权接入 worker（D 卡 = GRILL→SPEC→TASKS 的 prepare 段，C 卡 = PLAN→IMPLEMENT→REVIEW 的 prepare 段，R 卡 = BranchPipeline 发布前 stage 链）。这一步改变中间门"必须有人批"的语义，按本方案的顺序原则，要在 3.1~3.3 的实现先经一张真实卡验证后再做；
-2. 合同 3.4 RESTART lineage（按第 8 节在第 3 步落地并用真实卡验证）；
+2. 合同 3.4 RESTART lineage：**实现完成（2026-10-30，`restart.py` + `run_lineage` 表 + `restart-from` 命令）**，待 S5 真实 run 验证；
 3. 第 3 步真实场景矩阵 S1~S7、第 4 步 LegacyRunProjector 与删除，都依赖真实 run。
 
 顺序：**3.1 → 第 5 节证据合同 v2（双读）→ 3.2 → 3.3 → 第 2 节 scope 授权**。每个合同单独一个批次：实现 → fixture 场景（含 DERIVED 负例）→ 真实 run 验证 → 下一个。scope 授权放最后，因为它依赖 3.2/3.3 的 attempt 和 plan 结构。

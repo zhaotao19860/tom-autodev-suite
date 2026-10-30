@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-30 · 合同 3.4：RESTART lineage
+
+- 新增 `restart-from SOURCE`（默认只读列出遗留远程对象与处置；`--execute --reason` 才提交）。同一 SQLite 事务内 CAS 源 run 检查点、未停则写 STOPPED、插 `run_lineage`、建目标 run 的 INTAKE；一个源只能重开一次，重复执行回放。
+- 阻断（`RESTART_SOURCE_UNRESOLVED`）：无回执或 UNKNOWN/AMBIGUOUS 的写（v2 下 KU/iCafe 旁路除外）；未决处置的 CR（开启中需 `--keep-open-crs` 记 KEPT_FOR_REFERENCE，已合入需 `--accept-merged`，状态查不清记 ABANDONED_UNKNOWN）；运行中或读不到状态的 build；有未提交改动的源工作树。已 RELEASE_SUCCESS 的源不可重开。
+- 目标 run 从 INTAKE 重新走 D 段；源的设计产物只作引用记入 lineage；已确认的修复轮次随 INTAKE 继承（`inherited_repair_rounds`，修复预算一并计入），环境重试不继承。
+- `Orchestrator.start` 拆出 `_intake_event`，供 restart 在自己的事务里写 INTAKE。
+- CR 状态用 `icode-cli api get_review_info -n`（逐个精确查询；仓库列表按状态分页 20 条，翻不到的 CR 会被误判为不存在）。
+
 ## 2026-10-30 · 测试卡预授权：无人值守推进
 
 - 新增 `preauthorization.py`：本机 `~/.tom-autodev/preauthorizations.json` 里的 grant（卡号、项目、门号、允许分支、代答人、到期时间）覆盖的门，在双渠道投递完成后由代答人身份经台账 APPROVE，并写审计 `approval.preauthorized:{run}:{approval_id}`。profile 任一分支不在允许列表、过期、门号不符、代答人不是成员、投递不全时都不代答。

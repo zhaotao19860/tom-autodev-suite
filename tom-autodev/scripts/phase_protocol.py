@@ -1912,7 +1912,8 @@ class PhaseProtocol:
         # absolute limit too (adopt-code-only-repair records them on the entry event).
         for event in events:
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-            if payload.get("adoption_kind") == "CODE_ONLY_REPAIR":
+            if payload.get("adoption_kind") == "CODE_ONLY_REPAIR" or (
+                    event.get("state") == "INTAKE" and payload.get("restart_of")):
                 inherited = payload.get("inherited_repair_rounds")
                 count = inherited if isinstance(inherited, int) and not isinstance(inherited, bool) else 0
                 for _ in range(max(0, count)):
