@@ -165,8 +165,17 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
     _first = {"WORKFLOW_SPEC_MIGRATION": 0, "CHANGE_REQUEST": 1}
     open_gates.sort(key=lambda gate: _first.get(gate_of(gate["action"] or ""), 2))
     pending = []
+    side_writes: list[str] = []
+    # Under evidence contract v2 an open KU/iCafe write is a side channel that blocks
+    # nothing (recovery.resume skips it too); listing it as in flight told the operator
+    # to settle a write the run does not wait on.
+    side_channel = workflow_spec.run_evidence_contract(events) == "v2"
     if not terminal:
         for item in orchestrator.state.pending_intents(run_id):
+            operation = str(item.get("operation") or "")
+            if side_channel and operation.split(".", 1)[0] in {"icafe", "ku", "knowledge"}:
+                side_writes.append(operation)
+                continue
             entry = {
                 "operation": item.get("operation"),
                 "intent_id": item.get("intent_id"),
@@ -239,6 +248,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         "phases_done": sum(1 for event in events[1:]),
         "waiting_on": open_gates,
         "in_flight": pending,
+        "deferred_side_writes": sorted(set(side_writes)),
         "ipipe_monitoring": monitoring,
         "blocked": blocked,
         "producer_job": producer_job,
@@ -482,6 +492,8 @@ def render(brief: dict[str, Any]) -> str:
         lines.append("未确认的外部写入：" + "、".join(
             sorted({item["operation"] for item in brief["in_flight"]})
         ))
+    if brief.get("deferred_side_writes"):
+        lines.append("延后补发的旁路写入（不阻断）：" + "、".join(brief["deferred_side_writes"]))
     for item in brief.get("ipipe_monitoring") or []:
         checkpoint = item.get("checkpoint") or {}
         stages = checkpoint.get("stages") or []

@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-30 · 状态摘要：v2 旁路写入不再显示为阻断
+
+- `run_brief`：evidence contract v2 的 run 中，未回执的 KU/iCafe 写入（`ku.*`、`icafe.*`、`knowledge.*`）改列为“延后补发的旁路写入（不阻断）”，不再写成“未确认的外部写入”，下一步也不再要求先收敛它们（`recovery.resume` 本就跳过）。BGW-2019 发布段发现：摘要一直提示先收敛 KU 写入，实际 G9 已批准待提交。
+
 ## 2026-10-30 · 合同 3.4：RESTART lineage
 
 - 新增 `restart-from SOURCE`（默认只读列出遗留远程对象与处置；`--execute --reason` 才提交）。同一 SQLite 事务内 CAS 源 run 检查点、未停则写 STOPPED、插 `run_lineage`、建目标 run 的 INTAKE；一个源只能重开一次，重复执行回放。
