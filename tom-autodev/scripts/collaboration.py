@@ -40,7 +40,8 @@ _INTAKE_PREREQUISITE_KEYS_V2 = _INTAKE_PREREQUISITE_KEYS + (
 # a phase needs before it may advance. v2 and v1 payloads hash exactly as before.
 _INTAKE_PREREQUISITE_KEYS_V3 = _INTAKE_PREREQUISITE_KEYS_V2 + ("evidence_contract",)
 # v4 binds how the run's gates are answered (per gate, or by scope card) into G0.
-_INTAKE_PREREQUISITE_KEYS_V4 = _INTAKE_PREREQUISITE_KEYS_V3 + ("approval_mode",)
+# A restarted run also binds the requirement diff against its source (MVP §3.4).
+_INTAKE_PREREQUISITE_KEYS_V4 = _INTAKE_PREREQUISITE_KEYS_V3 + ("approval_mode", "requirement_diff")
 _GROUP_TOPIC_MAX = 12
 # Failures the group client raises before it dispatches anything: the request was
 # rejected locally or the gateway was unreachable, so no group can exist yet.

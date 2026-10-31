@@ -603,8 +603,17 @@ class IpipeRuntime:
         except Exception:
             return None
         found: dict[str, Any] | None = None
+        def _is_baseline(item: dict[str, Any]) -> bool:
+            # The listing is a query by revision; only a record that itself states this
+            # module, pipeline and baseline revision is the baseline (C-07).
+            stated = item.get("revision") or (item.get("trigger") or {}).get("revision")
+            return (str(item.get("pipelineConfId") or item.get("pipeline_id") or "") == pipeline_id
+                    and str(item.get("module") or item.get("space") or "") == module
+                    and stated == revision
+                    and _status(item) in _SUCCESS | _FAILURE | _SKIPPED)
+
         for build in sorted(
-            (item for item in builds or [] if isinstance(item, dict)),
+            (item for item in builds or [] if isinstance(item, dict) and _is_baseline(item)),
             key=lambda item: str(_build_id(item)), reverse=True,
         ):
             # The revision listing embeds stages without their jobs; the stage endpoint

@@ -1265,6 +1265,11 @@ def _prepare_manual_stage(
 
     # ENV_WAIT: an open wait is rechecked only on its schedule; before that the stage
     # parks without asking the platform again, and past max_wait the run stops.
+    if env_wait.expired_unstopped(orchestrator.state, run_id, stage_id) is not None:
+        # The wait already expired; finish the STOP it requires instead of reopening it.
+        stopped = orchestrator.stop(run_id)
+        return {"ok": False, "reason_code": "ENV_WAIT_EXPIRED", "run_id": run_id,
+                "stage_build_id": stage_id, "state": stopped.get("state")}
     waiting = env_wait.opened(orchestrator.state, run_id, stage_id)
     if waiting is not None:
         schedule = env_wait.latest(orchestrator.state, waiting)
@@ -1278,7 +1283,7 @@ def _prepare_manual_stage(
                     "stage_build_id": stage_id, "state": stopped.get("state"), "wait": schedule}
     # This path writes G8 material, so it is the one that records dependency evidence.
     resolved = _stage_parameters(orchestrator, runtime, run_id, [], stage_id, record_evidence=True)
-    if not resolved.get("ok") and resolved.get("reason_code") in env_wait.WAIT_REASONS:
+    if not resolved.get("ok") and env_wait.waitable(resolved):
         if waiting is None:
             schedule = env_wait.open_wait(orchestrator.state, run_id, stage_id, resolved, module=module)
         else:

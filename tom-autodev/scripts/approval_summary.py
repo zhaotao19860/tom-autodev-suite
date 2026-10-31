@@ -175,12 +175,15 @@ def _g0_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[str, An
         "profile_hash": payload.get("profile_hash"),
         "workflow_modes": payload.get("workflow_modes"),
         "collaboration_binding": binding,
+        **({"requirement_diff": payload["requirement_diff"]} if payload.get("requirement_diff") else {}),
     }
     refs = references(material)
     refs += references({"profile": profile})
     refs = list(dict((item["ref"], item) for item in refs).values())
     return {
         "summary": [
+            *([f"需求相对重开前 run 已变化：{'、'.join(sorted((payload['requirement_diff'].get('changed') or {}).keys()))}（重新研判）"]
+              if payload.get("requirement_diff") else []),
             f"需求 {payload.get('requirement_id') or '-'} / 项目 {payload.get('project') or '-'}",
             f"profile {payload.get('profile_path') or '-'}",
             f"协作成员 {len(binding.get('member_snapshot') or [])} 人",

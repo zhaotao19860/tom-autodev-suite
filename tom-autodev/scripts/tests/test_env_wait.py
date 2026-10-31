@@ -77,6 +77,21 @@ class EnvWaitTests(unittest.TestCase):
         self.assertEqual((result["reason_code"], checks), ("ENV_WAIT_EXPIRED", 0))
         self.assertEqual(self.orch.status(self.run_id)["state"], "STOPPED")
 
+    def test_a_permission_or_unknown_download_failure_does_not_wait(self):
+        for statuses in ([403], [503], []):
+            with self.subTest(statuses=statuses):
+                result, _ = self._prepare({"ok": False, "reason_code": "PRODUCT_DOWNLOAD_UNVERIFIED",
+                                           "http_statuses": statuses})
+                self.assertNotEqual(result.get("parked"), "ENV_WAIT")
+
+    def test_an_expired_wait_whose_stop_did_not_land_stops_on_the_next_call(self):
+        self._prepare(UNPUBLISHED)
+        record = env_wait.opened(self.state, self.run_id, "stage-1")
+        env_wait.end_wait(self.state, record, "EXPIRED")
+        result, checks = self._prepare(UNPUBLISHED)
+        self.assertEqual((result["reason_code"], checks), ("ENV_WAIT_EXPIRED", 0))
+        self.assertEqual(self.orch.status(self.run_id)["state"], "STOPPED")
+
     def test_other_failures_do_not_wait(self):
         result, _ = self._prepare({"ok": False, "reason_code": "STAGE_PARAMETER_NAMES_MISMATCH"})
         self.assertNotEqual(result.get("parked"), "ENV_WAIT")

@@ -615,7 +615,7 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(monitor(["case-a", "case-b"])["failure_signature"], observed["failure_signature"])
         self.assertNotEqual(monitor(["case-c"])["failure_signature"], observed["failure_signature"])
 
-    def _baseline_case_setup(self, current, baseline):
+    def _baseline_case_setup(self, current, baseline, baseline_revision="baseline-rev"):
         finished = {
             "id": "stage-1", "stageConfId": 4875670, "stageName": "p0", "status": "SUCC",
             "jobBuildBeans": [{"id": "job-1", "jobName": "p0-25G", "status": "SUCC",
@@ -623,11 +623,14 @@ class IpipeRuntimeTests(unittest.TestCase):
         }
         self.bind_build(status="SUCCESS", stages=[finished])
         self.api.stages["build-1"] = [finished]
-        self.api.candidates = [build("build-0", status="SUCCESS", stages=[{
+        baseline_build = build("build-0", status="SUCCESS", stages=[{
             "id": "stage-0", "stageConfId": 4875670, "stageName": "p0", "status": "SUCC",
             "jobBuildBeans": [{"id": "job-0", "jobName": "p0-25G", "status": "SUCC",
                                "logs": [{"url": "https://logonline.example/baseline"}]}],
-        }])]
+        }])
+        baseline_build["trigger"] = {**(baseline_build.get("trigger") or {}), "revision": baseline_revision}
+        baseline_build.pop("revision", None)
+        self.api.candidates = [baseline_build]
         logs = {
             "https://logonline.example/current": {"ok": True, "success_ratios": [96.0], "failed_cases": current},
             "https://logonline.example/baseline": {"ok": True, "success_ratios": [96.0], "failed_cases": baseline},
@@ -652,6 +655,10 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(failure["failed_cases"], ["case-new"])
         self.assertEqual(failure["preexisting_cases"], ["case-a"])
         self.assertEqual(failure["baseline_build_id"], "build-0")
+
+    def test_a_listed_build_of_another_revision_is_not_a_baseline(self):
+        observed = self._baseline_case_setup(["case-a"], ["case-a"], baseline_revision="other-rev")
+        self.assertEqual(observed["reason_code"], "JOB_SUCCEEDED_WITH_FAILED_CASES", observed)
 
     def test_without_a_baseline_every_failed_case_counts(self):
         self.api.candidates = []

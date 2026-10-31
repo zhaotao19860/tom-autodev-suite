@@ -25,9 +25,9 @@ Rules, from the MVP contract:
   matches and the prepared card does not apply.
 
 A run opts in at INTAKE (`approval_mode: "scope"`); runs started before keep per-gate
-approval. A provisional approval is recorded as its own ledger row with
-`effective_channel = scope-pending:<scope>` and decision `PREPARED`, which no gate check
-accepts as APPROVE.
+approval. A provisional approval is the gate's own ledger row, set to APPROVE with
+`effective_channel = scope-pending:<scope>` so the segment's next mechanical step can run;
+the exit gate is never set this way, only by the approved card (`expand_scope`).
 """
 
 from __future__ import annotations
@@ -86,6 +86,29 @@ def _repair_reentry(events: list[dict[str, Any]]) -> bool:
     plan = next((e for e in reversed(events) if e.get("state") in {"PLAN", "IMPLEMENT"}
                  and (e.get("payload") or {}).get("previous_state") in {"DIAGNOSE", "WORKSPACE"}), None)
     return bool(plan) and (plan.get("payload") or {}).get("previous_state") == "DIAGNOSE"
+
+
+_PHASE_OF = {
+    "D": {"G1": "GRILL", "G2": "SPEC", "G4": None},
+    "C": {"G4": "PLAN", "G5": "IMPLEMENT", "G7": None},
+}
+
+
+def expected_gates(events: list[dict[str, Any]], name: str) -> tuple[str, ...]:
+    """The gates this run's segment actually asks, from its pinned workflow modes (C-01).
+
+    A phase the run's change class completes automatically or leaves ungated asks no gate,
+    so it is not part of the card; controller gates (WORKSPACE G4, SUBMIT G7) always are.
+    """
+    import workflow_spec
+
+    found = []
+    for gate in SCOPES[name]:
+        phase = _PHASE_OF[name][gate]
+        if phase is not None and workflow_spec.phase_mode_for_run(events, phase) in {"auto", "ungated"}:
+            continue
+        found.append(gate)
+    return tuple(found)
 
 
 def last_gate(name: str) -> str:

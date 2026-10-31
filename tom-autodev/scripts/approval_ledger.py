@@ -199,7 +199,13 @@ class ApprovalLedger:
                         raise ValueError("SCOPE_GATE_ALREADY_DECIDED")
                     if (existing["effective_decision"] == "APPROVE"
                             and str(existing["effective_channel"] or "").startswith("scope-pending:")):
-                        # A provisional pass of the prepare segment becomes the card's.
+                        # A provisional pass of the prepare segment becomes the card's, but
+                        # only if the card's members are allowed on that gate (C-02).
+                        scoped = json.loads(row["member_policy_json"])
+                        own = json.loads(existing["member_policy_json"])
+                        if any(own.get(ch) and not set(scoped.get(ch) or []) <= set(own[ch])
+                               for ch in APPROVAL_CHANNELS):
+                            raise ValueError("SCOPE_GATE_POLICY_NARROWER")
                         c.execute("UPDATE approvals SET effective_channel=?,resolved_at=? WHERE approval_id=?",
                                   (channel, _now(), existing["approval_id"]))
                     if existing["effective_decision"] is None:

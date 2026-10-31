@@ -28,7 +28,10 @@ from pathlib import Path
 from typing import Any
 
 _SIDE_CHANNEL = frozenset({"icafe", "ku", "knowledge"})
-_RUNNING = frozenset({"RUNNING", "SKIPPING", "BUILDING", "EXECUTING", "WAITING", "PENDING"})
+# Only a platform-reported end is a disposition; anything else (running, manual wait,
+# unknown, unreadable) blocks the restart (C-05).
+_ENDED = frozenset({"SUCCESS", "SUCCEEDED", "SUCC", "PASSED", "PASS", "FAIL", "FAILED", "ERROR",
+                    "ABORTED", "CANCELLED", "CANCEL", "SKIPPED", "SKIP"})
 _DESIGN_PHASES = ("GRILL", "SPEC", "TASKS")
 
 
@@ -106,9 +109,10 @@ def _builds(orchestrator: Any, run_id: str, status_of: Any) -> list[dict[str, An
     builds = []
     for key, _record in rows:
         build_id = key.rsplit(":", 1)[-1]
-        if build_markers.is_excluded(orchestrator.state, run_id, build_id):
-            continue
-        builds.append({"build_id": build_id, "status": status_of(build_id) if status_of else None})
+        # Excluded only means "not evidence"; the build was still created on the platform
+        # and must be ended like any other (C-05, RSTR-001).
+        builds.append({"build_id": build_id, "status": status_of(build_id) if status_of else None,
+                       "excluded": build_markers.is_excluded(orchestrator.state, run_id, build_id)})
     return builds
 
 
@@ -139,16 +143,53 @@ def _design_references(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
 
 
 def _repair_rounds(orchestrator: Any, run_id: str) -> int:
+    """CODE_FIX rounds the source spent: confirmed REPAIR diagnoses plus every inherited round.
+
+    Environment diagnoses (route IPIPE, environment classes) are not CODE_FIX and are not
+    carried (MVP §3.4, RSTR-004); rounds inherited through `adopt-code-only-repair` or an
+    earlier restart are, wherever their event is (C-06).
+    """
+    import repair_policy
+
     rounds = 0
     for artifact in orchestrator.artifacts.phase_artifacts(run_id, "DIAGNOSE"):
         content = ((artifact.get("envelope") or {}).get("content") or {}) if artifact.get("valid") else {}
-        if content.get("evidence_state") == "SUFFICIENT":
+        if (content.get("evidence_state") == "SUFFICIENT" and content.get("route") == "REPAIR"
+                and content.get("classification") not in repair_policy.ENVIRONMENT_FAILURE_CLASSES):
             rounds += 1
-    for event in orchestrator.state.events(run_id)[:1]:
-        inherited = (event.get("payload") or {}).get("inherited_repair_rounds")
-        if isinstance(inherited, int) and not isinstance(inherited, bool):
-            rounds += inherited
+    for event in orchestrator.state.events(run_id):
+        payload = event.get("payload") or {}
+        if payload.get("adoption_kind") == "CODE_ONLY_REPAIR" or (
+                event.get("state") == "INTAKE" and payload.get("restart_of")):
+            inherited = payload.get("inherited_repair_rounds")
+            if isinstance(inherited, int) and not isinstance(inherited, bool):
+                rounds += inherited
     return rounds
+
+
+_DIFF_FIELDS = ("title", "body", "acceptance", "type", "fields")
+
+
+def requirement_diff(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any] | None:
+    """What changed in the card between the source run's snapshot and the new one (§3.4).
+
+    Scope and acceptance are what the GRILL decided on; any change there is a diff the
+    design approval has to see. None when they are the same.
+    """
+    import hashlib
+    import json
+
+    changed = {}
+    for field in _DIFF_FIELDS:
+        before, after = source.get(field), target.get(field)
+        if before != after:
+            changed[field] = {"before": before, "after": after}
+    if not changed:
+        return None
+    body = {"source_snapshot_hash": source.get("content_hash"),
+            "target_snapshot_hash": target.get("content_hash"), "changed": changed}
+    return {**body, "content_hash": hashlib.sha256(json.dumps(
+        body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
 
 
 def plan(
@@ -168,6 +209,8 @@ def plan(
         return {"ok": True, "reason_code": "RESTART_REPLAY", "run_id": source_run_id,
                 "target_run_id": held["target_run_id"], "lineage": held["payload"]}
     blockers: list[dict[str, Any]] = []
+    # The exact intent set this check looked at; the commit refuses if it changed.
+    checked_intent_ids = sorted(item["intent_id"] for item in orchestrator.state.all_intents(source_run_id))
     intents = _open_intents(orchestrator, source_run_id)
     if intents:
         blockers.append({"kind": "intent", "items": intents})
@@ -187,7 +230,7 @@ def plan(
         crs.append({**cr, "status": status, "disposition": disposition})
     builds = _builds(orchestrator, source_run_id, build_status)
     for build in builds:
-        if build["status"] is None or str(build["status"]).upper() in _RUNNING:
+        if str(build["status"] or "").upper() not in _ENDED:
             blockers.append({"kind": "build", "build_id": build["build_id"], "status": build["status"]})
     dirty = _dirty_worktrees(orchestrator, source_run_id)
     if dirty:
@@ -207,7 +250,8 @@ def plan(
     if blockers:
         return {"ok": False, "reason_code": "RESTART_SOURCE_UNRESOLVED", "run_id": source_run_id,
                 "blockers": blockers, "lineage": lineage}
-    return {"ok": True, "reason_code": "RESTART_READY", "run_id": source_run_id, "lineage": lineage}
+    return {"ok": True, "reason_code": "RESTART_READY", "run_id": source_run_id, "lineage": lineage,
+            "checked_intent_ids": checked_intent_ids}
 
 
 def execute(
@@ -217,22 +261,49 @@ def execute(
     """Commit the restart. The snapshot is re-fetched from iCafe by the caller."""
     if not isinstance(reason, str) or not reason.strip():
         return {"ok": False, "reason_code": "RESTART_REASON_REQUIRED", "run_id": source_run_id}
+    from orchestrator import _under_run_lease
+
+    # The same per-run lease the worker drives the source with: no worker can claim a new
+    # external write between the check and the commit (C-04, RSTR-002).
+    return _under_run_lease(orchestrator, source_run_id, lambda: _execute(
+        orchestrator, source_run_id, requirement_snapshot, reason=reason, **options))
+
+
+def _execute(
+    orchestrator: Any, source_run_id: str, requirement_snapshot: dict[str, Any], *,
+    reason: str, **options: Any,
+) -> dict[str, Any]:
     planned = plan(orchestrator, source_run_id, **options)
     if planned.get("reason_code") == "RESTART_REPLAY" or not planned.get("ok"):
         return planned
     lineage = planned["lineage"]
     events = orchestrator.state.events(source_run_id)
+    if events[-1]["event_id"] != lineage["source_event_id"]:
+        return {"ok": False, "reason_code": "SOURCE_EVENT_MISMATCH", "run_id": source_run_id}
+    checked_intents = planned["checked_intent_ids"]
     key = f"restart:{source_run_id}"
+    source_snapshot = (events[0].get("payload") or {}).get("requirement_snapshot") or {}
+    diff = requirement_diff(source_snapshot, requirement_snapshot)
+    import workflow_spec
+
+    change_class = None
+    if diff is not None:
+        # A changed requirement is clarified again by a person: a class that completes
+        # GRILL automatically is replaced by the default one (RSTR-003, C-10).
+        classified = workflow_spec.classify_change(requirement_snapshot, None)
+        if workflow_spec.phase_mode(classified, "GRILL") == "auto":
+            change_class = workflow_spec.DEFAULT_CHANGE_CLASS
     prepared = orchestrator.start(
         lineage["requirement_id"], lineage["project"], requirement_snapshot=requirement_snapshot,
-        fresh_token=key, intake_extra={},
+        fresh_token=key, intake_extra={}, change_class=change_class,
+        requirement_diff=diff,
     )
     if "payload" not in prepared:
         return {"ok": False, **prepared, "run_id": source_run_id}
     target_run_id = prepared["run_id"]
-    snapshot_changed = requirement_snapshot.get("content_hash") != lineage["source_snapshot_hash"]
     lineage = {**lineage, "target_run_id": target_run_id, "reason": reason.strip(),
-               "snapshot_changed": snapshot_changed}
+               "snapshot_changed": diff is not None,
+               **({"requirement_diff_hash": diff["content_hash"]} if diff else {})}
     payload = {**prepared["payload"], "restart_of": source_run_id,
                "inherited_repair_rounds": lineage["inherited_repair_rounds"],
                "design_references": lineage["design_references"]}
@@ -243,8 +314,8 @@ def execute(
                         "policy_decision": {"allowed": True, "reason_code": "RESTART",
                                             "restart_target": target_run_id}}
     committed = orchestrator.state.commit_restart(
-        source_run_id, current["event_id"], stop_payload, target_run_id, payload, key, lineage,
-        prepared["idempotency_key"], prepared["result"],
+        source_run_id, lineage["source_event_id"], stop_payload, target_run_id, payload, key, lineage,
+        prepared["idempotency_key"], prepared["result"], expected_intent_ids=checked_intents,
     )
     if committed["status"] == "REPLAY":
         return {"ok": True, "reason_code": "RESTART_REPLAY", "run_id": source_run_id,

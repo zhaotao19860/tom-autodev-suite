@@ -25,9 +25,32 @@ from typing import Any
 WAIT_REASONS: dict[str, str] = {
     "PRODUCT_URL_NOT_PUBLISHED": "目标分支尚未发布该模块产物",
     "COMPILE_ONLY_TRIGGER_UNSUPPORTED": "未改动模块在目标分支没有可用发布产物，且无法只编译不发布",
-    "PRODUCT_DOWNLOAD_UNVERIFIED": "产物下载校验未通过",
-    "BRANCH_PRODUCT_QUERY_INCOMPLETE": "分支产物查询不完整",
+    "PRODUCT_DOWNLOAD_UNVERIFIED": "产物下载地址尚不存在（404）",
 }
+
+# A download check that failed for another reason (401/403 is a permission problem, 5xx or
+# no status is not yet known) is not proof the dependency is missing (C-09, ENV-001).
+_ABSENT_STATUSES = frozenset({404, 410})
+
+
+def waitable(check: dict[str, Any]) -> bool:
+    """Whether a failed stage-input check proves the dependency is not there yet."""
+    reason = check.get("reason_code")
+    if reason not in WAIT_REASONS:
+        return False
+    if reason == "PRODUCT_DOWNLOAD_UNVERIFIED":
+        statuses = set(check.get("http_statuses") or [])
+        return bool(statuses) and statuses <= _ABSENT_STATUSES
+    return True
+
+
+def expired_unstopped(state: Any, run_id: str, stage_build_id: str) -> dict[str, Any] | None:
+    """An EXPIRED end whose STOP may not have landed (crash between the two writes, C-08)."""
+    reader = getattr(state, "idempotency_results_with_prefix", None)
+    if not callable(reader):
+        return None
+    ended = [r for key, r in reader(_key(run_id, stage_build_id) + ":") if ":end:" in key]
+    return next((r for r in ended if r.get("outcome") == "EXPIRED"), None)
 
 RECHECK_AFTER = timedelta(minutes=30)
 MAX_WAIT = timedelta(hours=72)

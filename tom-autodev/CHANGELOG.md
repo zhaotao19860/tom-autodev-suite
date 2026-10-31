@@ -2,6 +2,10 @@
 
 tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套件根目录 [CHANGELOG.md](../CHANGELOG.md) 的同日条目。
 
+## 2026-11-01
+
+- 第 9 轮评审修复：scope 门集合/成员交集/重发卡；RESTART 租约与 intent 集合 CAS、排除 build 也须处置、预算只计 CODE_FIX、需求差异绑定 G0 并强制人工 GRILL；ENV_WAIT 只等真实缺失、到期补 STOP；基线 build 须自证身份。详见根 CHANGELOG。
+
 ## 2026-10-31
 
 - BGW-2019 真实验证中修复与新增：失败用例与基线构建对比；同结局 stage 再次重跑可获新 G8；通知类写入不再阻断；发布查询异常停车；SUBMIT 未回执推送由 `continue` 自动只读收敛；他人重新执行的 stage 不顶替本 run 经 G8 启动的执行。

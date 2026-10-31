@@ -470,6 +470,7 @@ class StateStore:
         self, source_run_id: str, expected_event_id: str, stop_payload: dict[str, Any] | None,
         target_run_id: str, intake_payload: dict[str, Any], idempotency_key: str,
         lineage: dict[str, Any], start_key: str, start_result: dict[str, Any],
+        expected_intent_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Contract 3.4 in one transaction: CAS the source's checkpoint, stop it if it is
         not stopped, insert the lineage row and the target's INTAKE. All or nothing."""
@@ -490,6 +491,13 @@ class StateStore:
             ).fetchone()
             if current is None or current["event_id"] != expected_event_id:
                 return {"status": "SOURCE_EVENT_MISMATCH"}
+            if expected_intent_ids is not None:
+                # An intent claimed after the check appends no event, so the event CAS alone
+                # cannot see it; the set of intents is compared in the same transaction.
+                present = sorted(row["intent_id"] for row in connection.execute(
+                    "SELECT intent_id FROM external_intents WHERE run_id = ?", (source_run_id,)))
+                if present != sorted(expected_intent_ids):
+                    return {"status": "SOURCE_INTENTS_CHANGED"}
             created_at = _now()
             if stop_payload is not None:
                 connection.execute(

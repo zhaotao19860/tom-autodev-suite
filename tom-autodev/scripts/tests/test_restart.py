@@ -3,6 +3,7 @@
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -76,6 +77,46 @@ class RestartTests(unittest.TestCase):
             with self.subTest(status=status):
                 planned = restart.plan(self.orch, self.source, build_status=lambda _b, s=status: s)
                 self.assertEqual(planned["ok"], ok, planned)
+
+    def test_an_excluded_or_unknown_build_still_blocks(self):
+        self.orch.state.save_idempotency_result(f"ipipe.build-binding:{self.source}:b2", {"build_id": "b2"})
+        self.orch.state.save_idempotency_result(f"ipipe.build-rejected:{self.source}:b2", {"build_id": "b2"})
+        for status in ("RUNNING", "UNKNOWN"):
+            with self.subTest(status=status):
+                planned = restart.plan(self.orch, self.source, build_status=lambda _b, s=status: s)
+                self.assertFalse(planned["ok"], planned)
+
+    def test_an_intent_claimed_after_the_check_aborts_the_commit(self):
+        original = restart.plan
+
+        def plan_then_race(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.orch.state.claim_intent(self.source, "ipipe.trigger", "late", {"x": 1})
+            return result
+
+        with unittest.mock.patch("restart.plan", side_effect=plan_then_race):
+            result = restart.execute(self.orch, self.source, self.snapshot, reason="x")
+        self.assertEqual(result["reason_code"], "SOURCE_INTENTS_CHANGED")
+        self.assertIsNone(self.orch.state.lineage(self.source))
+
+    def test_environment_diagnoses_are_not_inherited_as_repair_rounds(self):
+        envelope = lambda route, cls: {"valid": True, "envelope": {"content": {
+            "evidence_state": "SUFFICIENT", "route": route, "classification": cls}}}
+        with unittest.mock.patch.object(self.orch.artifacts, "phase_artifacts", return_value=[
+                envelope("IPIPE", "ENV_UNSATISFIED"), envelope("REPAIR", "CODE_FAILURE")]):
+            self.assertEqual(restart._repair_rounds(self.orch, self.source), 1)
+
+    def test_a_changed_card_is_diffed_bound_to_g0_and_regrilled(self):
+        from clients.icafe_client import requirement_snapshot_hash
+
+        changed = {k: v for k, v in self.snapshot.items() if k != "content_hash"}
+        changed["acceptance"] = ["AC-1", "AC-2"]
+        changed["content_hash"] = requirement_snapshot_hash(changed)
+        result = restart.execute(self.orch, self.source, changed, reason="需求变更")
+        intake = self.orch.state.events(result["target_run_id"])[0]["payload"]
+        self.assertIn("acceptance", intake["requirement_diff"]["changed"])
+        self.assertEqual(intake["intake_hash_version"], "v4")
+        self.assertNotEqual(intake["workflow_modes"].get("GRILL"), "auto")
 
     def test_a_released_source_cannot_restart(self):
         self.orch.state.transition(self.source, "RELEASE_SUCCESS", {})

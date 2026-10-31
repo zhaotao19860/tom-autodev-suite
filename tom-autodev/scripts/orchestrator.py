@@ -93,6 +93,7 @@ class Orchestrator:
         fresh_token: str | None = None,
         intake_extra: dict[str, Any] | None = None,
         approval_mode: str | None = None,
+        requirement_diff: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a run. With `intake_extra` nothing is written: the prepared INTAKE
         (run id, payload, idempotency key) is returned for a caller that commits it in its
@@ -151,7 +152,7 @@ class Orchestrator:
             return existing
         prepared_intake = self._intake_event(
             requirement_id, project, configured_profile_path, profile_hash, profile_result,
-            requirement_snapshot, change_class, idempotency_key, approval_mode,
+            requirement_snapshot, change_class, idempotency_key, approval_mode, requirement_diff,
         )
         if "payload" not in prepared_intake:
             return prepared_intake
@@ -167,6 +168,7 @@ class Orchestrator:
         self, requirement_id: str, project: str, configured_profile_path: Path,
         profile_hash: str, profile_result: dict[str, Any], requirement_snapshot: dict[str, Any],
         change_class: str | None, idempotency_key: str, approval_mode: str | None = None,
+        requirement_diff: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """A new run's id and INTAKE payload, without writing anything."""
         run_id = uuid.uuid4().hex
@@ -209,6 +211,10 @@ class Orchestrator:
         if approval_mode == "scope":
             # MVP §2: D/C scope cards instead of per-gate approval, bound into G0.
             payload["approval_mode"] = "scope"
+            payload["intake_hash_version"] = "v4"
+        if requirement_diff is not None:
+            # MVP §3.4: a restart whose card changed shows and binds the diff at G0.
+            payload["requirement_diff"] = requirement_diff
             payload["intake_hash_version"] = "v4"
         payload["g0_input_hash"] = intake_input_hash(payload)
         return {
@@ -4731,21 +4737,35 @@ def _scope_request(
     name = scope_approval.segment(events, gate_of(action))
     if name is None or action != gate_of(action):
         return None
+    expected = scope_approval.expected_gates(events, name)
+    if action not in expected:
+        return None
     start = scope_approval.segment_start(events, name)
     scope_approval.record_gate(orchestrator.state, run_id, name, start, action, input_hash)
     policy = context["member_policy"]
     if action != scope_approval.last_gate(name):
         row = orchestrator.approvals.request(action, input_hash, ["comate", "infoflow"],
                                              run_id=run_id, member_policy=policy)
-        row = orchestrator.approvals.provisional(row["approval_id"], name)
+        if row.get("effective_decision") is None:
+            row = orchestrator.approvals.provisional(row["approval_id"], name)
         return {**row, "preauthorized": f"scope-pending:{name}", "scope": name}
     gates = scope_approval.collected(orchestrator.state, run_id, name, start)
-    if [gate for gate, _ in gates] != list(scope_approval.SCOPES[name]):
-        # A segment entered part-way (a resumed legacy run) has no complete card to show.
-        return None
+    if tuple(gate for gate, _ in gates) != expected:
+        # Intermediate gates were passed provisionally; falling back to a per-gate card here
+        # would leave them approved without anyone having seen them (C-01). Stop instead.
+        return {"ok": False, "reason_code": "SCOPE_SEGMENT_INCOMPLETE", "run_id": run_id,
+                "scope": name, "expected": list(expected), "collected": [g for g, _ in gates]}
+    # The card may only be answered by someone allowed on every gate it stands for (C-02):
+    # the members of each gate's own ledger row, intersected with the exit gate's.
+    from approval_ledger import scope_members
+    rows = {(r.get("action"), r.get("input_hash")): r for r in orchestrator.approvals.for_run(run_id)}
+    policies = [rows[(g, h)].get("member_policy") or {} for g, h in gates if (g, h) in rows]
+    policy = scope_members([*policies, policy])
+    if any(not policy.get(channel) for channel in ("comate", "infoflow")):
+        return {"ok": False, "reason_code": "SCOPE_MEMBERS_EMPTY", "run_id": run_id, "scope": name}
     bound = scope_hash(name, gates, scope_approval.policy_hash())
     for row in orchestrator.approvals.for_run(run_id):
-        if (row.get("action") == f"{SCOPE_ACTION_PREFIX}{name}" and row.get("input_hash") == bound
+        if (gate_of(row.get("action")) == f"{SCOPE_ACTION_PREFIX}{name}" and row.get("input_hash") == bound
                 and row.get("effective_decision") == "APPROVE"):
             derived = orchestrator.approvals.expand_scope(
                 row["approval_id"], name, gates, run_id=run_id,

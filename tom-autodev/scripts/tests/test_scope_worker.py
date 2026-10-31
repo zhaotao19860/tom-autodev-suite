@@ -81,6 +81,42 @@ class ScopeWorkerTests(unittest.TestCase):
         self._ask("G4", "c" * 64)
         self.assertNotEqual(self.delivered[1], first)
 
+    def test_a_retried_scope_card_is_consumed(self):
+        self._enter("GRILL"); self._ask("G1", "a" * 64)
+        self._enter("SPEC"); self._ask("G2", "b" * 64)
+        self._enter("WORKSPACE"); self._ask("G4", "c" * 64)
+        bound = self.delivered[1]
+        retry = self.orch.approvals.request("SCOPE:D#retry-1", bound, ["comate", "infoflow"],
+                                            run_id=self.run_id, member_policy=POLICY)
+        for channel in ("comate", "infoflow"):
+            self.orch.approvals.record_delivery(retry["approval_id"], channel, {"id": channel}, payload_hash=bound)
+        self.orch.approvals.resolve(retry["approval_id"], "APPROVE", bound, "comate",
+                                    run_id=self.run_id, responder=OWNER)
+        exit_row = self._ask("G4", "c" * 64)
+        self.assertEqual(exit_row["effective_channel"], f"scope:{retry['approval_id']}")
+
+    def test_an_incomplete_segment_does_not_fall_back_to_a_per_gate_card(self):
+        self._enter("SPEC"); self._ask("G2", "b" * 64)
+        self._enter("WORKSPACE")
+        result = self._ask("G4", "c" * 64)
+        self.assertEqual(result["reason_code"], "SCOPE_SEGMENT_INCOMPLETE")
+
+    def test_an_auto_grill_is_not_part_of_the_card(self):
+        events = self.orch.state.events(self.run_id)
+        with patch("workflow_spec.phase_mode_for_run",
+                   side_effect=lambda _e, phase: "auto" if phase == "GRILL" else "full"):
+            self.assertEqual(scope_approval.expected_gates(events, "D"), ("G2", "G4"))
+
+    def test_the_card_needs_members_allowed_on_every_gate(self):
+        self._enter("GRILL")
+        narrow = {"comate": ["bob@example.test"], "infoflow": ["bob@example.test"]}
+        self.orch.approvals.request("G1", "a" * 64, ["comate", "infoflow"],
+                                    run_id=self.run_id, member_policy=narrow)
+        self._ask("G1", "a" * 64)
+        self._enter("SPEC"); self._ask("G2", "b" * 64)
+        self._enter("WORKSPACE")
+        self.assertEqual(self._ask("G4", "c" * 64)["reason_code"], "SCOPE_MEMBERS_EMPTY")
+
     def test_a_run_without_scope_mode_is_asked_per_gate(self):
         other = self.orch.start("BGW-1", "bgw", requirement_snapshot=_requirement_snapshot("BGW-1"),
                                 fresh_token="t")["run_id"]

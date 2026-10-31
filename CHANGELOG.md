@@ -4,6 +4,15 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · 第 9 轮评审修复（基线 aca2b33 → c6dedf8，GPT-6.1-Sol 与 codex 两份独立初审）
+
+两份初审合计去重后 10 项 P1/P2，全部确认并修复：
+- **scope（C-01/02/03）**：scope 门集合按 run 固定的 workflow modes 计算（auto/ungated 阶段不入卡）；段内门不全时返回 `SCOPE_SEGMENT_INCOMPLETE`，不再退回单门卡让临时放行的门不经人看；卡的成员取段内各门台账成员与出口成员的交集，交集为空 `SCOPE_MEMBERS_EMPTY`；临时放行升级为派生同意前同样检查成员；重发的 `SCOPE:<段>#retry-N` 卡可被消费。
+- **RESTART（C-04/05/06、RSTR-001/002/003/004）**：`restart-from --execute` 在源 run 的 worker 租约下执行；提交 CAS 绑定检查时的事件 id，并在同一事务内比对检查时的 intent 集合（变化即 `SOURCE_INTENTS_CHANGED`）；被排除（superseded/rejected）的 build 也须处置，只认平台终态白名单，`UNKNOWN`/读不到即阻断；继承预算只计确认的 REPAIR 诊断（环境诊断不计），并包含 adoption 与再次重开继承的轮次；需求快照变化时生成 `requirement_diff`（标题/正文/验收/类型/字段，带 hash）写入目标 INTAKE 并绑定进 G0（v4），G0 卡置顶显示变化项，自动 GRILL 的类别改为默认类别以强制人工研判。
+- **ENV_WAIT（C-08/09、ENV-001）**：`PRODUCT_DOWNLOAD_UNVERIFIED` 只有全部候选为 404/410 才等待，权限（401/403）、5xx、无状态不等待；`BRANCH_PRODUCT_QUERY_INCOMPLETE` 不再等待；到期已关闭但 STOP 未落地时，下次调用直接补 STOP，不重开等待。
+- **基线用例对比（C-07）**：候选基线 build 必须自身记录的 pipeline、module、revision 与基线一致且为终态，按查询参数返回的其他 build 不再被当作基线。
+- 新增回归测试 11 个，全量 1637 个通过。
+
 ## 2026-10-31 · scope 授权接入 worker（MVP §2）
 
 - 新增 `scope_approval.py` 与 `start --scope-approval`：run 在 INTAKE 固定 `approval_mode: scope`（`intake_hash_version` v4，绑定进 G0）。D 段（GRILL 的 G1 → SPEC 的 G2 → 首个 WORKSPACE 的 G4）与 C 段（PLAN 的 G4 → IMPLEMENT 的 G5 → SUBMIT 的 G7）各出一张卡。
