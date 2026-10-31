@@ -7,7 +7,7 @@ suite had no version control before then.
 ## 2026-10-31 · 监控：他人重新执行的 stage 不得顶替本 run 经 G8 启动的执行
 
 - `IpipeRuntime._prefer_owned_stage_runs`：stage 列表只给出每个 stage 的最新一次执行。若本 run 已在该 build 上经 G8 启动某 stage，监控改按该次执行的 stage build id 读回状态与 job，另一次执行（`foreign_execution`）不计入证据。
-- 起因：BGW-2019 S5 目标 run b9a99c4c，G8 重跑 p0级自动化回归测试（stage 651470513，回归仍在运行）4 分钟后，同一 stage 又被需求负责人在平台上手动执行一次（651471226，全部 job 按表达式跳过、1 秒结束）；列表只剩后者，build 报 SKIPPED，控制面据此按通过入账并进入 RELEASE。该 run 的 IPIPE 证据因此不可信，需待 651470513 跑完后重新核对。
+- 起因：BGW-2019 S5 目标 run b9a99c4c，G8 重跑 p0级自动化回归测试（stage 651470513，回归仍在运行）4 分钟后，同一 stage 又被需求负责人在平台上手动执行一次，有意跳过以缩短时间（651471226，全部 job 按表达式跳过、1 秒结束）；列表只剩后者，build 报 SKIPPED，控制面据此按通过入账并进入 RELEASE。控制面无法区分有意跳过与误操作，所以默认不让另一次执行顶替；需求方确认该次跳过是有意的，S5 目标 run 已入账的证据保留。测试分支上要有意跳过时，应在 G8 触发前配置跳过表达式，让本 run 自己的执行按表达式跳过。
 
 ## 2026-10-31 · S5 RESTART 真实验证
 
