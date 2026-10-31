@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · S4 真实验证：提交结果未知时 continue 自动收敛
+
+- `worker_driver._drive`：SUBMIT 阶段存在未回执的 `icode.submit`（推送后、回执前进程中断）时，`continue` 先回放该任务已批准的提交（`_submit` 只读回查，已确认的仓不重推），而不是一直停在 `RECOVERY_REQUIRED`。此前只能手工执行 `orchestrator.py submit`。
+- BGW-2019 第三轮（run 3dfe403a）受控制造：qa CR 123064384 已确认后，x86bgw 的 `push_cr` 成功执行但回执前抛错。观测到聚合状态 PENDING（x86bgw UNKNOWN、qa CONFIRMED），run 留在 SUBMIT 未进 IPIPE；reconcile 读回 CR 123064552 后两仓 CONFIRMED、SUBMITTED，进入 IPIPE，qa 未重推。覆盖 MVP 场景 S4、S6（claim 后、receipt 前中断）与 S7 的 UNKNOWN→CONFIRMED。
+
 ## 2026-10-31 · 发布段：查询异常不再崩溃；测试分支提测跳过约定
 
 - `branch_release_build`：BranchPipeline 构建查询遇到网关拒绝（实测一次 `PERMISSION_DENIED`，重试即恢复）时返回 TRANSIENT 停车，不再抛出未捕获异常中断 worker。

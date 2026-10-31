@@ -102,3 +102,23 @@ class NoticeIntentTests(unittest.TestCase):
         self.assertEqual(orch.recovery.resume(run_id)["actions"], [])
         orch.state.claim_intent(run_id, "icode.submit", "icode:x", {"n": 1})
         self.assertEqual(len(orch.recovery.resume(run_id)["actions"]), 1)
+
+
+class PendingSubmitReconcileTests(unittest.TestCase):
+    def test_continue_settles_an_unreceipted_submit_by_replaying_it(self):
+        from unittest.mock import patch
+
+        import worker_driver
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _write_profile(root, PROFILE)
+        orch = Orchestrator(root)
+        run_id = _start(orch)["run_id"]
+        orch.state.transition(run_id, "SUBMIT", {"task_id": "BGW-1-T1"})
+        orch.state.claim_intent(run_id, "icode.submit", "icode.submit:x", {"module": "m"})
+        with patch("orchestrator._submit", return_value={"ok": True, "state": "IPIPE"}) as replay:
+            result = worker_driver._reconcile_pending_submit(orch, run_id, None)
+        replay.assert_called_once_with(orch, run_id, "BGW-1-T1", None, None)
+        self.assertEqual(result["state"], "IPIPE")

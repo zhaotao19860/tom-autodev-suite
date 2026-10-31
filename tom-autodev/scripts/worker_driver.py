@@ -1682,6 +1682,28 @@ def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                          released.get("status"))
 
 
+def _reconcile_pending_submit(orchestrator: Any, run_id: str, icode_skill: str | None) -> Any:
+    """Replay the approved submission of the task whose push is unreceipted (read-back)."""
+    task_id = next((
+        (item.get("payload") or {}).get("task_id")
+        for item in orchestrator.state.pending_intents(run_id)
+        if item.get("operation") == "icode.submit" and (item.get("payload") or {}).get("task_id")
+    ), None) or orchestrator.status(run_id).get("task_id")
+    if not task_id:
+        events = orchestrator.state.events(run_id)
+        task_id = next(((e.get("payload") or {}).get("task_id") for e in reversed(events)
+                        if (e.get("payload") or {}).get("task_id")), None)
+    if not task_id:
+        return {"ok": False, "reason_code": "SUBMIT_TASK_UNRESOLVED", "run_id": run_id}
+    import orchestrator as orchestrator_module
+
+    try:
+        return orchestrator_module._submit(orchestrator, run_id, task_id, None, icode_skill)
+    except Exception as error:  # noqa: BLE001 - recovery stays parked and auditable
+        return {"ok": False, "reason_code": "SUBMIT_RECONCILE_FAILED",
+                "detail": type(error).__name__, "run_id": run_id}
+
+
 def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
            max_steps: int = 32, icode_skill: str | None = None,
            icode_runtime: Any | None = None, ipipe_api: Any | None = None,
@@ -1725,6 +1747,17 @@ def _drive(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
                 "run_id": run_id,
                 "detail": recovered,
             }
+    # A submission left UNKNOWN (the worker died after push_cr, before the receipt) holds
+    # next() behind RECOVERY_REQUIRED, and the only settlement -- a read-back, never a
+    # re-push -- lived in the separate `submit` command. Settle it here, the same way,
+    # so `continue` reconciles instead of parking forever (S4/S6 on BGW-2019).
+    if orchestrator.status(run_id).get("state") == "SUBMIT" and any(
+            item.get("operation") == "icode.submit" for item in pending):
+        settled = _reconcile_pending_submit(orchestrator, run_id, icode_skill)
+        if isinstance(settled, dict) and settled.get("ok") is False and settled.get(
+                "reason_code") not in {"SUBMIT_RESULT_UNKNOWN", "QUERY_REQUIRED"}:
+            return {"ok": False, "reason_code": "RECOVERY_REQUIRED", "run_id": run_id,
+                    "detail": settled}
     steps: list[dict[str, Any]] = []
     for _ in range(max_steps):
         decision = classify_next(orchestrator, run_id)
