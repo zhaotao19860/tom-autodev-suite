@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · S5 RESTART 真实验证
+
+- BGW-2019 run 3dfe403a → b9a99c4c：已合入 CR 的阻断、`--accept-merged` 处置、原子提交与回放都按合同 3.4 生效；目标 run 重走 GRILL/SPEC/TASKS（全部经预授权门）并提交新 CR。`docs/MVP_CONVERGENCE_PLAN.md` 第 8 节同步。
+- 同一 run 的 P0新case回归再次因配置写死的 qa 产物 404 失败，失败签名与 run dec4229f 相同，经 G8 用本 run 产物重跑后按环境诊断回到 IPIPE。
+
 ## 2026-10-31 · S4 真实验证：提交结果未知时 continue 自动收敛
 
 - `worker_driver._drive`：SUBMIT 阶段存在未回执的 `icode.submit`（推送后、回执前进程中断）时，`continue` 先回放该任务已批准的提交（`_submit` 只读回查，已确认的仓不重推），而不是一直停在 `RECOVERY_REQUIRED`。此前只能手工执行 `orchestrator.py submit`。
