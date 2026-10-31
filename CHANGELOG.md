@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · scope 授权接入 worker（MVP §2）
+
+- 新增 `scope_approval.py` 与 `start --scope-approval`：run 在 INTAKE 固定 `approval_mode: scope`（`intake_hash_version` v4，绑定进 G0）。D 段（GRILL 的 G1 → SPEC 的 G2 → 首个 WORKSPACE 的 G4）与 C 段（PLAN 的 G4 → IMPLEMENT 的 G5 → SUBMIT 的 G7）各出一张卡。
+- 段内前面的门照常计算、按 hash 建台账，但由临时放行（`effective_channel = scope-pending:<段>`）让 prepare 继续到下一机械步骤；段末门才出卡，卡的 scope hash 覆盖段内全部门输入。卡批准后经 `expand_scope` 为每个门写派生同意（`scope:<approval_id>`），段出口（进入 PLAN、提交 iCode）才放行。
+- 任一产物变化即改变其门输入 hash，scope hash 随之变化，旧卡不适用；成员取段内各门成员交集（台账层既有规则）；修复轮次（从 DIAGNOSE 回到 PLAN/IMPLEMENT）、后续 frontier 的 G4、IPIPE 的 G7 仍逐门审批；未启用的 run 行为不变。
+- `ApprovalLedger.provisional` 与 `expand_scope`：段内临时放行的行在卡批准时改记为卡的派生同意。
+
 ## 2026-10-31 · ENV_WAIT：依赖未就绪时按计划复查（MVP §4）
 
 - 新增 `env_wait.py`：人工 stage 的输入因 run 之外的原因不可用（`PRODUCT_URL_NOT_PUBLISHED`、`COMPILE_ONLY_TRIGGER_UNSUPPORTED`、`PRODUCT_DOWNLOAD_UNVERIFIED`、`BRANCH_PRODUCT_QUERY_INCOMPLETE`）时，持久化等待：`wait_reason`、`next_actor`、`recheck_after`（30 分钟）、`max_wait`（72 小时）、`evidence_refresh`。worker 停车为 `ENV_WAIT`，而不是每次 `continue` 都报 CONTROLLER_STEP_FAILED。

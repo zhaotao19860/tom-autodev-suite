@@ -356,7 +356,7 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 
 **尚未完成、需要真实 run 或人决定的部分：**
 
-1. scope 授权接入 worker（D 卡 = GRILL→SPEC→TASKS 的 prepare 段，C 卡 = PLAN→IMPLEMENT→REVIEW 的 prepare 段，R 卡 = BranchPipeline 发布前 stage 链）。这一步改变中间门"必须有人批"的语义，按本方案的顺序原则，要在 3.1~3.3 的实现先经一张真实卡验证后再做；
+1. scope 授权接入 worker：**D、C 两张卡已实现（2026-10-31，`scope_approval.py`，`start --scope-approval`），待评审与真实 run 验证；R/R' 卡（发布段 stage 链）未接入**。原定范围：D 卡 = GRILL→SPEC→TASKS 的 prepare 段，C 卡 = PLAN→IMPLEMENT→REVIEW 的 prepare 段，R 卡 = BranchPipeline 发布前 stage 链。这一步改变中间门"必须有人批"的语义，按本方案的顺序原则，要在 3.1~3.3 的实现先经一张真实卡验证后再做；
 2. 合同 3.4 RESTART lineage：**实现完成（2026-10-30）并在真实 run 上验证（2026-10-31）**：BGW-2019 run 3dfe403a 的 qa CR 123064384 被评审人合入后，只读检查阻断为 `MERGED_UNDECIDED`；需求方确认接受后以 `--accept-merged` 重开，同一事务内源 run STOPPED、`run_lineage` 一行、目标 run b9a99c4c 从 INTAKE 重走 D 段，x86bgw CR 123064552 记为 KEPT_FOR_REFERENCE，修复轮次继承 1；重复执行返回 `RESTART_REPLAY`；
 3. 第 3 步真实场景矩阵 S1~S7、第 4 步 LegacyRunProjector 与删除，都依赖真实 run。
 

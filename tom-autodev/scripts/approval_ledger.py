@@ -197,6 +197,11 @@ class ApprovalLedger:
                     # scope card; one already approved stays as it was.
                     if existing["effective_decision"] not in (None, "APPROVE"):
                         raise ValueError("SCOPE_GATE_ALREADY_DECIDED")
+                    if (existing["effective_decision"] == "APPROVE"
+                            and str(existing["effective_channel"] or "").startswith("scope-pending:")):
+                        # A provisional pass of the prepare segment becomes the card's.
+                        c.execute("UPDATE approvals SET effective_channel=?,resolved_at=? WHERE approval_id=?",
+                                  (channel, _now(), existing["approval_id"]))
                     if existing["effective_decision"] is None:
                         # A pending per-gate card may have narrower members than the scope
                         # card; satisfying it with the scope decision would bypass them.
@@ -219,6 +224,24 @@ class ApprovalLedger:
                 derived.append(derived_id)
             rows = [c.execute("SELECT * FROM approvals WHERE approval_id=?", (i,)).fetchone() for i in derived]
         return [_row(item) for item in rows]
+
+    def provisional(self, approval_id: str, scope_name: str) -> dict[str, Any]:
+        """Let a scope's intermediate gate pass on to the next mechanical step (MVP §2).
+
+        Recorded as APPROVE with channel `scope-pending:<scope>` so the existing gate
+        checks let the prepare segment continue; the segment's exit gate is never
+        written this way -- it needs the approved scope card (`expand_scope`).
+        """
+        with self._connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+            if row is None:
+                raise ValueError("APPROVAL_NOT_FOUND")
+            if row["effective_decision"] is None:
+                c.execute("UPDATE approvals SET effective_decision='APPROVE',effective_channel=?,resolved_at=? WHERE approval_id=?",
+                          (f"scope-pending:{scope_name}", _now(), approval_id))
+            row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
+        return _row(row)
 
     def timeout(self, approval_id: str, input_hash: str, *, run_id: str | None = None, state_store: Any | None = None, now: datetime | None = None) -> dict[str, Any]:
         observed = now or datetime.now(timezone.utc)

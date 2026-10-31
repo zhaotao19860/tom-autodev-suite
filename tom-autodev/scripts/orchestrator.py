@@ -92,6 +92,7 @@ class Orchestrator:
         require_requirement_profile: bool | None = None,
         fresh_token: str | None = None,
         intake_extra: dict[str, Any] | None = None,
+        approval_mode: str | None = None,
     ) -> dict[str, Any]:
         """Create a run. With `intake_extra` nothing is written: the prepared INTAKE
         (run id, payload, idempotency key) is returned for a caller that commits it in its
@@ -143,14 +144,14 @@ class Orchestrator:
         snapshot_identity = requirement_snapshot["content_hash"]
         idempotency_key = (
             f"start:{project}:{requirement_id}:{profile_hash}:{snapshot_identity}:"
-            f"{fresh_token or 'default'}"
+            f"{fresh_token or 'default'}{':scope' if approval_mode == 'scope' else ''}"
         )
         existing = self.state.idempotency_result(idempotency_key)
         if existing is not None:
             return existing
         prepared_intake = self._intake_event(
             requirement_id, project, configured_profile_path, profile_hash, profile_result,
-            requirement_snapshot, change_class, idempotency_key,
+            requirement_snapshot, change_class, idempotency_key, approval_mode,
         )
         if "payload" not in prepared_intake:
             return prepared_intake
@@ -165,7 +166,7 @@ class Orchestrator:
     def _intake_event(
         self, requirement_id: str, project: str, configured_profile_path: Path,
         profile_hash: str, profile_result: dict[str, Any], requirement_snapshot: dict[str, Any],
-        change_class: str | None, idempotency_key: str,
+        change_class: str | None, idempotency_key: str, approval_mode: str | None = None,
     ) -> dict[str, Any]:
         """A new run's id and INTAKE payload, without writing anything."""
         run_id = uuid.uuid4().hex
@@ -205,6 +206,10 @@ class Orchestrator:
         # completing under v1 (dual read until they are all terminal).
         payload["evidence_contract"] = workflow_spec.EVIDENCE_CONTRACT
         payload["intake_hash_version"] = "v3"
+        if approval_mode == "scope":
+            # MVP §2: D/C scope cards instead of per-gate approval, bound into G0.
+            payload["approval_mode"] = "scope"
+            payload["intake_hash_version"] = "v4"
         payload["g0_input_hash"] = intake_input_hash(payload)
         return {
             "run_id": run_id,
@@ -3434,6 +3439,10 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="在已停止的同卡片 run 之外创建新的审计 run；不会删除旧事件或产物",
     )
+    start.add_argument(
+        "--scope-approval", action="store_true",
+        help="MVP §2：用 D/C 两张 scope 卡代替逐门审批（G1/G2/G4、G4/G5/G7）",
+    )
 
     status = subparsers.add_parser("status")
     status.add_argument("run_id")
@@ -3818,6 +3827,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.project,
                 requirement_snapshot=snapshot,
                 fresh_token=uuid.uuid4().hex if args.fresh else None,
+                approval_mode="scope" if args.scope_approval else None,
             )
     elif args.command == "process":
         from agent_bridge import AgentBridge, resolve_status_target
@@ -4691,6 +4701,9 @@ def _request_approval(
     )
     if "error" in context:
         return context["error"]
+    scoped = _scope_request(orchestrator, run_id, action, input_hash, context)
+    if scoped is not None:
+        return _apply_preauthorization(orchestrator, run_id, scoped)
     requested = orchestrator.request_infoflow_approval(
         run_id,
         action,
@@ -4701,6 +4714,62 @@ def _request_approval(
         infoflow_client=_infoflow_approval_client(orchestrator),
     )
     return _apply_preauthorization(orchestrator, run_id, requested)
+
+
+def _scope_request(
+    orchestrator: Orchestrator, run_id: str, action: str, input_hash: str, context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """MVP §2 scope approval: pass an intermediate gate on, or raise the segment's card.
+
+    None means the gate is not part of an active scope and is asked on its own.
+    """
+    import scope_approval
+    from approval_ledger import SCOPE_ACTION_PREFIX, scope_hash
+    from approval_delivery import ComateApprovalClient
+
+    events = orchestrator.state.events(run_id)
+    name = scope_approval.segment(events, gate_of(action))
+    if name is None or action != gate_of(action):
+        return None
+    start = scope_approval.segment_start(events, name)
+    scope_approval.record_gate(orchestrator.state, run_id, name, start, action, input_hash)
+    policy = context["member_policy"]
+    if action != scope_approval.last_gate(name):
+        row = orchestrator.approvals.request(action, input_hash, ["comate", "infoflow"],
+                                             run_id=run_id, member_policy=policy)
+        row = orchestrator.approvals.provisional(row["approval_id"], name)
+        return {**row, "preauthorized": f"scope-pending:{name}", "scope": name}
+    gates = scope_approval.collected(orchestrator.state, run_id, name, start)
+    if [gate for gate, _ in gates] != list(scope_approval.SCOPES[name]):
+        # A segment entered part-way (a resumed legacy run) has no complete card to show.
+        return None
+    bound = scope_hash(name, gates, scope_approval.policy_hash())
+    for row in orchestrator.approvals.for_run(run_id):
+        if (row.get("action") == f"{SCOPE_ACTION_PREFIX}{name}" and row.get("input_hash") == bound
+                and row.get("effective_decision") == "APPROVE"):
+            derived = orchestrator.approvals.expand_scope(
+                row["approval_id"], name, gates, run_id=run_id,
+                policy_hash=scope_approval.policy_hash())
+            exit_row = next(item for item in derived if item.get("action") == action)
+            return {**exit_row, "preauthorized": f"scope:{row['approval_id']}", "scope": name}
+    evidence = dict(context["evidence"])
+    gate_view = dict(evidence.get("gate") or {})
+    labels = {gate: workflow_spec.GATE_LABELS.get(gate, ("", ""))[0] for gate, _ in gates}
+    gate_view.update({
+        "subject": f"{name} 卡：一次批准 {'、'.join(g for g, _ in gates)}",
+        "effect": "批准后按已切好的工作区进入任务计划" if name == "D" else "批准后提交 iCode 并触发流水线",
+        "summary": [f"{gate} {labels[gate]}（{digest[:12]}）" for gate, digest in gates]
+                   + list(gate_view.get("summary") or []),
+        "scope": {"name": name, "gates": [[g, h] for g, h in gates], "scope_hash": bound},
+    })
+    evidence["gate"] = gate_view
+    requested = orchestrator.request_infoflow_approval(
+        run_id, f"{SCOPE_ACTION_PREFIX}{name}", bound,
+        member_policy=policy, evidence=evidence,
+        comate_client=ComateApprovalClient(),
+        infoflow_client=_infoflow_approval_client(orchestrator),
+    )
+    return {**requested, "scope": name} if isinstance(requested, dict) else requested
 
 
 def _apply_preauthorization(
@@ -5319,6 +5388,7 @@ def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any])
     approval = _request_approval(orchestrator, result.get("run_id"), gate, input_hash)
     approval_succeeded = isinstance(approval, dict) and (
         approval.get("ok") is True
+        or bool(approval.get("preauthorized"))
         or (
             approval.get("status") == "PENDING"
             and isinstance(approval.get("approval_id"), str)
