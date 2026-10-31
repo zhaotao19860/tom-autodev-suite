@@ -129,6 +129,13 @@ class RestartTests(unittest.TestCase):
         payload = {"intake_hash_version": "v4", "approval_mode": "scope", "project": "p"}
         self.assertEqual(intake_input_hash(payload), intake_input_hash({**payload, "requirement_diff": None}))
 
+    def test_a_v4_intake_hashed_by_3ff3ee1_still_validates(self):
+        from collaboration import _INTAKE_PREREQUISITE_KEYS_V5, _hash, _intake_hash_matches
+        payload = {"intake_hash_version": "v4", "approval_mode": "scope", "project": "p"}
+        payload["g0_input_hash"] = _hash({k: payload.get(k) for k in _INTAKE_PREREQUISITE_KEYS_V5})
+        self.assertTrue(_intake_hash_matches(payload))
+        self.assertFalse(_intake_hash_matches({**payload, "project": "q"}))
+
     def test_a_released_source_cannot_restart(self):
         self.orch.state.transition(self.source, "RELEASE_SUCCESS", {})
         self.assertEqual(restart.plan(self.orch, self.source)["reason_code"], "RESTART_SOURCE_RELEASED")

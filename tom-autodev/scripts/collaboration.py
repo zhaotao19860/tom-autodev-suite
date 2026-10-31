@@ -167,6 +167,17 @@ def intake_input_hash(payload: Any) -> str:
     return _hash(intake_prerequisites(payload))
 
 
+def _intake_hash_matches(payload: dict[str, Any]) -> bool:
+    if payload.get("g0_input_hash") == intake_input_hash(payload):
+        return True
+    # 3ff3ee1 (2026-11-01, ~75 min) hashed v4 over the v5 key set. A v4 payload pinned by
+    # that build is still its own G0 (R9-NEW-001 follow-up); nothing else is accepted.
+    if payload.get("intake_hash_version") == "v4":
+        legacy = {key: payload.get(key) for key in _INTAKE_PREREQUISITE_KEYS_V5}
+        return payload.get("g0_input_hash") == _hash(legacy)
+    return False
+
+
 def intake_prerequisites_valid(payload: Any, run_id: str) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -202,7 +213,7 @@ def intake_prerequisites_valid(payload: Any, run_id: str) -> bool:
         or binding.get("member_snapshot") != resolved.get("member_snapshot")
     ):
         return False
-    return payload.get("g0_input_hash") == intake_input_hash(payload)
+    return _intake_hash_matches(payload)
 
 
 def collaboration_binding_error(payload: Any, run_id: str) -> dict[str, Any] | None:

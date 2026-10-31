@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · 第 9 批评审收口
+
+- 最后一轮复核：codex 四项全部关闭；GPT 仍报 R9-NEW-001——3ff3ee1 期间写入的 v4 哈希含 `requirement_diff` 键。状态库中没有任何 v4/v5 INTAKE，实际无受影响 run；仍补兼容读取（v4 先按 v4 字段校验，失败再按 3ff3ee1 的字段集合），新增回归 1 个，全量 1640 个通过。
+- 预算 2/2 用完，本批次停止评审；记录见 `docs/reviews/2026-11-01-r9-local-c-review.md`，预算外修复与 scope/ENV_WAIT 缺真实证据登记为残余风险。
+
 ## 2026-11-01 · 第 9 轮复核后修复（3ff3ee1 的定向复核，两份）
 
 - **R9-NEW-001（P1，修复引入）**：`requirement_diff` 不再加入 v4 哈希字段集合；新增 `intake_hash_version` v5 承载它，v4 字段集合恢复原样，部署前建的 v4 scope run 的 G0 仍校验通过。
