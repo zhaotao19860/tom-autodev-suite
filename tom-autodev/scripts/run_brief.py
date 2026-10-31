@@ -253,6 +253,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         "in_flight": pending,
         "deferred_side_writes": sorted(set(side_writes)),
         "ipipe_monitoring": monitoring,
+        "env_waits": [] if terminal else _env_waits(orchestrator, run_id),
         "blocked": blocked,
         "producer_job": producer_job,
         "progress": progress,
@@ -312,6 +313,15 @@ def _producer_context(orchestrator: Any, run_id: str, action: dict[str, Any], te
         "draft_state": draft_state,
         "awaiting_answers": awaiting_answers,
     }
+
+
+def _env_waits(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
+    try:
+        import env_wait
+
+        return env_wait.open_waits(orchestrator.state, run_id)
+    except Exception:  # noqa: BLE001 - status must render without the wait detail
+        return []
 
 
 def _next_step(
@@ -495,6 +505,11 @@ def render(brief: dict[str, Any]) -> str:
         lines.append("未确认的外部写入：" + "、".join(
             sorted({item["operation"] for item in brief["in_flight"]})
         ))
+    for wait in brief.get("env_waits") or []:
+        lines.append(
+            f"环境等待：stage {wait.get('stage_build_id')} · {wait.get('wait_reason_text')} · "
+            f"待 {wait.get('next_actor')} · 下次复查 {wait.get('recheck_after')} · "
+            f"最长等到 {wait.get('max_wait')}（已查 {wait.get('checks')} 次）")
     if brief.get("deferred_side_writes"):
         lines.append("延后补发的旁路写入（不阻断）：" + "、".join(brief["deferred_side_writes"]))
     for item in brief.get("ipipe_monitoring") or []:

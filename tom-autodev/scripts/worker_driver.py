@@ -1249,13 +1249,46 @@ def adoptable_product_modules(plan: dict[str, Any]) -> list[str]:
     return modules
 
 
+def _env_wait_parked(run_id: str, stage_id: str, module: str, schedule: dict[str, Any]) -> dict[str, Any]:
+    return {"ok": True, "reason_code": "PARKED", "parked": "ENV_WAIT", "run_id": run_id,
+            "controller": "ipipe", "module": module, "stage_build_id": stage_id,
+            "wait": {key: schedule.get(key) for key in (
+                "wait_reason", "wait_reason_text", "next_actor", "recheck_after", "max_wait",
+                "evidence_refresh", "checks", "opened_at")}}
+
+
 def _prepare_manual_stage(
     orchestrator: Any, runtime: Any, run_id: str, stage_id: str, module: str,
 ) -> dict[str, Any]:
     from orchestrator import _stage_parameters, _prepare_ipipe_g8
+    import env_wait
 
+    # ENV_WAIT: an open wait is rechecked only on its schedule; before that the stage
+    # parks without asking the platform again, and past max_wait the run stops.
+    waiting = env_wait.opened(orchestrator.state, run_id, stage_id)
+    if waiting is not None:
+        schedule = env_wait.latest(orchestrator.state, waiting)
+        verdict = env_wait.due(schedule)
+        if verdict == "WAIT":
+            return _env_wait_parked(run_id, stage_id, module, schedule)
+        if verdict == "EXPIRED":
+            env_wait.end_wait(orchestrator.state, schedule, "EXPIRED")
+            stopped = orchestrator.stop(run_id)
+            return {"ok": False, "reason_code": "ENV_WAIT_EXPIRED", "run_id": run_id,
+                    "stage_build_id": stage_id, "state": stopped.get("state"), "wait": schedule}
     # This path writes G8 material, so it is the one that records dependency evidence.
     resolved = _stage_parameters(orchestrator, runtime, run_id, [], stage_id, record_evidence=True)
+    if not resolved.get("ok") and resolved.get("reason_code") in env_wait.WAIT_REASONS:
+        if waiting is None:
+            schedule = env_wait.open_wait(orchestrator.state, run_id, stage_id, resolved, module=module)
+        else:
+            schedule = env_wait.still_waiting(orchestrator.state, env_wait.latest(
+                orchestrator.state, waiting), resolved)
+        return _env_wait_parked(run_id, stage_id, module, schedule)
+    if waiting is not None and resolved.get("ok"):
+        env_wait.end_wait(orchestrator.state, env_wait.latest(orchestrator.state, waiting), "CLEARED",
+                          evidence={"declaration": (resolved.get("declaration") or {}).get("names"),
+                                    "products": sorted((resolved.get("products") or {}).keys())})
     if not resolved.get("ok"):
         if resolved.get("reason_code") == "BRANCH_COMPILE_APPROVAL_REQUIRED":
             input_hash = resolved["input_hash"]

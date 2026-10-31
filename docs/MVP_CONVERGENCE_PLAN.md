@@ -392,7 +392,7 @@ S1~S3 可以由同 1~3 个 run 覆盖；S4、S6、S7 允许在这些 run 里自�
 | S4 双仓部分成功 | 3dfe403a | qa CONFIRMED、x86bgw UNKNOWN 时聚合 PENDING，未进 IPIPE；reconcile 只读回查后 SUBMITTED |
 | S5 RESTART | 3dfe403a → b9a99c4c | 已合入 CR 阻断后以 `--accept-merged` 重开；目标 run RELEASE_SUCCESS |
 | S6 中断恢复 | 3dfe403a | push_cr 成功、回执前中断；`continue` 自动收敛，无重复推送 |
-| S7 未知回执 / 环境 | dec4229f、3dfe403a | UNKNOWN→CONFIRMED 已验证；环境失败经 G8 重跑后 `route=IPIPE` 回到流水线。**`ENV_WAIT` 按 `recheck_after` 复查未实现，未验证** |
+| S7 未知回执 / 环境 | dec4229f、3dfe403a | UNKNOWN→CONFIRMED 已验证；环境失败经 G8 重跑后 `route=IPIPE` 回到流水线。**`ENV_WAIT` 已实现（2026-10-31，`env_wait.py`），待真实 run 验证** |
 
 到 RELEASE_SUCCESS 的独立 run：3（dec4229f、5614a09a、b9a99c4c）。GRILL/SPEC 对不同需求类型的覆盖：未验证（同卡）。
 

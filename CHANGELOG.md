@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · ENV_WAIT：依赖未就绪时按计划复查（MVP §4）
+
+- 新增 `env_wait.py`：人工 stage 的输入因 run 之外的原因不可用（`PRODUCT_URL_NOT_PUBLISHED`、`COMPILE_ONLY_TRIGGER_UNSUPPORTED`、`PRODUCT_DOWNLOAD_UNVERIFIED`、`BRANCH_PRODUCT_QUERY_INCOMPLETE`）时，持久化等待：`wait_reason`、`next_actor`、`recheck_after`（30 分钟）、`max_wait`（72 小时）、`evidence_refresh`。worker 停车为 `ENV_WAIT`，而不是每次 `continue` 都报 CONTROLLER_STEP_FAILED。
+- 复查规则：`recheck_after` 之前不再询问平台；到点重新求解 stage 参数，仍不可用则顺延复查时间；只有新检查通过才结束等待（CLEARED），不接受口头解除；超过 `max_wait` 转 STOPPED（`ENV_WAIT_EXPIRED`）。记录全部追加写，不改已有行。
+- 等待是 IPIPE 内被阻 stage 的持久子状态，不新增 workflow 边，已固定 spec hash 的 run 不受影响。状态摘要显示“环境等待：…下次复查…最长等到…”。
+- 起因：BGW-2019 S1 run 5614a09a 等 x86bgw 分支发布产物时，worker 反复失败约 8 小时。
+
 ## 2026-10-31 · MVP 场景矩阵真实证据
 
 - `docs/MVP_CONVERGENCE_PLAN.md` 第 8 节第 3 步：记录 S1~S7 在 BGW-2019 上的真实证据，3 个独立 run 到 RELEASE_SUCCESS；S7 的 ENV_WAIT 与需求类型覆盖标为未验证。
