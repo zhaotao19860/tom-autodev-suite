@@ -325,7 +325,8 @@ class IpipeRuntime:
                 return _failure("BUILD_IDENTITY_MISMATCH", status="INVALID")
             if not _matches_build(build, binding):
                 return _failure("REVISION_MISMATCH", status="INVALID")
-            normalized_stages = [_normalize_stage(stage) for stage in stages]
+            normalized_stages = self._prefer_owned_stage_runs(
+                build_id, [_normalize_stage(stage) for stage in stages])
             last_stages = normalized_stages
             stage_identity_failure = _stage_identity_failure(normalized_stages)
             if stage_identity_failure is not None:
@@ -658,6 +659,53 @@ class IpipeRuntime:
             )
         except ValueError:
             pass
+
+    def _prefer_owned_stage_runs(
+        self, build_id: str, stages: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Keep the stage execution this run's G8 started as that stage's evidence.
+
+        The listing shows only the newest execution of each stage. When someone else
+        executes the same stage again (BGW-2019 S5: a second run of p0级自动化回归测试,
+        every job skipped by expression, four minutes after the G8 re-run), the listing
+        replaced the run still executing the regression, and the build was accepted as
+        passing on a stage that tested nothing. A stage this run started under G8 in this
+        build is read back by its own id instead; the foreign execution is ignored.
+        """
+        started: dict[str, tuple[str, str]] = {}
+        for item in self.state.external_results(self.run_id):
+            intent = item.get("intent") or {}
+            response = (item.get("receipt") or {}).get("response")
+            if (intent.get("operation") != "ipipe.rerun" or not isinstance(response, dict)
+                    or response.get("ok") is not True
+                    or str(response.get("build_id") or "") != build_id):
+                continue
+            stage_id = str(response.get("started_stage_build_id")
+                           or response.get("stage_build_id") or "")
+            owned = self._load_stage_binding(stage_id) if stage_id else None
+            conf = str(((owned or {}).get("stage") or {}).get("stage_conf_id") or "")
+            if conf and (conf not in started or str(intent.get("created_at") or "") > started[conf][0]):
+                started[conf] = (str(intent.get("created_at") or ""), stage_id)
+        if not started:
+            return stages
+        result = []
+        for stage in stages:
+            own = started.get(stage.get("stage_conf_id") or "")
+            if own is None or own[1] == stage.get("stage_build_id"):
+                result.append(stage)
+                continue
+            try:
+                detail = self.api.stage_detail(own[1])
+            except Exception:
+                result.append({**stage, "status": "RUNNING", "foreign_execution": stage["stage_build_id"]})
+                continue
+            entities = detail.get("entities") if isinstance(detail, dict) else {}
+            build = (entities or {}).get("stageBuild") or {}
+            raw = {"id": own[1], "stageConfId": stage.get("stage_conf_id"),
+                   "stageName": stage.get("name"), "status": build.get("status") or "RUNNING",
+                   "startTime": build.get("startTime"), "jobBuildBeans": _real_jobs(detail)}
+            result.append({**_normalize_stage(raw), "foreign_execution": stage["stage_build_id"]})
+        return result
 
     def _mark_expression_skips(self, stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Flag the wholly skipped stages the pipeline's own skip expression ruled out.

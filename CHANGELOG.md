@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · 监控：他人重新执行的 stage 不得顶替本 run 经 G8 启动的执行
+
+- `IpipeRuntime._prefer_owned_stage_runs`：stage 列表只给出每个 stage 的最新一次执行。若本 run 已在该 build 上经 G8 启动某 stage，监控改按该次执行的 stage build id 读回状态与 job，另一次执行（`foreign_execution`）不计入证据。
+- 起因：BGW-2019 S5 目标 run b9a99c4c，G8 重跑 p0级自动化回归测试（stage 651470513，回归仍在运行）4 分钟后，同一 stage 又被执行一次（651471226，全部 job 按表达式跳过、1 秒结束）；列表只剩后者，build 报 SKIPPED，控制面据此按通过入账并进入 RELEASE。该 run 的 IPIPE 证据因此不可信，需待 651470513 跑完后重新核对。
+
 ## 2026-10-31 · S5 RESTART 真实验证
 
 - BGW-2019 run 3dfe403a → b9a99c4c：已合入 CR 的阻断、`--accept-merged` 处置、原子提交与回放都按合同 3.4 生效；目标 run 重走 GRILL/SPEC/TASKS（全部经预授权门）并提交新 CR。`docs/MVP_CONVERGENCE_PLAN.md` 第 8 节同步。

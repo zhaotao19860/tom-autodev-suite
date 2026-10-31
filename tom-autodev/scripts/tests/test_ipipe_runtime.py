@@ -1185,6 +1185,26 @@ class IpipeRuntimeTests(unittest.TestCase):
             status="FAIL", stages=[{"id": "stage-1", "stageName": "unit", "status": "FAIL"}]
         )
 
+    def test_a_foreign_re_execution_does_not_replace_the_g8_started_stage(self):
+        # BGW-2019 S5: after the G8 re-run of the regression stage, someone executed the
+        # stage again with every job skipped. The listing then showed only that run.
+        self._failed_stage()
+        approval = self._g8()
+        self.api.builds["build-1"] = build(status="RUNNING", stages=[{"id": "stage-1", "status": "RUNNING"}])
+        self.assertEqual(self.runtime.rerun("stage-1", approval)["reason_code"], "OK")
+        foreign = {"id": "stage-9", "stageName": "unit", "status": "SKIPPED",
+                   "jobBuildBeans": [{"id": "j9", "jobName": "tests", "status": "SKIPPED"}]}
+        conf = self.state.idempotency_result("ipipe.stage-binding:run-1:stage-1")["stage"]["stage_conf_id"]
+        foreign["stageConfId"] = conf
+        self.api.builds["build-1"] = build(status="SKIPPED", stages=[foreign])
+        self.api.stages["build-1"] = [foreign]
+        self.api.details["stage-1"] = {"entities": {"stageBuild": {"status": "RUNNING"},
+                                                    "realJobBuilds": [[{"id": "j1", "jobName": "tests", "status": "RUNNING"}]]}}
+        observed = self.runtime.monitor(
+            "build-1", (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat(), poll_budget=1,
+            park_on_budget=True)
+        self.assertNotEqual(observed.get("status"), "SUCCESS", observed)
+
     def test_a_stage_that_fails_the_same_way_again_gets_a_new_g8_hash(self):
         # After an approved re-run the stage can end exactly as before; the identical
         # binding would hash to the consumed approval and could never be approved again.
