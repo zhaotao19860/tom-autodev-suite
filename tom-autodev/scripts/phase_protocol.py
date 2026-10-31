@@ -156,12 +156,13 @@ class PhaseProtocol:
         behind this guard. The only way out was to call `publish_phase` by hand.
         """
         side_channel = self._evidence_contract(run_id) == "v2"
-        from recovery import partial_held
+        from recovery import NOTICE_OPERATIONS, partial_held
         held = partial_held(self.state.events(run_id))
         return [
             pending
             for pending in self.state.pending_intents(run_id)
             if pending["intent_id"] not in held
+            and pending.get("operation") not in NOTICE_OPERATIONS
             and not _redriven_by_publish(pending.get("operation"))
             # Evidence contract v2: every KU/iCafe write is a side channel, including an
             # iCafe comment whose creation stays unconfirmed; it never holds the run.

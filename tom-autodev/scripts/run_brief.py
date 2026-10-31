@@ -173,7 +173,10 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
     if not terminal:
         for item in orchestrator.state.pending_intents(run_id):
             operation = str(item.get("operation") or "")
-            if side_channel and operation.split(".", 1)[0] in {"icafe", "ku", "knowledge"}:
+            from recovery import NOTICE_OPERATIONS
+
+            if operation in NOTICE_OPERATIONS or (
+                    side_channel and operation.split(".", 1)[0] in {"icafe", "ku", "knowledge"}):
                 side_writes.append(operation)
                 continue
             entry = {

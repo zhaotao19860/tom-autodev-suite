@@ -88,3 +88,17 @@ class RestartTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoticeIntentTests(unittest.TestCase):
+    def test_an_unreceipted_notice_does_not_block_resume(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        _write_profile(root, PROFILE)
+        orch = Orchestrator(root)
+        run_id = _start(orch)["run_id"]
+        orch.state.claim_intent(run_id, "approval.resume_notice", "resume-notice:x", {"run_id": run_id})
+        self.assertEqual(orch.recovery.resume(run_id)["actions"], [])
+        orch.state.claim_intent(run_id, "icode.submit", "icode:x", {"n": 1})
+        self.assertEqual(len(orch.recovery.resume(run_id)["actions"]), 1)

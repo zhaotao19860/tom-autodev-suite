@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · 审批通知类写入不再阻断 run
+
+- `recovery.NOTICE_OPERATIONS`（`approval.resume_notice` / `progress_notice` / `ack` / `nudge` / `ide_turn_notice`）：这些如流消息只是通知，不决定也不投递门。其未回执的 intent 不再让 `resume` 返回 QUERY_REQUIRED、不再挡阶段推进（`_blocking_pending`），状态摘要也不再列为未确认写入。审批投递（`approval.delivery.*`）照旧阻断。
+- 起因：BGW-2019 第二个 run（S1）在 SUBMIT 卡成 RECOVERY_REQUIRED，原因是如流网关拒收了一条“已批准、请继续”通知（`MESSAGE_REJECTED:GATEWAY`），对应 intent 没有回执。
+
 ## 2026-10-30 · 状态摘要：v2 旁路写入不再显示为阻断
 
 - `run_brief`：evidence contract v2 的 run 中，未回执的 KU/iCafe 写入（`ku.*`、`icafe.*`、`knowledge.*`）改列为“延后补发的旁路写入（不阻断）”，不再写成“未确认的外部写入”，下一步也不再要求先收敛它们（`recovery.resume` 本就跳过）。BGW-2019 发布段发现：摘要一直提示先收敛 KU 写入，实际 G9 已批准待提交。

@@ -28,6 +28,16 @@ def partial_held(events: list[dict[str, Any]]) -> frozenset[str]:
     return frozenset(held)
 
 
+
+# Informational 如流 messages about a gate (an acknowledgement, a reminder, "approved,
+# resume with continue", a progress card). None of them decides or delivers a gate, so an
+# unknown outcome of one is never a reason to stop the run: BGW-2019 sat in SUBMIT because
+# the gateway rejected a resume notice and the claimed intent had no receipt.
+NOTICE_OPERATIONS = frozenset({
+    "approval.resume_notice", "approval.progress_notice", "approval.ack",
+    "approval.nudge", "approval.ide_turn_notice",
+})
+
 class Recovery:
     def __init__(
         self,
@@ -54,6 +64,7 @@ class Recovery:
         uncertain = [
             intent for intent in self.state.pending_intents(run_id)
             if intent["intent_id"] not in held_for_diagnosis
+            and intent.get("operation") not in NOTICE_OPERATIONS
             and not (side_channel and isinstance(intent.get("operation"), str)
                      and intent["operation"].split(".", 1)[0] in {"icafe", "ku", "knowledge"})
         ]
