@@ -7,6 +7,7 @@ suite had no version control before then.
 ## 2026-10-31 · 发布段：查询异常不再崩溃；测试分支提测跳过约定
 
 - `branch_release_build`：BranchPipeline 构建查询遇到网关拒绝（实测一次 `PERMISSION_DENIED`，重试即恢复）时返回 TRANSIENT 停车，不再抛出未捕获异常中断 worker。
+- `tom-project-bgw/references/runtime-topology.md`：bgwagent BranchPipeline 348141 的测试准出为人工确认，跳过不算准出，发布会被拒（“没有执行准出，不能发布”），测试分支上需点确认。
 - `tom-project-bgw/references/runtime-topology.md`：记录测试分支的约定——提测由需求负责人在平台点跳过，准出审核按自身表达式跳过，测试准出无需 QA 点击；控制面不自行跳过提测。BGW-2019 第一轮发布段发现。
 
 ## 2026-10-31 · 审批通知类写入不再阻断 run

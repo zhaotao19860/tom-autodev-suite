@@ -151,6 +151,11 @@ requirement owner skips 提测 on the platform (2026-10-31); 准出审核 then s
 expression (`Job_skip_key == '1'`, default `1`) and 测试准出 completes without a QA click.
 The control plane does not trigger or skip 提测 itself — skipping is the owner's platform
 action. On a real branch 提测 runs and 测试准出 needs one of its configured `permitOutUsers`.
+bgwagent BranchPipeline `348141` differs: its 测试准出 is `confirmType: manual`
+(`permitOutUsers` yueyufei01, houpingping) and the 发布 job (`AGILE_RELEASE`) refuses a
+build without a recorded permit-out ("没有执行准出，不能发布"). Skipping 测试准出 does not
+count; on the test branches the owner must click 确认 there after skipping 提测. A refused
+发布 makes the platform rebuild 测试准出/发布 as new stage builds in the same build.
 
 Measured on 2026-10-27 (BGW-1995): BGW-1918's released build 273787582 filled
 `get_bgwagent` with a bgwagent `nodes/<id>` compile product because bgwagent changed in that
