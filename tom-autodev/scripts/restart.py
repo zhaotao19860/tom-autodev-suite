@@ -30,8 +30,15 @@ from typing import Any
 _SIDE_CHANNEL = frozenset({"icafe", "ku", "knowledge"})
 # Only a platform-reported end is a disposition; anything else (running, manual wait,
 # unknown, unreadable) blocks the restart (C-05).
-_ENDED = frozenset({"SUCCESS", "SUCCEEDED", "SUCC", "PASSED", "PASS", "FAIL", "FAILED", "ERROR",
-                    "ABORTED", "CANCELLED", "CANCEL", "SKIPPED", "SKIP"})
+def _ended_statuses() -> frozenset[str]:
+    # The iPipe runtime's own terminal vocabulary, so an alias it treats as ended
+    # (FAILING, SUCCEEDING, ...) is ended here too.
+    from clients.ipipe_runtime import _FAILURE, _SKIPPED, _SUCCESS
+
+    return _SUCCESS | _FAILURE | _SKIPPED
+
+
+_ENDED = _ended_statuses()
 _DESIGN_PHASES = ("GRILL", "SPEC", "TASKS")
 
 
@@ -167,7 +174,7 @@ def _repair_rounds(orchestrator: Any, run_id: str) -> int:
     return rounds
 
 
-_DIFF_FIELDS = ("title", "body", "acceptance", "type", "fields")
+_DIFF_FIELDS = ("title", "body", "acceptance", "type", "fields", "attachments", "links")
 
 
 def requirement_diff(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any] | None:
@@ -185,7 +192,11 @@ def requirement_diff(source: dict[str, Any], target: dict[str, Any]) -> dict[str
         if before != after:
             changed[field] = {"before": before, "after": after}
     if not changed:
-        return None
+        if source.get("content_hash") == target.get("content_hash"):
+            return None
+        # The snapshot changed in a field not compared above: whether it touches scope
+        # cannot be ruled out, so it is treated as a change (C-10).
+        changed["other"] = {"before": source.get("content_hash"), "after": target.get("content_hash")}
     body = {"source_snapshot_hash": source.get("content_hash"),
             "target_snapshot_hash": target.get("content_hash"), "changed": changed}
     return {**body, "content_hash": hashlib.sha256(json.dumps(

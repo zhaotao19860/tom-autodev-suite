@@ -78,6 +78,9 @@ class EnvWaitTests(unittest.TestCase):
         self.assertEqual(self.orch.status(self.run_id)["state"], "STOPPED")
 
     def test_a_permission_or_unknown_download_failure_does_not_wait(self):
+        mixed = {"ok": False, "reason_code": "PRODUCT_DOWNLOAD_UNVERIFIED", "http_statuses": [404],
+                 "candidates": [{"http_status": 404}, {"build_id": "b"}]}
+        self.assertNotEqual(self._prepare(mixed)[0].get("parked"), "ENV_WAIT")
         for statuses in ([403], [503], []):
             with self.subTest(statuses=statuses):
                 result, _ = self._prepare({"ok": False, "reason_code": "PRODUCT_DOWNLOAD_UNVERIFIED",

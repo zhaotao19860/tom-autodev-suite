@@ -39,6 +39,11 @@ def waitable(check: dict[str, Any]) -> bool:
     if reason not in WAIT_REASONS:
         return False
     if reason == "PRODUCT_DOWNLOAD_UNVERIFIED":
+        # Every candidate must itself report 404/410; one without a status is unknown (C-09).
+        candidates = check.get("candidates")
+        if isinstance(candidates, list) and candidates:
+            return all(isinstance(item, dict) and item.get("http_status") in _ABSENT_STATUSES
+                       for item in candidates)
         statuses = set(check.get("http_statuses") or [])
         return bool(statuses) and statuses <= _ABSENT_STATUSES
     return True

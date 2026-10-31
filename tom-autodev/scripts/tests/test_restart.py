@@ -73,7 +73,7 @@ class RestartTests(unittest.TestCase):
 
     def test_a_running_or_unreadable_build_blocks(self):
         self.orch.state.save_idempotency_result(f"ipipe.build-binding:{self.source}:b1", {"build_id": "b1"})
-        for status, ok in [("RUNNING", False), (None, False), ("SUCC", True)]:
+        for status, ok in [("RUNNING", False), (None, False), ("SUCC", True), ("FAILING", True), ("SUCCEEDING", True)]:
             with self.subTest(status=status):
                 planned = restart.plan(self.orch, self.source, build_status=lambda _b, s=status: s)
                 self.assertEqual(planned["ok"], ok, planned)
@@ -115,8 +115,19 @@ class RestartTests(unittest.TestCase):
         result = restart.execute(self.orch, self.source, changed, reason="需求变更")
         intake = self.orch.state.events(result["target_run_id"])[0]["payload"]
         self.assertIn("acceptance", intake["requirement_diff"]["changed"])
-        self.assertEqual(intake["intake_hash_version"], "v4")
+        self.assertEqual(intake["intake_hash_version"], "v5")
         self.assertNotEqual(intake["workflow_modes"].get("GRILL"), "auto")
+
+    def test_attachment_or_link_changes_are_a_diff(self):
+        for field, value in (("attachments", [{"name": "spec.pdf"}]), ("links", ["http://x"])):
+            with self.subTest(field=field):
+                after = dict(self.snapshot, **{field: value}, content_hash="new")
+                self.assertIn(field, restart.requirement_diff(self.snapshot, after)["changed"])
+
+    def test_v4_intake_hash_is_unchanged(self):
+        from collaboration import intake_input_hash
+        payload = {"intake_hash_version": "v4", "approval_mode": "scope", "project": "p"}
+        self.assertEqual(intake_input_hash(payload), intake_input_hash({**payload, "requirement_diff": None}))
 
     def test_a_released_source_cannot_restart(self):
         self.orch.state.transition(self.source, "RELEASE_SUCCESS", {})

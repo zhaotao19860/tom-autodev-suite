@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · 第 9 轮复核后修复（3ff3ee1 的定向复核，两份）
+
+- **R9-NEW-001（P1，修复引入）**：`requirement_diff` 不再加入 v4 哈希字段集合；新增 `intake_hash_version` v5 承载它，v4 字段集合恢复原样，部署前建的 v4 scope run 的 G0 仍校验通过。
+- **C-10/RSTR-003（P1）**：需求差异比较纳入 `attachments`、`links`；快照 hash 变化但比较字段都相同时，记为 `other` 变化，同样强制人工研判。
+- **C-05/RSTR-001（P1）**：RESTART 的终态白名单改为复用 iPipe runtime 的 `_SUCCESS | _FAILURE | _SKIPPED`，`FAILING`、`SUCCEEDING` 等别名不再被误判为未结束。
+- **C-09/ENV-001（P2）**：下载未验证时逐个候选判断，只有每个候选都明确返回 404/410 才进入 ENV_WAIT；`[404, 无状态]` 不再被压缩成全部 404。
+- 全量 1639 个测试通过。至此第 9 批修复→复核预算已用完（2 轮）。
+
 ## 2026-11-01 · 第 9 轮评审修复（基线 aca2b33 → c6dedf8，GPT-6.1-Sol 与 codex 两份独立初审）
 
 两份初审合计去重后 10 项 P1/P2，全部确认并修复：

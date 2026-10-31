@@ -215,7 +215,7 @@ class Orchestrator:
         if requirement_diff is not None:
             # MVP §3.4: a restart whose card changed shows and binds the diff at G0.
             payload["requirement_diff"] = requirement_diff
-            payload["intake_hash_version"] = "v4"
+            payload["intake_hash_version"] = "v5"
         payload["g0_input_hash"] = intake_input_hash(payload)
         return {
             "run_id": run_id,

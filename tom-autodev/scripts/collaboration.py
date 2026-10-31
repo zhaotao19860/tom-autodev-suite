@@ -40,8 +40,10 @@ _INTAKE_PREREQUISITE_KEYS_V2 = _INTAKE_PREREQUISITE_KEYS + (
 # a phase needs before it may advance. v2 and v1 payloads hash exactly as before.
 _INTAKE_PREREQUISITE_KEYS_V3 = _INTAKE_PREREQUISITE_KEYS_V2 + ("evidence_contract",)
 # v4 binds how the run's gates are answered (per gate, or by scope card) into G0.
-# A restarted run also binds the requirement diff against its source (MVP §3.4).
-_INTAKE_PREREQUISITE_KEYS_V4 = _INTAKE_PREREQUISITE_KEYS_V3 + ("approval_mode", "requirement_diff")
+_INTAKE_PREREQUISITE_KEYS_V4 = _INTAKE_PREREQUISITE_KEYS_V3 + ("approval_mode",)
+# v5 also binds a restarted run's requirement diff against its source (MVP §3.4); v4 is
+# left exactly as it was hashed, so a scope run created before keeps its G0 (R9-NEW-001).
+_INTAKE_PREREQUISITE_KEYS_V5 = _INTAKE_PREREQUISITE_KEYS_V4 + ("requirement_diff",)
 _GROUP_TOPIC_MAX = 12
 # Failures the group client raises before it dispatches anything: the request was
 # rejected locally or the gateway was unreachable, so no group can exist yet.
@@ -153,6 +155,7 @@ def intake_prerequisites(payload: Any) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
     version = source.get("intake_hash_version")
     keys = {
+        "v5": _INTAKE_PREREQUISITE_KEYS_V5,
         "v4": _INTAKE_PREREQUISITE_KEYS_V4,
         "v3": _INTAKE_PREREQUISITE_KEYS_V3,
         "v2": _INTAKE_PREREQUISITE_KEYS_V2,
