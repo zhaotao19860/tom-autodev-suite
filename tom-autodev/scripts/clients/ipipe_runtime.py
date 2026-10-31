@@ -2280,8 +2280,14 @@ class IpipeRuntime:
         if len(ids) != 1 or "" in ids or not _nonempty(revision):
             return _failure("BRANCH_PIPELINE_UNSUPPORTED")
         pipeline_id = next(iter(ids))
+        try:
+            listed = self.api.builds_by_revision(module, revision, pipeline_id) or []
+        except Exception as error:
+            # A transient gateway refusal (seen: PERMISSION_DENIED once, then OK on retry)
+            # must park the release, not crash the worker with a traceback.
+            return _failure(_transport_reason(error, "PIPELINE_TRANSIENT"), status="TRANSIENT")
         builds = [
-            item for item in self.api.builds_by_revision(module, revision, pipeline_id) or []
+            item for item in listed
             if isinstance(item, dict)
             and str(item.get("branch") or (item.get("trigger") or {}).get("branch") or "")
             == binding["target_branch"]

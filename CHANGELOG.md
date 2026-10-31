@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · 发布段：查询异常不再崩溃；测试分支提测跳过约定
+
+- `branch_release_build`：BranchPipeline 构建查询遇到网关拒绝（实测一次 `PERMISSION_DENIED`，重试即恢复）时返回 TRANSIENT 停车，不再抛出未捕获异常中断 worker。
+- `tom-project-bgw/references/runtime-topology.md`：记录测试分支的约定——提测由需求负责人在平台点跳过，准出审核按自身表达式跳过，测试准出无需 QA 点击；控制面不自行跳过提测。BGW-2019 第一轮发布段发现。
+
 ## 2026-10-31 · 审批通知类写入不再阻断 run
 
 - `recovery.NOTICE_OPERATIONS`（`approval.resume_notice` / `progress_notice` / `ack` / `nudge` / `ide_turn_notice`）：这些如流消息只是通知，不决定也不投递门。其未回执的 intent 不再让 `resume` 返回 QUERY_REQUIRED、不再挡阶段推进（`_blocking_pending`），状态摘要也不再列为未确认写入。审批投递（`approval.delivery.*`）照旧阻断。

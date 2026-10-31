@@ -146,6 +146,12 @@ stages, in order: 编译 → 扫描 → **自动化回归测试** (MANUAL) → �
 | 提测 | none in stage config; the job carries card, iTest plan, QA owner, module/commit | Platform-derived from the merged CR and card |
 | 发布 | none | — |
 
+**Test branches (BGW-2019 autodev, `x86bgw-dpdk-2011-autodev` / `pipline_case_autodev`):** the
+requirement owner skips 提测 on the platform (2026-10-31); 准出审核 then skips by its own
+expression (`Job_skip_key == '1'`, default `1`) and 测试准出 completes without a QA click.
+The control plane does not trigger or skip 提测 itself — skipping is the owner's platform
+action. On a real branch 提测 runs and 测试准出 needs one of its configured `permitOutUsers`.
+
 Measured on 2026-10-27 (BGW-1995): BGW-1918's released build 273787582 filled
 `get_bgwagent` with a bgwagent `nodes/<id>` compile product because bgwagent changed in that
 requirement; an unchanged bgwagent uses its BranchPipeline `releases/<version>` product.
