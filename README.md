@@ -443,6 +443,10 @@ python3 tom-autodev/scripts/cli.py resume RUN_ID
 | G9 | 发布动作和版本证据 |
 | G10 | 终态后对控制面自身的优化提案 |
 
+**scope 授权（可选）**：`start --scope-approval CARD PROJECT` 启动的 run 把 G1/G2/首个 G4 合成一张 D 卡、把任务的 G4/G5/G7 合成一张 C 卡。段内门照常按 hash 建台账，由临时放行（`scope-pending:<段>`）推进到段末才出卡；卡批准后为每个门写派生同意（`scope:<approval_id>`）。任一产物变化都会改变 scope hash，旧卡失效；修复轮次、后续任务的 G4、IPIPE 的 G7 仍逐门审批。
+
+**测试卡预授权（无人值守）**：仅限不上线的测试卡。在本机 `~/.tom-autodev/preauthorizations.json` 写 grant（卡号、项目、门号、允许分支、代答人、到期时间）后，覆盖的门在双渠道投递完成后由代答人身份 APPROVE 并留审计，`continue` 在同一命令里续跑。删掉该文件即恢复人工审批，真实需求不得配置。
+
 普通使用者直接在如流审批即可。维护人员可查看参数：
 
 ```bash
@@ -527,7 +531,8 @@ build/stage、核对原 G8，确认后保存本地回执；它不创建新意图
 | `WORKER_LEASE_HELD` | 等当前 worker 完成，不并发驱动同一 run |
 | iPipe 未结束 / `RELEASE_WAITING` | 等平台结果，不把超时当成失败 |
 | `RELEASE_INGEST_REQUIRED` | 使用发布证据摄取入口核验完整计划和平台回执，不能用通用迁移命令认定发布成功 |
-| 外部操作结果不明 | 先查平台和持久化 intent，不要直接重发 |
+| 外部操作结果不明 | 先查平台和持久化 intent，不要直接重发；SUBMIT 阶段未回执的推送由 `continue` 自动只读回查收敛 |
+| `ENV_WAIT` | 人工阶段的依赖产物在 run 之外不可用（如目标分支尚未发布）；按 `recheck_after`（30 分钟）复查，只有新检查通过才离开，超过 `max_wait`（72 小时）转 STOPPED。`status` 显示等待原因、待谁解除和下次复查时间 |
 
 只在对应场景使用恢复命令：
 
@@ -540,6 +545,8 @@ python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py work-card reconcile --help
 ```
+
+**在新 run 中重开需求（合同 3.4）**：`restart-from SOURCE_RUN` 默认只读列出旧 run 留下的 CR、build、未回执写入和工作树及其处置；有任何未决项返回 `RESTART_SOURCE_UNRESOLVED`。确认处置后加 `--execute --reason "..."`（未合入的旧 CR 用 `--keep-open-crs` 保留，已合入的用 `--accept-merged` 接受）：同一事务内停止旧 run、写 `run_lineage`、建新 run 的 INTAKE，新 run 重走需求研判/规格/任务拆解，修复轮次继承。一个旧 run 只能重开一次，重复执行返回同一个新 run。
 
 `recover-legacy-pipeline-plan` 只用于升级前已进入 IPIPE、但缺少冻结 `pipeline_plan` 的历史 run。它从该 run 自己获审的提交和固定 profile 重建计划，不提交、不发布、不审批、不调用 runtime；旧 build 会按模块重新核验。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。对 `ipipe.rerun`，只有当观察记录了 `before_dispatch: true`（运行时确认错误发生在调用点、请求尚未发出）且无 `http_status` 时，才可加 `--local-error-proven` 让同一审批重发一次；被调方内部抛出的同类错误，以及没有 `before_dispatch` 字段的旧观察，一律拒绝（`LOCAL_ERROR_NOT_PROVEN`）。无该标志的放弃仍是终局。观察、回执、G8/重建审批材料写入前统一脱敏：`IREPO-TOKEN:`、`access_token=`、Authorization/Bearer 值以及本进程已加载的 irepo/iPipe token 原值（任意长度）。未变更模块的发布产物必须与冻结 revision 精确一致，否则返回 `PRODUCT_REVISION_MISMATCH`。不要手改数据库或删除记录解除阻断。
 

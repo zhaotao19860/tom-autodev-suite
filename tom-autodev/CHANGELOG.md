@@ -2,6 +2,12 @@
 
 tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套件根目录 [CHANGELOG.md](../CHANGELOG.md) 的同日条目。
 
+## 2026-10-31
+
+- BGW-2019 真实验证中修复与新增：失败用例与基线构建对比；同结局 stage 再次重跑可获新 G8；通知类写入不再阻断；发布查询异常停车；SUBMIT 未回执推送由 `continue` 自动只读收敛；他人重新执行的 stage 不顶替本 run 经 G8 启动的执行。
+- 新增：测试卡预授权（`preauthorization.py`，无人值守）；合同 3.4 `restart-from`（`run_lineage`）；ENV_WAIT（`env_wait.py`，按 `recheck_after` 复查、超 `max_wait` 停止）；scope 授权接入 worker（`start --scope-approval`，D/C 卡）。
+- MVP 场景 S1~S6 在 BGW-2019 上取得真实证据，3 个 run 到 RELEASE_SUCCESS。详见根 CHANGELOG 同日条目。
+
 ## 2026-10-29
 
 - MVP 评审修复第 8 轮：REFUSED 的 PARTIAL 留在 SUBMIT 同 attempt 重试；trigger 记录是否已派发，预检失败的重放仍可采纳。评审收口，转真实运行验证。
