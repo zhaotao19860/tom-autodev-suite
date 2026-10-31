@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-10-31 · MVP 场景矩阵真实证据
+
+- `docs/MVP_CONVERGENCE_PLAN.md` 第 8 节第 3 步：记录 S1~S7 在 BGW-2019 上的真实证据，3 个独立 run 到 RELEASE_SUCCESS；S7 的 ENV_WAIT 与需求类型覆盖标为未验证。
+
 ## 2026-10-31 · 监控：他人重新执行的 stage 不得顶替本 run 经 G8 启动的执行
 
 - `IpipeRuntime._prefer_owned_stage_runs`：stage 列表只给出每个 stage 的最新一次执行。若本 run 已在该 build 上经 G8 启动某 stage，监控改按该次执行的 stage build id 读回状态与 job，另一次执行（`foreign_execution`）不计入证据。
