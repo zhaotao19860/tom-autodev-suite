@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · MVP 第 4 步：删除 submit-companion 补救命令
+
+- 删除 CLI `submit-companion` 与 `_submit_missing_companion`：它只为 3.2 之前只推了业务库的历史 run 补推测试库提交；3.2 聚合状态保证 SUBMITTED 前两库都已确认，库中已无非终态 run。`_submit_companion` 是正常 SUBMIT 推送测试库的实现，保留。`tom-autodev/SKILL.md` 同步。全量 1631 个测试通过。
+
 ## 2026-11-01 · MVP 第 4 步：删除无生产调用方的模块
 
 - 前提核对（MVP 第 7 节）：场景矩阵 S1~S7 均有真实证据（合并验证 run 5c66c1f1 到 RELEASE_SUCCESS，共 4 个 run）；旧 run 7c545ba1（BGW-1956，2026-09-15 起停在 WORKSPACE）经需求方同意已 stop；全库无 UNKNOWN/AMBIGUOUS intent；LegacyRunProjector 演练 18/18。

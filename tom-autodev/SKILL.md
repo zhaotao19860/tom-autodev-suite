@@ -170,10 +170,8 @@ it into `KU_QUERY_UNKNOWN`.
 A task that changes both the business and the test repository has one reviewed
 descriptor whose `revision_set` names both commits; SUBMIT pushes the business commit and
 the test commit (`submit_companion`) under that same G7, and the test push happens first.
-Never treat "the run reached IPIPE" as proof the test commit is in iCode: check the test
-repository's remote branch. A run that predates this pushed only the business commit;
-recover it with `submit-companion RUN_ID --task TASK` (same descriptor, same G7, no state
-change).
+Never treat "the run reached IPIPE" as proof the test commit is in iCode: the aggregate
+submission state (contract 3.2) only becomes SUBMITTED once every repository is confirmed.
 
 The release of a merged CR is the target branch's **BranchPipeline**, not the
 ChangePipeline that verified it. After G9 the release controller binds that BranchPipeline

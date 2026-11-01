@@ -3762,13 +3762,6 @@ def main(argv: list[str] | None = None) -> int:
     advance.add_argument("--evidence", help="其余证据上下文 JSON：workspace 收据、revision、环境指纹")
     advance.add_argument("--approval-id", help="省略则取该门最近一条 APPROVE 台账")
 
-    companion = subparsers.add_parser(
-        "submit-companion",
-        help="补提已获 G7、但未推送的测试库提交（同一描述符、同一 G7，不改 run 状态）")
-    companion.add_argument("run_id")
-    companion.add_argument("--task", required=True)
-    companion.add_argument("--approval-id")
-    companion.add_argument("--icode-skill", default=None)
     submit = subparsers.add_parser("submit", help="把已评审并获 G7 的变更集提交到 iCode")
     submit.add_argument("run_id")
     submit.add_argument("--task", required=True, help="要提交的任务 id，例如 T3")
@@ -4288,9 +4281,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     elif args.command == "submit":
         result = _submit(orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
-    elif args.command == "submit-companion":
-        result = _submit_missing_companion(
-            orchestrator, args.run_id, args.task, args.approval_id, args.icode_skill)
     elif args.command == "abandon-intent":
         result = _abandon_intent(orchestrator, args.intent_id, args.reason, args.actor,
                                  args.local_error_proven)
@@ -4540,54 +4530,6 @@ def _submit_companion(
         "commit_revision": pushed.get("commit_revision"),
     })
     return pushed
-
-
-def _submit_missing_companion(
-    orchestrator: Any, run_id: str, task_id: str, approval_id: str | None, icode_skill: str,
-) -> dict[str, Any]:
-    """Recover a run whose G7-approved test commit was never pushed.
-
-    Before `_submit` carried the companion, a task changing both repositories reached
-    IPIPE with only the business CR. The descriptor and its G7 still name the test
-    commit, so pushing it under that same approval is the write the G7 authorized; the
-    run state is not touched.
-    """
-    from cli_transport import ProcessTransport
-    from pipeline_plan import current_descriptors
-    from submit_descriptor import _ownership_rows
-
-    entry = current_descriptors(orchestrator, run_id).get(task_id)
-    if not isinstance(entry, dict):
-        return {"ok": False, "reason_code": "CHANGE_SET_MISSING", "run_id": run_id}
-    artifact = entry["artifact"]
-    descriptor = {**entry["descriptor"], "input_hash": artifact["sha256"],
-                  "reviewed_artifact_id": artifact["artifact_id"]}
-    approval = _g7_approval(orchestrator, run_id, approval_id, descriptor["input_hash"])
-    if approval is None or approval.get("effective_decision") != "APPROVE":
-        return {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": run_id,
-                "input_hash": descriptor["input_hash"]}
-    pinned = orchestrator._runtime_profile(run_id)
-    if not pinned.get("ok"):
-        return pinned
-    profile = pinned["profile"]
-    companion = _companion_binding(orchestrator, run_id, task_id, profile, descriptor,
-                                   _ownership_rows(orchestrator, run_id))
-    if companion is None:
-        return {"ok": True, "reason_code": "NO_COMPANION", "run_id": run_id}
-    if companion.get("ok") is False:
-        return companion
-    runtime = orchestrator.icode_runtime(
-        run_id,
-        worktree_bindings={companion["worktree_path"]: companion},
-        owner=descriptor["owner"],
-        system_skill_path=icode_skill or agent_host.skill_path("icode"),
-        argv_transport=ProcessTransport(),
-        submission_policy=profile.get("submission_policy"),
-    )
-    return _submit_companion(orchestrator, run_id, runtime, descriptor,
-                             {"approval_id": approval["approval_id"],
-                              "input_hash": descriptor["input_hash"]},
-                             companion["worktree_path"])
 
 
 def _replayed_submit_intent(
