@@ -1552,46 +1552,9 @@ def _execute_release(
         return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id,
                 "state": orchestrator.status(run_id).get("state"), "result": ingested,
                 "build_id": verified["content"]["build_id"], "release_id": verified["content"]["release_id"]}
-    ipipe_artifact = protocol.artifacts.latest_phase(run_id, "IPIPE", None)
-    ipipe_content = ipipe_artifact.get("envelope", {}).get("content") if ipipe_artifact.get("valid") else None
-    if not isinstance(ipipe_content, dict) or not isinstance(ipipe_content.get("build_id"), str):
-        return {"ok": False, "reason_code": "PREDECESSOR_REQUIRED", "run_id": run_id}
-    build_id = ipipe_content["build_id"]
-    pinned = orchestrator._runtime_profile(run_id)
-    if not pinned.get("ok"):
-        return pinned
-    from orchestrator import _ipipe_revision_set
-
-    derived = _ipipe_revision_set(orchestrator, run_id, pinned["profile"])
-    if not derived.get("ok"):
-        return derived
-    runtime = orchestrator.ipipe_runtime(run_id, ipipe_api)
-    if isinstance(runtime, dict):  # the factory returns an error dict, never a falsy runtime
-        return runtime
-    verified = runtime.verify_release(build_id, derived["revisions"])
-    if not verified.get("ok"):
-        if verified.get("status") == "RELEASE_WAITING":
-            # The platform has not published the release yet: wait for it, do not force it.
-            return {"ok": True, "reason_code": "PARKED", "run_id": run_id, "parked": "RELEASE_WAITING",
-                    "controller": "release", "build_id": build_id, "detail": verified}
-        return {"ok": False, "reason_code": "RELEASE_VERIFY_FAILED", "detail": verified,
-                "run_id": run_id, "build_id": build_id}
-    gate = _verify_required_releases(orchestrator, run_id, runtime, pinned["profile"])
-    if gate is not None:
-        # A multi-module release only lands once EVERY required-for-release module's build is
-        # published — otherwise the last module's success would release the whole run while
-        # another module was never published (R-H3).
-        return gate
-    content = _build_release_evidence(ipipe_content, verified)
-    ingested = protocol.ingest_release_evidence(
-        run_id, content, {"approval_id": approval_id, "input_hash": action.get("input_hash")}
-    )
-    if not ingested.get("ok"):
-        return {"ok": False, "reason_code": "RELEASE_EVIDENCE_INGEST_FAILED", "detail": ingested,
-                "run_id": run_id, "build_id": build_id}
-    landed = orchestrator.status(run_id).get("state")
-    return {"ok": True, "reason_code": "CONTROLLER_ADVANCED", "run_id": run_id, "state": landed,
-            "build_id": build_id, "release_id": verified.get("release_id"), "result": ingested}
+    # A release needs the frozen pipeline plan (phase_protocol refuses RELEASE without it
+    # with PIPELINE_PLAN_REQUIRED); the planless legacy branch was removed.
+    return {"ok": False, "reason_code": "PIPELINE_PLAN_REQUIRED", "run_id": run_id}
 
 
 def _advance_branch_release(
@@ -1656,31 +1619,6 @@ def _next_ready_manual_stage(stages: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _build_release_evidence(ipipe_content: dict[str, Any], verified: dict[str, Any]) -> dict[str, Any]:
-    """Join the IPIPE evidence's binding half with the verified release's outcome half.
-
-    Pipeline / module / revisions come from the successful IPIPE evidence (so they cannot
-    drift from what the pipeline proved); build / release id / rule / environment / refs
-    come from verify_release. Together they form the `release-evidence` document the
-    protocol validates and binds on ingestion.
-    """
-    return {
-        "pipeline_id": ipipe_content.get("pipeline_id"),
-        "build_id": verified["build_id"],
-        "release_id": verified["release_id"],
-        "module": ipipe_content.get("module"),
-        "revisions": ipipe_content.get("revisions"),
-        "environment_fingerprint": verified["environment_fingerprint"],
-        "release_rule": verified["release_rule"],
-        "status": "SUCCESS",
-        "release_evidence": verified["evidence_refs"],
-        "remote_evidence_refs": verified["evidence_refs"],
-    }
-
-
-# States a deterministic auto-advance may complete on its own. Controller side effects
-# (submit / iPipe / release) are deliberately NOT auto-run here: they touch external
-# systems and each keeps its own gate, so the loop parks on them for an explicit step.
 @guard_execution
 def advance(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
             max_steps: int = 32, icode_skill: str | None = None,

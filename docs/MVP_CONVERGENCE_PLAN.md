@@ -279,7 +279,7 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 | 审批旁路 | **保留（负责人 2026-11-01 决定）**：`approve`、`request-approval`、`await-approval`、`correct-approval-message` 是投递失败、如流不可达时人工落账与纠错的唯一入口 | scope 授权 + `approval reconcile` 已覆盖 |
 | 手工推进 | **保留（负责人 2026-11-01 决定）**：`next`、`complete-phase`、`advance`、`drive`、`start` 用于 worker 出错时的人工定位与推进，不在正常路径上 | worker 在真实卡上无需它们 |
 | 提交补救 | ~~`submit-companion`~~ **已删除（2026-11-01）**；`orchestrator._submit_companion` 保留（正常 SUBMIT 路径推送测试库提交的实现，不是补救） | 3.2 上线 |
-| 发布旧路径 | `verify_release` 的 `release_info` 分支（网关 404）、legacy planless 分支 | 3.3 上线 |
+| 发布旧路径 | ~~`verify_release` 的 `release_info` 分支（网关 404）、legacy planless 分支~~ **已删除（2026-11-01）** | 3.3 上线 |
 | 无生产调用方 | ~~`replay_gate.py`、`decision_questions.py`、`failure_signature_inventory.py`~~ **已删除（2026-11-01）** | 前提 6 |
 | 次要功能 | `optimize` / G10、`acceptance-candidates`、`notify-ide-turn`、`ide_turn_hook.py`、`backfill_knowledge.py` | 负责人确认不用；`acceptance-candidates`、`notify-ide-turn` 现仍有调用，先迁走调用方 |
 

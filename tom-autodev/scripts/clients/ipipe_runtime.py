@@ -2263,61 +2263,19 @@ class IpipeRuntime:
             branch = self._branch_release(binding)
         except Exception as error:
             return _failure(_transport_reason(error, "RELEASE_QUERY_FAILED"))
-        if branch.get("reason_code") != "BRANCH_PIPELINE_UNSUPPORTED":
-            if not branch.get("ok"):
-                return branch
-            refs = _build_evidence(build_id, binding) + [
-                f"ipipe:branch-build/{branch['branch_build_id']}",
-                f"ipipe:release/{branch['release_id']}",
-            ]
-            return {
-                "ok": True, "reason_code": "OK", "status": "SUCCESS", "run_id": self.run_id,
-                "build_id": build_id, "release_id": branch["release_id"],
-                "release_version": branch.get("version"),
-                "release_product_url": branch.get("product_url"),
-                "revision_set_id": binding["revision_set_id"],
-                "release_rule": binding["release_rule"],
-                "environment_fingerprint": binding["environment_fingerprint"],
-                "evidence_refs": refs,
-            }
-        try:
-            releases = self.api.release_info(binding["module"], binding["target_branch"])
-        except Exception as error:
-            return _failure(_transport_reason(error, "RELEASE_QUERY_FAILED"))
-        exact = []
-        associated = []
-        for release in releases:
-            if not isinstance(release, dict):
-                continue
-            same_identity = (
-                str(release.get("module") or "") == binding["module"]
-                and str(release.get("branch") or "") == binding["target_branch"]
-                and str(release.get("pipelineBuildId") or release.get("build_id") or "") == build_id
-            )
-            if same_identity:
-                associated.append(release)
-            if (
-                same_identity
-                and release.get("revisions") == binding["revision_map"]
-                and str(release.get("releaseRule") or release.get("release_rule") or "") == binding["release_rule"]
-                and _status(release) in _SUCCESS
-            ):
-                exact.append(release)
-        if not exact:
-            return _failure("REVISION_MISMATCH" if associated else "RELEASE_WAITING", status="RELEASE_WAITING")
-        if len(exact) != 1:
-            return _failure("RELEASE_AMBIGUOUS")
-        release_id = str(exact[0].get("id") or exact[0].get("releaseId") or "")
-        if not release_id:
-            return _failure("RELEASE_IDENTITY_MISSING")
-        refs = _build_evidence(build_id, binding) + [f"ipipe:release/{release_id}"]
+        # `/api/agile/getReleaseInfo` answers 404 on the real gateway, so the BranchPipeline's
+        # own release job is the only evidence; the legacy listing fallback was removed.
+        if not branch.get("ok"):
+            return branch
+        refs = _build_evidence(build_id, binding) + [
+            f"ipipe:branch-build/{branch['branch_build_id']}",
+            f"ipipe:release/{branch['release_id']}",
+        ]
         return {
-            "ok": True,
-            "reason_code": "OK",
-            "status": "SUCCESS",
-            "run_id": self.run_id,
-            "build_id": build_id,
-            "release_id": release_id,
+            "ok": True, "reason_code": "OK", "status": "SUCCESS", "run_id": self.run_id,
+            "build_id": build_id, "release_id": branch["release_id"],
+            "release_version": branch.get("version"),
+            "release_product_url": branch.get("product_url"),
             "revision_set_id": binding["revision_set_id"],
             "release_rule": binding["release_rule"],
             "environment_fingerprint": binding["environment_fingerprint"],
@@ -2329,7 +2287,7 @@ class IpipeRuntime:
 
         A merged CR is released by the module's BranchPipeline, not by the ChangePipeline
         that verified it, so the release is looked for there. `BRANCH_PIPELINE_UNSUPPORTED`
-        means this adapter cannot name that pipeline and the legacy release listing applies.
+        means this adapter cannot name that pipeline, so the release cannot be verified.
         """
         lookup = getattr(self.api, "pipelines_by_module", None)
         if not callable(lookup):

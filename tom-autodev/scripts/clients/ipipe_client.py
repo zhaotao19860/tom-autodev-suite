@@ -340,10 +340,6 @@ class IpipeApiClient:
             params={"currentUser": self.current_user},
         )
 
-    def release_info(self, module: str, branch: str) -> list[dict[str, Any]]:
-        value = self.transport.request("GET", "/api/agile/getReleaseInfo", params={"module": module, "branch": branch, "offset": 0, "limit": 20})
-        return _entities(value)
-
     def trigger_by_revision(
         self, pipeline_id: str, revision: str, parameters: dict[str, Any],
         *, event_type: str | None = None,

@@ -534,16 +534,6 @@ class PipelinePlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'BUILD_BINDING_MISMATCH'):
             self.protocol.ipipe_outstanding_modules(self.run)
 
-    def test_successful_build_without_complete_remote_release_revisions_waits(self):
-        self._start_plan()
-        self._build('A', 'a-ok')
-        self._build('B', 'b-ok')
-        self._publish('a-ok')
-        self._publish('b-ok')
-        self.api.releases[0]['revisions'].pop('tests')
-        self.assertEqual(self._release().get('parked'), 'RELEASE_WAITING')
-        self.assertEqual(self.orch.state.events(self.run)[-1]['state'], 'RELEASE')
-
     def test_new_review_without_descriptor_cannot_reuse_prior_submission(self):
         self._start_plan()
         from test_phase_protocol_repair import final_envelope

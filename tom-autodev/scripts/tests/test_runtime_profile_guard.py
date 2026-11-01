@@ -309,7 +309,7 @@ class RuntimeProfileGuardTests(unittest.TestCase):
 
     def test_drift_during_release_query_does_not_save_a_verifier_result(self):
         target = self._release_target()
-        checkpoint = self._drift_during_query("release_info")
+        checkpoint = self._drift_during_query("stage_detail")
         result = self.runtime.verify_planned_release("build-1", target)
         self.assertEqual(result["reason_code"], "PROFILE_CONFLICT", result)
         self.assertEqual(self._snapshot(), checkpoint["state"])

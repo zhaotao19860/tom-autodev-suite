@@ -156,6 +156,8 @@ class FakeApi:
 
     def builds_by_revision(self, module, revision, pipeline_id):
         self.calls.append(("builds_by_revision", module, revision, pipeline_id))
+        if str(pipeline_id) == self._BRANCH_PIPELINE:
+            return self._branch_builds(module, revision)
         return list(self.candidates)
 
     # Like the platform, a stage that is executing (or has executed) reports when it
@@ -199,9 +201,33 @@ class FakeApi:
         self.calls.append(("stage_detail", stage_id))
         return self.details.get(stage_id, {})
 
-    def release_info(self, module, branch):
-        self.calls.append(("release_info", module, branch))
-        return list(self.releases)
+    # `releases` are published by the module's BranchPipeline, the way the platform does it:
+    # each one is a branch build of the released revision whose release stage carries an
+    # AGILE_RELEASE job. (The old `/api/agile/getReleaseInfo` listing answers 404 live.)
+    _BRANCH_PIPELINE = "branch-pipe"
+
+    def pipelines_by_module(self, module):
+        self.calls.append(("pipelines_by_module", module))
+        return [{"id": self._BRANCH_PIPELINE, "pipelineName": "BranchPipeline"}]
+
+    def _branch_builds(self, module, revision):
+        found = []
+        for index, release in enumerate(self.releases):
+            status = str(release.get("releaseStatus") or release.get("status") or "").upper()
+            if (release.get("module") != module
+                    or (release.get("revisions") or {}).get(module) != revision):
+                continue
+            build_id = f"branch-{index}"
+            stage_id = f"release-stage-{index}"
+            self.stages.setdefault(build_id, [{"id": stage_id, "stageName": "发布", "status": status}])
+            self.details.setdefault(stage_id, {"entities": {"realJobBuilds": [[{
+                "jobType": "AGILE_RELEASE", "status": status,
+                "realJobBuild": {"id": release["id"], "version": release["id"], "revision": revision,
+                                 "branch": release.get("branch")}}]]}})
+            found.append({"id": build_id, "pipelineConfId": self._BRANCH_PIPELINE, "module": module,
+                          "branch": release.get("branch"), "status": status,
+                          "trigger": {"branch": release.get("branch"), "revision": revision}})
+        return found
 
     def trigger_by_revision(self, pipeline_id, revision, parameters):
         self.calls.append(("trigger_by_revision", pipeline_id, revision, dict(parameters)))
@@ -1489,22 +1515,6 @@ class IpipeRuntimeTests(unittest.TestCase):
         released = restarted.verify_release("build-1", REVISIONS)
         self.assertEqual(monitored["status"], "SUCCESS")
         self.assertEqual(released["release_id"], "release-1")
-
-    def test_verify_release_requires_exact_build_rule_branch_and_complete_revisions(self):
-        self.bind_build(status="SUCCESS")
-        self.api.stages["build-1"] = [{"id": "stage-1", "status": "SUCCESS"}]
-        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
-        self.api.releases = [{
-            "id": "release-1", "module": "baidu/team/app", "branch": "main", "pipelineBuildId": "build-1",
-            "releaseRule": "manual-approval", "releaseStatus": "SUCCESS",
-            "revisions": {"baidu/team/app": "app-rev", "baidu/team/app-tests": "stale"},
-        }]
-        mismatch = self.runtime.verify_release("build-1", REVISIONS)
-        self.api.releases[0]["revisions"]["baidu/team/app-tests"] = "test-rev"
-        exact = self.runtime.verify_release("build-1", REVISIONS)
-        self.assertEqual(mismatch["reason_code"], "REVISION_MISMATCH")
-        self.assertEqual(exact["reason_code"], "OK")
-        self.assertEqual(exact["release_id"], "release-1")
 
     def test_verify_release_of_build_uses_the_builds_own_revision_set(self):
         # R4-H2 (per-module independent release): a build is verified against its OWN recorded

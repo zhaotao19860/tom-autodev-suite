@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · MVP 第 4 步：删除发布旧路径
+
+- `verify_release` 不再回退到 `/api/agile/getReleaseInfo` 列表（真实网关对所有分支都返回 404），只认 BranchPipeline 的 AGILE_RELEASE job；不能识别 BranchPipeline 时返回 `BRANCH_PIPELINE_UNSUPPORTED`。删除 `IpipeClient.release_info`。`_execute_release` 删除无冻结 pipeline plan 的 legacy 分支和 `_build_release_evidence`，无 plan 时返回 `PIPELINE_PLAN_REQUIRED`（与 phase_protocol 一致）。测试的 FakeApi 改为按 BranchPipeline 发布作业模拟发布；两条只校验旧列表完整 revision map 的测试删除。全量 1596 个测试通过。
+
 ## 2026-11-01 · MVP 第 4 步：删除原地重钉 repin-profile
 
 - 删除 `profile_repin.py`（323 行）与 CLI `repin-profile`。run 的 profile pin 现在只取 INTAKE 的 `profile_hash`：`phase_protocol._pinned_profile_hash` 去掉 re-pin 参数，orchestrator、icode/ipipe runtime、worker_driver 统一调用它，`PhaseProtocol._repin` 删除；`approval_summary`、`run_brief`、`run_change.superseded` 中的 PROFILE_REPIN 分支删除。profile 改动在运行中返回 `PROFILE_CONFLICT`，处理方式是恢复原文件或 `restart-from`。历史上做过重钉的 2 个 run（7c545ba1、81a91c08）均已 STOPPED。README、OPERATIONS、approval-policy 同步。全量 1598 个测试通过。
