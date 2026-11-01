@@ -6,6 +6,8 @@ suite had no version control before then.
 
 ## 2026-11-01 · scope：auto GRILL 回退为人工研判时 G1 入 D 卡
 
+- `worker_driver.resume`：CLI 与 watcher 为同一已结算审批各记一条 APPROVAL_RESUME 交接（`approval-resume-<id>` 与 `approval-resume-<id>-<event>`），此前被当作两个候选报 `MULTIPLE_RESUME_HANDOFFS`。现在同一审批与 hash 的多条交接视为一个，续跑后一并关闭；不同审批仍拒绝。scope 的临时放行在同一命令内连续结算多门时触发。
+
 - `scope_approval.expected_gates`：express/hotfix 的 GRILL 为 auto 时，只有卡片已带验收点才自动完成、跳过 G1；无验收点回退为完整 GRILL，此时 G1 属于 D 卡。此前按模式一律剔除 G1，G1 被逐门代答，D 卡少一门。合并验证 run ed2c2dc1 发现（BGW-2019 卡无验收点）。
 
 ## 2026-11-01 · 第 9 批评审收口

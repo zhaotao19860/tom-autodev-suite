@@ -1919,6 +1919,18 @@ def resume(orchestrator: Any, run_id: str, knowledge_sync: Any | None = None,
         candidates = reap_stale_resume_handoffs(
             orchestrator, run_id, candidates, actor="worker_driver.resume"
         )
+    if len(candidates) > 1:
+        # The CLI and the watcher each record a handoff for the same settled approval
+        # (`approval-resume-<id>` and `approval-resume-<id>-<event>`). They resume the same
+        # decision, so they are one candidate; the duplicates are closed with it.
+        by_approval: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+        for item in candidates:
+            data = item.get("payload") or {}
+            by_approval.setdefault((data.get("approval_id"), data.get("input_hash")), []).append(item)
+        if len(by_approval) == 1:
+            for duplicate in candidates[1:]:
+                orchestrator.state.complete_handoff(duplicate["handoff_id"])
+            candidates = candidates[:1]
     if not candidates:
         return {"ok": False, "reason_code": "NO_RESUME_HANDOFF", "run_id": run_id}
     if len(candidates) > 1:

@@ -173,6 +173,18 @@ class StaleResumeHandoffTests(unittest.TestCase):
         self.assertEqual(worker_driver.resume(self.orch, RUN)["reason_code"], "MULTIPLE_RESUME_HANDOFFS")
         self.assertEqual(len(self._open()), 2)
 
+    def test_two_handoffs_of_one_approval_resume_once(self):
+        latest = self._events()[-1]["event_id"]
+        approval = self._approval("G2")
+        self._handoff(approval, latest)
+        self.state.record_handoff(RUN, f"approval-resume-{approval['approval_id']}", {
+            "kind": "APPROVAL_RESUME", "run_id": RUN, "approval_id": approval["approval_id"],
+            "input_hash": approval["input_hash"], "action": "G2"})
+        with mock.patch.object(worker_driver, "advance", return_value={"ok": True, "reason_code": "PARKED"}):
+            result = worker_driver.resume(self.orch, RUN)
+        self.assertEqual(result["reason_code"], "PARKED")
+        self.assertEqual(self._open(), [])
+
     def test_resume_refuses_when_stale_one_is_unconsumed_and_gate_matches(self):
         # Gate matches the current state and nothing consumed it: not provably expired.
         first = self._approval("G6")
