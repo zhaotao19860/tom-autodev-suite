@@ -34,7 +34,7 @@ class ApprovalMaterialsTests(unittest.TestCase):
         }, ["owner"])
 
     def test_every_gate_including_retry_has_review_focus_and_effect(self):
-        for gate in [*(f"G{i}" for i in range(11)), "PROFILE_REPIN"]:
+        for gate in [f"G{i}" for i in range(11)]:
             with self.subTest(gate=gate):
                 detail = gate_intent(gate + "#retry-1")
                 self.assertTrue(detail["subject"])

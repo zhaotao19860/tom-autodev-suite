@@ -97,7 +97,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 
 ### 审批消息与进度通知
 
-- 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G10 和 `PROFILE_REPIN` 都有各自的检查重点。
+- 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G10 都有各自的检查重点。
 - 自动草案审批会提供本次材料的本地 JSON 快照路径；这是阅读副本，不是已验收产物。路径只能在运行机器打开，已有 KU 文档才显示网页链接。缺少与 hash 匹配的材料会明确提示“请勿批准”。
 - 如流正文旁有“同意 / 需修改 / 停止run”按钮（“停止run”即原“驳回”，停止本 run）。有协作群时发群；G0 尚未建群时发给审批成员的机器人单聊。
   后续审批正文和操作示例统一使用中文：“同意 <approval_id>”会继续当前 run；
@@ -144,7 +144,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 - 进度路线只把沿正常路线离开的阶段标为 ✓；进入 DIAGNOSE 或恢复分支的前驱阶段标为 ✗
   （例如 IMPLEMENT 被 producer-block 阻断），回退到较早阶段时其后阶段全部重置为 ○。
 - 显式命令（`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`、
-  `repin-profile`、`optimize apply`）成功消费审批后，会完成该审批对应的 `APPROVAL_RESUME` handoff；
+  `optimize apply`）成功消费审批后，会完成该审批对应的 `APPROVAL_RESUME` handoff；
   `continue` 遇到多条 handoff 时，只清理指向旧事件且审批已被消费/门禁已不符的过期项（审计原因 `STALE_EVENT`），
   匹配最新事件的有效 handoff 与 REJECT 审批的 handoff 不受影响。
 
@@ -532,7 +532,6 @@ build/stage、核对原 G8，确认后保存本地回执；它不创建新意图
 只在对应场景使用恢复命令：
 
 ```bash
-python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py work-card reconcile --help
 ```

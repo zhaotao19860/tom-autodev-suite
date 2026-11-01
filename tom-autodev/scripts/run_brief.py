@@ -129,7 +129,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
     for row in approvals:
         if row.get("effective_decision"):
             continue
-        if (row.get("created_at") or "") < reentered_at and gate_of(row.get("action") or "") != "PROFILE_REPIN":
+        if (row.get("created_at") or "") < reentered_at:
             continue
         action_name = gate_of(row.get("action") or "")
         if current_gate is not None and action_name != current_gate:

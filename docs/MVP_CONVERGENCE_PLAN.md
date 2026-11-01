@@ -275,9 +275,9 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 
 | 类别 | 候选 | 额外前提 |
 |---|---|---|
-| 原地恢复 / 迁移 | ~~`recover-*`~~、~~`rewind`~~、~~`migrate-workflow-spec`~~、~~`workflow_spec_migration.py`~~ **已删除（2026-11-01）**；`repin-profile`、`profile_repin.py`；**保留** `revise` 与 `run_change.py` 的需修改重做（负责人决定，需修改是正常审批回路，不是恢复） | `restart-from`（3.4）已在真实卡上验证 |
-| 审批旁路 | `approve`、`request-approval`、`await-approval`、`correct-approval-message` | scope 授权 + `approval reconcile` 已覆盖 |
-| 手工推进 | `next`、`complete-phase`、`advance`、`drive`（并入 `continue`）、`start`（并入 `process`） | worker 在真实卡上无需它们 |
+| 原地恢复 / 迁移 | ~~`recover-*`~~、~~`rewind`~~、~~`migrate-workflow-spec`~~、~~`repin-profile`~~、~~`workflow_spec_migration.py`~~、~~`profile_repin.py`~~ **已删除（2026-11-01）**；**保留** `revise` 与 `run_change.py` 的需修改重做（负责人决定，需修改是正常审批回路，不是恢复） | `restart-from`（3.4）已在真实卡上验证 |
+| 审批旁路 | **保留（负责人 2026-11-01 决定）**：`approve`、`request-approval`、`await-approval`、`correct-approval-message` 是投递失败、如流不可达时人工落账与纠错的唯一入口 | scope 授权 + `approval reconcile` 已覆盖 |
+| 手工推进 | **保留（负责人 2026-11-01 决定）**：`next`、`complete-phase`、`advance`、`drive`、`start` 用于 worker 出错时的人工定位与推进，不在正常路径上 | worker 在真实卡上无需它们 |
 | 提交补救 | ~~`submit-companion`~~ **已删除（2026-11-01）**；`orchestrator._submit_companion` 保留（正常 SUBMIT 路径推送测试库提交的实现，不是补救） | 3.2 上线 |
 | 发布旧路径 | `verify_release` 的 `release_info` 分支（网关 404）、legacy planless 分支 | 3.3 上线 |
 | 无生产调用方 | ~~`replay_gate.py`、`decision_questions.py`、`failure_signature_inventory.py`~~ **已删除（2026-11-01）** | 前提 6 |

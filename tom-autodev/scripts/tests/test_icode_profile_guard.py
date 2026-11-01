@@ -13,7 +13,6 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import profile_repin
 import workflow_spec
 from clients.icode_client import IcodeClient
 from orchestrator import Orchestrator
@@ -216,21 +215,6 @@ class IcodeProfileGuardTests(unittest.TestCase):
         self.published()
         self.drift()
         self.assert_blocked_without_effects(self.submit)
-
-    def test_approved_repin_invalidates_old_client_and_new_factory_uses_new_policy(self):
-        previous = self.fixture.root / 'previous.yaml'
-        previous.write_bytes(self.path.read_bytes())
-        self.profile['submission_policy'] = 'one_cr_per_repo'
-        self.path.write_text(yaml.safe_dump(self.profile))
-        prepared = profile_repin.plan(self.orch, self.run, previous)
-        self.assertTrue(prepared.get('ok'), prepared)
-        decision = approved(self.orch.approvals, self.run, profile_repin.ACTION, prepared['input_hash'])
-        applied = profile_repin.apply(self.orch, self.run, decision['approval_id'], previous)
-        self.assertTrue(applied.get('ok'), applied)
-        self.assert_blocked_without_effects(self.submit)
-        self.runtime = self.factory()
-        self.assertEqual(self.runtime.submission_policy, 'one_cr_per_repo')
-        self.assertEqual(self.submit()['reason_code'], 'OK')
 
     def test_matching_controller_receipt_is_read_only_after_profile_drift(self):
         receipt = {'ok': True, 'reason_code': 'OK', 'state': 'IPIPE'}

@@ -13,7 +13,6 @@
 | G8 | iPipe failed-stage rerun or manual-stage continuation |
 | G9 | release evidence and release action |
 | G10 | bounded control-plane optimization candidate |
-| PROFILE_REPIN | permitted old/new profile pin change |
 
 Publish the same `approval_id`, evidence summary, and `input_hash` to Comate and Infoflow. Accept the first valid response. Audit later responses without changing the effective decision. Expire an approval whenever its bound input changes. Default wait limit is ten hours; timeout stops the run.
 
@@ -132,8 +131,8 @@ same gate is asked again for the new hash with a "本次修改说明 / 与上一
 Only the member who cast the effective REJECT can supply the 如流 feedback. A REJECT of
 any other gate stays a stop; code-phase rework goes through DIAGNOSE.
 
-Moving back to an earlier phase, or changing `test_repo` / `business_repos`, is a new run
-started with `restart-from`; the in-place `CHANGE_REQUEST` rewind was removed. Gates opened
+Moving back to an earlier phase, or changing any profile field of a running run, is a new run
+started with `restart-from` (the in-place `repin-profile` was removed too); the in-place `CHANGE_REQUEST` rewind was removed. Gates opened
 before a revise are superseded: they are not nudged, reissued or listed as waiting.
 
 ### What to inspect at each gate
@@ -151,7 +150,6 @@ before a revise are superseded: they are not nudged, reissued or listed as waiti
 | G8 | Current build/stage evidence, case failures, rerun/manual continuation binding and sanitized parameters |
 | G9 | Frozen plan and all current-action-pinned module evidence, versions, environment and release rules; this authorizes read-only platform release verification, not forced publication |
 | G10 | Run Summary, Optimization Proposal, allowed target files, before hashes, validation and rollback |
-| PROFILE_REPIN | Validated previous profile and new profile paths/hashes, permitted changed keys and preservation of existing submissions |
 
 Progress notices are titled “进度通知（非审批）” and say they neither request approval nor authorize anything. A named future gate is not a pending request; the next actor is derived from the ledger. No pending row means no instruction to approve a nonexistent card. An approval-resume notice reports an already accepted decision and is not a new approval.
 

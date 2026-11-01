@@ -13,7 +13,6 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import profile_repin
 from approval_ledger import ApprovalLedger
 from clients.ipipe_runtime import IpipeRuntime
 from orchestrator import Orchestrator
@@ -164,33 +163,6 @@ class RuntimeProfileGuardTests(unittest.TestCase):
         self.runtime.validated_profile["environment_profile"]["image_digest"] = "sha256:changed"
         self.api.candidates = [build()]
         self._blocked_without_effects(lambda: self.runtime.discover(self.runtime.validated_profile, REVISIONS))
-
-    def test_latest_approved_repin_rejects_old_objects_and_accepts_a_new_factory_runtime(self):
-        original_approval = self._trigger_approval()
-        runtimes = [(self.runtime, self.profile, original_approval)]
-        for index, change in enumerate((
-            lambda p: p.update(submission_policy="one_cr_per_repo"),
-            lambda p: p["pipeline_profile"].update(stage_classes=["compile", "unit", "release", "integration"]),
-        )):
-            previous = self.root / f"previous-{index}.yaml"
-            previous.write_bytes(self.path.read_bytes())
-            current = yaml.safe_load(self.path.read_text())
-            change(current)
-            self.path.write_text(yaml.safe_dump(current))
-            prepared = profile_repin.plan(self.orch, self.run, previous)
-            self.assertEqual(prepared["reason_code"], "OK", prepared)
-            approval = approved(self.orch.approvals, profile_repin.ACTION, prepared["input_hash"], self.run)
-            applied = profile_repin.apply(self.orch, self.run, approval["approval_id"], previous)
-            self.assertEqual(applied["reason_code"], "OK", applied)
-            for stale, profile, trigger_approval in runtimes:
-                self._blocked_without_effects(lambda: stale.trigger(profile, REVISIONS, trigger_approval))
-            fresh = self._factory()
-            runtimes.append((fresh, current, self._trigger_approval(fresh, current)))
-        self.api.builds["build-1"] = build()
-        fresh, current, trigger_approval = runtimes[-1]
-        result = fresh.trigger(current, REVISIONS, trigger_approval)
-        self.assertEqual(result["reason_code"], "OK", result)
-        self.assertEqual(sum(call[0] == "trigger_by_revision" for call in self.api.calls), 1)
 
     def test_completed_trigger_receipt_remains_readable_without_writes_after_drift(self):
         approval = self._trigger_approval()

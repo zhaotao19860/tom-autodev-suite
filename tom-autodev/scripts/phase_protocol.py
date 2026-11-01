@@ -132,13 +132,6 @@ class PhaseProtocol:
         except Exception as error:
             return _failure(_exception_reason(error, "PHASE_PROTOCOL_INVALID"), run_id=run_id)
 
-    def _repin(self, events: list[dict[str, Any]]) -> Any:
-        """The approved profile re-pin for the run these events belong to, if any."""
-        from profile_repin import record_for
-
-        run_id = events[0].get("run_id") if events else None
-        return record_for(self.state, run_id) if isinstance(run_id, str) and run_id else None
-
     def _blocking_pending(self, run_id: str) -> list[dict[str, Any]]:
         """Pending intents that no further phase work can settle.
 
@@ -212,7 +205,7 @@ class PhaseProtocol:
                 "host": "comate",
                 "stop": True,
             }
-        profile_error = _pinned_profile_error(events, self._repin(events))
+        profile_error = _pinned_profile_error(events)
         if profile_error is not None:
             return _failure(profile_error, run_id=run_id)
         if self._blocking_pending(run_id):
@@ -275,7 +268,7 @@ class PhaseProtocol:
             "state": state,
             "phase": state,
             "task_id": task_id,
-            "profile_hash": _pinned_profile_hash(events, self._repin(events)),
+            "profile_hash": _pinned_profile_hash(events),
             "input_artifacts": input_artifacts,
             "parent_artifact_hash": parent_hash,
             "source_revisions": source_revisions,
@@ -340,7 +333,7 @@ class PhaseProtocol:
             ),
         }
         key = _action_key(run_id, current["event_id"], state, task_id,
-                          _pinned_profile_hash(events, self._repin(events)))
+                          _pinned_profile_hash(events))
         existing = self.state.idempotency_result(key)
         if existing is not None and not ignore_idempotency_conflict:
             # Presentation evidence was missing from old producer-block actions.
@@ -418,7 +411,7 @@ class PhaseProtocol:
             return _failure("STALE_ACTION")
         action_key = _action_key(
             action["run_id"], action["source_event_id"], action.get("state"),
-            action.get("task_id"), _pinned_profile_hash(events, self._repin(events)),
+            action.get("task_id"), _pinned_profile_hash(events),
         )
         issued = self.state.idempotency_result(action_key)
         action_matches_legacy = False
@@ -1062,7 +1055,7 @@ class PhaseProtocol:
         events = self.state.events(run_id)
         action_key = _action_key(
             run_id, envelope.get("source_event_id"), envelope.get("phase"),
-            envelope.get("task_id"), _pinned_profile_hash(events, self._repin(events)),
+            envelope.get("task_id"), _pinned_profile_hash(events),
         )
         action = self.state.idempotency_result(action_key)
         if not isinstance(action, dict) or action.get("action_id") != envelope.get("action_id"):
@@ -1092,7 +1085,7 @@ class PhaseProtocol:
         events = self.state.events(action["run_id"])
         if not events or events[-1].get("event_id") != action.get("source_event_id"):
             return "STALE_ACTION"
-        profile_error = _pinned_profile_error(events, self._repin(events))
+        profile_error = _pinned_profile_error(events)
         if profile_error is not None:
             return profile_error
         predecessor = self._predecessor(
@@ -1617,9 +1610,7 @@ class PhaseProtocol:
             or (historical.get("payload") or {}).get("task_id") != task_id
         ):
             return None
-        profile_hash = _pinned_profile_hash(
-            self.state.events(run_id), self._repin(self.state.events(run_id))
-        )
+        profile_hash = _pinned_profile_hash(self.state.events(run_id))
         action = self.state.idempotency_result(
             _action_key(run_id, source_event_id, "PLAN", task_id, profile_hash)
         )
@@ -2287,7 +2278,7 @@ class PhaseProtocol:
         if not events or events[-1].get("event_id") != action["source_event_id"]:
             raced = self.state.idempotency_result(result_key)
             return self._validated_cached_ipipe_ingestion(run_id, raced) if raced else _failure("STALE_ACTION", run_id=run_id)
-        profile_error = _pinned_profile_error(events, self._repin(events))
+        profile_error = _pinned_profile_error(events)
         if profile_error is not None:
             return _failure(profile_error, run_id=run_id)
         binding_error = self._ipipe_binding_error(events, payload, content)
@@ -2684,7 +2675,7 @@ class PhaseProtocol:
     def _ipipe_binding_error(
         self, events: list[dict[str, Any]], payload: Any, content: Any = None
     ) -> str | None:
-        profile_error = _pinned_profile_error(events, self._repin(events))
+        profile_error = _pinned_profile_error(events)
         if profile_error is not None:
             return profile_error
         if not isinstance(payload, dict):
@@ -3068,24 +3059,17 @@ def _required_modules(pipeline: Any) -> list[str]:
     })
 
 
-def _pinned_profile_hash(events: list[dict[str, Any]], repin: Any = None) -> str | None:
-    if isinstance(repin, dict) and isinstance(repin.get("new_hash"), str) and repin["new_hash"]:
-        return repin["new_hash"]
+def _pinned_profile_hash(events: list[dict[str, Any]]) -> str | None:
+    """The profile hash INTAKE pinned (the in-place `repin-profile` was removed)."""
     payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
     value = payload.get("profile_hash")
     return value if isinstance(value, str) and value else None
 
 
-def _pinned_profile_error(events: list[dict[str, Any]], repin: Any = None) -> str | None:
-    """Compare the profile on disk against the hash this run is pinned to.
-
-    An approved re-pin moves that hash, so it has to be consulted here too: this is a
-    second, independent copy of the check `orchestrator._runtime_profile` performs,
-    and a re-pin only one of them honours would leave the run healthy through one
-    door and conflicted through the other.
-    """
+def _pinned_profile_error(events: list[dict[str, Any]]) -> str | None:
+    """Compare the profile on disk against the hash this run is pinned to."""
     payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
-    expected = _pinned_profile_hash(events, repin)
+    expected = _pinned_profile_hash(events)
     if not _valid_hash(expected):
         return "PROJECT_NOT_READY"
     profile_path = payload.get("profile_path")

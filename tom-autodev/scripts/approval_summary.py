@@ -47,8 +47,6 @@ _REVIEW = {
            "冻结 pipeline plan 与本次 action 钉住的全部 iPipe 产物；旧 build 不可替代"),
     "G10": ("控制面候选 diff、允许目录、收益、风险、验证命令与回滚",
             "Run Summary、Optimization Proposal、candidate.target_files 与 before_sha256"),
-    "PROFILE_REPIN": ("旧新 profile 差异、允许字段、既有提交绑定保持有效",
-                      "已校验旧副本与当前 profile；old_hash / new_hash / changed_keys"),
 }
 _EFFECTS = {
     "G0": "批准当前需求/协作/路由绑定；控制器随后建群并进入 GRILL，不授权代码提交或发布",
@@ -60,7 +58,6 @@ _EFFECTS = {
     "G8": "仅重跑或继续本次 build/stage 和参数绑定的阶段，或对同一 CR 版本重新构建一次；不批准新代码或发布",
     "G9": "只读核验平台发布并记录匹配证据；全部模块通过才进入 RELEASE_SUCCESS，未发布则等待，不强制发布",
     "G10": "仅应用允许目录内的控制面候选改动并验证/失败回滚；不修改业务 run 的授权",
-    "PROFILE_REPIN": "执行另行 apply 后移动 profile pin；不改阶段、不重新授权既有提交，不允许改变审批成员",
 }
 
 
@@ -68,8 +65,6 @@ def gate_intent(action: Any) -> dict[str, Any]:
     from approval_ledger import gate_of
     name = gate_of(str(action))
     subject, effect = _GATES.get(name, ("", ""))
-    if name == "PROFILE_REPIN":
-        subject = "将运行重新钉到已审核的 project profile"
     focus, reads = _REVIEW.get(name, ("核对本次动作与绑定", "缺少已知审批合同，请先补齐"))
     revisable = name in workflow_spec.REVISABLE_GATES
     return {"subject": subject, "effect": _EFFECTS.get(name, effect),

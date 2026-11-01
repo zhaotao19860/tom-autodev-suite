@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · MVP 第 4 步：删除原地重钉 repin-profile
+
+- 删除 `profile_repin.py`（323 行）与 CLI `repin-profile`。run 的 profile pin 现在只取 INTAKE 的 `profile_hash`：`phase_protocol._pinned_profile_hash` 去掉 re-pin 参数，orchestrator、icode/ipipe runtime、worker_driver 统一调用它，`PhaseProtocol._repin` 删除；`approval_summary`、`run_brief`、`run_change.superseded` 中的 PROFILE_REPIN 分支删除。profile 改动在运行中返回 `PROFILE_CONFLICT`，处理方式是恢复原文件或 `restart-from`。历史上做过重钉的 2 个 run（7c545ba1、81a91c08）均已 STOPPED。README、OPERATIONS、approval-policy 同步。全量 1598 个测试通过。
+
 ## 2026-11-01 · MVP 第 4 步：删除原地迁移 migrate-workflow-spec
 
 - 删除 `workflow_spec_migration.py`（257 行）、CLI `migrate-workflow-spec`、`continue` 自动应用已批迁移、`execution_guard.migration_exempt` 及其在审批投递/落账/重发/watcher 中的豁免、status 的「迁移已批准待应用」。策略漂移的 run 现在所有写入都被拒绝，处理方式是 `stop` + `restart-from`，新 run 在自己的 G0 钉住当前策略（新增回归测试：漂移 run 可 restart-from）。历史上做过迁移的 4 个 run 均已 STOPPED，`spec_drift_for_state` 不再读迁移链对它们无影响。`GATE_LABELS` 中的迁移条目进 workflow 策略 hash，保留。README、SKILL.md、OPERATIONS、approval-policy 同步。全量 1609 个测试通过。

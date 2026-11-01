@@ -208,7 +208,7 @@ def _recover_legacy_diagnose_action(
         return None
     if payload.get("task_id") != (current.get("payload") or {}).get("task_id"):
         return None
-    profile_hash = _pinned_profile_hash(events, orchestrator.phase_protocol()._repin(events))
+    profile_hash = _pinned_profile_hash(events)
     key = _action_key(
         run_id, current.get("event_id"), "DIAGNOSE", payload.get("task_id"), profile_hash,
     )

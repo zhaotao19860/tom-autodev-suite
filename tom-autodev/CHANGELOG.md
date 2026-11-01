@@ -4,6 +4,7 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-11-01
 
+- MVP 第 4 步删除原地重钉 `repin-profile`，profile pin 只取 INTAKE；原地恢复/迁移类删除完成。
 - MVP 第 4 步删除原地迁移 `migrate-workflow-spec`，策略漂移改走 `stop` + `restart-from`。
 - MVP 第 4 步删除原地回退 `rewind`（CHANGE_REQUEST），改走 `restart-from`；保留 `revise` 需修改重做。
 - MVP 第 4 步删除 `recover-*` 原地恢复命令（restart-from 已覆盖）。

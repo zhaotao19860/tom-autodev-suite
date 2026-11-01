@@ -20,7 +20,7 @@ import yaml
 import intent_executor
 from approval_ledger import ApprovalLedger, gate_of
 from artifact_store import ArtifactStore
-from profile_repin import pinned_hash, record_for
+from phase_protocol import _pinned_profile_hash
 from state_store import StateStore
 from workspace_manager import WorkspaceManager
 
@@ -68,8 +68,7 @@ class IcodeRuntime:
         # a second change set for the same card folds into it instead of opening another.
         self.submission_policy = submission_policy or "one_cr_per_change_set"
         self._bound_submission_policy = self.submission_policy
-        self._bound_profile_hash = profile_hash or pinned_hash(
-            self.state.events(run_id), record_for(self.state, run_id))
+        self._bound_profile_hash = profile_hash or _pinned_profile_hash(self.state.events(run_id))
         self._cli_by_repo: dict[str, str] = {}
 
     def _profile_error(self) -> dict[str, Any] | None:
@@ -81,7 +80,7 @@ class IcodeRuntime:
         if not isinstance(intake, dict) or "profile_path" not in intake:
             return None
         path = intake.get("profile_path")
-        expected = pinned_hash(events, record_for(self.state, self.run_id))
+        expected = _pinned_profile_hash(events)
         if not _nonempty(path) or not _nonempty(expected):
             return _failure("PROJECT_NOT_READY")
         if (expected != self._bound_profile_hash

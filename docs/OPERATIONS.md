@@ -187,7 +187,6 @@ skill 产生的前置 debug 文本不会再被误判为 JSON 损坏；如果入�
 只有符合对应恢复场景时才使用专门命令：
 
 ```bash
-python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py confirm-approval-redelivery --help
 python3 tom-autodev/scripts/cli.py revise --help
@@ -230,7 +229,7 @@ python3 tom-autodev/scripts/cli.py revise "$RUN_ID" --approval-id REJECTED_ID \
 （`APPROVAL_SUPERSEDED`），也不再出现在 `status` 的待审批列表里。重发次数用完
 （`APPROVAL_RETRY_EXHAUSTED`）时，核对成员与投递后 stop，再用 `restart-from` 新建运行。
 
-`repin-profile` 需要保存的上一版 profile 副本和对应审批；直接编辑配置不会自动改变已运行任务的绑定。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录来解除阻断。
+原地重钉 `repin-profile` 已删除：直接编辑配置不会改变已运行任务的绑定，运行中的 run 会因 `PROFILE_CONFLICT` 停住；要换 profile，恢复原文件，或 stop 后用 `restart-from` 新建运行。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录来解除阻断。
 
 默认状态库为 `~/.tom-autodev/state.sqlite`。自定义根目录参数放在子命令前，后续命令须保持一致：
 

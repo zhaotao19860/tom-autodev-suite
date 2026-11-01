@@ -61,7 +61,6 @@ class LegacyDiagnoseRecoveryTests(unittest.TestCase):
         }]
         self.orch.state.idempotency_result.return_value = action()
         protocol = Mock()
-        protocol._repin.return_value = None
         protocol.legacy_diagnose_action.return_value = {
             **action(), "source_evidence_refs": ["artifact:" + PARENT_HASH],
         }

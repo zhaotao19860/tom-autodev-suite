@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import orchestrator as entry
 import approval_watch
-import profile_repin
 import submit_descriptor
 import worker_driver
 import workflow_spec
@@ -109,8 +108,6 @@ class ExecutionGuardTests(unittest.TestCase):
             "approval timeout": lambda: owner.timeout_infoflow_approval(run, approval_id, "hash"),
             "approval reissue": lambda: owner.reissue_infoflow_approval(run, "G8", "hash", member_policy=policy, infoflow_client=object()),
             "descriptor": lambda: submit_descriptor.build_and_archive(owner, run, "task"),
-            "profile repin": lambda: profile_repin.apply(owner, run, "approval", self.root / "old.yaml"),
-            "profile approval": lambda: profile_repin.request(owner, run, self.root / "old.yaml", comate_client=object(), infoflow_client=object()),
             "worker controller": lambda: worker_driver.execute_controller(owner, run),
             "worker auto": lambda: worker_driver.execute_auto(owner, run),
             "worker advance": lambda: worker_driver.advance(owner, run),

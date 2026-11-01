@@ -18,8 +18,7 @@ from approval_ledger import ApprovalLedger, gate_of
 import build_markers
 import intent_executor
 from clients.ipipe_client import IpipeTransportError
-from phase_protocol import _registered_pipeline
-from profile_repin import pinned_hash, record_for
+from phase_protocol import _pinned_profile_hash, _registered_pipeline
 from project_registry import validate_profile
 from state_store import StateStore
 
@@ -2602,7 +2601,7 @@ class IpipeRuntime:
         if not isinstance(intake, dict) or "profile_path" not in intake:
             return None
         path = intake.get("profile_path")
-        expected = pinned_hash(events, record_for(self.state, self.run_id))
+        expected = _pinned_profile_hash(events)
         if not _nonempty(path) or not _nonempty(expected):
             return _failure("PROJECT_NOT_READY")
         if expected != self._bound_profile_hash:

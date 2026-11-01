@@ -249,13 +249,8 @@ def superseded(state: Any, run_id: str, approval: dict[str, Any]) -> bool:
     """Whether a revise landed after this approval was opened.
 
     The gate it asked belongs to an action the run has left, so it must not be
-    reissued, nudged or listed as waiting. A profile re-pin is about the run rather
-    than a position in it and is never superseded.
+    reissued, nudged or listed as waiting.
     """
-    from approval_ledger import gate_of
-
-    if gate_of(approval.get("action") or "") == "PROFILE_REPIN":
-        return False
     created = approval.get("created_at") or ""
     return any(
         isinstance((event.get("payload") or {}).get("reentry"), dict)

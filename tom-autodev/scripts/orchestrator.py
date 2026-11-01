@@ -33,6 +33,7 @@ from evidence_gate import EvidenceGate
 from evidence_policy import requirement_for
 from knowledge_sync import KnowledgeSync, project_ku_target
 from phase_protocol import PhaseProtocol, plan_implement_binding
+from phase_protocol import _pinned_profile_hash as _pinned_from_intake
 from project_registry import (
     acceptable_profile_paths,
     load_profile,
@@ -59,13 +60,6 @@ _log = logging.getLogger(__name__)
 # happened. Every other exception -- a socket dying mid-request, an HTTP error, a
 # timeout -- leaves the outcome genuinely unknown and must still be reconciled.
 _NOTHING_SENT_EXCEPTIONS = (AttributeError, TypeError, NameError, ImportError)
-
-
-def _pinned_profile_hash(orchestrator: Any, run_id: str, events: list[dict[str, Any]]) -> Any:
-    """The hash this run is pinned to, honouring an approved re-pin over INTAKE's."""
-    from profile_repin import pinned_hash, record
-
-    return pinned_hash(events, record(orchestrator, run_id))
 
 
 class Orchestrator:
@@ -830,12 +824,7 @@ class Orchestrator:
             return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
         recorded_path = intake.get("profile_path")
         recorded_project = intake.get("project")
-        # The pin can have moved since INTAKE: `repin-profile` accepts an edited profile
-        # under its own approval, and `_runtime_profile` already reads the moved pin.
-        # Reading INTAKE's hash here instead left the run healthy through one door and
-        # PROFILE_CONFLICT through the other, which blocked every phase completion after
-        # a legitimate re-pin.
-        recorded_hash = _pinned_profile_hash(self, run_id, events)
+        recorded_hash = _pinned_from_intake(events)
         card_id = intake.get("requirement_id")
         if (
             not isinstance(recorded_path, str)
@@ -1831,7 +1820,7 @@ class Orchestrator:
         if not isinstance(intake, dict):
             return {"ok": False, "reason_code": "PROJECT_NOT_READY", "run_id": run_id}
         recorded_path = intake.get("profile_path")
-        recorded_hash = _pinned_profile_hash(self, run_id, events)
+        recorded_hash = _pinned_from_intake(events)
         recorded_project = intake.get("project")
         card_id = intake.get("requirement_id")
         if not all(isinstance(value, str) and value for value in (recorded_path, recorded_hash, recorded_project)):
@@ -3374,12 +3363,6 @@ def main(argv: list[str] | None = None) -> int:
     redelivery.add_argument("--reason", required=True, help="说明已核对未收到审批的依据")
     redelivery.add_argument("--actor", required=True, help="执行确认的人员")
 
-    repin = subparsers.add_parser("repin-profile")
-    repin.add_argument("run_id")
-    repin.add_argument("previous", help="被钉住的那份 profile 的副本，用于给出改动 diff")
-    repin.add_argument("--request", action="store_true", help="开 PROFILE_REPIN 门")
-    repin.add_argument("--approval-id", help="省略则只给出待批的 input_hash，不落账")
-
     revise = subparsers.add_parser(
         "revise",
         help="G1–G6 选择需修改后，按修改意见重做本阶段草案并重新发起该门",
@@ -3832,24 +3815,6 @@ def main(argv: list[str] | None = None) -> int:
             args.reason,
             args.actor,
         )
-    elif args.command == "repin-profile":
-        import profile_repin
-
-        if args.approval_id:
-            result = _settle_consumed_approval(
-                orchestrator, args.run_id, args.approval_id, "repin-profile",
-                profile_repin.apply(orchestrator, args.run_id, args.approval_id, args.previous),
-            )
-        elif args.request:
-            from approval_delivery import ComateApprovalClient
-
-            result = profile_repin.request(
-                orchestrator, args.run_id, args.previous,
-                comate_client=ComateApprovalClient(),
-                infoflow_client=_infoflow_approval_client(orchestrator),
-            )
-        else:
-            result = profile_repin.plan(orchestrator, args.run_id, args.previous)
     elif args.command == "revise":
         import run_change
 
