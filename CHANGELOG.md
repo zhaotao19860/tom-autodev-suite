@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 10 轮 Codex 评审第 3 轮：局部复核 PASS
+
+- 报告：[docs/reviews/2026-11-02-r10-codex-review-3.md](docs/reviews/2026-11-02-r10-codex-review-3.md)（4e7417d..ae3c5d9）。R10-NEW-001 关闭，无新增 finding。本批次三轮评审结束；全量 C、M、P 未在本批次重新验证。仅文档改动，无用户可见行为变化。
+
 ## 2026-11-02 · 第 10 轮 Codex 评审第 2 轮修复
 
 评审报告：[docs/reviews/2026-11-02-r10-codex-review-2.md](docs/reviews/2026-11-02-r10-codex-review-2.md)（eb9ed7c..4e7417d）。第 1 轮 4 项全部关闭，新增 1 项 P2。
