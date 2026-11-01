@@ -189,7 +189,7 @@ Call `EvidenceGate` before every checkpoint or external side effect. Block on a 
 
 For a failed or manual iPipe stage, load the project skill's runtime/parameter map first, then use `orchestrator.py ipipe-rerun RUN STAGE_BUILD_ID APPROVAL_ID INPUT_HASH --parameter NAME ...`; it is the explicit G8/manual-continuation path and reuses the durable stage ownership check. The project skill names the topology, logs, version/counter checks, and parameter-to-product mapping; this controller resolves product URLs, redacts tokens, requests G8, reruns, and classifies the new evidence. Child project skills never call iPipe.
 
-If the failed build's compile product can no longer be downloaded (the platform answers 403/404), stage re-runs cannot succeed; use `orchestrator.py ipipe-rebuild RUN --reason ...` (read-only check, then `--request-g8`, then `--approval-id A --input-hash H`). It builds the same CR revisions once more under G8, rebinds the run to the new build and supersedes the pending DIAGNOSE job; it needs the `DIAGNOSE -> IPIPE` edge, so an older pinned run is migrated first with `migrate-workflow-spec`. A superseded build (and a build rejected after `TRIGGER_MODE_MISMATCH`, marked `ipipe.build-rejected`) is never module, release or G9 evidence, and its stages cannot be re-run (`STAGE_BUILD_SUPERSEDED`). From `IPIPE` the replaced build must have failed or have its product proven gone.
+If the failed build's compile product can no longer be downloaded (the platform answers 403/404), stage re-runs cannot succeed; use `orchestrator.py ipipe-rebuild RUN --reason ...` (read-only check, then `--request-g8`, then `--approval-id A --input-hash H`). It builds the same CR revisions once more under G8, rebinds the run to the new build and supersedes the pending DIAGNOSE job; it needs the `DIAGNOSE -> IPIPE` edge, so an older pinned run is continued in a new run with `restart-from`. A superseded build (and a build rejected after `TRIGGER_MODE_MISMATCH`, marked `ipipe.build-rejected`) is never module, release or G9 evidence, and its stages cannot be re-run (`STAGE_BUILD_SUPERSEDED`). From `IPIPE` the replaced build must have failed or have its product proven gone.
 
 A stage re-run counts as started only when the stage carries a start time later than the intent's creation (30 s skew) and is not a successor another re-run already receipted; otherwise the outcome stays unknown. `abandon-intent --local-error-proven` needs an observation recorded with `before_dispatch: true`.
 
@@ -270,17 +270,10 @@ a pending job exists); the diagnosis routes `GRILL` and G6 re-opens the decision
 the user what a draft contains only from the saved draft, never from the intended version.
 
 If a paused run returns `WORKFLOW_SPEC_DRIFT`, do not edit its event or hash in place and do
-not use ordinary `continue` to bypass the guard. Use the dedicated
-`scripts/cli.py migrate-workflow-spec RUN_ID --request` gate, then apply the exact approved
-`approval_id` with `--approval-id`, or call `continue` to consume an existing APPROVE whose
-run, action and input_hash exactly match the current migration plan. `continue` never
-approves or reopens the gate; stale, rejected or cross-run approvals still cannot pass
-drift. `status` remains read-only and shows “迁移已批准待应用”, with `continue` as the
-next step. This appends an auditable workflow-pin migration receipt
-and preserves the run's phase artifacts, existing approval bindings, and external intent
-records. Only after that migration is approved may an unknown approval delivery use
-`confirm-approval-redelivery`; that command still reuses the original approval_id/input_hash
-and never creates a new G1.
+not use ordinary `continue` to bypass the guard. The in-place `migrate-workflow-spec` was
+removed: stop the run and continue the requirement with `scripts/cli.py restart-from RUN_ID`,
+whose new run pins the current policy at its own G0. Every write of the drifted run,
+approval delivery and settlement included, stays refused.
 
 For a legacy run, use `scripts/backfill_knowledge.py RUN_ID CARD_ID --project PROJECT
 --username USERNAME`. It reads only integrity-checked phase artifacts, publishes KU-only

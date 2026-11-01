@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ipipe_rebuild
 import orchestrator as orchestrator_module
 import worker_driver
-import workflow_spec_migration
 from approval_watch import auto_resume_from_hook
 from orchestrator import Orchestrator
 
@@ -61,7 +60,7 @@ class StaleResumeHandoffTests(unittest.TestCase):
     def _rebuild_scenario(self):
         """Reproduce the real run: two handoffs on the DIAGNOSE event, then an IPIPE event."""
         old_event = self._events()[-1]["event_id"]
-        migration = self._approval("WORKFLOW_SPEC_MIGRATION")
+        migration = self._approval("G6")
         g8 = self._approval("G8")
         self._handoff(migration, old_event)
         self._handoff(g8, old_event)
@@ -86,19 +85,6 @@ class StaleResumeHandoffTests(unittest.TestCase):
                 RUN, mine["approval_id"], actor="again", reason="APPROVAL_CONSUMED"), [])
         self.assertEqual(self.state.idempotency_result(f"handoff-completion:{done[0]}")["actor"],
                          "ipipe-rebuild")
-
-    def test_migrate_workflow_spec_success_closes_its_handoff_and_failure_does_not(self):
-        migration, g8 = self._rebuild_scenario()
-        failure = {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": RUN}
-        with mock.patch.object(workflow_spec_migration, "_apply", return_value=failure):
-            workflow_spec_migration.apply(self.orch, RUN, migration["approval_id"])
-        self.assertEqual(len(self._open()), 2)
-        success = {"ok": True, "reason_code": "OK", "approval_id": migration["approval_id"]}
-        with mock.patch.object(workflow_spec_migration, "_apply", return_value=success):
-            workflow_spec_migration.apply(self.orch, RUN, migration["approval_id"])
-            workflow_spec_migration.apply(self.orch, RUN, migration["approval_id"])
-        self.assertEqual([h for h in self._open() if migration["approval_id"] in h], [])
-        self.assertEqual(len(self._open()), 1)
 
     def test_ipipe_rebuild_trigger_and_reconcile_close_the_g8_handoff(self):
         for reconcile in (False, True):

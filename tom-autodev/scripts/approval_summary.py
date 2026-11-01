@@ -49,10 +49,6 @@ _REVIEW = {
             "Run Summary、Optimization Proposal、candidate.target_files 与 before_sha256"),
     "PROFILE_REPIN": ("旧新 profile 差异、允许字段、既有提交绑定保持有效",
                       "已校验旧副本与当前 profile；old_hash / new_hash / changed_keys"),
-    "WORKFLOW_SPEC_MIGRATION": (
-        "旧新 workflow_spec_hash、保留的阶段/审批/外部审计绑定",
-        "运行事件、已有 artifact、approval_id/input_hash 和外部 intent/receipt",
-    ),
 }
 _EFFECTS = {
     "G0": "批准当前需求/协作/路由绑定；控制器随后建群并进入 GRILL，不授权代码提交或发布",
@@ -65,10 +61,6 @@ _EFFECTS = {
     "G9": "只读核验平台发布并记录匹配证据；全部模块通过才进入 RELEASE_SUCCESS，未发布则等待，不强制发布",
     "G10": "仅应用允许目录内的控制面候选改动并验证/失败回滚；不修改业务 run 的授权",
     "PROFILE_REPIN": "执行另行 apply 后移动 profile pin；不改阶段、不重新授权既有提交，不允许改变审批成员",
-    "WORKFLOW_SPEC_MIGRATION": (
-        "执行另行 apply 后移动 workflow policy pin；不重写阶段事件、"
-        "不创建新的 G1、不改变既有 approval_id/input_hash，也不删除外部审计"
-    ),
 }
 
 
@@ -78,8 +70,6 @@ def gate_intent(action: Any) -> dict[str, Any]:
     subject, effect = _GATES.get(name, ("", ""))
     if name == "PROFILE_REPIN":
         subject = "将运行重新钉到已审核的 project profile"
-    if name == "WORKFLOW_SPEC_MIGRATION":
-        subject = "将暂停中的运行迁移到当前 workflow policy"
     focus, reads = _REVIEW.get(name, ("核对本次动作与绑定", "缺少已知审批合同，请先补齐"))
     revisable = name in workflow_spec.REVISABLE_GATES
     return {"subject": subject, "effect": _EFFECTS.get(name, effect),
@@ -386,37 +376,6 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
                         "material_status": "PINNED",
                         "_review_content": proposal,
                     }
-        if gate_name == "WORKFLOW_SPEC_MIGRATION":
-            # This gate's object is the policy pin move itself, derived read-only
-            # from the run's events; there is no phase artifact to read. Without
-            # this branch a redelivery of the card reports APPROVAL_MATERIAL_MISSING
-            # and a paused, drifted run can never be migrated at all.
-            from workflow_spec_migration import plan as migration_plan
-
-            prepared = migration_plan(orchestrator, run_id)
-            if not prepared.get("ok") or prepared.get("input_hash") != input_hash:
-                return missing
-            return {
-                "summary": [
-                    f"workflow_spec_hash {prepared['old_hash'][:12]}… → {prepared['new_hash'][:12]}…",
-                    f"当前阶段 {prepared['current_state']}",
-                    *(f"保留 {item}" for item in prepared["preserves"]),
-                ],
-                "references": [
-                    {"label": "旧 workflow_spec_hash", "ref": prepared["old_hash"]},
-                    {"label": "当前 workflow_spec_hash", "ref": prepared["new_hash"]},
-                    {"label": "当前阶段", "ref": str(prepared["current_state"])},
-                ],
-                "content_hash": input_hash,
-                "material_status": "PINNED",
-                "_review_content": {
-                    key: prepared[key]
-                    for key in (
-                        "run_id", "action", "old_hash", "new_hash",
-                        "current_state", "preserves", "input_hash",
-                    )
-                },
-            }
         action = _read_only_next(orchestrator, run_id)
         if (
             not action.get("ok")

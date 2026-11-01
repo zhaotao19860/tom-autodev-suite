@@ -414,20 +414,14 @@ def spec_drift(events: list[dict[str, Any]] | None) -> dict[str, str] | None:
 
 
 def spec_drift_for_state(state: Any, run_id: str) -> dict[str, str] | None:
-    """The execution-time drift check, including an approved migration chain."""
-    events = state.events(run_id)
-    pinned = pinned_spec_hash(events)
+    """The execution-time drift check.
+
+    The in-place `migrate-workflow-spec` was removed: a drifted run is stopped and
+    continued with `restart-from`, which pins the current policy at its own G0.
+    """
+    pinned = pinned_spec_hash(state.events(run_id))
     if pinned is None:
         return None
-    try:
-        from workflow_spec_migration import effective_pinned_hash
-
-        migrated = effective_pinned_hash(state, run_id, events=events)
-        if migrated is not None:
-            pinned = migrated
-    except ImportError:
-        # Keep workflow_spec independently usable in schema/hash unit tests.
-        pass
     current = canonical_hash()
     if pinned == current:
         return None

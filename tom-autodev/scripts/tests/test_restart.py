@@ -140,6 +140,15 @@ class RestartTests(unittest.TestCase):
         self.orch.state.transition(self.source, "RELEASE_SUCCESS", {})
         self.assertEqual(restart.plan(self.orch, self.source)["reason_code"], "RESTART_SOURCE_RELEASED")
 
+    def test_a_drifted_run_restarts_since_migration_was_removed(self):
+        import workflow_spec
+
+        with unittest.mock.patch("workflow_spec.canonical_hash", return_value="f" * 64):
+            self.assertIsNotNone(workflow_spec.spec_drift_for_state(self.orch.state, self.source))
+            result = restart.execute(self.orch, self.source, self.snapshot, reason="策略漂移")
+        self.assertEqual(result["reason_code"], "RESTARTED", result)
+        self.assertEqual(self.orch.status(self.source)["state"], "STOPPED")
+
     def test_a_reason_is_required(self):
         self.assertEqual(restart.execute(self.orch, self.source, self.snapshot, reason=" ")["reason_code"],
                          "RESTART_REASON_REQUIRED")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import agent_host
-from execution_guard import execution_guard, guard_execution, migration_exempt
+from execution_guard import execution_guard, guard_execution
 
 import hashlib
 import json
@@ -1432,13 +1432,9 @@ class Orchestrator:
         record = self.approvals.get(approval_id)
         if bound_run is None:
             bound_run = record.get("run_id") if isinstance(record, dict) else None
-        # A drifted run may still answer the gate that authorizes its migration.
-        # Without this the card could be delivered but its decision never landed,
-        # leaving `migrate-workflow-spec --approval-id` permanently APPROVAL_REQUIRED.
-        if not migration_exempt(record.get("action") if isinstance(record, dict) else None):
-            blocked = execution_guard(self.state, bound_run)
-            if blocked is not None:
-                return blocked
+        blocked = execution_guard(self.state, bound_run)
+        if blocked is not None:
+            return blocked
         result = self.approvals.resolve(
             approval_id, decision, input_hash, channel,
             run_id=run_id, responder=responder, state_store=self.state,
@@ -1904,7 +1900,6 @@ class Orchestrator:
         evidence: dict[str, Any] | None = None,
         comate_client: Any,
         infoflow_client: Any,
-        allow_workflow_spec_migration: bool = False,
     ) -> dict[str, Any]:
         if self.status(run_id)["state"] == "RUN_NOT_FOUND":
             return {"run_id": run_id, "reason_code": "RUN_NOT_FOUND"}
@@ -2093,13 +2088,9 @@ class Orchestrator:
         approval = self.approvals.get(approval_id)
         if approval is None or approval.get("run_id") != run_id or approval.get("run_id") == "legacy":
             return {"reason_code": "APPROVAL_RUN_MISMATCH", "run_id": run_id}
-        # Guarded per approval instead of by decorator: reading the gate back is how
-        # its decision lands, and a drifted run must still be able to answer the gate
-        # that authorizes its own migration.
-        if not migration_exempt(approval.get("action")):
-            blocked = execution_guard(self.state, run_id)
-            if blocked is not None:
-                return blocked
+        blocked = execution_guard(self.state, run_id)
+        if blocked is not None:
+            return blocked
         receipt = next((entry.get("receipt") for entry in approval["delivery_receipts"] if entry.get("channel") == "infoflow"), None)
         request_id = receipt.get("request_id") if isinstance(receipt, dict) else None
         if not isinstance(request_id, str) or not request_id:
@@ -2167,16 +2158,8 @@ class Orchestrator:
         return result
 
     def receive_infoflow_reply(self, run_id: str, approval_id: str, input_hash: str, response: Any) -> dict[str, Any]:
-        # The migration gate is the one approval that must be answerable while
-        # the run is drifted. A method-level guard cannot see the approval action,
-        # so the old decorator rejected a verified migration reply before it
-        # reached the ledger. Ordinary gates remain guarded per approval.
         approval = self.approvals.get(approval_id)
-        if (
-            isinstance(approval, dict)
-            and approval.get("run_id") == run_id
-            and not migration_exempt(approval.get("action"))
-        ):
+        if isinstance(approval, dict) and approval.get("run_id") == run_id:
             blocked = execution_guard(self.state, run_id)
             if blocked is not None:
                 return blocked
@@ -2203,7 +2186,6 @@ class Orchestrator:
         evidence: dict[str, Any] | None = None,
         infoflow_client: Any,
         comate_client: Any | None = None,
-        allow_workflow_spec_migration: bool = False,
     ) -> dict[str, Any]:
         """Open a fresh attempt at a stuck gate, bound to the same input hash.
 
@@ -2277,9 +2259,6 @@ class Orchestrator:
             evidence=evidence,
             comate_client=comate_client or ComateApprovalClient(),
             infoflow_client=infoflow_client,
-            # A timed-out migration gate must be reissuable, otherwise the only path
-            # out of drift disappears the moment nobody answers it in time.
-            allow_workflow_spec_migration=migration_exempt(action),
         )
 
     @guard_execution
@@ -3401,14 +3380,6 @@ def main(argv: list[str] | None = None) -> int:
     repin.add_argument("--request", action="store_true", help="开 PROFILE_REPIN 门")
     repin.add_argument("--approval-id", help="省略则只给出待批的 input_hash，不落账")
 
-    migrate_spec = subparsers.add_parser(
-        "migrate-workflow-spec",
-        help="在审批后把旧运行迁移到当前 workflow policy",
-    )
-    migrate_spec.add_argument("run_id")
-    migrate_spec.add_argument("--request", action="store_true", help="开 WORKFLOW_SPEC_MIGRATION 门")
-    migrate_spec.add_argument("--approval-id", help="应用已批准的迁移审批")
-
     revise = subparsers.add_parser(
         "revise",
         help="G1–G6 选择需修改后，按修改意见重做本阶段草案并重新发起该门",
@@ -3879,22 +3850,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = profile_repin.plan(orchestrator, args.run_id, args.previous)
-    elif args.command == "migrate-workflow-spec":
-        import workflow_spec_migration
-
-        if args.approval_id:
-            result = workflow_spec_migration.apply(orchestrator, args.run_id, args.approval_id)
-        elif args.request:
-            from approval_delivery import ComateApprovalClient
-
-            result = workflow_spec_migration.request(
-                orchestrator,
-                args.run_id,
-                comate_client=ComateApprovalClient(),
-                infoflow_client=_infoflow_approval_client(orchestrator),
-            )
-        else:
-            result = workflow_spec_migration.plan(orchestrator, args.run_id)
     elif args.command == "revise":
         import run_change
 
@@ -4421,7 +4376,6 @@ def _reissue_approval(
         member_policy=context["member_policy"],
         evidence=context["evidence"],
         infoflow_client=_infoflow_approval_client(orchestrator),
-        allow_workflow_spec_migration=migration_exempt(action),
     )
 
 
@@ -4452,12 +4406,10 @@ def _confirm_approval_redelivery(
     approval = orchestrator.approvals.get(approval_id)
     if not isinstance(approval, dict):
         return {"ok": False, "reason_code": "APPROVAL_NOT_FOUND", "run_id": run_id}
-    # Refuse before abandoning an intent or caching approval context: only the
-    # migration gate may be redelivered while the run's workflow pin is drifted.
-    if not migration_exempt(approval.get("action")):
-        blocked = execution_guard(orchestrator.state, run_id)
-        if blocked is not None:
-            return blocked
+    # Refuse before abandoning an intent or caching approval context.
+    blocked = execution_guard(orchestrator.state, run_id)
+    if blocked is not None:
+        return blocked
     if approval.get("run_id") != run_id or approval.get("input_hash") != input_hash:
         return {
             "ok": False,
@@ -4538,7 +4490,6 @@ def _confirm_approval_redelivery(
             member_policy=approval.get("member_policy") or context["member_policy"],
             evidence=context["evidence"],
             infoflow_client=_infoflow_approval_client(orchestrator),
-            allow_workflow_spec_migration=migration_exempt(approval.get("action")),
         )
         return {
             **retry,

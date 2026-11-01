@@ -248,12 +248,12 @@ class ApprovalLedgerChannelTests(unittest.TestCase):
         self.assertEqual([(row["effective"], row["late"], row["responder"]) for row in audit], [(True, False, "dev@example.test"), (False, True, "owner@example.test")])
 
     def test_revise_is_refused_on_a_non_revisable_gate_and_leaves_it_pending(self):
-        # A 需修改 tap/reply on a migration (or any non G1-G6) gate has nothing to redo,
+        # A 需修改 tap/reply on a non G1-G6 gate (G9 here) has nothing to redo,
         # so the ledger must not resolve the gate; APPROVE then still works.
         with tempfile.TemporaryDirectory() as directory:
             ledger = ApprovalLedger(Path(directory) / "approvals.sqlite")
             request = ledger.request(
-                "WORKFLOW_SPEC_MIGRATION", "hash-a", ["comate", "infoflow"],
+                "G9", "hash-a", ["comate", "infoflow"],
                 member_policy={"comate": ["dev@example.test"], "infoflow": ["owner@example.test"]},
             )
             revise = ledger.receive(

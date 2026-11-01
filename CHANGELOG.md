@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · MVP 第 4 步：删除原地迁移 migrate-workflow-spec
+
+- 删除 `workflow_spec_migration.py`（257 行）、CLI `migrate-workflow-spec`、`continue` 自动应用已批迁移、`execution_guard.migration_exempt` 及其在审批投递/落账/重发/watcher 中的豁免、status 的「迁移已批准待应用」。策略漂移的 run 现在所有写入都被拒绝，处理方式是 `stop` + `restart-from`，新 run 在自己的 G0 钉住当前策略（新增回归测试：漂移 run 可 restart-from）。历史上做过迁移的 4 个 run 均已 STOPPED，`spec_drift_for_state` 不再读迁移链对它们无影响。`GATE_LABELS` 中的迁移条目进 workflow 策略 hash，保留。README、SKILL.md、OPERATIONS、approval-policy 同步。全量 1609 个测试通过。
+
 ## 2026-11-01 · MVP 第 4 步：删除原地回退 rewind（CHANGE_REQUEST）
 
 - 删除 CLI `rewind` 与 `run_change` 的 `plan`/`request`/`apply`/`rewind_available`/`snapshot`/`summary_lines`：回到更早阶段、改 `test_repo`/`business_repos`、离开 ARCHITECTURE_REVIEW 一律走 `restart-from`（3.4，已在真实卡验证）。`run_brief`、`approval_watch`、`approval_summary` 的 CHANGE_REQUEST 分支随之删除，重发用尽与需修改提示改指 `restart-from`。保留 `revise`（需修改按意见重做）与 `superseded`。`workflow_spec.REWIND_TARGETS` 不再有使用方，但它进 workflow 策略 hash，删掉会让所有已钉住的 run 漂移，故保留并注明。SKILL.md、state-machine、approval-policy、producer-contract、OPERATIONS、README 同步。

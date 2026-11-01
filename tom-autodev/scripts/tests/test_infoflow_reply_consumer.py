@@ -172,7 +172,7 @@ class InfoflowReplyConsumerTests(unittest.TestCase):
                 self.assertEqual(reply["decision"], expected)
 
     def test_revise_on_a_non_revisable_gate_is_skipped_for_a_later_approve(self):
-        # A mis-tapped 需修改 on a migration gate must not shadow a later 同意.
+        # A mis-tapped 需修改 on a non-revisable gate must not shadow a later 同意.
         reply = self._resolve(
             [
                 _message("REVISE approval-1", message_id="m-rev",
@@ -180,7 +180,7 @@ class InfoflowReplyConsumerTests(unittest.TestCase):
                 _message("同意 approval-1", message_id="m-app",
                          received_at="2026-08-28T11:05:00+00:00"),
             ],
-            record=_record(action="WORKFLOW_SPEC_MIGRATION"),
+            record=_record(action="G9"),
         )
         self.assertEqual(reply["decision"], "APPROVE")
 

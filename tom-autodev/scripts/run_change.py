@@ -249,12 +249,12 @@ def superseded(state: Any, run_id: str, approval: dict[str, Any]) -> bool:
     """Whether a revise landed after this approval was opened.
 
     The gate it asked belongs to an action the run has left, so it must not be
-    reissued, nudged or listed as waiting. Pin moves (policy migration, profile
-    re-pin) are about the run rather than a position in it and are never superseded.
+    reissued, nudged or listed as waiting. A profile re-pin is about the run rather
+    than a position in it and is never superseded.
     """
     from approval_ledger import gate_of
 
-    if gate_of(approval.get("action") or "") in {"WORKFLOW_SPEC_MIGRATION", "PROFILE_REPIN"}:
+    if gate_of(approval.get("action") or "") == "PROFILE_REPIN":
         return False
     created = approval.get("created_at") or ""
     return any(

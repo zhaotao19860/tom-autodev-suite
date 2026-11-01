@@ -14,7 +14,6 @@
 | G9 | release evidence and release action |
 | G10 | bounded control-plane optimization candidate |
 | PROFILE_REPIN | permitted old/new profile pin change |
-| WORKFLOW_SPEC_MIGRATION | approved old/new workflow policy pin change for a paused run |
 
 Publish the same `approval_id`, evidence summary, and `input_hash` to Comate and Infoflow. Accept the first valid response. Audit later responses without changing the effective decision. Expire an approval whenever its bound input changes. Default wait limit is ten hours; timeout stops the run.
 

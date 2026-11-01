@@ -562,7 +562,7 @@ def submit_draft(
                 "job_id": job_id}
     decision = classify_next(orchestrator, run_id)
     # Workflow drift is not recoverable here: it must go through
-    # WORKFLOW_SPEC_MIGRATION before any job is claimed or a receipt is written.
+    # a restart-from before any job is claimed or a receipt is written.
     if decision["kind"] == BLOCKED and decision.get("reason_code") == "ACTION_CONFLICT":
         recovered = _recover_legacy_diagnose_action(orchestrator, run_id, job_id)
         if recovered is not None:

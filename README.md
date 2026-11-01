@@ -117,18 +117,16 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
   审批台账、幂等和 retry 次数约束，不应直接调用底层卡片接口绕过控制器。
 - “进度通知（非审批）”只报告停驻位置，不请求批准，也不代表阶段完成。没有待审批账本记录时，不会让你处理一个尚未创建的审批。
 - 点击只表示收到选择。最终是否有效以权限、有效期、hash 和送达回执校验后的审批回执为准；审批本身不会推进业务阶段。
-- 当 run 因 `WORKFLOW_SPEC_DRIFT` 停驻时，`WORKFLOW_SPEC_MIGRATION` 是唯一允许在
-  drift 状态下消费的审批类型。迁移门会先按原 run、approval、input hash、审批成员、
-  群组和送达回执校验回复，再应用精确的旧/新 workflow hash；普通 G0–G10 审批仍会
-  被 drift 守卫阻断。迁移审批的重复消费必须复用原 approval 和 intent，不能手改账本或
-  创建第二张迁移卡。
+- 当 run 因 `WORKFLOW_SPEC_DRIFT` 停驻时，所有写入（含审批投递与落账）都被拒绝。原地
+  迁移 `migrate-workflow-spec` 已删除：先 `stop`，再用 `restart-from` 新建承接运行，新 run
+  在自己的 G0 钉住当前 workflow policy。
 - `IMPLEMENT → DIAGNOSE` 的 producer-block 前驱证据可以位于 transition payload 的
   `evidence` 对象中。控制器会同时校验 run、task、business/tests revisions、报告内容
   和 artifact hash；缺失或不一致时 fail-closed。若修复前已创建合法的 DIAGNOSE
   ProducerJob，控制器只允许按同一 run、事件、任务、producer-block 父证据，对仍为
   pending 或已 FULFILLED 且带诊断草案的 job 做受限兼容恢复，不能按 action 前缀或最近
   记录猜测 job。兼容恢复只处理 `ACTION_CONFLICT`；`WORKFLOW_SPEC_DRIFT` 必须先走
-  `WORKFLOW_SPEC_MIGRATION`，不会在漂移状态下认领 job 或写模型回执。兼容恢复提交时只会
+  `restart-from`，不会在漂移状态下认领 job 或写模型回执。兼容恢复提交时只会
   使用当前已核验 producer-block artifact 的精确 `artifact:<id>` evidence reference；
   不会从历史空 refs、外部输入或伪造路径补证据。
 - G5 只对应真实 IMPLEMENT Change Set 的审批。若 IMPLEMENT ProducerJob 因计划与
@@ -145,10 +143,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
   已处理的卡不会因重复点击重新出现按钮。提醒优先重放最近一次已送达的纠正正文。
 - 进度路线只把沿正常路线离开的阶段标为 ✓；进入 DIAGNOSE 或恢复分支的前驱阶段标为 ✗
   （例如 IMPLEMENT 被 producer-block 阻断），回退到较早阶段时其后阶段全部重置为 ○。
-- 如流已回复并落账精确的 `WORKFLOW_SPEC_MIGRATION` 批准时，`continue` 会按当前 run 与
-  当前迁移计划的 `input_hash` 消费该批准并应用迁移，再交给 worker 恢复；它不会自动批准或
-  重开审批。`status` 只读显示「迁移已批准待应用」。
-- 显式命令（`migrate-workflow-spec`、`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`、
+- 显式命令（`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`、
   `repin-profile`、`optimize apply`）成功消费审批后，会完成该审批对应的 `APPROVAL_RESUME` handoff；
   `continue` 遇到多条 handoff 时，只清理指向旧事件且审批已被消费/门禁已不符的过期项（审计原因 `STALE_EVENT`），
   匹配最新事件的有效 handoff 与 REJECT 审批的 handoff 不受影响。
@@ -491,7 +486,7 @@ G8 绑定原构建号、attempt 序号与原因；旧 build 的事件和证据�
 被取代的旧 build 不再算作任何模块的通过证据，不进入发布选择、RELEASE 前驱或 G9；其 stage 不能再 `ipipe-rerun`（`STAGE_BUILD_SUPERSEDED`），其迟到证据也不再被摄取（`BUILD_SUPERSEDED`）。
 触发调用在本进程内即失败（调用点编程错误、请求未发出）时返回 `REBUILD_LOCAL_ERROR` 并关闭该次 trigger intent，可直接申请下一 attempt；若无法记录该证明则返回 `REBUILD_LOCAL_ERROR_UNRECORDED`，intent 保持开放，先 `--reconcile-only` 或 `abandon-intent`。
 新 build 的触发类型与原 build 不一致时返回 `TRIGGER_MODE_MISMATCH`：回执保留，新 build 记为 `ipipe.build-rejected`（不采信，discover/plan/watch/产物/发布都排除），原 build 仍是当前 build；可再次 `--request-g8` 生成 attempt+1，或改用与原 build 一致的 `--event-type`。
-该命令引入 `DIAGNOSE -> IPIPE` 边，已 pin 旧 workflow 的 run 须先 `migrate-workflow-spec`。
+该命令引入 `DIAGNOSE -> IPIPE` 边，已 pin 旧 workflow 的 run 须 `restart-from` 新建运行。
 
 **结果不明的阶段重跑。** `ipipe-rerun` 只有在阶段带有严格晚于本次执行意图创建时间（容差 30 秒）的 startTime 时才认定"已启动"；仅凭 SUCCESS/RUNNING 状态、或已被另一次重跑回执占用的后继 stage，都不算证据，结果保持 `QUERY_REQUIRED` / `RERUN_NOT_STARTED_UNPROVEN`。同一 stage 的两个不同 G8 并发执行时最多一次 POST（检查与认领在同一事务），CLI 的执行与 `--reconcile-only` 也持有与 worker 相同的 run 级租约（被占用时返回 `WORKER_LEASE_HELD`）。
 

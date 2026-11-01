@@ -152,7 +152,7 @@ python3 tom-autodev/scripts/cli.py ai-review --help
 
 `ipipe-rerun` 的 `--parameter` 接受**参数名**，值由本次运行的产品/提交证据推导；不是任意 `NAME=VALUE`。例如 BGW 的 `get_bgw_test_case`、`get_bgwagent` 应先核对 [参数映射](../tom-project-bgw/references/runtime-topology.md)。`--print-parameters` 只展示脱敏后的参数，`--print-input-hash` 返回本次 G8 绑定值；实际重跑仍需匹配的批准。
 
-`ipipe-rebuild` 用于失败 build 的编译产物已被平台清理（下载 403/404）的情形：`ipipe-rerun` 对这种 build 的任何 stage 都会在环境任务失败。流程是 预检 → `--request-g8` → 批准 → `--approval-id/--input-hash` 触发并换绑 →（结果不明时）`--reconcile-only` → `continue`。已 pin 旧 workflow 的 run 因新增 `DIAGNOSE -> IPIPE` 边需先 `migrate-workflow-spec`。触发响应无法解析时只会用 GET 按 revision 和时间窗口认领比原 build 更新的唯一 build；多个候选返回 `BUILD_AMBIGUOUS`，不猜。
+`ipipe-rebuild` 用于失败 build 的编译产物已被平台清理（下载 403/404）的情形：`ipipe-rerun` 对这种 build 的任何 stage 都会在环境任务失败。流程是 预检 → `--request-g8` → 批准 → `--approval-id/--input-hash` 触发并换绑 →（结果不明时）`--reconcile-only` → `continue`。已 pin 旧 workflow 的 run 因新增 `DIAGNOSE -> IPIPE` 边需 `restart-from` 新建运行。触发响应无法解析时只会用 GET 按 revision 和时间窗口认领比原 build 更新的唯一 build；多个候选返回 `BUILD_AMBIGUOUS`，不猜。
 
 `ipipe-adopt` 用于绑定平台已经触发、确属本次 CR 的 build。平台 AI Review 在 CR 已存在时启动，返回的 `conversation_id` 用于后续 poll；平台建议仍须逐条验证，不能直接作为修改指令。
 
@@ -190,7 +190,6 @@ skill 产生的前置 debug 文本不会再被误判为 JSON 损坏；如果入�
 python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py confirm-approval-redelivery --help
-python3 tom-autodev/scripts/cli.py migrate-workflow-spec --help
 python3 tom-autodev/scripts/cli.py revise --help
 ```
 
@@ -204,21 +203,10 @@ python3 tom-autodev/scripts/cli.py confirm-approval-redelivery "$RUN_ID" APPROVA
   --confirm '未收到，允许重发' --reason '已在如流确认未收到该卡片' --actor zhaotao02@baidu.com
 ```
 
-`WORKFLOW_SPEC_DRIFT` 表示该 run 固定的 workflow policy 与当前版本不一致。此时除迁移门
-本身外的写入都会被拒绝：先 `--request` 开 `WORKFLOW_SPEC_MIGRATION` 门，由人批准后再用
-精确的 `approval_id` 应用迁移；迁移只移动策略 pin，不重写阶段事件、不改既有审批绑定。
-只有迁移获批并应用之后，其它门的未知投递才可以走上面的受控重发。
-
-如流已经回复并落账了精确的 `WORKFLOW_SPEC_MIGRATION` 批准，`continue` 会消费当前
-run、当前 workflow_spec_migration.plan 生成的相同 `input_hash`，调用现有迁移 apply，
-然后再交给 worker 恢复。它不会自动批准、重新开门、重开审批或直接修改 pin；未批准、
-驳回、旧 hash、跨 run 的审批仍保持 `WORKFLOW_SPEC_DRIFT`。`status` 只读展示“迁移已批准
-待应用”，并提示调用 `continue`，不会在查看状态时执行迁移。
-
-```bash
-python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --request
-python3 tom-autodev/scripts/cli.py migrate-workflow-spec "$RUN_ID" --approval-id APPROVAL_ID
-```
+`WORKFLOW_SPEC_DRIFT` 表示该 run 固定的 workflow policy 与当前版本不一致。此时该 run 的
+所有写入（含审批投递、落账与受控重发）都会被拒绝；原地迁移 `migrate-workflow-spec` 已删除。
+处理方式：`stop` 该 run，再用 `restart-from` 新建承接运行，新 run 在自己的 G0 钉住当前
+policy；旧 run 的事件、产物和审批保留为审计记录。
 
 ### 改着改着发现前面要动：revise 与 restart-from
 

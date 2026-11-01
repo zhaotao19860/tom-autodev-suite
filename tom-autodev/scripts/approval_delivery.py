@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from execution_guard import execution_guard, migration_exempt
+from execution_guard import execution_guard
 
 import hashlib
 import inspect
@@ -108,16 +108,7 @@ def corrected_content(state_store: Any, approval: dict[str, Any]) -> str | None:
 
 
 def _delivery_guard(state: Any, run_id: Any, action: Any) -> dict[str, Any] | None:
-    """Guard delivery, except for the gate that authorizes the migration itself.
-
-    Opening and answering the migration gate is the one write allowed while the old
-    workflow pin is drifted (see `execution_guard.guard_execution`). The controller
-    exempts it, so this boundary must too: guarding it here suppressed the card
-    without sending anything, the ledger then refused every decision for a gate it
-    considered undelivered, and the paused run could never be migrated at all.
-    """
-    if migration_exempt(action):
-        return None
+    """Guard delivery like every other run-bound write."""
     return execution_guard(state, run_id)
 
 
@@ -457,9 +448,7 @@ class InfoflowApprovalTransport:
                 "record": record,
                 "delivery": receipt,
                 # Outside the gateway record, whose field set is fixed by
-                # `parse_gateway_result`. Re-reading the request needs the gate name to
-                # know whether it is the migration gate, which stays answerable while
-                # the run's old workflow pin is drifted.
+                # `parse_gateway_result`; re-reading the request needs the gate name.
                 "action": gateway_request.get("action"),
                 # Kept so a reminder repeats the exact card the approvers already saw,
                 # and so a timed-out gate can be reissued without rebuilding evidence.

@@ -23,8 +23,6 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
         return "已停止"
     if pending or blocked == "RECOVERY_REQUIRED":
         return "待恢复"
-    if approved and approved.get("action") == "WORKFLOW_SPEC_MIGRATION":
-        return "迁移已批准待应用"
     if open_gates:
         return "待审批"
     if approved:
@@ -131,9 +129,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
     for row in approvals:
         if row.get("effective_decision"):
             continue
-        if (row.get("created_at") or "") < reentered_at and gate_of(row.get("action") or "") not in {
-            "WORKFLOW_SPEC_MIGRATION", "PROFILE_REPIN",
-        }:
+        if (row.get("created_at") or "") < reentered_at and gate_of(row.get("action") or "") != "PROFILE_REPIN":
             continue
         action_name = gate_of(row.get("action") or "")
         if current_gate is not None and action_name != current_gate:
@@ -154,9 +150,6 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         }
         for row in latest_unresolved.values()
     ]
-    # A migration decides what the phase gate is about (under drift its answer cannot
-    # even land), so it is named first.
-    open_gates.sort(key=lambda gate: gate_of(gate["action"] or "") != "WORKFLOW_SPEC_MIGRATION")
     pending = []
     side_writes: list[str] = []
     # Under evidence contract v2 an open KU/iCafe write is a side channel that blocks
@@ -199,19 +192,6 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         and row["created_at"] >= current["created_at"]
         and row.get("resolved_at")
     ), None)
-    if not terminal and action.get("reason_code") == "WORKFLOW_SPEC_DRIFT":
-        from workflow_spec_migration import ACTION, plan as migration_plan
-
-        prepared = migration_plan(orchestrator, run_id)
-        if prepared.get("ok"):
-            approved = next((
-                row for row in reversed(approvals)
-                if row.get("run_id") == run_id
-                and row.get("action") == ACTION
-                and row.get("input_hash") == prepared.get("input_hash")
-                and row.get("effective_decision") == "APPROVE"
-                and row.get("resolved_at")
-            ), approved)
     # A REJECT of the draft this attempt produced: the run waits on a person, not on
     # `continue`, which would only find the gate already answered.
     rejected = None if terminal or open_gates or approved else next((
@@ -344,11 +324,6 @@ def _next_step(
             }
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
         return {"owner": "Agent", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
-    if approved and approved.get("action") == "WORKFLOW_SPEC_MIGRATION":
-        return {
-            "owner": "Agent",
-            "text": "当前 workflow 迁移已批准待应用；调用 continue，由 worker 应用精确迁移后恢复",
-        }
     if open_gates:
         gate = open_gates[0]
         approval_id = gate.get("approval_id") or "未知"
