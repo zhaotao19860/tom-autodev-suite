@@ -106,6 +106,9 @@ class ScopeWorkerTests(unittest.TestCase):
         with patch("workflow_spec.phase_mode_for_run",
                    side_effect=lambda _e, phase: "auto" if phase == "GRILL" else "full"):
             self.assertEqual(scope_approval.expected_gates(events, "D"), ("G2", "G4"))
+            # A card without acceptance falls back to the gated GRILL, so G1 is in the card.
+            bare = [dict(events[0], payload=dict(events[0]["payload"], requirement_snapshot={"acceptance": []}))]
+            self.assertEqual(scope_approval.expected_gates(bare, "D"), ("G1", "G2", "G4"))
 
     def test_the_card_needs_members_allowed_on_every_gate(self):
         self._enter("GRILL")

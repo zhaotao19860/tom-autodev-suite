@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · scope：auto GRILL 回退为人工研判时 G1 入 D 卡
+
+- `scope_approval.expected_gates`：express/hotfix 的 GRILL 为 auto 时，只有卡片已带验收点才自动完成、跳过 G1；无验收点回退为完整 GRILL，此时 G1 属于 D 卡。此前按模式一律剔除 G1，G1 被逐门代答，D 卡少一门。合并验证 run ed2c2dc1 发现（BGW-2019 卡无验收点）。
+
 ## 2026-11-01 · 第 9 批评审收口
 
 - 最后一轮复核：codex 四项全部关闭；GPT 仍报 R9-NEW-001——3ff3ee1 期间写入的 v4 哈希含 `requirement_diff` 键。状态库中没有任何 v4/v5 INTAKE，实际无受影响 run；仍补兼容读取（v4 先按 v4 字段校验，失败再按 3ff3ee1 的字段集合），新增回归 1 个，全量 1640 个通过。

@@ -105,10 +105,21 @@ def expected_gates(events: list[dict[str, Any]], name: str) -> tuple[str, ...]:
     found = []
     for gate in SCOPES[name]:
         phase = _PHASE_OF[name][gate]
-        if phase is not None and workflow_spec.phase_mode_for_run(events, phase) in {"auto", "ungated"}:
+        mode = workflow_spec.phase_mode_for_run(events, phase) if phase is not None else "full"
+        if mode == "ungated":
+            continue
+        if mode == "auto" and phase == "GRILL" and _card_has_acceptance(events):
+            # Mirrors phase_protocol: an auto GRILL only skips G1 when the card already
+            # carries acceptance; otherwise it falls back to the full, gated path.
             continue
         found.append(gate)
     return tuple(found)
+
+
+def _card_has_acceptance(events: list[dict[str, Any]]) -> bool:
+    snapshot = ((events[0].get("payload") or {}).get("requirement_snapshot") or {}) if events else {}
+    acceptance = snapshot.get("acceptance") if isinstance(snapshot, dict) else None
+    return isinstance(acceptance, list) and bool(acceptance)
 
 
 def last_gate(name: str) -> str:
