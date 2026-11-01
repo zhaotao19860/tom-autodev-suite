@@ -1229,6 +1229,16 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(second["reason_code"], "OK", second)
         self.assertEqual(len(self._posts()), 2)
 
+    def test_an_abandoned_refused_rerun_gets_a_new_g8_hash(self):
+        self._failed_stage()
+        first_hash = self.runtime.rerun_input_hash("stage-1")["input_hash"]
+        first = approved(self.ledger, "G8", first_hash)
+        self.api.rerun_result = TimeoutError("refused")
+        intent = self.runtime.rerun("stage-1", first)["intent_id"]
+        from orchestrator import _abandon_intent
+        _abandon_intent(type("O", (), {"state": self.state})(), intent, "403", "tester", False)
+        self.assertNotEqual(self.runtime.rerun_input_hash("stage-1")["input_hash"], first_hash)
+
     def test_same_stage_can_be_rerun_again_under_a_new_g8_with_new_parameters(self):
         self._failed_stage()
         first_approval = self._g8()

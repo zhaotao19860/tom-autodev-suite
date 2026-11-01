@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · 被放弃的重跑也让新 G8 得到新哈希
+
+- `_rerun_binding` 的 `prior_attempts`：除已确认的执行外，经 `abandon-intent` 放弃的尝试（非本地错误证明）也计入，同一 stage 再申请 G8 时得到新哈希；本地错误证明的放弃保留同一审批的一次重发，不计入。起因：run 5c66c1f1 的 P0新case回归 重跑遇 iPipe 执行接口 HTTP 403，两次只读核对证明未执行后放弃，但重新申请得到的仍是已消费的 G8。
+
 ## 2026-11-01 · 合并验证 run：scope 授权与 ENV_WAIT 真实证据
 
 - run 5c66c1f1（`start --scope-approval`）：需求方只批 SCOPE:D、SCOPE:C 两张卡；G1/G2/首个 G4 与任务 G4/G5/G7 均由卡派生同意，C 卡批准前 iCode 推送 0 次。

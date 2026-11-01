@@ -1011,10 +1011,19 @@ class IpipeRuntime:
         # could never be approved anew. Only in that case the receipted attempts join the
         # binding; any other binding (new parameters, new evidence) is already distinct.
         used = _canonical_hash(binding)
+        # A confirmed run, or an attempt abandoned for good (e.g. after a 403), consumed the
+        # approval of this exact binding. An abandonment proven local keeps the approval
+        # reusable for its one reissue, so it does not count.
+        def _consumed(item: dict[str, Any]) -> bool:
+            done = self.state.result_by_idempotency_key(item["idempotency_key"])
+            response = ((done or {}).get("receipt") or {}).get("response") or {}
+            if response.get("ok") is True:
+                return True
+            return response.get("abandoned") is True and not response.get("local_error_proven")
+
         prior = sorted(
             item["intent_id"] for item in self._rerun_intents(stage_build_id, exclude_key="")
-            if ((self.state.result_by_idempotency_key(item["idempotency_key"]) or {})
-                .get("receipt", {}).get("response") or {}).get("ok") is True
+            if _consumed(item)
         )
         if prior and any(
             (item.get("payload") or {}).get("input_hash") == used
