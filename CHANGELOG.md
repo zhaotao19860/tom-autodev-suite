@@ -4,6 +4,16 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 10 轮 Codex 评审第 1 轮修复
+
+评审报告：[docs/reviews/2026-11-02-r10-codex-review-1.md](docs/reviews/2026-11-02-r10-codex-review-1.md)（a4733d1..eb9ed7c，4 项 P2）。
+
+- **REC-01**：`restart-from` 的 build 状态查询改为直接按 build 自己的持久化 binding（module/revision/pipeline）只读查询，不再经过源 run 的 profile 守卫；此前改过 profile 的 run 所有已结束 build 都显示为未知，restart 被阻断。`IpipeRuntime._build_key` 提为模块函数 `build_key`。
+- **FIX46-001**：G8 哈希只在本绑定自己有已消费尝试时才加入 `prior_attempts`；此前其它绑定被放弃后，本绑定本地错误的一次重发会因哈希变化返回 `APPROVAL_INPUT_MISMATCH`。
+- **R9-NEW-001（复核未关）**：3ff3ee1 期间写入的 v4 INTAKE 由存储的 G0 哈希识别，`intake_prerequisites` 返回当时的字段集，哈希校验与 action 身份一致，已缓存的 INTAKE action 不再 `ACTION_CONFLICT`。
+- **REL-001**：平台 fixture 录制脚本删除已不存在的 `release_info` 目标（保留历史 404 录制），新增 recorder 目标与真实客户端方法一致的测试。
+- 全量 1600 个测试通过。
+
 ## 2026-11-01 · MVP 第 4 步：删除发布旧路径
 
 - `verify_release` 不再回退到 `/api/agile/getReleaseInfo` 列表（真实网关对所有分支都返回 404），只认 BranchPipeline 的 AGILE_RELEASE job；不能识别 BranchPipeline 时返回 `BRANCH_PIPELINE_UNSUPPORTED`。删除 `IpipeClient.release_info`。`_execute_release` 删除无冻结 pipeline plan 的 legacy 分支和 `_build_release_evidence`，无 plan 时返回 `PIPELINE_PLAN_REQUIRED`（与 phase_protocol 一致）。测试的 FakeApi 改为按 BranchPipeline 发布作业模拟发布；两条只校验旧列表完整 revision map 的测试删除。全量 1596 个测试通过。

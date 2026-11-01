@@ -4917,21 +4917,39 @@ def _deliver_worker_approval(orchestrator: Orchestrator, result: dict[str, Any])
 
 
 def _restart_build_status(orchestrator: Orchestrator, run_id: str) -> Any:
-    """build_id -> live iPipe status for `restart-from`, or None when it cannot be read."""
-    runtime = _cli_ipipe_runtime(orchestrator, run_id)
-    if isinstance(runtime, dict):
+    """build_id -> live iPipe status for `restart-from`, or None when it cannot be read.
+
+    Read-only, from each build's own recorded binding (module, revision, pipeline). It
+    does not go through the run's execution profile guard: a profile edited since INTAKE
+    is exactly a reason to restart, and the guard would refuse the query and leave every
+    finished build looking unknown (REC-01).
+    """
+    import yaml
+    from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport
+    from clients.ipipe_runtime import _status, build_key
+    from clients.ku_client import resolve_username
+
+    events = orchestrator.state.events(run_id)
+    intake = (events[0].get("payload") or {}) if events else {}
+    try:
+        profile = yaml.safe_load(Path(str(intake.get("profile_path") or "")).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        profile = None
+    repos = (profile or {}).get("business_repos") if isinstance(profile, dict) else None
+    user = resolve_username([item["path"] for item in repos or [] if isinstance(item, dict) and item.get("path")])
+    if not user:
         return lambda _build_id: None
+    api = IpipeApiClient(IpipeHttpTransport(), current_user=user)
 
     def status(build_id: str) -> Any:
-        binding = runtime._load_build_binding(build_id)
-        if binding is None:
+        stored = orchestrator.state.idempotency_result(f"ipipe.build-binding:{run_id}:{build_id}")
+        binding = stored.get("binding") if isinstance(stored, dict) and stored.get("build_id") == build_id else None
+        if not isinstance(binding, dict):
             return None
         try:
-            build = runtime.api.build_by_id(build_id, **runtime._build_key(binding))
+            build = api.build_by_id(build_id, **build_key(binding))
         except Exception:  # noqa: BLE001 - an unreadable build blocks the restart
             return None
-        from clients.ipipe_runtime import _status
-
         return _status(build) if isinstance(build, dict) else None
 
     return status

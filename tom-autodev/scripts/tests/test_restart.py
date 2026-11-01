@@ -136,6 +136,19 @@ class RestartTests(unittest.TestCase):
         self.assertTrue(_intake_hash_matches(payload))
         self.assertFalse(_intake_hash_matches({**payload, "project": "q"}))
 
+    def test_a_3ff3ee1_v4_intake_keeps_its_cached_action_identity(self):
+        # R9-NEW-001 follow-up: the action identity hashes intake_prerequisites, so the
+        # 3ff3ee1 key set (with requirement_diff) must come back for that payload too.
+        from collaboration import (_INTAKE_PREREQUISITE_KEYS_V5, _hash, intake_input_hash,
+                                   intake_prerequisites)
+        payload = {"intake_hash_version": "v4", "approval_mode": "scope", "project": "p"}
+        as_written = {k: payload.get(k) for k in _INTAKE_PREREQUISITE_KEYS_V5}
+        payload["g0_input_hash"] = _hash(as_written)
+        self.assertEqual(intake_prerequisites(payload), as_written)
+        self.assertEqual(intake_input_hash(payload), payload["g0_input_hash"])
+        current = {k: v for k, v in payload.items() if k != "g0_input_hash"}
+        self.assertNotIn("requirement_diff", intake_prerequisites(current))
+
     def test_a_released_source_cannot_restart(self):
         self.orch.state.transition(self.source, "RELEASE_SUCCESS", {})
         self.assertEqual(restart.plan(self.orch, self.source)["reason_code"], "RESTART_SOURCE_RELEASED")
@@ -148,6 +161,35 @@ class RestartTests(unittest.TestCase):
             result = restart.execute(self.orch, self.source, self.snapshot, reason="策略漂移")
         self.assertEqual(result["reason_code"], "RESTARTED", result)
         self.assertEqual(self.orch.status(self.source)["state"], "STOPPED")
+
+    def test_the_cli_build_query_survives_an_edited_profile(self):
+        # REC-01: the restart's read-only build query must not go through the source
+        # run's profile guard, or every finished build reads as unknown after an edit.
+        import orchestrator as orchestrator_module
+
+        self.orch.state.save_idempotency_result(f"ipipe.build-binding:{self.source}:b1", {
+            "run_id": self.source, "build_id": "b1",
+            "binding": {"module": "bgw", "revision_map": {"bgw": "r1"}, "pipeline_id": "p1"}})
+        profile = Path(self.orch.state.events(self.source)[0]["payload"]["profile_path"])
+        profile.write_text(profile.read_text(encoding="utf-8") + "\n# edited\n", encoding="utf-8")
+        self.assertEqual(self.orch._runtime_profile(self.source)["reason_code"], "PROFILE_CONFLICT")
+        seen = []
+
+        class Api:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def build_by_id(self, build_id, **key):
+                seen.append((build_id, key))
+                return {"id": build_id, "status": "FAIL"}
+
+        with unittest.mock.patch("clients.ipipe_client.IpipeApiClient", Api), \
+                unittest.mock.patch("clients.ku_client.resolve_username", return_value="tester"):
+            status = orchestrator_module._restart_build_status(self.orch, self.source)
+            self.assertEqual(status("b1"), "FAIL")
+        self.assertEqual(seen, [("b1", {"module": "bgw", "revision": "r1", "pipeline_id": "p1"})])
+        planned = restart.plan(self.orch, self.source, build_status=lambda _b: "FAIL")
+        self.assertTrue(planned["ok"], planned)
 
     def test_a_reason_is_required(self):
         self.assertEqual(restart.execute(self.orch, self.source, self.snapshot, reason=" ")["reason_code"],

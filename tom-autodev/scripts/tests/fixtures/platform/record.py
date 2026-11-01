@@ -131,8 +131,8 @@ TARGETS = [
      lambda api: stage_detail(api, "649960675")),
     ("bgw1995-branch-pipeline-conf-348101", "get_pipeline_by_id", "pipeline/348101",
      lambda api: pipeline_conf(api, "348101")),
-    ("gateway-get-release-info-404", "release_info", f"release_info/{X86}",
-     lambda api: error(lambda: api.release_info(X86, "x86bgw-dpdk-2011-syncookie"))),
+    # `gateway-get-release-info-404` is kept as a historical recording: the client no
+    # longer has `release_info` (the fallback was removed), so it is not re-recorded.
 ]
 
 

@@ -151,8 +151,7 @@ def group_id_for_run(state_store: Any, run_id: Any) -> str | None:
     return group_id if isinstance(group_id, str) and group_id.isdigit() else None
 
 
-def intake_prerequisites(payload: Any) -> dict[str, Any]:
-    source = payload if isinstance(payload, dict) else {}
+def _intake_keys(source: dict[str, Any]) -> tuple[str, ...]:
     version = source.get("intake_hash_version")
     keys = {
         "v5": _INTAKE_PREREQUISITE_KEYS_V5,
@@ -160,7 +159,20 @@ def intake_prerequisites(payload: Any) -> dict[str, Any]:
         "v3": _INTAKE_PREREQUISITE_KEYS_V3,
         "v2": _INTAKE_PREREQUISITE_KEYS_V2,
     }.get(version, _INTAKE_PREREQUISITE_KEYS)
-    return {key: source.get(key) for key in keys}
+    # 3ff3ee1 (2026-11-01, ~75 min) hashed v4 over the v5 key set. A v4 payload whose
+    # stored G0 hash is exactly that one keeps that key set everywhere -- the hash check
+    # and the action identity alike -- so its cached INTAKE action still matches
+    # (R9-NEW-001 follow-up). The stored hash decides; nothing else is accepted.
+    if version == "v4" and source.get("g0_input_hash") != _hash({k: source.get(k) for k in keys}):
+        legacy = _INTAKE_PREREQUISITE_KEYS_V5
+        if source.get("g0_input_hash") == _hash({k: source.get(k) for k in legacy}):
+            return legacy
+    return keys
+
+
+def intake_prerequisites(payload: Any) -> dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
+    return {key: source.get(key) for key in _intake_keys(source)}
 
 
 def intake_input_hash(payload: Any) -> str:
@@ -168,14 +180,7 @@ def intake_input_hash(payload: Any) -> str:
 
 
 def _intake_hash_matches(payload: dict[str, Any]) -> bool:
-    if payload.get("g0_input_hash") == intake_input_hash(payload):
-        return True
-    # 3ff3ee1 (2026-11-01, ~75 min) hashed v4 over the v5 key set. A v4 payload pinned by
-    # that build is still its own G0 (R9-NEW-001 follow-up); nothing else is accepted.
-    if payload.get("intake_hash_version") == "v4":
-        legacy = {key: payload.get(key) for key in _INTAKE_PREREQUISITE_KEYS_V5}
-        return payload.get("g0_input_hash") == _hash(legacy)
-    return False
+    return payload.get("g0_input_hash") == intake_input_hash(payload)
 
 
 def intake_prerequisites_valid(payload: Any, run_id: str) -> bool:

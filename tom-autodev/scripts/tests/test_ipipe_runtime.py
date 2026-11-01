@@ -2326,6 +2326,20 @@ class StageOwnParameterRerunTests(unittest.TestCase):
         self.assertEqual(new["idempotency_key"], old["idempotency_key"] + ":retry-1")
         self.assertEqual(len(self.posts()), 1)
 
+    def test_an_unrelated_abandonment_does_not_break_the_local_error_reissue(self):
+        # FIX46-001: an attempt of another binding abandoned for good must not pull the
+        # stage's history into this binding, whose own attempt only failed locally.
+        self.arrange(_own_stage_configuration())
+        other = self.state.claim_intent("run-1", "ipipe.rerun", "ipipe.rerun:other-binding",
+                                        {"stage_build_id": "stage-1", "input_hash": "e" * 64})
+        self.state.abandon_intent(other["intent"]["intent_id"], "403", "tester")
+        approval = self.approval()
+        self.assertEqual(self._local_error_attempt(approval)["reason_code"], "RERUN_LOCAL_ERROR")
+        del self.api.manual_execute_stage
+        self.running()
+        again = self.runtime.rerun("stage-1", approval, parameters=dict(STAGE_PARAMETERS))
+        self.assertEqual(again["reason_code"], "OK", again)
+
     def test_second_local_error_is_final_for_that_approval(self):
         self.arrange(_own_stage_configuration())
         approval = self.approval()

@@ -42,6 +42,29 @@ _REBUILD_REASON_LIMIT = 500
 _REBUILD_CLOCK_SKEW_SECONDS = 120
 
 
+def build_key(source: Any) -> dict[str, Any]:
+    """The module, revision and pipeline a build record is looked up by.
+
+    The gateway has no per-build resource, so reading one build means selecting it
+    out of the listing for its own revision; every binding this runtime writes
+    already carries that revision, either mapped or as a repository list.
+    """
+    if not isinstance(source, dict):
+        return {"module": "", "revision": "", "pipeline_id": ""}
+    module = source.get("module")
+    revision = (source.get("revision_map") or {}).get(module)
+    if not _nonempty(revision):
+        for repository in source.get("repositories") or []:
+            if isinstance(repository, dict) and repository.get("module") == module:
+                revision = repository.get("revision")
+                break
+    return {
+        "module": str(module or ""),
+        "revision": str(revision or ""),
+        "pipeline_id": str(source.get("pipeline_id") or ""),
+    }
+
+
 class IpipeRuntime:
     """Run-bound iPipe discovery, write, monitoring, and release verification."""
 
@@ -1020,15 +1043,13 @@ class IpipeRuntime:
                 return True
             return response.get("abandoned") is True and not response.get("local_error_proven")
 
-        prior = sorted(
-            item["intent_id"] for item in self._rerun_intents(stage_build_id, exclude_key="")
-            if _consumed(item)
-        )
-        if prior and any(
-            (item.get("payload") or {}).get("input_hash") == used
-            for item in self._rerun_intents(stage_build_id, exclude_key="")
-        ):
-            binding = {**binding, "prior_attempts": prior}
+        consumed = [item for item in self._rerun_intents(stage_build_id, exclude_key="")
+                    if _consumed(item)]
+        # Only a consumed attempt of this very binding forces the history in: an attempt of
+        # it that failed locally before sending keeps its approval for the one reissue, even
+        # when some other, unrelated binding of the stage was abandoned (FIX46-001).
+        if any((item.get("payload") or {}).get("input_hash") == used for item in consumed):
+            binding = {**binding, "prior_attempts": sorted(item["intent_id"] for item in consumed)}
         return {
             "ok": True,
             "reason_code": "OK",
@@ -2606,26 +2627,7 @@ class IpipeRuntime:
         return [stage for stage in stages if isinstance(stage, dict)]
 
     def _build_key(self, source: Any) -> dict[str, Any]:
-        """The module, revision and pipeline a build record is looked up by.
-
-        The gateway has no per-build resource, so reading one build means selecting it
-        out of the listing for its own revision; every binding this runtime writes
-        already carries that revision, either mapped or as a repository list.
-        """
-        if not isinstance(source, dict):
-            return {"module": "", "revision": "", "pipeline_id": ""}
-        module = source.get("module")
-        revision = (source.get("revision_map") or {}).get(module)
-        if not _nonempty(revision):
-            for repository in source.get("repositories") or []:
-                if isinstance(repository, dict) and repository.get("module") == module:
-                    revision = repository.get("revision")
-                    break
-        return {
-            "module": str(module or ""),
-            "revision": str(revision or ""),
-            "pipeline_id": str(source.get("pipeline_id") or ""),
-        }
+        return build_key(source)
 
     def _bind_build(self, build_id: str, context: dict[str, Any], build: dict[str, Any]) -> None:
         binding = {

@@ -2,6 +2,10 @@
 
 tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套件根目录 [CHANGELOG.md](../CHANGELOG.md) 的同日条目。
 
+## 2026-11-02
+
+- 第 10 轮 Codex 评审第 1 轮修复：restart 的 build 查询绕开 profile 守卫、G8 本地错误重发哈希、v4 兼容 action 身份、fixture 录制脚本。详见根 CHANGELOG。
+
 ## 2026-11-01
 
 - MVP 第 4 步删除发布旧路径：`getReleaseInfo` 回退与无 plan 的发布分支。
