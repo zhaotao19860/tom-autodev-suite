@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · 合并验证 run：scope 授权与 ENV_WAIT 真实证据
+
+- run 5c66c1f1（`start --scope-approval`）：需求方只批 SCOPE:D、SCOPE:C 两张卡；G1/G2/首个 G4 与任务 G4/G5/G7 均由卡派生同意，C 卡批准前 iCode 推送 0 次。
+- 同一 run 的 x86bgw p0 回归人工 stage：受控注入一次产物 404（执行前已如流通知）进入 ENV_WAIT；复查期内 `continue` 不再查平台；到期普通 `continue` 由真实检查 CLEARED，随后预授权 G8 执行该 stage。`docs/MVP_CONVERGENCE_PLAN.md` 同步。
+
 ## 2026-11-01 · scope：auto GRILL 回退为人工研判时 G1 入 D 卡
 
 - `worker_driver.resume`：CLI 与 watcher 为同一已结算审批各记一条 APPROVAL_RESUME 交接（`approval-resume-<id>` 与 `approval-resume-<id>-<event>`），此前被当作两个候选报 `MULTIPLE_RESUME_HANDOFFS`。现在同一审批与 hash 的多条交接视为一个，续跑后一并关闭；不同审批仍拒绝。scope 的临时放行在同一命令内连续结算多门时触发。

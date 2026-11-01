@@ -356,7 +356,7 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 
 **尚未完成、需要真实 run 或人决定的部分：**
 
-1. scope 授权接入 worker：**D、C 两张卡已实现（2026-10-31，`scope_approval.py`，`start --scope-approval`），待评审与真实 run 验证；R/R' 卡（发布段 stage 链）未接入**。原定范围：D 卡 = GRILL→SPEC→TASKS 的 prepare 段，C 卡 = PLAN→IMPLEMENT→REVIEW 的 prepare 段，R 卡 = BranchPipeline 发布前 stage 链。这一步改变中间门"必须有人批"的语义，按本方案的顺序原则，要在 3.1~3.3 的实现先经一张真实卡验证后再做；
+1. scope 授权接入 worker：**D、C 两张卡已实现并在 run 5c66c1f1 真实验证（2026-11-01）：用户只批 SCOPE:D、SCOPE:C 两张卡，台账中 G1/G2/首个 G4 记为 `scope:<D>`、任务 G4/G5/G7 记为 `scope:<C>`，临时放行未越过段出口（C 卡批准前 iCode 推送 0 次）；R/R' 卡（发布段 stage 链）未接入**。原定范围：D 卡 = GRILL→SPEC→TASKS 的 prepare 段，C 卡 = PLAN→IMPLEMENT→REVIEW 的 prepare 段，R 卡 = BranchPipeline 发布前 stage 链。这一步改变中间门"必须有人批"的语义，按本方案的顺序原则，要在 3.1~3.3 的实现先经一张真实卡验证后再做；
 2. 合同 3.4 RESTART lineage：**实现完成（2026-10-30）并在真实 run 上验证（2026-10-31）**：BGW-2019 run 3dfe403a 的 qa CR 123064384 被评审人合入后，只读检查阻断为 `MERGED_UNDECIDED`；需求方确认接受后以 `--accept-merged` 重开，同一事务内源 run STOPPED、`run_lineage` 一行、目标 run b9a99c4c 从 INTAKE 重走 D 段，x86bgw CR 123064552 记为 KEPT_FOR_REFERENCE，修复轮次继承 1；重复执行返回 `RESTART_REPLAY`；
 3. 第 3 步真实场景矩阵 S1~S7、第 4 步 LegacyRunProjector 与删除，都依赖真实 run。
 
@@ -392,7 +392,7 @@ S1~S3 可以由同 1~3 个 run 覆盖；S4、S6、S7 允许在这些 run 里自�
 | S4 双仓部分成功 | 3dfe403a | qa CONFIRMED、x86bgw UNKNOWN 时聚合 PENDING，未进 IPIPE；reconcile 只读回查后 SUBMITTED |
 | S5 RESTART | 3dfe403a → b9a99c4c | 已合入 CR 阻断后以 `--accept-merged` 重开；目标 run RELEASE_SUCCESS |
 | S6 中断恢复 | 3dfe403a | push_cr 成功、回执前中断；`continue` 自动收敛，无重复推送 |
-| S7 未知回执 / 环境 | dec4229f、3dfe403a | UNKNOWN→CONFIRMED 已验证；环境失败经 G8 重跑后 `route=IPIPE` 回到流水线。**`ENV_WAIT` 已实现（2026-10-31，`env_wait.py`），待真实 run 验证** |
+| S7 未知回执 / 环境 | dec4229f、3dfe403a | UNKNOWN→CONFIRMED 已验证；环境失败经 G8 重跑后 `route=IPIPE` 回到流水线。`ENV_WAIT` 已在 run 5c66c1f1 真实验证（2026-11-01）：p0 回归人工 stage 准备参数时受控注入一次产物 404，进入等待（30 分钟后复查、72 小时上限），复查期内 `continue` 不再查平台，到期由真实检查 CLEARED 后经 G8 执行该 stage |
 
 到 RELEASE_SUCCESS 的独立 run：3（dec4229f、5614a09a、b9a99c4c）。GRILL/SPEC 对不同需求类型的覆盖：未验证（同卡）。
 
