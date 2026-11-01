@@ -213,35 +213,5 @@ class FrozenFailureSignatureTests(unittest.TestCase):
                              {"failure_signature": results[0]})
 
 
-class FailureSignatureInventoryTests(unittest.TestCase):
-    def test_inventory_preserves_legacy_rows_and_reports_replay_requirement(self):
-        with tempfile.TemporaryDirectory() as directory:
-            database = Path(directory) / "state.sqlite"
-            state = StateStore(database)
-            state.record_failure_case("a" * 64, "CODE", "legacy-a")
-            state.record_failure_case("a" * 64, "CODE", "legacy-b")
-            state.record_failure_case("ipipe-failure:v2:" + "b" * 64, "CODE", "current")
-            before = database.read_bytes()
-            script = Path(__file__).resolve().parents[1] / "failure_signature_inventory.py"
-            process = subprocess.run([sys.executable, str(script), str(database)], capture_output=True, text=True)
-            self.assertEqual(process.returncode, 0, process.stderr)
-            report = json.loads(process.stdout)
-            self.assertEqual(report["counts"], {"legacy_unversioned": 1, "v2": 1, "other": 0})
-            self.assertFalse(report["automatic_migration_safe"])
-            legacy = next(case for case in report["cases"] if case["signature"] == "a" * 64)
-            self.assertEqual(legacy["run_ids"], ["legacy-a", "legacy-b"])
-            self.assertEqual(legacy["occurrences"], 2)
-            self.assertEqual(legacy["migration_status"], "RAW_OCCURRENCE_REPLAY_REQUIRED")
-            self.assertEqual(database.read_bytes(), before)
-
-    def test_inventory_does_not_create_missing_database(self):
-        with tempfile.TemporaryDirectory() as directory:
-            database = Path(directory) / "missing.sqlite"
-            script = Path(__file__).resolve().parents[1] / "failure_signature_inventory.py"
-            process = subprocess.run([sys.executable, str(script), str(database)], capture_output=True, text=True)
-            self.assertNotEqual(process.returncode, 0)
-            self.assertFalse(database.exists())
-
-
 if __name__ == "__main__":
     unittest.main()

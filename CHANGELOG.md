@@ -4,6 +4,11 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · MVP 第 4 步：删除无生产调用方的模块
+
+- 前提核对（MVP 第 7 节）：场景矩阵 S1~S7 均有真实证据（合并验证 run 5c66c1f1 到 RELEASE_SUCCESS，共 4 个 run）；旧 run 7c545ba1（BGW-1956，2026-09-15 起停在 WORKSPACE）经需求方同意已 stop；全库无 UNKNOWN/AMBIGUOUS intent；LegacyRunProjector 演练 18/18。
+- 删除 `replay_gate.py`（106 行）、`decision_questions.py`（174 行）、`failure_signature_inventory.py`（68 行）及只覆盖它们的测试；三者在 import 图、CLI 注册中均无生产调用方。`references/failure-signatures.md` 改为说明用只读 SQLite 清点旧签名。全量 1631 个测试通过。
+
 ## 2026-11-01 · 被放弃的重跑也让新 G8 得到新哈希
 
 - `_rerun_binding` 的 `prior_attempts`：除已确认的执行外，经 `abandon-intent` 放弃的尝试（非本地错误证明）也计入，同一 stage 再申请 G8 时得到新哈希；本地错误证明的放弃保留同一审批的一次重发，不计入。起因：run 5c66c1f1 的 P0新case回归 重跑遇 iPipe 执行接口 HTTP 403，两次只读核对证明未执行后放弃，但重新申请得到的仍是已消费的 G8。

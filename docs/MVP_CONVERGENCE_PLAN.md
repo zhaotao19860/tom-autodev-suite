@@ -280,7 +280,7 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 | 手工推进 | `next`、`complete-phase`、`advance`、`drive`（并入 `continue`）、`start`（并入 `process`） | worker 在真实卡上无需它们 |
 | 提交补救 | `submit-companion`、`orchestrator._submit_companion` | 3.2 上线 |
 | 发布旧路径 | `verify_release` 的 `release_info` 分支（网关 404）、legacy planless 分支 | 3.3 上线 |
-| 无生产调用方 | `replay_gate.py`、`decision_questions.py`、`failure_signature_inventory.py` | 前提 6 |
+| 无生产调用方 | ~~`replay_gate.py`、`decision_questions.py`、`failure_signature_inventory.py`~~ **已删除（2026-11-01）** | 前提 6 |
 | 次要功能 | `optimize` / G10、`acceptance-candidates`、`notify-ide-turn`、`ide_turn_hook.py`、`backfill_knowledge.py` | 负责人确认不用；`acceptance-candidates`、`notify-ide-turn` 现仍有调用，先迁走调用方 |
 
 **保留**：`stage_parameters.py`、`product_policy.py`、`environment_evidence.py`；`full` / `express` / `hotfix`；`ENVIRONMENT_BLOCKED`。逐模块行数预算在本节执行前按调用图给出。

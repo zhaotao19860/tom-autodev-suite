@@ -1539,29 +1539,6 @@ class FakeE2ETests(unittest.TestCase):
             summary["producers"],
         )
 
-    def test_golden_replay_and_cross_model_diff_gate(self):
-        # Phase 3c: golden replay confirms every recorded producer fill has a cached draft
-        # that still hashes to its recorded output (determinism/integrity); the cross-model
-        # diff gate flags when two models produce different drafts for the same input.
-        import replay_gate
-
-        summary = self._worker_drive_to_terminal("BGW-803")
-        report = replay_gate.golden_replay(self.orchestrator.state, summary["run_id"])
-        self.assertTrue(report["ok"], report)
-        self.assertEqual(report["receipts"], summary["producers"])
-        self.assertGreaterEqual(report["checked"], summary["producers"])
-        self.assertEqual(report["missing_cache"], [])
-
-        input_hash = "input-xyz"
-        self.orchestrator.state.cache_draft(input_hash, "workflow-spec-v1", "model-a", {"x": 1})
-        self.orchestrator.state.cache_draft(input_hash, "workflow-spec-v1", "model-b", {"x": 1})
-        agree = replay_gate.cross_model_diff(self.orchestrator.state.draft_cache_entries(input_hash))
-        self.assertEqual(agree["status"], "CONSISTENT")
-
-        self.orchestrator.state.cache_draft(input_hash, "workflow-spec-v1", "model-c", {"x": 2})
-        diverge = replay_gate.cross_model_diff(self.orchestrator.state.draft_cache_entries(input_hash))
-        self.assertEqual((diverge["status"], diverge["distinct_outputs"]), ("DIVERGENT", 2))
-
     def test_cross_run_failure_case_library_escalates_recurring_signatures(self):
         # Phase 3b: the same failure signature routed across two runs accumulates into one
         # cross-run FailureCase; signature-first matching then escalates a recurring,
@@ -1830,95 +1807,6 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(again["draft"], {"spec": 1})
         with self.assertRaises(ValueError):
             st.fulfill_producer_job("producer:x", {"spec": 2})
-
-    def test_golden_replay_requires_the_receipt_output_to_be_backed_by_cache(self):
-        # MEDIUM-003: a receipt whose output_hash matches no cached draft for its input must
-        # fail replay — a receipt cannot claim an output no cached draft actually produced.
-        import replay_gate
-
-        run_id = self.orchestrator.start(
-            "BGW-810", "bgw", requirement_snapshot=snapshot("BGW-810"))["run_id"]
-        st = self.orchestrator.state
-        st.cache_draft("ih-z", "workflow-spec-v1", None, {"real": 1})
-        st.record_model_execution_receipt(run_id, {
-            "job_id": "producer:z", "phase": "SPEC", "input_hash": "ih-z",
-            "output_hash": "claimed-output-not-in-cache"})
-        report = replay_gate.golden_replay(st, run_id)
-        self.assertFalse(report["ok"])
-        self.assertTrue(any(m.get("reason") == "receipt_not_backed_by_cache"
-                            for m in report["mismatches"]), report)
-
-    def test_cross_model_diff_is_insufficient_evidence_without_two_known_models(self):
-        # MEDIUM-003: without >= 2 known model identities (agent-turn records model=None),
-        # a cross-model comparison cannot conclude — INSUFFICIENT_EVIDENCE, not a false CONSISTENT.
-        import replay_gate
-
-        st = self.orchestrator.state
-        st.cache_draft("ih-solo", "workflow-spec-v1", None, {"x": 1})
-        self.assertEqual(
-            replay_gate.cross_model_diff(st.draft_cache_entries("ih-solo"))["status"],
-            "INSUFFICIENT_EVIDENCE")
-        st.cache_draft("ih-solo", "workflow-spec-v1", "model-a", {"x": 1})
-        self.assertEqual(
-            replay_gate.cross_model_diff(st.draft_cache_entries("ih-solo"))["status"],
-            "INSUFFICIENT_EVIDENCE")
-        st.cache_draft("ih-solo", "workflow-spec-v1", "model-b", {"x": 1})
-        self.assertEqual(
-            replay_gate.cross_model_diff(st.draft_cache_entries("ih-solo"))["status"],
-            "CONSISTENT")
-
-    def test_cross_model_diff_groups_by_prompt_identity(self):
-        # R-M3: models are only comparable within the same prompt version. p1 has A->X and
-        # B->Y (divergent); p2 has only A->Y (one model). The old model-only keying let p2's A
-        # overwrite p1's A and falsely report CONSISTENT.
-        import replay_gate
-
-        entries = [
-            {"input_hash": "ih", "prompt_version": "p1", "model": "A", "output_hash": "X"},
-            {"input_hash": "ih", "prompt_version": "p1", "model": "B", "output_hash": "Y"},
-            {"input_hash": "ih", "prompt_version": "p2", "model": "A", "output_hash": "Y"},
-        ]
-        report = replay_gate.cross_model_diff(entries)
-        self.assertEqual(report["status"], "DIVERGENT")
-        self.assertEqual(report["groups"]["p1"]["status"], "DIVERGENT")
-        self.assertEqual(report["groups"]["p2"]["status"], "INSUFFICIENT_EVIDENCE")
-
-    def test_golden_replay_rejects_a_backer_of_a_different_producer_identity(self):
-        # R-M3: a cache entry that shares the receipt's output hash but came from a different
-        # prompt/model cannot vouch for the receipt.
-        import replay_gate
-
-        st = self.orchestrator.state
-        run_id = self.orchestrator.start(
-            "BGW-815", "bgw", requirement_snapshot=snapshot("BGW-815"))["run_id"]
-        draft = {"x": 1}
-        output_hash = replay_gate._output_hash(draft)
-        st.cache_draft("ih-z", "p2", "model-b", draft)  # same output, different identity
-        st.record_model_execution_receipt(run_id, {
-            "job_id": "producer:z", "phase": "SPEC", "input_hash": "ih-z",
-            "output_hash": output_hash, "prompt_version": "p1", "model": "model-a",
-        })
-        report = replay_gate.golden_replay(st, run_id)
-        self.assertFalse(report["ok"])
-        self.assertTrue(
-            any(m.get("reason") == "receipt_not_backed_by_cache" for m in report["mismatches"]))
-        # A cache entry of the receipt's own identity backs it.
-        st.cache_draft("ih-z", "p1", "model-a", draft)
-        self.assertTrue(replay_gate.golden_replay(st, run_id)["ok"])
-
-    def test_golden_replay_flags_a_receipt_with_no_cached_draft(self):
-        # A recorded producer fill whose cached draft is missing must fail the replay gate
-        # (never a false green), naming the offending input.
-        import replay_gate
-
-        run_id = self.orchestrator.start(
-            "BGW-806", "bgw", requirement_snapshot=snapshot("BGW-806"))["run_id"]
-        self.orchestrator.state.record_model_execution_receipt(run_id, {
-            "job_id": "producer:y", "phase": "SPEC", "input_hash": "ih-y", "output_hash": "oh-y",
-        })
-        report = replay_gate.golden_replay(self.orchestrator.state, run_id)
-        self.assertFalse(report["ok"])
-        self.assertIn("ih-y", report["missing_cache"])
 
     def test_plan_rejects_caller_forged_task_and_revisions_without_owned_workspaces(self):
         run_id, _knowledge = self._run_to_workspace("BGW-510", "bgw", "I15ClP2KW4ZGAK")

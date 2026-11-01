@@ -4,6 +4,8 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-11-01
 
+- MVP 第 4 步第一批删除：`replay_gate.py`、`decision_questions.py`、`failure_signature_inventory.py`（无生产调用方）。
+
 - 第 9 轮评审修复：scope 门集合/成员交集/重发卡；RESTART 租约与 intent 集合 CAS、排除 build 也须处置、预算只计 CODE_FIX、需求差异绑定 G0 并强制人工 GRILL；ENV_WAIT 只等真实缺失、到期补 STOP；基线 build 须自证身份。详见根 CHANGELOG。
 
 ## 2026-10-31

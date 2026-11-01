@@ -12,14 +12,8 @@
 
 升级不修改、不删除旧 `failure_cases` 行，也不把新 v2 签名自动关联到旧 digest。旧算法可能将多个根因归到同一 digest，仅凭聚合 hash、计数和 run 集无法证明其中哪次属于哪个新根因。
 
-因此，**v2 新故障的跨运行累计与旧签名累计分开**。旧故障历史仍在库中，可通过以下只读工具清点。该命令使用 SQLite `mode=ro`，不会创建数据库、调用 StateStore 的 schema 迁移或写入状态：
-
-```sh
-python3 tom-autodev/scripts/failure_signature_inventory.py /path/to/state.sqlite
-```
-
-输出保留所有行、run 集、次数、解决状态和首末发生信息，并将未带版本的 digest 标为 `RAW_OCCURRENCE_REPLAY_REQUIRED`。未带版本的 digest 也可能来自其他 producer，须通过证据确认来源。
+因此，**v2 新故障的跨运行累计与旧签名累计分开**。旧故障历史仍原样保留在 `failure_cases` 表中，可用只读 SQLite 查询（`mode=ro`）清点；未带版本的 digest 也可能来自其他 producer，须通过证据确认来源。
 
 要回填到 v2，必须取得**每次 occurrence 的原始 pipeline/module、失败 stage 的稳定身份、完整 job message、run 与 occurrence 身份，以及解决事件的时间顺序**。逐次重算、按新根因拆组、检查是否与当前累计重复，并保存旧到新映射的证据后，才能通过独立且明确的迁移实施回填。缺失原始消息时只能保留历史待查，不能宣称无损迁移；归档 IPIPE 结构化 evidence 和截断的通知摘要通常不足以重建这些原始输入。
 
-本次提供清单和迁移边界，不自动执行历史回填。历史聚合表与旧冻结 evidence 原样保留。
+本文给出迁移边界，不自动执行历史回填。历史聚合表与旧冻结 evidence 原样保留。
