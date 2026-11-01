@@ -101,9 +101,6 @@ class ExecutionGuardTests(unittest.TestCase):
         cases = {
             "advance": lambda: owner.advance(run, "IPIPE", {}),
             "failure routing": lambda: owner.route_failure(run, "CODE_FAILURE", {}),
-            "rebuild recovery": lambda: owner.recover_rebuilt_change_set(run, "task", "plan"),
-            "stale plan recovery": lambda: owner.recover_stale_rebuilt_plan(run, "task", "SUBMIT", "plan", {"business": "b", "tests": "t"}),
-            "stale submit recovery": lambda: owner.recover_stale_submit(run, "task", "plan"),
             "summary archival": lambda: owner.optimize(run, "build"),
             "approval request": lambda: owner.request_infoflow_approval(run, "G7", "hash", member_policy={"comate": ["a@test.example"], "infoflow": ["a@test.example"]}, comate_client=SimpleNamespace(request=self.effect), infoflow_client=SimpleNamespace(request=self.effect)),
             "approval reply": lambda: owner.receive_infoflow_reply(run, approval_id, "hash", {}),

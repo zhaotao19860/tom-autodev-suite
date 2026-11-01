@@ -43,7 +43,7 @@ owns `complete-phase` for archival and transition — the producer turn never ca
 Hash drift requires a new human decision, while an unchanged action reuses its gate.
 Missing remote authorization/receipts remain a block, not permission to fake evidence.
 
-A `PLAN -> IMPLEMENT` event pins the completed Plan's artifact ID and content hash. IMPLEMENT resolves this pin before any latest-by-task lookup; an invalid, cross-run, cross-task, or hash-mismatched pin fails closed as a missing predecessor. `orchestrator.py recover-rebuilt-change-set RUN TASK PLAN_ARTIFACT` is the local-only recovery entry for rebuilding a candidate: it verifies that immutable Plan, records an idempotent `IMPLEMENT` checkpoint with the pin, and performs no worktree, database, or remote adapter operation.
+A `PLAN -> IMPLEMENT` event pins the completed Plan's artifact ID and content hash. IMPLEMENT resolves this pin before any latest-by-task lookup; an invalid, cross-run, cross-task, or hash-mismatched pin fails closed as a missing predecessor. A run whose candidate must be rebuilt from scratch is restarted with `restart-from` (contract 3.4) rather than repaired in place.
 
 ## Parent Controller Phases
 

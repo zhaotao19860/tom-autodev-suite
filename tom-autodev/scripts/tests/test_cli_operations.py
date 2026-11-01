@@ -540,63 +540,6 @@ class CliOperationTests(unittest.TestCase):
         self.assertNotIn("content", result)
         self.assertEqual((missing_code, missing["reason_code"]), (1, "ARTIFACT_NOT_FOUND"))
 
-    def test_recover_rebuilt_change_set_cli_uses_only_explicit_local_arguments(self):
-        self.orchestrator.state.transition(self.run_id, "PLAN", {"task_id": "T-1"})
-        output = io.StringIO()
-        with (
-            patch("orchestrator.Orchestrator", return_value=self.orchestrator),
-            patch.object(
-                self.orchestrator, "recover_rebuilt_change_set",
-                return_value={"ok": True, "reason_code": "REBUILT_CHANGE_SET_RECOVERED"},
-            ) as recover,
-            contextlib.redirect_stdout(output),
-        ):
-            code = main([
-                "--config-root", str(self.root), "recover-rebuilt-change-set",
-                self.run_id, "T-1", "artifact-plan-1",
-            ])
-
-        self.assertEqual((code, json.loads(output.getvalue())["reason_code"]), (0, "REBUILT_CHANGE_SET_RECOVERED"))
-        recover.assert_called_once_with(self.run_id, "T-1", "artifact-plan-1")
-
-    def test_recover_stale_rebuilt_plan_cli_requires_explicit_state_and_revisions(self):
-        output = io.StringIO()
-        with (
-            patch("orchestrator.Orchestrator", return_value=self.orchestrator),
-            patch.object(
-                self.orchestrator, "recover_stale_rebuilt_plan",
-                return_value={"ok": True, "reason_code": "STALE_REBUILT_PLAN_RECOVERED"},
-            ) as recover,
-            contextlib.redirect_stdout(output),
-        ):
-            code = main([
-                "--config-root", str(self.root), "recover-stale-rebuilt-plan",
-                "run-7", "T3", "plan-7", "--expected-state", "SUBMIT",
-                "--business-revision", "008f38ba",
-                "--tests-revision", "8696dccb13487a1920c4efd468bbdff9ae8df495",
-            ])
-
-        self.assertEqual((code, json.loads(output.getvalue())["reason_code"]), (0, "STALE_REBUILT_PLAN_RECOVERED"))
-        recover.assert_called_once_with(
-            "run-7", "T3", "SUBMIT", "plan-7",
-            {"business": "008f38ba", "tests": "8696dccb13487a1920c4efd468bbdff9ae8df495"},
-        )
-
-    def test_recover_legacy_pipeline_plan_cli_takes_only_the_run(self):
-        output = io.StringIO()
-        with (
-            patch("orchestrator.Orchestrator", return_value=self.orchestrator),
-            patch.object(
-                self.orchestrator, "recover_legacy_pipeline_plan",
-                return_value={"ok": True, "reason_code": "LEGACY_PIPELINE_PLAN_MIGRATED"},
-            ) as recover,
-            contextlib.redirect_stdout(output),
-        ):
-            code = main(["--config-root", str(self.root), "recover-legacy-pipeline-plan", "run-9"])
-
-        self.assertEqual((code, json.loads(output.getvalue())["reason_code"]), (0, "LEGACY_PIPELINE_PLAN_MIGRATED"))
-        recover.assert_called_once_with("run-9")
-
     def test_ipipe_rerun_has_an_explicit_cli_path_and_passes_the_bound_g8_fields(self):
         class Runtime:
             def __init__(self):

@@ -1137,67 +1137,6 @@ class SkippedSubmitRecoveryTests(unittest.TestCase):
 class RebuiltChangeSetRecoveryTests(unittest.TestCase):
     """Recovery must be local, idempotent, and bind IMPLEMENT to one Plan."""
 
-    def test_recovery_pins_the_selected_plan_not_a_newer_plan(self):
-        from test_phase_protocol_repair import final_envelope
-        from test_schema_validation import specialized_examples
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            _write_profile(root, PROFILE)
-            orchestrator = Orchestrator(root)
-            run_id = _start(orchestrator)["run_id"]
-            first = orchestrator.artifacts.put_envelope(final_envelope(
-                run_id, "PLAN", "T-1", specialized_examples()["task-plan"],
-                revisions={"business": "r1", "tests": "t1"},
-            ))
-            newer_plan = specialized_examples()["task-plan"]
-            newer_plan["g4_input_hash"] = "b" * 64
-            newer = orchestrator.artifacts.put_envelope(final_envelope(
-                run_id, "PLAN", "T-1", newer_plan,
-                revisions={"business": "r2", "tests": "t2"},
-            ))
-            checkpoint = orchestrator.state.transition(run_id, "PLAN", {
-                "previous_state": "DIAGNOSE", "task_id": "T-1",
-            })
-
-            recovered = orchestrator.recover_rebuilt_change_set(
-                run_id, "T-1", first["artifact_id"]
-            )
-            action = orchestrator.next(run_id)
-            replay = orchestrator.recover_rebuilt_change_set(
-                run_id, "T-1", first["artifact_id"]
-            )
-
-        self.assertTrue(recovered["ok"], recovered)
-        self.assertEqual(recovered["state"], "IMPLEMENT")
-        self.assertEqual(replay["event_id"], recovered["event_id"])
-        self.assertEqual(action["task_id"], "T-1")
-        self.assertEqual(action["parent_artifact_hash"], first["envelope"]["content_hash"])
-        self.assertNotEqual(action["parent_artifact_hash"], newer["envelope"]["content_hash"])
-        self.assertEqual(checkpoint["state"], "PLAN")
-
-    def test_recovery_rejects_foreign_plan_without_transition(self):
-        from test_phase_protocol_repair import final_envelope
-        from test_schema_validation import specialized_examples
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            _write_profile(root, PROFILE)
-            orchestrator = Orchestrator(root)
-            run_id = _start(orchestrator)["run_id"]
-            foreign = orchestrator.artifacts.put_envelope(final_envelope(
-                "other-run", "PLAN", "T-1", specialized_examples()["task-plan"],
-                revisions={"business": "r1", "tests": "t1"},
-            ))
-            orchestrator.state.transition(run_id, "PLAN", {"task_id": "T-1"})
-
-            result = orchestrator.recover_rebuilt_change_set(run_id, "T-1", foreign["artifact_id"])
-            state = orchestrator.status(run_id)["state"]
-
-        self.assertEqual(result["reason_code"], "PLAN_PREDECESSOR_INVALID")
-        self.assertEqual(state, "PLAN")
-
-
 class StaleRebuiltPlanRecoveryTests(unittest.TestCase):
     """A rebuilt QA revision must restart at an unapproved, immutable PLAN."""
 
@@ -1223,56 +1162,6 @@ class StaleRebuiltPlanRecoveryTests(unittest.TestCase):
         if state == "SUBMIT":
             orchestrator.state.transition(run_id, "SUBMIT", {"task_id": "T3"})
         return orchestrator, run_id, source
-
-    def test_recovery_creates_a_new_unapproved_plan_and_preserves_source(self):
-        orchestrator, run_id, source = self._fixture()
-        revisions = {
-            "business": "008f38ba",
-            "tests": "8696dccb13487a1920c4efd468bbdff9ae8df495",
-        }
-
-        recovered = orchestrator.recover_stale_rebuilt_plan(
-            run_id, "T3", "SUBMIT", source["artifact_id"], revisions
-        )
-        replay = orchestrator.recover_stale_rebuilt_plan(
-            run_id, "T3", "SUBMIT", source["artifact_id"], revisions
-        )
-        replacement = orchestrator.artifacts.phase_artifact(recovered["plan_artifact_id"])["envelope"]
-        original = orchestrator.artifacts.phase_artifact(source["artifact_id"])["envelope"]
-
-        self.assertTrue(recovered["ok"], recovered)
-        self.assertEqual(recovered["state"], "PLAN")
-        self.assertEqual(replay["event_id"], recovered["event_id"])
-        self.assertNotEqual(recovered["plan_artifact_id"], source["artifact_id"])
-        self.assertEqual(replacement["source_revisions"], revisions)
-        self.assertIsNone(replacement["approval_id"])
-        self.assertIsNone(replacement["approval_input_hash"])
-        self.assertEqual(
-            {entry["role"]: entry["revision"] for entry in replacement["content"]["repositories"]},
-            revisions,
-        )
-        self.assertEqual(original["source_revisions"], {"business": "old-business", "tests": "old-tests"})
-        self.assertEqual(orchestrator.status(run_id)["events"][-1]["payload"]["approval_required"], "G4")
-        # The command itself never auto-approves; the recovery event explicitly leaves G4 pending.
-        self.assertEqual(recovered["approval_required"], "G4")
-        self.assertIsNone(replacement["approval_id"])
-
-    def test_recovery_fails_closed_when_current_state_or_pinned_plan_does_not_match(self):
-        orchestrator, run_id, source = self._fixture("IMPLEMENT")
-        revisions = {"business": "b-new", "tests": "t-new"}
-
-        wrong_state = orchestrator.recover_stale_rebuilt_plan(
-            run_id, "T3", "SUBMIT", source["artifact_id"], revisions
-        )
-        wrong_plan = orchestrator.recover_stale_rebuilt_plan(
-            run_id, "T3", "IMPLEMENT", "not-the-pinned-plan", revisions
-        )
-
-        self.assertEqual(wrong_state["reason_code"], "RECOVERY_STATE_MISMATCH")
-        self.assertEqual(wrong_plan["reason_code"], "RECOVERY_PLAN_MISMATCH")
-        self.assertEqual(orchestrator.status(run_id)["state"], "IMPLEMENT")
-
-
 
 class MultiRepoSubmitFrontierTests(unittest.TestCase):
     """SUBMIT may only hand over to IPIPE once every reviewed change set is in."""

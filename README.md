@@ -537,10 +537,6 @@ build/stage、核对原 G8，确认后保存本地回执；它不创建新意图
 只在对应场景使用恢复命令：
 
 ```bash
-python3 tom-autodev/scripts/cli.py recover-rebuilt-change-set --help
-python3 tom-autodev/scripts/cli.py recover-stale-submit --help
-python3 tom-autodev/scripts/cli.py recover-stale-rebuilt-plan --help
-python3 tom-autodev/scripts/cli.py recover-legacy-pipeline-plan --help
 python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py work-card reconcile --help
@@ -548,7 +544,7 @@ python3 tom-autodev/scripts/cli.py work-card reconcile --help
 
 **在新 run 中重开需求（合同 3.4）**：`restart-from SOURCE_RUN` 默认只读列出旧 run 留下的 CR、build、未回执写入和工作树及其处置；有任何未决项返回 `RESTART_SOURCE_UNRESOLVED`。确认处置后加 `--execute --reason "..."`（未合入的旧 CR 用 `--keep-open-crs` 保留，已合入的用 `--accept-merged` 接受）：同一事务内停止旧 run、写 `run_lineage`、建新 run 的 INTAKE，新 run 重走需求研判/规格/任务拆解，修复轮次继承。一个旧 run 只能重开一次，重复执行返回同一个新 run。
 
-`recover-legacy-pipeline-plan` 只用于升级前已进入 IPIPE、但缺少冻结 `pipeline_plan` 的历史 run。它从该 run 自己获审的提交和固定 profile 重建计划，不提交、不发布、不审批、不调用 runtime；旧 build 会按模块重新核验。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。对 `ipipe.rerun`，只有当观察记录了 `before_dispatch: true`（运行时确认错误发生在调用点、请求尚未发出）且无 `http_status` 时，才可加 `--local-error-proven` 让同一审批重发一次；被调方内部抛出的同类错误，以及没有 `before_dispatch` 字段的旧观察，一律拒绝（`LOCAL_ERROR_NOT_PROVEN`）。无该标志的放弃仍是终局。观察、回执、G8/重建审批材料写入前统一脱敏：`IREPO-TOKEN:`、`access_token=`、Authorization/Bearer 值以及本进程已加载的 irepo/iPipe token 原值（任意长度）。未变更模块的发布产物必须与冻结 revision 精确一致，否则返回 `PRODUCT_REVISION_MISMATCH`。不要手改数据库或删除记录解除阻断。
+`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。对 `ipipe.rerun`，只有当观察记录了 `before_dispatch: true`（运行时确认错误发生在调用点、请求尚未发出）且无 `http_status` 时，才可加 `--local-error-proven` 让同一审批重发一次；被调方内部抛出的同类错误，以及没有 `before_dispatch` 字段的旧观察，一律拒绝（`LOCAL_ERROR_NOT_PROVEN`）。无该标志的放弃仍是终局。观察、回执、G8/重建审批材料写入前统一脱敏：`IREPO-TOKEN:`、`access_token=`、Authorization/Bearer 值以及本进程已加载的 irepo/iPipe token 原值（任意长度）。未变更模块的发布产物必须与冻结 revision 精确一致，否则返回 `PRODUCT_REVISION_MISMATCH`。不要手改数据库或删除记录解除阻断。
 
 ### 终态后优化
 

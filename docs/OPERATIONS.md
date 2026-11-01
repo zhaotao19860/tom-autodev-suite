@@ -187,10 +187,6 @@ skill 产生的前置 debug 文本不会再被误判为 JSON 损坏；如果入�
 只有符合对应恢复场景时才使用专门命令：
 
 ```bash
-python3 tom-autodev/scripts/cli.py recover-rebuilt-change-set --help
-python3 tom-autodev/scripts/cli.py recover-stale-submit --help
-python3 tom-autodev/scripts/cli.py recover-stale-rebuilt-plan --help
-python3 tom-autodev/scripts/cli.py recover-legacy-pipeline-plan --help
 python3 tom-autodev/scripts/cli.py repin-profile --help
 python3 tom-autodev/scripts/cli.py abandon-intent --help
 python3 tom-autodev/scripts/cli.py confirm-approval-redelivery --help
@@ -263,7 +259,7 @@ python3 tom-autodev/scripts/cli.py rewind "$RUN_ID" --approval-id APPROVAL_ID   
 （`APPROVAL_SUPERSEDED`），也不再出现在 `status` 的待审批列表里。重发次数用完
 （`APPROVAL_RETRY_EXHAUSTED`）的设计阶段门，可用同阶段 rewind 换一道新门。
 
-`repin-profile` 需要保存的上一版 profile 副本和对应审批；直接编辑配置不会自动改变已运行任务的绑定。`recover-legacy-pipeline-plan` 仅用于升级前已进入 IPIPE、事件里没有 `pipeline_plan`（RELEASE 报 `PIPELINE_PLAN_REQUIRED`）的历史 run：它从该 run 自己不可变的、获审的提交与固定 profile 确定性重建并回填冻结计划，不提交、不发布、不审批、不调用任何 runtime，幂等；在途旧构建会按模块重跑，不会被当作发布证据。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录来解除阻断。
+`repin-profile` 需要保存的上一版 profile 副本和对应审批；直接编辑配置不会自动改变已运行任务的绑定。`abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。不要手改数据库或删除记录来解除阻断。
 
 默认状态库为 `~/.tom-autodev/state.sqlite`。自定义根目录参数放在子命令前，后续命令须保持一致：
 
