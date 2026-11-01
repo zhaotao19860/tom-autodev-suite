@@ -260,9 +260,9 @@ For an explicit CLI recovery, run `scripts/cli.py revise RUN_ID --approval-id <r
 --feedback <text> --actor <who>`; the producer is re-entered with
 `revision_context` (instruction plus the previous draft) from `context`, must address every
 point of the instruction, keep what was not objected to, and the new gate shows a diff. When
-an earlier phase or a repository fact must change, open `scripts/cli.py rewind RUN_ID --to
-<GRILL|SPEC|TASKS> --reason ... --actor ... [--previous-profile COPY] --request`, wait for the
-human `CHANGE_REQUEST` approval, then apply it with `--approval-id`. Never move a run by hand.
+an earlier phase or a repository fact must change, stop the run and use
+`scripts/cli.py restart-from RUN_ID --reason ...` for a new run that carries the lineage
+(the in-place `rewind` was removed). Never move a run by hand.
 
 A requirement the user changes after G1 is never absorbed into a later draft. From PLAN or
 IMPLEMENT, report it as `USER_REQUIREMENT_CHANGED` (G5 “需修改” first re-enters IMPLEMENT so

@@ -133,10 +133,9 @@ same gate is asked again for the new hash with a "本次修改说明 / 与上一
 Only the member who cast the effective REJECT can supply the 如流 feedback. A REJECT of
 any other gate stays a stop; code-phase rework goes through DIAGNOSE.
 
-Moving back to an earlier phase, or changing `test_repo` / `business_repos`, needs a
-`CHANGE_REQUEST` approval bound to the run's current event, the target and the reason
-(and the profile old/new hash when the profile changes). Gates opened before a revise or
-rewind are superseded: they are not nudged, reissued or listed as waiting.
+Moving back to an earlier phase, or changing `test_repo` / `business_repos`, is a new run
+started with `restart-from`; the in-place `CHANGE_REQUEST` rewind was removed. Gates opened
+before a revise are superseded: they are not nudged, reissued or listed as waiting.
 
 ### What to inspect at each gate
 

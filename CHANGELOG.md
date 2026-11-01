@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-01 · MVP 第 4 步：删除原地回退 rewind（CHANGE_REQUEST）
+
+- 删除 CLI `rewind` 与 `run_change` 的 `plan`/`request`/`apply`/`rewind_available`/`snapshot`/`summary_lines`：回到更早阶段、改 `test_repo`/`business_repos`、离开 ARCHITECTURE_REVIEW 一律走 `restart-from`（3.4，已在真实卡验证）。`run_brief`、`approval_watch`、`approval_summary` 的 CHANGE_REQUEST 分支随之删除，重发用尽与需修改提示改指 `restart-from`。保留 `revise`（需修改按意见重做）与 `superseded`。`workflow_spec.REWIND_TARGETS` 不再有使用方，但它进 workflow 策略 hash，删掉会让所有已钉住的 run 漂移，故保留并注明。SKILL.md、state-machine、approval-policy、producer-contract、OPERATIONS、README 同步。
+
 ## 2026-11-01 · MVP 第 4 步：删除 submit-companion 补救命令
 
 - 删除 CLI `submit-companion` 与 `_submit_missing_companion`：它只为 3.2 之前只推了业务库的历史 run 补推测试库提交；3.2 聚合状态保证 SUBMITTED 前两库都已确认，库中已无非终态 run。`_submit_companion` 是正常 SUBMIT 推送测试库的实现，保留。`tom-autodev/SKILL.md` 同步。全量 1631 个测试通过。

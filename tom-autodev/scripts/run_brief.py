@@ -25,8 +25,6 @@ def _status_label(state: str, action: dict[str, Any], open_gates: list[dict[str,
         return "待恢复"
     if approved and approved.get("action") == "WORKFLOW_SPEC_MIGRATION":
         return "迁移已批准待应用"
-    if approved and gate_of(approved.get("action") or "") == "CHANGE_REQUEST":
-        return "变更已批准待执行"
     if open_gates:
         return "待审批"
     if approved:
@@ -122,7 +120,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
             latest_approve_at[action_name] = resolved
     # A reissued approval keeps the same bare gate (for example G1#retry-1 is
     # still G1), but only the newest unresolved attempt is actionable.
-    # After a revise/rewind the gates opened before it ask about an action the run
+    # After a revise the gates opened before it ask about an action the run
     # has left; listing them would send the reviewer to a card nothing can use.
     reentered_at = max(
         (event.get("created_at") or "" for event in events
@@ -138,11 +136,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         }:
             continue
         action_name = gate_of(row.get("action") or "")
-        # A change request is about the run, not the phase's gate, and is the very
-        # thing a person has to answer while the phase waits.
-        if current_gate is not None and action_name not in {current_gate, "CHANGE_REQUEST"}:
-            continue
-        if action_name == "CHANGE_REQUEST" and not _change_request_live(orchestrator, run_id, row, current):
+        if current_gate is not None and action_name != current_gate:
             continue
         created = row.get("created_at") or row.get("deadline_at") or ""
         if action_name in latest_approve_at and latest_approve_at[action_name] >= created:
@@ -160,10 +154,9 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         }
         for row in latest_unresolved.values()
     ]
-    # A migration or change request decides what the phase gate is about (under drift
-    # or a pending profile change its answer cannot even land), so it is named first.
-    _first = {"WORKFLOW_SPEC_MIGRATION": 0, "CHANGE_REQUEST": 1}
-    open_gates.sort(key=lambda gate: _first.get(gate_of(gate["action"] or ""), 2))
+    # A migration decides what the phase gate is about (under drift its answer cannot
+    # even land), so it is named first.
+    open_gates.sort(key=lambda gate: gate_of(gate["action"] or "") != "WORKFLOW_SPEC_MIGRATION")
     pending = []
     side_writes: list[str] = []
     # Under evidence contract v2 an open KU/iCafe write is a side channel that blocks
@@ -228,14 +221,6 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         and row.get("created_at") and current.get("created_at")
         and row["created_at"] >= current["created_at"]
     ), None)
-    change_approved = None if terminal else next((
-        row for row in reversed(approvals)
-        if gate_of(row.get("action") or "") == "CHANGE_REQUEST"
-        and row.get("effective_decision") == "APPROVE"
-        and _change_request_live(orchestrator, run_id, row, current)
-    ), None)
-    if change_approved is not None:
-        approved = change_approved
     producer_job = _producer_context(orchestrator, run_id, action, terminal)
     status_label = _status_label(current["state"], action, open_gates, pending, blocked, approved, producer_job, rejected)
     from progress_snapshot import build as build_progress
@@ -262,21 +247,6 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         "gate": action.get("required_human_gate"),
         "next": next_step,
     }
-
-
-def _change_request_live(orchestrator: Any, run_id: str, row: dict[str, Any], current: dict[str, Any]) -> bool:
-    """A change request still applies only where it was opened and until it is applied."""
-    getter = getattr(getattr(orchestrator, "state", None), "idempotency_result", None)
-    if not callable(getter):
-        return False
-    from run_change import snapshot
-
-    prepared = snapshot(orchestrator.state, run_id, row.get("input_hash") or "")
-    return (
-        isinstance(prepared, dict)
-        and prepared.get("from_event_id") == current.get("event_id")
-        and getter(f"run-change:{row.get('approval_id')}") is None
-    )
 
 
 def _producer_context(orchestrator: Any, run_id: str, action: dict[str, Any], terminal: bool) -> dict[str, Any] | None:
@@ -374,13 +344,6 @@ def _next_step(
             }
         operations = "、".join(sorted({item["operation"] for item in pending})) or "-"
         return {"owner": "Agent", "text": f"先收敛未确认的外部写入（{operations}），再继续"}
-    # An approved change request replaces the phase gates still open, so applying it
-    # comes before answering any of them.
-    if approved and gate_of(approved.get("action") or "") == "CHANGE_REQUEST":
-        return {
-            "owner": "Agent",
-            "text": f"变更请求已批准；执行 rewind --approval-id {approved.get('approval_id')} 回到目标阶段",
-        }
     if approved and approved.get("action") == "WORKFLOW_SPEC_MIGRATION":
         return {
             "owner": "Agent",
@@ -407,8 +370,8 @@ def _next_step(
         return {
             "owner": "你",
             "text": (
-                "修复预算已用尽或同类失败反复出现，需要人决定回到哪个设计阶段："
-                "告诉 agent 回到 GRILL / SPEC / TASKS 及原因，由它发起 rewind 变更请求审批"
+                "修复预算已用尽或同类失败反复出现，需要人重新审视设计："
+                "告诉 agent 要改什么，由它 restart-from 新建承接运行（旧运行停止并保留审计）"
             ),
         }
     if rejected:
@@ -420,15 +383,10 @@ def _next_step(
                 "text": (
                     f"{gate} 已标记需修改（审批 {approval_id}）。把修改意见告诉 agent"
                     f"（`/tom-autodev <卡片> 需修改 <意见>`，或在如流点「需修改」后直接回复意见），"
-                    f"Agent 会按意见重做草案并重新发起 {gate}；要回到更早阶段用 rewind，停止用 stop"
+                    f"Agent 会按意见重做草案并重新发起 {gate}；要改更早阶段的设计用 restart-from，停止用 stop"
                 ),
             }
-        from run_change import rewind_available
-
-        way_back = (
-            "；如需改前面的设计，告诉 agent 回到 GRILL/SPEC/TASKS 中哪个阶段，由它发起 rewind"
-            if rewind_available(events or [], state) else ""
-        )
+        way_back = "；如需改前面的设计，告诉 agent 要改什么，由它 restart-from 新建承接运行"
         return {
             "owner": "你",
             "text": (

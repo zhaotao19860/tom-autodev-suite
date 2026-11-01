@@ -946,8 +946,6 @@ def _ack_note(
         return "已选择需修改：保留 run 并重新进入当前阶段，Agent 将按审批重点生成新版材料并重新发起本门。"
     if decision == "REJECT":
         return "已停止 run，不会继续后续阶段。"
-    if decision == "APPROVE" and gate == "CHANGE_REQUEST":
-        return f"变更请求只授权回退本身：在 agent 会话里执行 `rewind --approval-id {approval['approval_id']}`。"
     return None
 
 

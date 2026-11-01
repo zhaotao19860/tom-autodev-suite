@@ -275,7 +275,7 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 
 | 类别 | 候选 | 额外前提 |
 |---|---|---|
-| 原地恢复 / 迁移 | `recover-*`、`migrate-workflow-spec`、`repin-profile`、`revise`、`rewind`、`workflow_spec_migration.py`、`profile_repin.py`、`run_change.py` | `restart-from`（3.4）已在真实卡上验证 |
+| 原地恢复 / 迁移 | ~~`recover-*`~~、~~`rewind`~~ **已删除（2026-11-01）**；`migrate-workflow-spec`、`repin-profile`、`workflow_spec_migration.py`、`profile_repin.py`；**保留** `revise` 与 `run_change.py` 的需修改重做（负责人决定，需修改是正常审批回路，不是恢复） | `restart-from`（3.4）已在真实卡上验证 |
 | 审批旁路 | `approve`、`request-approval`、`await-approval`、`correct-approval-message` | scope 授权 + `approval reconcile` 已覆盖 |
 | 手工推进 | `next`、`complete-phase`、`advance`、`drive`（并入 `continue`）、`start`（并入 `process`） | worker 在真实卡上无需它们 |
 | 提交补救 | ~~`submit-companion`~~ **已删除（2026-11-01）**；`orchestrator._submit_companion` 保留（正常 SUBMIT 路径推送测试库提交的实现，不是补救） | 3.2 上线 |

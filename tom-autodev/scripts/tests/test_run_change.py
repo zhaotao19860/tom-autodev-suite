@@ -1,4 +1,4 @@
-"""Redo a phase without a new run: revise after REJECT, rewind under CHANGE_REQUEST."""
+"""Redo a phase without a new run: revise after REVISE."""
 
 import copy
 import os
@@ -239,47 +239,6 @@ class RunChangeTests(unittest.TestCase):
         )
         self.assertEqual(revised["feedback"], "reject path needs rollback")
 
-    def test_a_rewind_that_loses_the_race_moves_neither_the_pin_nor_the_run(self):
-        import profile_repin
-
-        run_id, _knowledge, _job_id, _hash = self._at_g2()
-        previous = self._edit_test_branch("feature/race")
-        opened = run_change.request(
-            self.orchestrator, run_id, "SPEC", "换分支", "owner@example.test", previous,
-            comate_client=_Channel(), infoflow_client=_Channel(),
-        )
-        approval_id = opened["approval"]["approval_id"]
-        self._settle(approval_id, opened["input_hash"], run_id)
-        self.orchestrator.state.transition(run_id, "SPEC", {})
-        moved = run_change.apply(self.orchestrator, run_id, approval_id)
-        self.assertIn(moved["reason_code"], {"RUN_MOVED", "CHANGE_REQUEST_DRIFTED"})
-        self.assertIsNone(profile_repin.record_for(self.orchestrator.state, run_id))
-
-    def test_rewind_commits_pin_event_and_result_together(self):
-        import profile_repin
-
-        run_id, _knowledge, _job_id, _hash = self._at_g2()
-        previous = self._edit_test_branch("feature/atomic")
-        opened = run_change.request(
-            self.orchestrator, run_id, "SPEC", "换分支", "owner@example.test", previous,
-            comate_client=_Channel(), infoflow_client=_Channel(),
-        )
-        approval_id = opened["approval"]["approval_id"]
-        self._settle(approval_id, opened["input_hash"], run_id)
-        original = self.orchestrator.state.commit_transition_result
-
-        def crash_after_commit(*args, **kwargs):
-            original(*args, **kwargs)
-            raise RuntimeError("crash after commit")
-
-        with patch.object(self.orchestrator.state, "commit_transition_result", crash_after_commit):
-            with self.assertRaises(RuntimeError):
-                run_change.apply(self.orchestrator, run_id, approval_id)
-        landed = profile_repin.record_for(self.orchestrator.state, run_id)
-        self.assertEqual(landed["approval_id"], approval_id)
-        self.assertEqual(self.orchestrator.state.events(run_id)[-1]["payload"]["reentry"]["approval_id"], approval_id)
-        self.assertEqual(run_change.apply(self.orchestrator, run_id, approval_id)["reason_code"], "ALREADY_REWOUND")
-
     def test_feedback_split_over_messages_is_joined_in_order(self):
         run_id, _knowledge, _job_id, rejected_hash = self._at_g2()
         rejected = self._approval(run_id, "G2", rejected_hash, decision="REJECT")
@@ -370,39 +329,9 @@ class RunChangeTests(unittest.TestCase):
         self.assertEqual(state.events(run_id)[-1]["event_id"], current["event_id"])
         self.assertIsNone(state.idempotency_result("result-key"))
 
-    def test_rewind_requires_the_edited_profile_to_be_reconfirmed(self):
-        from profile_wizard import confirmation_hash, confirmed_inputs
-
-        run_id, _knowledge, _job_id, _hash = self._at_g2()
-        path = self.root / "config" / "projects" / "bgw.yaml"
-        previous = self.root / "bgw.pinned.yaml"
-        shutil.copyfile(path, previous)
-        profile = yaml.safe_load(path.read_text(encoding="utf-8"))
-        profile["test_repo"]["branch"] = "feature/confirm"
-        profile["profile_confirmation"] = {"confirmed_by": "owner@example.test",
-                                           "confirmed_inputs_hash": "0" * 64,
-                                           "source": "profile_wizard"}
-        path.write_text(yaml.safe_dump(profile), encoding="utf-8")
-        stale = run_change.plan(self.orchestrator, run_id, "SPEC", "换分支", "owner@example.test", previous)
-        self.assertEqual(stale["reason_code"], "PROFILE_CONFIRMATION_MISMATCH")
-        profile["profile_confirmation"]["confirmed_inputs_hash"] = confirmation_hash(confirmed_inputs(profile))
-        path.write_text(yaml.safe_dump(profile), encoding="utf-8")
-        planned = run_change.plan(self.orchestrator, run_id, "SPEC", "换分支", "owner@example.test", previous)
-        self.assertEqual(planned["reason_code"], "OK", planned)
-        self.assertEqual(planned["profile"]["changed_keys"], ["profile_confirmation", "test_repo"])
-
-    def test_workspace_that_already_had_code_cannot_rewind(self):
-        run_id, _knowledge, _job_id, _hash = self._at_g2()
-        for state in ("WORKSPACE", "PLAN", "IMPLEMENT", "REVIEW", "WORKSPACE"):
-            self.orchestrator.state.transition(run_id, state, {})
-        result = run_change.plan(self.orchestrator, run_id, "SPEC", "改设计", "owner@example.test")
-        self.assertEqual(result["reason_code"], "REWIND_AFTER_CODE_FORBIDDEN")
-
     def test_acknowledgements_name_the_step_that_really_follows(self):
         from approval_watch import _ack_note
 
-        change = {"approval_id": "c" * 32, "action": "CHANGE_REQUEST"}
-        self.assertIn("rewind --approval-id", _ack_note(change, "APPROVE", False, None))
         gate = {"approval_id": "g" * 32, "action": "G2#retry-1"}
         self.assertIn("需修改", _ack_note(gate, "REVISE", False, None))
         self.assertIn("已按意见登记重做", _ack_note(gate, "REVISE", False, {"feedback": "补回滚"}))
@@ -410,126 +339,12 @@ class RunChangeTests(unittest.TestCase):
         self.assertIn("取代", _ack_note(gate, "APPROVE", True, None))
         self.assertIn("停止 run", _ack_note({"approval_id": "x", "action": "G7"}, "REJECT", False, None))
 
-    def test_pending_change_request_is_listed_and_an_approved_one_says_apply(self):
-        run_id, _knowledge, _job_id, pending_hash = self._at_g2()
-        self.orchestrator.approvals.request(
-            "G2", pending_hash, ["comate", "infoflow"], run_id=run_id,
-            member_policy={"comate": ["owner@example.test"], "infoflow": ["owner@example.test"]},
-        )
-        opened = run_change.request(
-            self.orchestrator, run_id, "GRILL", "重新澄清", "owner@example.test",
-            comate_client=_Channel(), infoflow_client=_Channel(),
-        )
-        approval_id = opened["approval"]["approval_id"]
-        for intent in self.orchestrator.state.pending_intents(run_id):
-            self.orchestrator.state.receipt(intent["intent_id"], {"approval_id": approval_id}, [])
-        brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
-        self.assertEqual(brief["waiting_on"][0]["approval_id"], approval_id)
-        self._settle(approval_id, opened["input_hash"], run_id)
-        brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
-        self.assertEqual(brief["status_label"], "变更已批准待执行")
-        self.assertIn(f"rewind --approval-id {approval_id}", brief["next"]["text"])
-
-    def _settle(self, approval_id, input_hash, run_id):
-        for channel in ("comate", "infoflow"):
-            self.orchestrator.approvals.record_delivery(
-                approval_id, channel, {"request_id": f"{channel}-change"}, payload_hash=input_hash,
-            )
-        self.orchestrator.approvals.resolve(
-            approval_id, "APPROVE", input_hash, "comate", run_id=run_id,
-            responder="owner@example.test", state_store=self.orchestrator.state,
-        )
-
-    def _edit_test_branch(self, branch):
-        path = self.root / "config" / "projects" / "bgw.yaml"
-        previous = self.root / "bgw.pinned.yaml"
-        shutil.copyfile(path, previous)
-        profile = yaml.safe_load(path.read_text(encoding="utf-8"))
-        profile["test_repo"]["branch"] = branch
-        path.write_text(yaml.safe_dump(profile), encoding="utf-8")
-        return previous
-
-    def test_rewind_moves_test_repo_with_one_change_request_and_redoes_from_target(self):
-        run_id, knowledge, _job_id, pending_hash = self._at_g2()
-        stale_g2 = self.orchestrator.approvals.request(
-            "G2", pending_hash, ["comate", "infoflow"], run_id=run_id,
-            member_policy={"comate": ["owner@example.test"], "infoflow": ["owner@example.test"]},
-        )
-        previous = self._edit_test_branch("feature/new-cases")
-        self.assertEqual(self.orchestrator.next(run_id, read_only=True)["reason_code"], "PROFILE_CONFLICT")
-
-        undeclared = run_change.plan(self.orchestrator, run_id, "SPEC", "换测试分支", "owner@example.test")
-        self.assertEqual(undeclared["reason_code"], "PROFILE_CHANGE_UNDECLARED")
-        forbidden = run_change.plan(
-            self.orchestrator, run_id, "TASKS", "换测试分支", "owner@example.test", previous
-        )
-        self.assertEqual(forbidden["reason_code"], "REWIND_TARGET_FORBIDDEN")
-
-        comate, infoflow = _Channel(), _Channel()
-        opened = run_change.request(
-            self.orchestrator, run_id, "SPEC", "测试仓库换到新分支", "owner@example.test", previous,
-            comate_client=comate, infoflow_client=infoflow,
-        )
-        self.assertEqual(opened["reason_code"], "OK", opened)
-        self.assertEqual(opened["profile"]["changed_keys"], ["test_repo"])
-        self.assertEqual(opened["redo"], ["SPEC"])
-        approval_id = opened["approval"]["approval_id"]
-        detail = pinned_context(self.orchestrator, run_id, "CHANGE_REQUEST", opened["input_hash"])
-        self.assertEqual(detail["material_status"], "PINNED")
-
-        self.assertEqual(run_change.apply(self.orchestrator, run_id, approval_id)["reason_code"],
-                         "APPROVAL_REQUIRED")
-        self._settle(approval_id, opened["input_hash"], run_id)
-        # The fake infoflow channel answers with no gateway result, which leaves its
-        # delivery claim open; a real delivery closes it with the receipt.
-        for intent in self.orchestrator.state.pending_intents(run_id):
-            self.orchestrator.state.receipt(intent["intent_id"], {"approval_id": approval_id}, [])
-        applied = run_change.apply(self.orchestrator, run_id, approval_id)
-        self.assertEqual((applied["ok"], applied.get("state")), (True, "SPEC"), applied)
-        self.assertEqual(run_change.apply(self.orchestrator, run_id, approval_id)["reason_code"],
-                         "ALREADY_REWOUND")
-
-        action = self.orchestrator.next(run_id, read_only=True)
-        self.assertEqual((action["reason_code"], action.get("state")), ("OK", "SPEC"), action)
-        self.assertEqual(action["reentry"]["kind"], "REWIND")
-        self.assertTrue(run_change.superseded(
-            self.orchestrator.state, run_id, self.orchestrator.approvals.get(stale_g2["approval_id"])
-        ))
-        brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
-        self.assertEqual(brief["waiting_on"], [])
-
-    def test_change_request_is_void_once_the_run_moves(self):
-        run_id, _knowledge, _job_id, _hash = self._at_g2()
-        prepared = run_change.request(
-            self.orchestrator, run_id, "GRILL", "重新澄清", "owner@example.test",
-            comate_client=_Channel(), infoflow_client=_Channel(),
-        )
-        approval_id = prepared["approval"]["approval_id"]
-        self._settle(approval_id, prepared["input_hash"], run_id)
-        self.orchestrator.state.transition(run_id, "SPEC", {})
-        self.assertEqual(run_change.apply(self.orchestrator, run_id, approval_id)["reason_code"], "RUN_MOVED")
-
-    def test_repository_keys_cannot_move_after_a_workspace_was_bound(self):
-        run_id, _knowledge, _job_id, _hash = self._at_g2()
-        self.orchestrator.state.transition(run_id, "WORKSPACE", {})
-        previous = self._edit_test_branch("feature/late")
-        result = run_change.plan(
-            self.orchestrator, run_id, "SPEC", "换分支", "owner@example.test", previous
-        )
-        self.assertEqual(result["reason_code"], "REPIN_FIELD_FORBIDDEN")
-
-    def test_architecture_review_is_left_only_by_an_approved_rewind(self):
+    def test_architecture_review_points_to_restart_from(self):
         run_id, _knowledge, _job_id, _hash = self._at_g2()
         self.orchestrator.state.transition(run_id, "ARCHITECTURE_REVIEW", {})
         brief = run_brief.build(self.orchestrator, run_id, include_progress=False)
-        self.assertIn("rewind", brief["next"]["text"])
-        planned = run_change.plan(self.orchestrator, run_id, "SPEC", "接口需重设计", "owner@example.test")
-        self.assertEqual(planned["reason_code"], "OK")
-        self.assertEqual(planned["redo"], ["SPEC", "TASKS"])
-        self.assertEqual(
-            run_change.plan(self.orchestrator, run_id, "PLAN", "x", "a")["reason_code"],
-            "REWIND_TARGET_FORBIDDEN",
-        )
+        self.assertIn("restart-from", brief["next"]["text"])
+        self.assertNotIn("rewind", brief["next"]["text"])
 
     def test_rewind_policy_is_part_of_the_workflow_pin(self):
         original = workflow_spec.canonical_hash()

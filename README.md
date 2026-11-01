@@ -148,7 +148,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 - 如流已回复并落账精确的 `WORKFLOW_SPEC_MIGRATION` 批准时，`continue` 会按当前 run 与
   当前迁移计划的 `input_hash` 消费该批准并应用迁移，再交给 worker 恢复；它不会自动批准或
   重开审批。`status` 只读显示「迁移已批准待应用」。
-- 显式命令（`migrate-workflow-spec`、`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`、`rewind`、
+- 显式命令（`migrate-workflow-spec`、`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`、
   `repin-profile`、`optimize apply`）成功消费审批后，会完成该审批对应的 `APPROVAL_RESUME` handoff；
   `continue` 遇到多条 handoff 时，只清理指向旧事件且审批已被消费/门禁已不符的过期项（审计原因 `STALE_EVENT`），
   匹配最新事件的有效 handoff 与 REJECT 审批的 handoff 不受影响。

@@ -41,8 +41,8 @@ ACTION = "PROFILE_REPIN"
 # change what any approval was granted against.
 _ALLOWED_KEYS = frozenset({"pipeline_profile", "submission_policy"})
 # Repository facts are hashed into the drafts that name them, so they may only move
-# together with an approved rewind that produces those drafts again
-# (run_change.rewind), and only before any workspace was bound to them.
+# together with a redo of those drafts; with the in-place rewind removed, that is a
+# new run (`restart-from`), so a re-pin never moves them.
 # `profile_confirmation` re-records the owner's confirmation of those facts and has
 # to move with them, otherwise the edited profile fails its own confirmation check.
 REWIND_KEYS = frozenset({"test_repo", "business_repos", "profile_confirmation"})

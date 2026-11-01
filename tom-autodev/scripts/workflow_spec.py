@@ -241,11 +241,9 @@ _FAILURE_DEFAULT = "STOPPED"
 REVISABLE_STATES: frozenset[str] = frozenset({"GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "DIAGNOSE"})
 REVISABLE_GATES: frozenset[str] = frozenset({"G1", "G2", "G3", "G4", "G5", "G6"})
 
-# Approved backward moves (run_change.rewind): the run re-enters the target and every
-# phase from there is produced again; nothing already recorded is rewritten. Later
-# states go back through DIAGNOSE, which owns repair routing once code exists and can
-# route a changed requirement to GRILL.
-# ARCHITECTURE_REVIEW has no producer, so a rewind is the only way out of it.
+# Backward moves the retired `rewind` command allowed. No command uses them any more
+# (a design change now goes through `restart-from`, which also leaves
+# ARCHITECTURE_REVIEW); they stay because they are part of the pinned policy hash.
 REWIND_TARGETS: dict[str, frozenset[str]] = {
     "GRILL": frozenset({"GRILL"}),
     "SPEC": frozenset({"GRILL", "SPEC"}),

@@ -53,10 +53,6 @@ _REVIEW = {
         "旧新 workflow_spec_hash、保留的阶段/审批/外部审计绑定",
         "运行事件、已有 artifact、approval_id/input_hash 和外部 intent/receipt",
     ),
-    "CHANGE_REQUEST": (
-        "回退目标、原因、将重新产出的阶段；若同时改 profile，核对改动字段",
-        "发起时的阶段事件、回退目标与 profile 旧新 hash；已有记录不删除",
-    ),
 }
 _EFFECTS = {
     "G0": "批准当前需求/协作/路由绑定；控制器随后建群并进入 GRILL，不授权代码提交或发布",
@@ -69,10 +65,6 @@ _EFFECTS = {
     "G9": "只读核验平台发布并记录匹配证据；全部模块通过才进入 RELEASE_SUCCESS，未发布则等待，不强制发布",
     "G10": "仅应用允许目录内的控制面候选改动并验证/失败回滚；不修改业务 run 的授权",
     "PROFILE_REPIN": "执行另行 apply 后移动 profile pin；不改阶段、不重新授权既有提交，不允许改变审批成员",
-    "CHANGE_REQUEST": (
-        "执行另行 apply 后回到目标阶段并重新产出其后各阶段；每一版仍需各自的门，"
-        "不批准任何草案，运行离开发起时的位置即失效"
-    ),
     "WORKFLOW_SPEC_MIGRATION": (
         "执行另行 apply 后移动 workflow policy pin；不重写阶段事件、"
         "不创建新的 G1、不改变既有 approval_id/input_hash，也不删除外部审计"
@@ -88,8 +80,6 @@ def gate_intent(action: Any) -> dict[str, Any]:
         subject = "将运行重新钉到已审核的 project profile"
     if name == "WORKFLOW_SPEC_MIGRATION":
         subject = "将暂停中的运行迁移到当前 workflow policy"
-    if name == "CHANGE_REQUEST":
-        subject = "变更请求：回到较早阶段重新产出"
     focus, reads = _REVIEW.get(name, ("核对本次动作与绑定", "缺少已知审批合同，请先补齐"))
     revisable = name in workflow_spec.REVISABLE_GATES
     return {"subject": subject, "effect": _EFFECTS.get(name, effect),
@@ -426,22 +416,6 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
                         "current_state", "preserves", "input_hash",
                     )
                 },
-            }
-        if gate_name == "CHANGE_REQUEST":
-            from run_change import snapshot, summary_lines
-
-            prepared = snapshot(orchestrator.state, run_id, input_hash)
-            if prepared is None or prepared.get("input_hash") != input_hash:
-                return missing
-            return {
-                "summary": summary_lines(prepared),
-                "references": [
-                    {"label": "当前阶段事件", "ref": str(prepared["from_event_id"])},
-                    {"label": "回退目标", "ref": str(prepared["target"])},
-                ],
-                "content_hash": input_hash,
-                "material_status": "PINNED",
-                "_review_content": {"change_request": prepared},
             }
         action = _read_only_next(orchestrator, run_id)
         if (

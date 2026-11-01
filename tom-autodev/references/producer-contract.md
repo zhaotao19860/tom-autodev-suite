@@ -33,14 +33,14 @@ The phase schema and actual action take precedence over descriptive field lists 
 - On interruption, inspect durable job/workspace state and actual files before doing work again. A checklist describes intended work; it is not proof that an edit, commit, trigger or publication occurred.
 - Local source reading, source generation and suite helper validation are separate from project execution. Business compilation, simulation and tests require the configured iPipe runner; source reasoning is not a passing test receipt.
 
-## Redo after REJECT or rewind
+## Redo after REJECT
 
 When `context` returns `revision_context`, this job is a redo, not a fresh draft:
 
-- `instruction` is the reviewer's feedback (`REVISE`), the change request reason (`REWIND`), or the approved G6 repair direction (`DIAGNOSIS`, with `repair_plan`). Address every point of it and nothing beyond it.
+- `instruction` is the reviewer's feedback (`REVISE`), or the approved G6 repair direction (`DIAGNOSIS`, with `repair_plan`). Address every point of it and nothing beyond it.
 - `previous_draft`, when present, is the version that was sent back. Start from it: keep what the instruction does not touch, so the diff on the new gate shows only the requested change.
-- Repository facts (`test_repo`, `business_repos`, branches, locks) come from the run's pinned profile; cite them from the profile instead of retyping them, so a profile change made with a rewind cannot leave a stale value in the draft.
-- If the instruction contradicts an approved earlier artifact, say so in the draft's open questions or decline; do not silently override the earlier phase — that is a rewind decision for a human.
+- Repository facts (`test_repo`, `business_repos`, branches, locks) come from the run's pinned profile; cite them from the profile instead of retyping them, so a stale value cannot stay in the draft.
+- If the instruction contradicts an approved earlier artifact, say so in the draft's open questions or decline; do not silently override the earlier phase — that is a `restart-from` decision for a human.
 - Never silently follow the earlier artifact either. When a user's later requirement (in chat, a G5 “需修改”, or a `DIAGNOSIS` instruction) contradicts the approved decision log or Spec, PLAN reports `report-producer-conflict` and IMPLEMENT reports `report-producer-block`, both with `classification: USER_REQUIREMENT_CHANGED`, stating the old and new rule verbatim. The diagnosis then routes `GRILL`.
 
 ## Reporting a draft
