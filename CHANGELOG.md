@@ -4,6 +4,12 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 10 轮 Codex 评审第 2 轮修复
+
+评审报告：[docs/reviews/2026-11-02-r10-codex-review-2.md](docs/reviews/2026-11-02-r10-codex-review-2.md)（eb9ed7c..4e7417d）。第 1 轮 4 项全部关闭，新增 1 项 P2。
+
+- **R10-NEW-001**：`restart-from` 的 build 状态查询把 iPipe transport 的创建推迟到确有 build binding 时，并纳入异常处理；此前无 build 的源 run 在缺 iPipe 认证时 CLI 直接抛 `IPIPE_AUTH_REQUIRED`。有 build 而认证不可用时返回未知状态，restart 仍被阻断。全量 1601 个测试通过。
+
 ## 2026-11-02 · 第 10 轮 Codex 评审第 1 轮修复
 
 评审报告：[docs/reviews/2026-11-02-r10-codex-review-1.md](docs/reviews/2026-11-02-r10-codex-review-1.md)（a4733d1..eb9ed7c，4 项 P2）。

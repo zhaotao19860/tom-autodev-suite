@@ -4939,14 +4939,16 @@ def _restart_build_status(orchestrator: Orchestrator, run_id: str) -> Any:
     user = resolve_username([item["path"] for item in repos or [] if isinstance(item, dict) and item.get("path")])
     if not user:
         return lambda _build_id: None
-    api = IpipeApiClient(IpipeHttpTransport(), current_user=user)
 
     def status(build_id: str) -> Any:
         stored = orchestrator.state.idempotency_result(f"ipipe.build-binding:{run_id}:{build_id}")
         binding = stored.get("binding") if isinstance(stored, dict) and stored.get("build_id") == build_id else None
         if not isinstance(binding, dict):
             return None
+        # The transport (and its credentials) is only needed once a build exists: a run
+        # with no build restarts without touching iPipe auth (R10-NEW-001).
         try:
+            api = IpipeApiClient(IpipeHttpTransport(), current_user=user)
             build = api.build_by_id(build_id, **build_key(binding))
         except Exception:  # noqa: BLE001 - an unreadable build blocks the restart
             return None

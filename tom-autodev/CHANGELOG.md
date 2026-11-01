@@ -4,6 +4,7 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-11-02
 
+- 第 10 轮 Codex 评审第 2 轮修复：无 build 的 restart-from 不再需要 iPipe 认证。
 - 第 10 轮 Codex 评审第 1 轮修复：restart 的 build 查询绕开 profile 守卫、G8 本地错误重发哈希、v4 兼容 action 身份、fixture 录制脚本。详见根 CHANGELOG。
 
 ## 2026-11-01

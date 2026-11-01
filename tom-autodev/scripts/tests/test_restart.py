@@ -136,6 +136,21 @@ class RestartTests(unittest.TestCase):
         self.assertTrue(_intake_hash_matches(payload))
         self.assertFalse(_intake_hash_matches({**payload, "project": "q"}))
 
+    def test_the_cli_build_query_needs_no_ipipe_auth_without_builds(self):
+        # R10-NEW-001: no build means no iPipe query, so missing auth must not raise.
+        import orchestrator as orchestrator_module
+
+        with unittest.mock.patch("clients.ipipe_client.IpipeHttpTransport",
+                                 side_effect=ValueError("IPIPE_AUTH_REQUIRED")), \
+                unittest.mock.patch("clients.ku_client.resolve_username", return_value="tester"):
+            status = orchestrator_module._restart_build_status(self.orch, self.source)
+            self.assertTrue(restart.plan(self.orch, self.source, build_status=status)["ok"])
+            self.orch.state.save_idempotency_result(f"ipipe.build-binding:{self.source}:b1", {
+                "run_id": self.source, "build_id": "b1",
+                "binding": {"module": "bgw", "revision_map": {"bgw": "r1"}, "pipeline_id": "p1"}})
+            self.assertIsNone(status("b1"))
+            self.assertFalse(restart.plan(self.orch, self.source, build_status=status)["ok"])
+
     def test_a_3ff3ee1_v4_intake_keeps_its_cached_action_identity(self):
         # R9-NEW-001 follow-up: the action identity hashes intake_prerequisites, so the
         # 3ff3ee1 key set (with requirement_diff) must come back for that payload too.
