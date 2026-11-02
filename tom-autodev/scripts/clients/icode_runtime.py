@@ -402,6 +402,9 @@ class IcodeRuntime:
             if self.state.result_by_idempotency_key(intent["idempotency_key"]) is not None:
                 return _failure("SUBMIT_INTENT_CLOSED", intent_id=intent["intent_id"],
                                 retry_allowed=False)
+            # Where the push can land, read before it goes out: a refusal only proves
+            # nothing landed when there is exactly one place it could land (R11B-001).
+            single_target = _single_push_target(submit_repo)
             pushed = _run(
                 self.transport,
                 [
@@ -422,7 +425,7 @@ class IcodeRuntime:
         if blocked is not None:
             return blocked
         output = f"{pushed.get('stdout') or ''}\n{pushed.get('stderr') or ''}"
-        if pushed["returncode"] != 0 and not _push_refused(output):
+        if pushed["returncode"] != 0 and not _push_refused(output, single_target):
             # Only an answer that says the push was refused ends the attempt. A timeout,
             # a signal, a lost or empty reply may have landed it; a read-back decides
             # (R11B-001: the cases kept coming, so unknown is the default, not a list).
@@ -990,23 +993,52 @@ _SUBMIT_DISPATCH_MARKER = "icode.submit.dispatch"
 # Words like "permission denied" or "invalid argument" can also follow a transfer that
 # already landed, so they are not proof of a refusal; every other non-zero exit is
 # unknown and settled by a read-back (R11B-001).
-_PUSH_REFUSED = re.compile(
-    r"(?i)!\s*\[(?:remote )?rejected\]|missing change-id|failed to extract repo name"
-)
+# push_cr's own checks that fail before it connects anywhere.
+_PUSH_LOCAL_REFUSAL = re.compile(r"(?i)missing change-id|failed to extract repo name")
+# Gerrit's per-ref rejection: it speaks only for the target it was printed under.
+_PUSH_REMOTE_REJECTED = re.compile(r"(?i)!\s*\[(?:remote )?rejected\]")
 # git names each push target on a "To <url>" line and each ref it updated with a
 # "*" / "+" / " " status line; Gerrit adds "remote: SUCCESS" for a created change.
 _PUSH_TARGET = re.compile(r"(?m)^To \S+")
 _PUSH_ACCEPTED = re.compile(r"(?im)^\s*[*+ ]\s+\S+\s+\S+\s*->|^remote:\s*SUCCESS|\[new (?:reference|branch|tag)\]")
+# The remotes push_cr pushes through (`git push origin`, or `origin-https`).
+_PUSH_REMOTES = ("origin", "origin-https")
 
 
-def _push_refused(output: str) -> bool:
+def _single_push_target(repo_path: Any) -> bool:
+    """Whether every remote push_cr may use resolves to exactly one push URL.
+
+    Read from git itself (`remote get-url --push --all`, which applies pushurl and any
+    global/insteadOf configuration), not from the push output: a target that accepted
+    may print nothing. Unreadable configuration is not proof of a single target.
+    """
+    seen = False
+    listed = _git_text(repo_path, "remote")
+    if listed is None:
+        return False
+    names = listed.split()
+    for remote in _PUSH_REMOTES:
+        if remote not in names:
+            continue
+        urls = _git_text(repo_path, "remote", "get-url", "--push", "--all", remote)
+        if urls is None or len([line for line in urls.splitlines() if line.strip()]) != 1:
+            return False
+        seen = True
+    return seen
+
+
+def _push_refused(output: str, single_target: bool = False) -> bool:
     """Whether a failed push proves that nothing of it landed.
 
-    A refusal line only speaks for the target it is printed under. With several push
-    URLs one target can accept while another rejects, so the refusal counts only for
-    a single (or no) target and when no ref was reported accepted (R11B-001).
+    push_cr's local checks fail before any connection, so they prove it outright. A
+    Gerrit rejection proves it only when the push could land in one place at all,
+    checked on the repository before dispatch, and no ref was reported accepted.
+    With several push URLs one target can accept while its output is lost and another
+    rejects, so the rejection says nothing about the whole push (R11B-001).
     """
-    if not _PUSH_REFUSED.search(output):
+    if _PUSH_LOCAL_REFUSAL.search(output) and not _PUSH_TARGET.search(output):
+        return True
+    if not _PUSH_REMOTE_REJECTED.search(output) or not single_target:
         return False
     return len(_PUSH_TARGET.findall(output)) <= 1 and not _PUSH_ACCEPTED.search(output)
 

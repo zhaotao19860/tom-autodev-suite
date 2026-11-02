@@ -760,7 +760,11 @@ class IcodeRuntimeTests(unittest.TestCase):
                 self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
                 self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
+    def _push_urls(self, url):
+        subprocess.run(["git", "-C", str(self.source_repo), "remote", "add", "origin", url], check=True)
+
     def test_a_gerrit_rejection_still_ends_the_attempt(self):
+        self._push_urls("ssh://icode.example:8235/baidu/team/repo")
         change = self.change_set()
         approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
         self.transport.push_result = {"returncode": 1, "stdout": "",
@@ -778,7 +782,34 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
+    def test_a_rejection_is_unknown_when_another_push_url_printed_nothing(self):
+        # R11B-001 follow-up: a second push URL from global git configuration reaches the
+        # submit mirror too; A accepted but printed nothing, B rejected.
+        self._push_urls("ssh://icode-a.example:8235/baidu/team/repo")
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 1, "stdout": "", "stderr": (
+            "To https://icode-b.example/repo\n ! [remote rejected] HEAD -> refs/for/main (prohibited)\n")}
+        extra = {"GIT_CONFIG_COUNT": "2",
+                 "GIT_CONFIG_KEY_0": "remote.origin.pushurl",
+                 "GIT_CONFIG_VALUE_0": "ssh://icode-a.example:8235/baidu/team/repo",
+                 "GIT_CONFIG_KEY_1": "remote.origin.pushurl",
+                 "GIT_CONFIG_VALUE_1": "ssh://icode-b.example:8235/baidu/team/repo"}
+        with patch.dict(os.environ, extra):
+            self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_RESULT_UNKNOWN")
+            self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_a_rejection_without_a_readable_push_target_is_unknown(self):
+        # No origin to read the push URLs from: a lone rejection line proves nothing.
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 1, "stdout": "",
+                                      "stderr": " ! [remote rejected] HEAD -> refs/for/main (prohibited)\n"}
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_RESULT_UNKNOWN")
+
     def test_a_single_target_rejection_still_ends_the_attempt(self):
+        self._push_urls("ssh://icode.example:8235/baidu/team/repo")
         change = self.change_set()
         approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
         self.transport.push_result = {"returncode": 1, "stdout": "", "stderr": (

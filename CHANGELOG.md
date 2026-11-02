@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 11 轮定向复核（第 6 轮）后修复
+
+报告（ed34c1c）：[6B](docs/reviews/2026-11-02-r11-codex-review-6B.md) FAIL。完整输出下的多推送目标已修好，但已接受的那个目标如果什么都没打印，只剩另一个目标的拒绝行，仍会被当成整次拒绝并重推。本提交修复，**尚未经 Codex 复核**。
+
+- **R11B-001**：不再从推送输出推断有几个推送目标。推送前用 `git remote get-url --push --all` 读取 push_cr 可能使用的 remote（`origin`、`origin-https`）的推送地址（含 pushurl、全局配置与 insteadOf）。只有每个 remote 都恰好一个推送地址、且输出里没有任何 ref 被接受时，Gerrit 的拒绝才算整次未落地；读不到配置或地址多于一个都按结果未知只读核对。push_cr 联网前的本地检查（缺 Change-Id、无法解析远端）仍直接算拒绝。
+- 新增回归：全局配置注入第二个推送地址、接受方无输出时保持未知且只推一次；没有可读 origin 时拒绝行也按未知；单推送地址的 Gerrit 拒绝仍结束本次尝试。修前对照失败。全量 1595 个测试通过。
+
 ## 2026-11-02 · 第 11 轮定向复核（第 5 轮）后修复
 
 报告（52128a7）：[A](docs/reviews/2026-11-02-r11-codex-review-5A.md) PASS，R11A-003 关闭；[B](docs/reviews/2026-11-02-r11-codex-review-5B.md) FAIL，R11B-001 仍有残留。本提交修复残留，**尚未经 Codex 复核**。
