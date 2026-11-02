@@ -1109,13 +1109,8 @@ class PhaseProtocol:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
         if (payload.get("reentry") or {}).get("kind") != "REVISE" or not payload.get("repair_of"):
             return False
-        origin = next((event for event in self.state.events(run_id)
-                       if event.get("event_id") == payload["repair_of"]), None)
-        if not isinstance(origin, dict) or origin.get("state") != "PLAN":
-            return False
-        origin_payload = origin.get("payload") or {}
-        return (origin_payload.get("previous_state") == "DIAGNOSE"
-                and origin_payload.get("task_id") == payload.get("task_id"))
+        origin = repair_root(self.state.events(run_id), payload["repair_of"])
+        return origin is not None and (origin.get("payload") or {}).get("task_id") == payload.get("task_id")
 
     def _task_id(self, run_id: str, state: str, current: dict[str, Any]) -> str | None:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
@@ -3090,6 +3085,27 @@ def _required_modules(pipeline: Any) -> list[str]:
         if isinstance(entry, dict) and entry.get("required_for_release")
         and isinstance(entry.get("module"), str)
     })
+
+
+def repair_root(events: list[dict[str, Any]], event_id: Any) -> dict[str, Any] | None:
+    """The PLAN entered from DIAGNOSE that a repair redo chain starts at, or None.
+
+    Redos written since cf27f02 point at that PLAN directly; older ones point at the
+    previous redo. Both are followed, with cycle detection instead of a depth limit,
+    so a run whose chain was written in the old form keeps its repair (R11A-003).
+    """
+    by_id = {event.get("event_id"): event for event in events}
+    seen: set[Any] = set()
+    current = by_id.get(event_id)
+    while isinstance(current, dict) and current.get("event_id") not in seen:
+        seen.add(current.get("event_id"))
+        if current.get("state") != "PLAN":
+            return None
+        payload = current.get("payload") or {}
+        if payload.get("previous_state") == "DIAGNOSE":
+            return current
+        current = by_id.get(payload.get("repair_of"))
+    return None
 
 
 def _pinned_profile_hash(events: list[dict[str, Any]]) -> str | None:

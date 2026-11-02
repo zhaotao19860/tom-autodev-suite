@@ -232,6 +232,50 @@ class RunChangeTests(unittest.TestCase):
         protocol.state.events.return_value = chain
         self.assertTrue(protocol._revised_repair_plan(run_id, chain[-1]))
 
+    def test_a_repair_chain_written_redo_to_redo_still_resolves_to_its_root(self):
+        # R11A-003 follow-up: before cf27f02 each redo pointed at the previous redo.
+        from unittest.mock import MagicMock as Mock
+        from phase_protocol import PhaseProtocol, repair_root
+
+        root = {"event_id": "p0", "state": "PLAN", "payload": {"previous_state": "DIAGNOSE", "task_id": "T1"}}
+        chain = [root]
+        for n in range(1, 41):
+            chain.append({"event_id": f"r{n}", "state": "PLAN", "payload": {
+                "task_id": "T1", "repair_of": chain[-1]["event_id"], "reentry": {"kind": "REVISE"}}})
+        self.assertIs(repair_root(chain, "r40"), root)
+        protocol = PhaseProtocol.__new__(PhaseProtocol)
+        protocol.state = Mock()
+        protocol.state.events.return_value = chain
+        self.assertTrue(protocol._revised_repair_plan("run", chain[-1]))
+        # Another task's redo does not count as this repair; a loop proves nothing.
+        other = {"event_id": "x", "state": "PLAN", "payload": {
+            "task_id": "T2", "repair_of": "r40", "reentry": {"kind": "REVISE"}}}
+        protocol.state.events.return_value = chain + [other]
+        self.assertFalse(protocol._revised_repair_plan("run", other))
+        loop = [{"event_id": "a", "state": "PLAN", "payload": {"repair_of": "b"}},
+                {"event_id": "b", "state": "PLAN", "payload": {"repair_of": "a"}}]
+        self.assertIsNone(repair_root(loop, "a"))
+
+    def test_the_next_redo_of_an_old_chain_points_at_the_root(self):
+        run_id, approval_id = "plan-old-chain", "approval-old-chain"
+        root = {"event_id": "p0", "state": "PLAN", "payload": {"previous_state": "DIAGNOSE", "task_id": "T1"}}
+        old = {"event_id": "r1", "state": "PLAN", "payload": {
+            "task_id": "T1", "repair_of": "p0", "reentry": {"kind": "REVISE"}}}
+        older = {"event_id": "r2", "state": "PLAN", "payload": {
+            "task_id": "T1", "repair_of": "r1", "reentry": {"kind": "REVISE"}}}
+        action = {"ok": True, "phase": "PLAN", "state": "PLAN", "task_id": "T1", "source_event_id": "r2"}
+        approval = {"run_id": run_id, "action": "G4", "approval_id": approval_id,
+                    "effective_decision": "REVISE", "input_hash": "h" * 64}
+        fake = MagicMock()
+        fake.state.events.return_value = [root, old, older]
+        fake.approvals.get.return_value = approval
+        fake.state.commit_transition_result.return_value = {"status": "COMMITTED", "result": {"ok": True}}
+        with patch.object(run_change, "_current_draft", return_value=(action, "producer:r2", {"task_id": "T1"})), \
+                patch.object(run_change, "_draft_approval_hash", return_value="h" * 64):
+            self.assertTrue(run_change.revise(fake, run_id, approval_id, feedback="再改", actor="owner")["ok"])
+        payload = fake.state.commit_transition_result.call_args.args[3]
+        self.assertEqual((payload["task_id"], payload["repair_of"]), ("T1", "p0"))
+
     def test_plan_revise_rejects_unvalidated_legacy_reentry_pin(self):
         protocol = self.orchestrator.phase_protocol()
         current = {"event_id": "legacy-revise", "payload": {"reentry": {

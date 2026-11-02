@@ -746,6 +746,27 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
+    def test_a_post_send_failure_worded_like_a_refusal_is_still_unknown(self):
+        # R11B-001 follow-up: these words can follow a transfer that already landed.
+        for stderr in ("objects sent; response read failed: Permission denied",
+                       "error: operation not permitted after upload",
+                       "fatal: invalid argument in server response"):
+            with self.subTest(stderr=stderr):
+                self.setUp()
+                change = self.change_set()
+                approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+                self.transport.push_result = {"returncode": 1, "stdout": "", "stderr": stderr}
+                self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_RESULT_UNKNOWN")
+                self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
+                self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_a_gerrit_rejection_still_ends_the_attempt(self):
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 1, "stdout": "",
+                                      "stderr": " ! [remote rejected] HEAD -> refs/for/main (no new changes)"}
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_REJECTED")
+
     def test_one_cr_per_repo_create_new_cr_skips_baseline_drift(self):
         change = self.change_set()
         change["submission_mode"] = "create_new_cr"

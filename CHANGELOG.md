@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 11 轮定向复核（第 4 轮）后修复
+
+定向复核报告（cf27f02，只看上一提交修的 3 项）：[A](docs/reviews/2026-11-02-r11-codex-review-4A.md)、[B](docs/reviews/2026-11-02-r11-codex-review-4B.md)、[C](docs/reviews/2026-11-02-r11-codex-review-4C.md)。R11-C-002 关闭；R11A-003、R11B-001 仍有同根因残留，本提交修复，**尚未经 Codex 复核**。
+
+- **R11A-003**：cf27f02 之前写下的重做链是逐个指向上一次重做的，cf27f02 只查一次起点，升级后这类 run 会丢任务或误切到下一任务。新增 `phase_protocol.repair_root`：沿 `repair_of` 回溯到从 DIAGNOSE 进入的 PLAN，带循环检测、无深度上限；新写入的重做统一指向该根。
+- **R11B-001**：`_PUSH_REFUSED` 只保留不会出现在已发送之后的证据：Gerrit 的 `! [rejected]` / `! [remote rejected]`，以及 push_cr 联网前的本地检查（缺 Change-Id、无法解析远端）。`permission denied`、`not permitted`、`invalid argument` 可能出现在推送已落地之后，不再当作拒绝。
+- 新增回归：旧格式 40 层链、他任务与循环链不误判、旧链下一次重做指向根；发送后带拒绝字样的三种失败保持未知、只推一次；Gerrit 拒绝仍结束本次尝试。修前对照均失败。全量 1591 个测试通过。
+
 ## 2026-11-02 · 第 11 轮 Codex 全量评审第 3 轮（最后一轮）后修复
 
 复核报告（e41578c）：[A](docs/reviews/2026-11-02-r11-codex-review-3A.md)、[B](docs/reviews/2026-11-02-r11-codex-review-3B.md)、[C](docs/reviews/2026-11-02-r11-codex-review-3C.md)。第 2 轮 8 项中 5 项关闭；3 项仍有同根因残留，无新增问题。三项已在本提交修复并补回归，但三轮预算已用完，**这次修复未经 Codex 复核**。

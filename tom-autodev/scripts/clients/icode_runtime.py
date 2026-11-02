@@ -985,11 +985,13 @@ _SUBMIT_ABSENCE_GRACE_SECONDS = _SUBMIT_PUSH_TIMEOUT_SECONDS + 300
 _SUBMIT_DISPATCH_MARKER = "icode.submit.dispatch"
 
 
-# What a refused push says: Gerrit's own rejection, or push_cr failing before it sent
-# anything (no Change-Id, an unreadable remote). Every other non-zero exit is unknown.
+# What a refused push says, and only that: Gerrit's own per-ref rejection, or push_cr's
+# local pre-checks that fail before any connection (no Change-Id, no readable remote).
+# Words like "permission denied" or "invalid argument" can also follow a transfer that
+# already landed, so they are not proof of a refusal; every other non-zero exit is
+# unknown and settled by a read-back (R11B-001).
 _PUSH_REFUSED = re.compile(
-    r"(?i)\[remote rejected\]|\[rejected\]|missing change-id|failed to extract repo name"
-    r"|prohibited by gerrit|not permitted|permission denied|invalid (?:argument|option)"
+    r"(?i)!\s*\[(?:remote )?rejected\]|missing change-id|failed to extract repo name"
 )
 
 def _default_candidates() -> list[str]:
