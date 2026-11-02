@@ -767,6 +767,24 @@ class IcodeRuntimeTests(unittest.TestCase):
                                       "stderr": " ! [remote rejected] HEAD -> refs/for/main (no new changes)"}
         self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_REJECTED")
 
+    def test_a_rejection_from_one_of_several_push_targets_is_unknown(self):
+        # R11B-001 follow-up: with two push URLs, A accepted and B rejected.
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 1, "stdout": "", "stderr": (
+            "To https://icode-a.example/repo\n * [new reference] HEAD -> refs/for/main\n"
+            "To https://icode-b.example/repo\n ! [remote rejected] HEAD -> refs/for/main (prohibited)\n")}
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_RESULT_UNKNOWN")
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_a_single_target_rejection_still_ends_the_attempt(self):
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 1, "stdout": "", "stderr": (
+            "To https://icode.example/repo\n ! [remote rejected] HEAD -> refs/for/main (no new changes)\n")}
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_REJECTED")
+
     def test_one_cr_per_repo_create_new_cr_skips_baseline_drift(self):
         change = self.change_set()
         change["submission_mode"] = "create_new_cr"

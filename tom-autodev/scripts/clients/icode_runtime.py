@@ -422,7 +422,7 @@ class IcodeRuntime:
         if blocked is not None:
             return blocked
         output = f"{pushed.get('stdout') or ''}\n{pushed.get('stderr') or ''}"
-        if pushed["returncode"] != 0 and not _PUSH_REFUSED.search(output):
+        if pushed["returncode"] != 0 and not _push_refused(output):
             # Only an answer that says the push was refused ends the attempt. A timeout,
             # a signal, a lost or empty reply may have landed it; a read-back decides
             # (R11B-001: the cases kept coming, so unknown is the default, not a list).
@@ -993,6 +993,22 @@ _SUBMIT_DISPATCH_MARKER = "icode.submit.dispatch"
 _PUSH_REFUSED = re.compile(
     r"(?i)!\s*\[(?:remote )?rejected\]|missing change-id|failed to extract repo name"
 )
+# git names each push target on a "To <url>" line and each ref it updated with a
+# "*" / "+" / " " status line; Gerrit adds "remote: SUCCESS" for a created change.
+_PUSH_TARGET = re.compile(r"(?m)^To \S+")
+_PUSH_ACCEPTED = re.compile(r"(?im)^\s*[*+ ]\s+\S+\s+\S+\s*->|^remote:\s*SUCCESS|\[new (?:reference|branch|tag)\]")
+
+
+def _push_refused(output: str) -> bool:
+    """Whether a failed push proves that nothing of it landed.
+
+    A refusal line only speaks for the target it is printed under. With several push
+    URLs one target can accept while another rejects, so the refusal counts only for
+    a single (or no) target and when no ref was reported accepted (R11B-001).
+    """
+    if not _PUSH_REFUSED.search(output):
+        return False
+    return len(_PUSH_TARGET.findall(output)) <= 1 and not _PUSH_ACCEPTED.search(output)
 
 def _default_candidates() -> list[str]:
     return [

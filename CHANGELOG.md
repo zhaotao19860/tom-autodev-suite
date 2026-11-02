@@ -4,6 +4,13 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 11 轮定向复核（第 5 轮）后修复
+
+报告（52128a7）：[A](docs/reviews/2026-11-02-r11-codex-review-5A.md) PASS，R11A-003 关闭；[B](docs/reviews/2026-11-02-r11-codex-review-5B.md) FAIL，R11B-001 仍有残留。本提交修复残留，**尚未经 Codex 复核**。
+
+- **R11B-001**：remote 配了多个 push URL 时，一个目标接受、另一个返回 `! [remote rejected]`，旧判断会把整次推送当成被拒绝并允许重推。新增 `_push_refused`：拒绝行只在输出只涉及一个推送目标、且没有任何 ref 被报告为已接受时才算拒绝，否则按结果未知只读核对。
+- 新增回归：两个推送目标部分成功时保持未知、只推一次（修前对照失败）；单目标拒绝仍结束本次尝试。全量 1593 个测试通过。
+
 ## 2026-11-02 · 第 11 轮定向复核（第 4 轮）后修复
 
 定向复核报告（cf27f02，只看上一提交修的 3 项）：[A](docs/reviews/2026-11-02-r11-codex-review-4A.md)、[B](docs/reviews/2026-11-02-r11-codex-review-4B.md)、[C](docs/reviews/2026-11-02-r11-codex-review-4C.md)。R11-C-002 关闭；R11A-003、R11B-001 仍有同根因残留，本提交修复，**尚未经 Codex 复核**。
