@@ -28,6 +28,7 @@ class RestartTests(unittest.TestCase):
         claim = self.orch.state.claim_intent(self.source, "icode.submit", f"icode:{number}", {"n": number})
         self.orch.state.receipt(claim["intent"]["intent_id"], {
             "ok": True, "change_number": number, "module": "bgw", "change_id": "I1",
+            "commit_revision": "c" * 40,
         }, [f"icode-cr-{number}"])
 
     def test_a_clean_source_restarts_once_and_replays(self):
@@ -42,6 +43,17 @@ class RestartTests(unittest.TestCase):
         again = restart.execute(self.orch, self.source, self.snapshot, reason="需求变更")
         self.assertEqual(again["reason_code"], "RESTART_REPLAY")
         self.assertEqual(again["target_run_id"], target)
+
+    def test_a_chained_restart_replays_its_own_target(self):
+        # R11B-008: B is A's target and C's source; replaying B must find C, not A.
+        first = restart.execute(self.orch, self.source, self.snapshot, reason="一")
+        middle = first["target_run_id"]
+        second = restart.execute(self.orch, middle, self.snapshot, reason="二")
+        self.assertEqual(second["reason_code"], "RESTARTED", second)
+        again = restart.execute(self.orch, middle, self.snapshot, reason="二")
+        self.assertEqual((again["reason_code"], again["target_run_id"]),
+                         ("RESTART_REPLAY", second["target_run_id"]))
+        self.assertEqual(self.orch.state.lineage(middle)["target_run_id"], second["target_run_id"])
 
     def test_an_unreceipted_write_blocks_and_nothing_is_written(self):
         self.orch.state.claim_intent(self.source, "ipipe.rerun", "ipipe.rerun:x", {"stage_build_id": "s"})
@@ -70,6 +82,19 @@ class RestartTests(unittest.TestCase):
                 planned = restart.plan(self.orch, self.source, cr_status=lambda _cr, s=status: s, **options)
                 self.assertEqual(planned["ok"], ok, planned)
                 self.assertEqual(planned["lineage"]["crs"][0]["disposition"], disposition)
+
+    def test_a_pipeline_icode_started_for_a_cr_must_be_ended_too(self):
+        # R11B-007: a build iCode started for the merged CR was never bound by the worker.
+        self._submitted_cr()
+        options = {"cr_status": lambda _cr: "MERGED", "accept_merged": True}
+        running = restart.plan(self.orch, self.source, **options,
+                               cr_builds=lambda _cr: [{"build_id": "auto-1", "status": "RUNNING"}])
+        self.assertFalse(running["ok"], running)
+        self.assertEqual(running["blockers"][0]["build_id"], "auto-1")
+        self.assertFalse(restart.plan(self.orch, self.source, **options, cr_builds=lambda _cr: None)["ok"])
+        ended = restart.plan(self.orch, self.source, **options,
+                             cr_builds=lambda _cr: [{"build_id": "auto-1", "status": "SUCC"}])
+        self.assertTrue(ended["ok"], ended)
 
     def test_a_running_or_unreadable_build_blocks(self):
         self.orch.state.save_idempotency_result(f"ipipe.build-binding:{self.source}:b1", {"build_id": "b1"})

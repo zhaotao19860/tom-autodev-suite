@@ -11,7 +11,7 @@ from typing import Any
 from approval_contract import ApprovalGatewayResult, parse_gateway_result
 from collaboration import group_id_for_run
 import workflow_spec
-from approval_ledger import gate_of
+from approval_ledger import gate_of, revise_supported
 from run_change import FEEDBACK_PLACEHOLDER
 from approval_summary import gate_intent, references
 
@@ -69,6 +69,18 @@ def correct_approval_message(orchestrator, run_id, approval_id, input_hash, *, a
                "deadline_at": approval["deadline_at"], "actor": actor, "reason": reason,
                "original_content_hash": _hash(original["content"]),
                "content_hash": _hash(content), "content": content}
+    # Prove a wrong client locally, before the claim: once the sender runs, a TypeError
+    # raised inside it can come after the message left (R11A-007).
+    group_id = group_id_for_run(orchestrator.state, run_id)
+    sender = getattr(client, "send_markdown" if group_id is None else "send_group_markdown", None)
+    if not callable(sender):
+        return refuse("CORRECTION_REJECTED", "通知客户端不支持发送纠正消息，未发送。")
+    try:
+        inspect.signature(sender).bind(*(([], "") if group_id is None else (group_id, "", [])))
+    except TypeError:
+        return refuse("CORRECTION_REJECTED", "通知客户端的发送接口与调用不符，未发送。")
+    except ValueError:
+        pass
     claim = orchestrator.state.claim_intent(run_id, "approval.message-correction", key, payload)
     if claim["status"] != "CLAIMED":
         return refuse("QUERY_REQUIRED", "纠正消息已有投递意图但结果未确认；禁止重复发送，请核对该意图。")
@@ -80,7 +92,7 @@ def correct_approval_message(orchestrator, run_id, approval_id, input_hash, *, a
             **payload, "receipt": receipt, "channel": "infoflow",
         }, [])
     except Exception as error:
-        if getattr(error, "outcome", None) == "REJECTED_BEFORE_SEND" or isinstance(error, TypeError):
+        if getattr(error, "outcome", None) == "REJECTED_BEFORE_SEND":
             orchestrator.state.withdraw_intent(run_id, "approval.message-correction", key, payload)
             return refuse("CORRECTION_REJECTED", "网关在发送前拒绝了纠正消息，未送达；已撤回投递意图，可修正后重试。")
         return refuse("QUERY_REQUIRED", "纠正消息发送结果未确认，保留投递意图；请核对，勿重复发送。")
@@ -198,6 +210,7 @@ def _deliver_approval_card(
     reminder that repeats the reply instructions also carries its own buttons.
     """
     group_id = group_id_for_run(state_store, gateway_request["run_id"])
+    revisable = revise_supported(gateway_request.get("action"), state_store, gateway_request.get("run_id"))
     if not hasattr(client, "send_approval_card"):
         return {"status": "UNAVAILABLE", "reason_code": "APPROVAL_BUTTON_UNSUPPORTED"}
     evidence = gateway_request.get("evidence")
@@ -213,7 +226,7 @@ def _deliver_approval_card(
          else "请先查看 " + ("；".join(reads[:2]) if reads else "材料未齐，请先在 IDE 补齐，勿盲批")),
         f"批准后 {_line(gate.get('effect'))}" if _line(gate.get("effect")) else "",
         ("按钮含义：同意=继续 run；需修改=保留 run、按意见重做并重发；停止run=停止本 run。"
-         if gate_of(action) in _REVISABLE_GATES
+         if revisable
          else "按钮含义：同意=执行本操作；停止run=停止本 run。"),
         f"版本 {gateway_request['input_hash'][:12]}…；截止 {_moment(gateway_request['deadline_at'])}；完整材料及本地文件位置见同一审批详情",
     ]
@@ -244,10 +257,10 @@ def _deliver_approval_card(
                     target_type=target_type, target_id=target_id,
                     title=f"tom-autodev {action} 审批",
                     question=("待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。"
-                              if gate_of(action) in _REVISABLE_GATES
+                              if revisable
                               else "待你审批：请先核对材料和重点，再选择「同意」或「停止run」。"),
                     lines=[line for line in lines if line],
-                    revisable=gate_of(action) in _REVISABLE_GATES,
+                    revisable=revisable,
                     # Who may answer, so a shared group card only reads as answered
                     # when the tap came from an approver. The ledger still decides.
                     approvers=sorted({
@@ -407,7 +420,9 @@ class InfoflowApprovalTransport:
 
         def render(mention: bool) -> str:
             card = _approval_markdown(
-                gateway_request, sorted(recipients), mention=mention, progress=progress
+                gateway_request, sorted(recipients), mention=mention, progress=progress,
+                revisable=revise_supported(
+                    gateway_request.get("action"), self.state, gateway_request.get("run_id")),
             )
             delivered_content.append(card)
             return card
@@ -590,7 +605,7 @@ def _deadline(value: Any) -> datetime:
 
 def _approval_markdown(
     gateway_request: dict[str, Any], recipients: list[str], *, mention: bool = False,
-    progress: dict[str, Any] | None = None,
+    progress: dict[str, Any] | None = None, revisable: bool | None = None,
 ) -> str:
     """Render the gate as something a person can act on from a phone.
 
@@ -603,6 +618,8 @@ def _approval_markdown(
     run_id = gateway_request["run_id"]
     input_hash = gateway_request["input_hash"]
     action = str(gateway_request.get("action") or "gate")
+    if revisable is None:
+        revisable = gate_of(action) in _REVISABLE_GATES
     evidence = gateway_request.get("evidence")
     lines = [
         f"## tom-autodev {action} 审批",
@@ -669,7 +686,7 @@ def _approval_markdown(
                 f"需修改 {approval_id} <{FEEDBACK_PLACEHOLDER}>",
                 "",
             ]
-            if gate_of(action) in _REVISABLE_GATES
+            if revisable
             else []
         ),
         "**停止 run 请回复**",
@@ -679,7 +696,7 @@ def _approval_markdown(
            "也可以在驱动本 run 的 agent 会话里直接说“/tom-autodev <卡片> 需修改 <意见>”，一步提意见并继续。"
            "“停止”则结束本 run。收到意见后自动登记重做，在 IDE 继续即生成新版草案并重新发起本门。"
            "历史“驳回”“REJECT”等回复仍兼容。"]
-          if gate_of(action) in _REVISABLE_GATES else []),
+          if revisable else []),
         "> 文字回复的同意/停止/需修改必须带 approval_id；它绑定本次内容，需求一变即失效。",
         f"> input_hash `{input_hash[:12]}…`",
         f"> run_id `{run_id[:12]}…`",

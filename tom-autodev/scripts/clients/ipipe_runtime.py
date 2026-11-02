@@ -1938,7 +1938,11 @@ class IpipeRuntime:
                 continue
             if identity.isdigit() and original.isdigit() and int(identity) <= int(original):
                 continue
-            if since is not None and _started_before(item, since, _REBUILD_CLOCK_SKEW_SECONDS):
+            # After a dispatched POST only a build that states it was created after the
+            # intent can be this rebuild's; one with no usable time, or one queued earlier
+            # and started later, proves nothing (R11B-003). Before any dispatch the
+            # adoption path passes no `since` and keeps its own rules.
+            if since is not None and not _created_after(item, since, _REBUILD_CLOCK_SKEW_SECONDS):
                 continue
             found[identity] = item
         return list(found.values())
@@ -2337,6 +2341,9 @@ class IpipeRuntime:
             == binding["target_branch"]
             and str((item.get("trigger") or {}).get("revision") or item.get("revision") or "")
             == revision
+            # A listed build that names another module or pipeline is not this one (R11B-006).
+            and str(item.get("module") or module) == module
+            and str(item.get("pipelineConfId") or pipeline_id) == str(pipeline_id)
         ]
         if not builds:
             return _failure("RELEASE_WAITING", status="RELEASE_WAITING",
@@ -2344,7 +2351,7 @@ class IpipeRuntime:
         # The newest build of this exact revision: iPipe build ids are increasing numbers.
         build = max(builds, key=lambda item: (len(_build_id(item)), _build_id(item)))
         return {"ok": True, "reason_code": "OK", "branch_pipeline_id": pipeline_id,
-                "branch_build_id": _build_id(build), "build": build,
+                "branch_build_id": _build_id(build), "build": build, "builds": builds,
                 "context": {**binding, "pipeline_id": pipeline_id}}
 
     def _branch_release(self, binding: dict[str, Any]) -> dict[str, Any]:
@@ -2361,31 +2368,38 @@ class IpipeRuntime:
             return found
         module = binding["module"]
         revision = binding["revision_map"][module]
-        stages = [_normalize_stage(stage)
-                  for stage in self._build_stages(found["branch_build_id"], found["build"])]
         # Contract 3.1, BranchPipeline release: identity is the AGILE_RELEASE job's release
-        # id + revision + branch. Every matching release is collected, not the first one:
-        # two releases of this revision cannot both be this run's, and picking one would
-        # bind the run to a version it may not have produced.
+        # id + revision + branch. Every matching release of every branch build of this
+        # revision is collected, not the newest build's only: two releases of this revision
+        # cannot both be this run's, and picking one would bind the run to a version it may
+        # not have produced (R11B-005).
         releases: dict[str, dict[str, Any]] = {}
-        for stage in stages:
-            if stage.get("status") not in _SUCCESS:
-                continue
-            detail = self.api.stage_detail(str(stage["stage_build_id"]))
-            for job in _real_jobs(detail):
-                real = job.get("realJobBuild") if isinstance(job.get("realJobBuild"), dict) else job
-                if (job.get("jobType") == "AGILE_RELEASE"
-                        and str(job.get("status") or "").upper() in _SUCCESS
-                        and real.get("revision") == revision
-                        and real.get("branch") == binding["target_branch"]
-                        and _nonempty(real.get("version"))):
-                    release_id = str(real.get("id") or real["version"])
-                    releases.setdefault(release_id, {
-                        "ok": True, "reason_code": "OK", "release_id": release_id,
-                        "version": real["version"],
-                        "product_url": real.get("releaseOutputHttpUrl"),
-                        "branch_build_id": found["branch_build_id"],
-                        "branch_pipeline_id": found["branch_pipeline_id"]})
+        for branch_build in found.get("builds") or [found["build"]]:
+            branch_build_id = _build_id(branch_build)
+            stages = [_normalize_stage(stage)
+                      for stage in self._build_stages(branch_build_id, branch_build)]
+            for stage in stages:
+                if stage.get("status") not in _SUCCESS:
+                    continue
+                detail = self.api.stage_detail(str(stage["stage_build_id"]))
+                if _foreign_stage_detail(detail, branch_build_id, found["branch_pipeline_id"]):
+                    continue
+                for job in _real_jobs(detail):
+                    real = job.get("realJobBuild") if isinstance(job.get("realJobBuild"), dict) else job
+                    if (job.get("jobType") == "AGILE_RELEASE"
+                            and str(job.get("status") or "").upper() in _SUCCESS
+                            and real.get("revision") == revision
+                            and real.get("branch") == binding["target_branch"]
+                            # A release job that names another module is not this one (R11B-006).
+                            and str(real.get("module") or module) == module
+                            and _nonempty(real.get("version"))):
+                        release_id = str(real.get("id") or real["version"])
+                        releases.setdefault(release_id, {
+                            "ok": True, "reason_code": "OK", "release_id": release_id,
+                            "version": real["version"],
+                            "product_url": real.get("releaseOutputHttpUrl"),
+                            "branch_build_id": branch_build_id,
+                            "branch_pipeline_id": found["branch_pipeline_id"]})
         if len(releases) > 1:
             return _failure("RELEASE_AMBIGUOUS", status="RELEASE_AMBIGUOUS", intent_state="AMBIGUOUS",
                             candidates=sorted(releases), retry_allowed=False,
@@ -2880,6 +2894,12 @@ def _matches_build(build: Any, context: dict[str, Any]) -> bool:
     module = str(build.get("module") or build.get("space") or "")
     if pipeline_id != context["pipeline_id"] or module != context["module"]:
         return False
+    # A build that states the branch it ran on must have run on the frozen one: a run on
+    # another branch, with its own skip rules, cannot stand in for it (R11B-004).
+    stated = build.get("branch") or (build.get("trigger") or {}).get("branch")
+    expected = context.get("target_branch")
+    if stated and expected and str(stated) != str(expected):
+        return False
     # A build record reports the revision it was triggered on, and only sometimes a map
     # over every repository or the parameters it ran with. Absent fields are not
     # evidence of a mismatch, so each is compared only when the record states it.
@@ -2893,6 +2913,18 @@ def _matches_build(build: Any, context: dict[str, Any]) -> bool:
         return False
     parameters = build.get("params", build.get("parameters"))
     return parameters is None or parameters == context["parameters"]
+
+
+def _foreign_stage_detail(detail: Any, build_id: str, pipeline_id: str) -> bool:
+    """Whether a stage detail states it belongs to another build or pipeline."""
+    entities = detail.get("entities") if isinstance(detail, dict) else None
+    stage = entities.get("stageBuild") if isinstance(entities, dict) else None
+    if not isinstance(stage, dict):
+        return False
+    owner_build = stage.get("pipelineBuildId")
+    owner_pipeline = stage.get("pipelineConfId")
+    return bool((owner_build not in (None, "") and str(owner_build) != str(build_id))
+                or (owner_pipeline not in (None, "") and str(owner_pipeline) != str(pipeline_id)))
 
 
 def _build_id(build: Any) -> str:
@@ -3644,26 +3676,6 @@ def _created_after(build: Any, since: Any, skew_seconds: float) -> bool:
         floor = floor.replace(tzinfo=timezone.utc)
     created = datetime.fromtimestamp(raw / 1000 if raw > 10**11 else raw, tz=timezone.utc)
     return (created - floor).total_seconds() > -skew_seconds
-
-
-def _started_before(build: Any, since: Any, skew_seconds: float) -> bool:
-    """True when the build record states a start time earlier than `since` minus skew.
-
-    Records without a usable start time are not excluded: absence is not evidence.
-    """
-    if not isinstance(build, dict):
-        return False
-    raw = build.get("startTime", build.get("buildTime"))
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return False
-    try:
-        floor = datetime.fromisoformat(str(since).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return False
-    if floor.tzinfo is None:
-        floor = floor.replace(tzinfo=timezone.utc)
-    started = datetime.fromtimestamp(raw / 1000 if raw > 10**11 else raw, tz=timezone.utc)
-    return (floor - started).total_seconds() > skew_seconds
 
 
 def _deadline(value: str) -> datetime | None:

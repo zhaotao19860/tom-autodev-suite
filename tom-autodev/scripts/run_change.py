@@ -201,6 +201,12 @@ def revise(
         source_revisions = action.get("source_revisions")
         if isinstance(source_revisions, dict) and source_revisions:
             payload["source_revisions"] = dict(source_revisions)
+    if state == "PLAN" and (current.get("payload") or {}).get("previous_state") == "DIAGNOSE":
+        # A repair Plan redone in place stays the repair of the diagnosed task: without
+        # the pointer the task resolver reads it as already reviewed and moves on to the
+        # next DAG node, or finds none (R11A-003).
+        payload["task_id"] = action.get("task_id")
+        payload["repair_of"] = current["event_id"]
     if state == "DIAGNOSE":
         # The diagnosis predecessor (failure, producer block) is bound by the entry
         # event, so the redo carries that binding unchanged.

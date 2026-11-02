@@ -2014,9 +2014,9 @@ class FakeE2ETests(unittest.TestCase):
     def test_cli_exposes_next_complete_phase_and_preflight(self):
         class Controller:
             def __init__(self): self.calls = []
-            def next(self, run_id): self.calls.append(("next", run_id)); return {"ok": True, "reason_code": "OK"}
+            def next(self, run_id, read_only=False): self.calls.append(("next", run_id)); assert read_only; return {"ok": True, "reason_code": "OK"}
             def complete_phase(self, run_id, envelope): self.calls.append(("complete", run_id, envelope)); return {"ok": True, "reason_code": "OK"}
-            def preflight(self, project): self.calls.append(("preflight", project)); return {"ready": True, "status": "READY", "reason_code": "READY"}
+            def preflight(self, project, card=None): self.calls.append(("preflight", project)); return {"ready": True, "status": "READY", "reason_code": "READY"}
 
         controller = Controller()
         envelope = self.root / "envelope.json"

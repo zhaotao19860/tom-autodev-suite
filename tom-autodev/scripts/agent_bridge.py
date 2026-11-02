@@ -457,7 +457,8 @@ class AgentBridge:
         if not resolved.get("ok"):
             return _json_safe(resolved)
         run_id = resolved["run_id"]
-        self.orchestrator.state.expire_stale_producer_jobs(run_id)
+        # Read-only: an expired agent lease is not written back here (R11C-003); the next
+        # claim already takes over a lease whose expiry has passed.
         decision = worker_driver.classify_next(self.orchestrator, run_id, read_only=True)
         action = decision.get("action") if isinstance(decision, dict) else None
         action_view = None

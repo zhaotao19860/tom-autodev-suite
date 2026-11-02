@@ -10,6 +10,7 @@ from typing import Any
 from approval_contract import STRICT_APPROVAL_TIMEOUT_SECONDS
 from approval_delivery import _deliver_approval_card, corrected_content, deliver_markdown, mention_line
 from approval_ledger import gate_of
+from scope_approval import answers_gate
 
 
 _ACK_KEY = "approval.ack"
@@ -258,7 +259,7 @@ class ApprovalWatcher:
         if not isinstance(gate, str) or not gate:
             return None
         for row in reversed(self.orchestrator.approvals.for_run(run_id)):
-            if gate_of(row.get("action")) != gate or row.get("effective_decision") != "APPROVE":
+            if not answers_gate(row.get("action"), gate) or row.get("effective_decision") != "APPROVE":
                 continue
             if _later(row.get("resolved_at"), since):
                 return row
@@ -400,7 +401,7 @@ class ApprovalWatcher:
         reason = result.get("reason_code")
         from run_change import superseded
 
-        stale = superseded(self.orchestrator.state, run_id, approval)
+        stale = superseded(self.orchestrator.state, run_id, approval) or self._replaced(approval)
         if reason == "PENDING":
             return None if stale else self._nudge(approval, client)
         decision = result.get("effective_decision")
@@ -566,6 +567,24 @@ class ApprovalWatcher:
         if deadline.tzinfo is None:
             return None
         return (deadline.astimezone(timezone.utc) - self.clock()).total_seconds()
+
+    def _replaced(self, approval: dict[str, Any]) -> bool:
+        """Whether a newer card of the same gate binds a different input (R11A-004).
+
+        When the gate's input changes (a remote stage was reconfigured, so G8 hashes
+        anew) the old card asks about an action that no longer exists. Its answer is
+        audited, but it must not stop or redo the run that has moved to the new input.
+        A reissued card keeps the same hash, so it does not replace its original.
+        """
+        gate = gate_of(approval.get("action") or "")
+        created = approval.get("created_at") or ""
+        return any(
+            row.get("approval_id") != approval.get("approval_id")
+            and gate_of(row.get("action") or "") == gate
+            and row.get("input_hash") != approval.get("input_hash")
+            and (row.get("created_at") or "") > created
+            for row in self.orchestrator.approvals.for_run(approval["run_id"])
+        )
 
     def _responder(self, approval_id: str) -> str | None:
         effective = [
@@ -859,7 +878,8 @@ def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[st
             handoff for handoff in orchestrator.state.incomplete_handoffs(run_id)
             if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
         ]
-        if len(open_handoffs) > 1:
+        # Reaping writes handoff completions, so a drifted run is left untouched (R11A-005).
+        if len(open_handoffs) > 1 and execution_guard(orchestrator.state, run_id) is None:
             open_handoffs = reap_stale_resume_handoffs(
                 orchestrator, run_id, open_handoffs, actor="approval_watch.stop_hook"
             )

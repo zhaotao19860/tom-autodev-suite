@@ -126,6 +126,22 @@ def last_gate(name: str) -> str:
     return SCOPES[name][-1]
 
 
+def answers_gate(action: Any, gate: Any) -> bool:
+    """Whether an approval action answers `gate`: the gate itself, or a scope card
+    whose segment ends at it (the card's approval becomes that exit gate's APPROVE).
+    Status and resume handoffs need this so a waiting or approved card is seen
+    where the run asks for its exit gate (R11A-006)."""
+    from approval_ledger import SCOPE_ACTION_PREFIX, gate_of
+
+    name = gate_of(action or "")
+    if name == gate:
+        return True
+    if name.startswith(SCOPE_ACTION_PREFIX):
+        scope = name[len(SCOPE_ACTION_PREFIX):]
+        return scope in SCOPES and last_gate(scope) == gate
+    return False
+
+
 def _scope_key(run_id: str, name: str, start: str) -> str:
     return f"scope.segment:{run_id}:{name}:{start}"
 

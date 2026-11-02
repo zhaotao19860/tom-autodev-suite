@@ -656,7 +656,9 @@ class Orchestrator:
             result = {**result, "submit_descriptor": descriptor}
         return result
 
-    def preflight(self, project: str, *, probes: dict[str, Any] | None = None) -> dict[str, Any]:
+    def preflight(
+        self, project: str, *, probes: dict[str, Any] | None = None, card: str | None = None,
+    ) -> dict[str, Any]:
         """Query configured dependencies without creating run state or remote intents."""
         if not isinstance(project, str) or not _PROJECT_ID.fullmatch(project):
             return {
@@ -664,7 +666,14 @@ class Orchestrator:
                 "reason_code": "PROJECT_NOT_READY", "project": project,
                 "missing": ["project"], "components": {},
             }
-        configured = profile_path(project, self.config_root)
+        # A card names its own profile (profile_wizard writes one per requirement); without
+        # one only the legacy per-project file is read, never the newest card (R11C-004).
+        try:
+            configured = (resolve_active_profile_path(project, card, self.config_root)
+                          if card else profile_path(project, self.config_root))
+        except ValueError:
+            return {"ready": False, "status": "PROJECT_NOT_READY", "reason_code": "PROJECT_NOT_READY",
+                    "project": project, "missing": ["card"], "components": {}}
         loaded = load_profile(configured)
         if not loaded.get("ready"):
             return {
@@ -3160,6 +3169,7 @@ def main(argv: list[str] | None = None) -> int:
 
     preflight = subparsers.add_parser("preflight")
     preflight.add_argument("project")
+    preflight.add_argument("--card", help="需求卡片 ID：预检该卡片的需求级 profile（profile_wizard 生成）")
 
     candidates = subparsers.add_parser("acceptance-candidates")
     candidates.add_argument("project")
@@ -3536,12 +3546,15 @@ def main(argv: list[str] | None = None) -> int:
         resolved = resolve_run_target(orchestrator, args.target)
         result = orchestrator.stop(resolved["run_id"]) if resolved.get("ok") else resolved
     elif args.command == "next":
-        result = orchestrator.next(args.run_id)
+        # A query: the skipped-SUBMIT recovery and action caching stay on the worker's
+        # writable path (R11C-002).
+        result = orchestrator.next(args.run_id, read_only=True)
     elif args.command == "restart-from":
         import restart
 
         options = {"keep_open_crs": args.keep_open_crs, "accept_merged": args.accept_merged,
-                   "build_status": _restart_build_status(orchestrator, args.source_run_id)}
+                   "build_status": _restart_build_status(orchestrator, args.source_run_id),
+                   "cr_builds": _restart_cr_builds(orchestrator, args.source_run_id)}
         if not args.execute:
             result = restart.plan(orchestrator, args.source_run_id, **options)
         else:
@@ -3754,7 +3767,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "artifact":
         result = _artifact_show(orchestrator, args.artifact_id)
     else:
-        result = orchestrator.preflight(args.project)
+        result = orchestrator.preflight(args.project, card=args.card)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return _cli_exit_code(result)
 
@@ -4039,11 +4052,14 @@ def _cli_exit_code(result: Any) -> int:
         return 1
     reason = result.get("reason_code")
     return 0 if reason in {
-        None, "OK", "READY", "REBUILT_CHANGE_SET_RECOVERED", "STALE_REBUILT_PLAN_RECOVERED",
-        "SUBMISSION_RECORDED", "LEGACY_PIPELINE_PLAN_MIGRATED", "PIPELINE_PLAN_PRESENT", "NO_COMPANION",
-        "CODE_VERSION_CHANGED",
+        None, "OK", "READY", "STALE_REBUILT_PLAN_RECOVERED",
+        "SUBMISSION_RECORDED", "CODE_VERSION_CHANGED",
         "PARKED", "WORK_CARD_RECONCILED", "WORK_CARD_ABANDONED",
         "CHANGE_SET_PREPARED",
+        # Committed or idempotently replayed effects (R11C-001).
+        "RESTART_READY", "RESTARTED", "RESTART_REPLAY",
+        "CORRECTION_DELIVERED", "CORRECTION_ALREADY_DELIVERED",
+        "ALREADY_REVISED", "ALREADY_REBOUND",
     } else 1
 
 
@@ -4862,6 +4878,46 @@ def _restart_build_status(orchestrator: Orchestrator, run_id: str) -> Any:
         return _status(build) if isinstance(build, dict) else None
 
     return status
+
+
+def _restart_cr_builds(orchestrator: Orchestrator, run_id: str) -> Any:
+    """cr -> the platform builds of the CR's module and revision, for `restart-from`.
+
+    iCode starts the ChangePipeline (and, once merged, the BranchPipeline) on its own, so
+    a build the worker never bound is still the run's remote object (R11B-007). Read-only
+    over every pipeline of the module; None when any listing cannot be read.
+    """
+    import yaml
+    from clients.ipipe_client import IpipeApiClient, IpipeHttpTransport
+    from clients.ipipe_runtime import _build_id, _status
+    from clients.ku_client import resolve_username
+
+    events = orchestrator.state.events(run_id)
+    intake = (events[0].get("payload") or {}) if events else {}
+    try:
+        profile = yaml.safe_load(Path(str(intake.get("profile_path") or "")).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        profile = None
+    repos = (profile or {}).get("business_repos") if isinstance(profile, dict) else None
+    user = resolve_username([item["path"] for item in repos or [] if isinstance(item, dict) and item.get("path")])
+
+    def builds(cr: dict[str, Any]) -> Any:
+        module, revision = cr.get("module"), cr.get("commit_revision")
+        if not (user and module and revision):
+            return None
+        try:
+            api = IpipeApiClient(IpipeHttpTransport(), current_user=user)
+            found = []
+            for pipeline in api.pipelines_by_module(module) or []:
+                pipeline_id = str(pipeline.get("id") or pipeline.get("pipelineConfId") or "")
+                for item in api.builds_by_revision(module, revision, pipeline_id) or []:
+                    if isinstance(item, dict) and _build_id(item):
+                        found.append({"build_id": _build_id(item), "status": _status(item)})
+            return found
+        except Exception:  # noqa: BLE001 - an unreadable listing blocks the restart
+            return None
+
+    return builds
 
 
 _PREAUTHORIZED_STEPS = 12

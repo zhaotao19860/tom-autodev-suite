@@ -12,6 +12,7 @@ from typing import Any
 
 import workflow_spec
 from approval_ledger import gate_of
+from scope_approval import answers_gate
 
 _TERMINAL_SUCCESS = {"RELEASE_SUCCESS", "STOPPED"}
 
@@ -132,7 +133,7 @@ def build(orchestrator: Any, run_id: str, *, include_progress: bool = True) -> d
         if (row.get("created_at") or "") < reentered_at:
             continue
         action_name = gate_of(row.get("action") or "")
-        if current_gate is not None and action_name != current_gate:
+        if current_gate is not None and not answers_gate(action_name, current_gate):
             continue
         created = row.get("created_at") or row.get("deadline_at") or ""
         if action_name in latest_approve_at and latest_approve_at[action_name] >= created:

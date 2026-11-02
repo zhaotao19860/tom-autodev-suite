@@ -121,14 +121,16 @@ English replies remain compatible.
 
 ### What a REJECT does
 
-A REJECT never reopens the same hash. On G1–G6 it means "redo this draft": the
-reviewer adds feedback (typed after `需修改 <approval_id>` in 如流, tapped 需修改 then replied
+A decision never reopens the same hash. On G1–G6 a REVISE (`需修改`) means "redo this
+draft": the reviewer adds feedback (typed after `需修改 <approval_id>` in 如流, tapped 需修改 then replied
 plainly in the group, or given to Comate as `/tom-autodev CARD 需修改 <意见>` which also
 settles a still-pending gate), `revise` re-enters the same phase with that feedback and the
 rejected draft, and the
 same gate is asked again for the new hash with a "本次修改说明 / 与上一版的差异" section.
-Only the member who cast the effective REJECT can supply the 如流 feedback. A REJECT of
-any other gate stays a stop; code-phase rework goes through DIAGNOSE.
+Only the member who cast the effective REVISE can supply the 如流 feedback. A REJECT
+(`停止` / historical `驳回`) stops the run on every gate, G1–G6 included; code-phase rework
+goes through DIAGNOSE. The explicit `revise` command still accepts a historical REJECT of
+the waiting draft, but only while the run has not been stopped by it.
 
 Moving back to an earlier phase, or changing any profile field of a running run, is a new run
 started with `restart-from` (the in-place `repin-profile` was removed too); the in-place `CHANGE_REQUEST` rewind was removed. Gates opened

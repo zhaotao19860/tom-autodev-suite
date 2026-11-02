@@ -713,6 +713,18 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertFalse(second["retry_allowed"])
         self.assertEqual(len(pushes), 1)
 
+    def test_a_transport_timeout_exit_is_unknown_not_a_rejection(self):
+        # R11B-001: ProcessTransport turns a timeout into returncode 124. That does not
+        # prove the push never reached iCode, so it must not free the intent.
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 124, "stdout": "", "stderr": "PROCESS_TIMEOUT"}
+        first = self.runtime().submit(change, approval)
+        second = self.runtime().submit(change, approval)
+        self.assertEqual(first["reason_code"], "SUBMIT_RESULT_UNKNOWN")
+        self.assertEqual(second["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
     def test_one_cr_per_repo_create_new_cr_skips_baseline_drift(self):
         change = self.change_set()
         change["submission_mode"] = "create_new_cr"
@@ -773,6 +785,15 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "OK")
         self.assertEqual(result["change_number"], "41")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
+    def test_an_append_target_on_another_branch_is_never_pushed(self):
+        # R11B-002: G7 approved appending to CR 41 on main; CR 41 is on another branch.
+        change = self.append_change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = [{**self.append_target(self.revision), "branch": "release"}]
+        result = self.runtime().submit(change, approval)
+        self.assertNotEqual(result["reason_code"], "OK")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 0)
 
     def test_append_existing_cr_restart_replays_receipt_without_pushing_again(self):
         change = self.append_change_set()

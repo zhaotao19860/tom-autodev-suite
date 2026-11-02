@@ -126,6 +126,29 @@ class ScopeWorkerTests(unittest.TestCase):
         self.orch.state.transition(other, "GRILL", {})
         self.assertIsNone(_scope_request(self.orch, other, "G1", "a" * 64, CONTEXT))
 
+    def test_a_provisionally_answered_plan_is_not_reused_by_a_repair(self):
+        # R11A-001: a scope-pending G4 is not a person's approval of the Plan.
+        protocol = self.orch.phase_protocol()
+        plan = {"envelope": {"approval_input_hash": "p" * 64}}
+        row = self.orch.approvals.request("G4", "p" * 64, ["comate", "infoflow"],
+                                          run_id=self.run_id, member_policy=POLICY)
+        self.orch.approvals.provisional(row["approval_id"], "C")
+        self.assertTrue(protocol._plan_only_provisional(self.run_id, plan))
+        real = self.orch.approvals.request("G4#retry-1", "p" * 64, ["comate", "infoflow"],
+                                           run_id=self.run_id, member_policy=POLICY)
+        for channel in ("comate", "infoflow"):
+            self.orch.approvals.record_delivery(real["approval_id"], channel, {"id": channel}, payload_hash="p" * 64)
+        self.orch.approvals.resolve(real["approval_id"], "APPROVE", "p" * 64, "comate",
+                                    run_id=self.run_id, responder=OWNER)
+        self.assertFalse(protocol._plan_only_provisional(self.run_id, plan))
+
+    def test_a_scope_card_answers_its_exit_gate_for_status_and_resume(self):
+        # R11A-006: status and resume must see SCOPE:C where the run asks for G7.
+        self.assertTrue(scope_approval.answers_gate("SCOPE:C", "G7"))
+        self.assertTrue(scope_approval.answers_gate("SCOPE:D#retry-1", "G4"))
+        self.assertFalse(scope_approval.answers_gate("SCOPE:C", "G4"))
+        self.assertTrue(scope_approval.answers_gate("G7#retry-1", "G7"))
+
     def test_g7_outside_submit_and_a_repair_round_are_per_gate(self):
         self._enter("IPIPE")
         self.assertIsNone(scope_approval.segment(self.orch.state.events(self.run_id), "G7"))

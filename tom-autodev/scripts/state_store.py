@@ -508,13 +508,21 @@ class StateStore:
         return {"status": "COMMITTED", "target_run_id": target_run_id, "event_id": event_id,
                 "lineage": lineage}
 
-    def lineage(self, run_id: str) -> dict[str, Any] | None:
-        """The lineage row where `run_id` is the source or the target, if any."""
+    def lineage(self, run_id: str, *, as_source: bool = False) -> dict[str, Any] | None:
+        """The lineage row where `run_id` is the source or the target, if any.
+
+        A run in a chain is both (A->B->C: B is A's target and C's source), so a caller
+        that asks about one direction must say so; `as_source` returns only the row that
+        restarted `run_id` (R11B-008). Otherwise the outgoing row is preferred.
+        """
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM run_lineage WHERE source_run_id = ? OR target_run_id = ?",
-                (run_id, run_id),
+                "SELECT * FROM run_lineage WHERE source_run_id = ?", (run_id,)
             ).fetchone()
+            if row is None and not as_source:
+                row = connection.execute(
+                    "SELECT * FROM run_lineage WHERE target_run_id = ?", (run_id,)
+                ).fetchone()
         if row is None:
             return None
         return {"source_run_id": row["source_run_id"], "target_run_id": row["target_run_id"],

@@ -4,6 +4,32 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 11 轮 Codex 全量评审第 1 轮修复
+
+报告（9b8daff，分三片）：[A 审批与状态机](docs/reviews/2026-11-02-r11-codex-review-1A.md)、[B 外部写入与发布](docs/reviews/2026-11-02-r11-codex-review-1B.md)、[C CLI 与文档](docs/reviews/2026-11-02-r11-codex-review-1C.md)。共 22 项（P1 11、P2 11），逐条对照代码核实后全部修复，每项有回归测试。
+
+- **R11A-001 P1**：scope 段内只被临时放行（`scope-pending`）的 Plan 不能被 CODE_ONLY 修复复用，回到 PLAN 取得真 G4。
+- **R11A-002 P1**：WORKSPACE 的 G4 不能“需修改”：台账按运行当前状态判定（`revise_supported`），卡片和文字回复模板不再显示该选项；此前点了会让 run 永远拿不到 APPROVE。
+- **R11A-003 P1**：修复 PLAN 被“需修改”重做时保留任务与修复来源（`task_id`、`repair_of`），不再被当成已评审任务跳过。
+- **R11A-004 P1**：同一门的输入变了（如 G8 新哈希）后，旧卡上的停止/需修改只记审计，不再停掉 run。
+- **R11A-005**：Stop-hook 在策略漂移时不清理旧 handoff（这是写操作）。
+- **R11A-006**：`SCOPE:C`/`SCOPE:D` 卡在 status 和续跑 handoff 中按其出口门（G7/G4）识别。
+- **R11A-007**：诊断中文纠正在发送前用签名预检排除本地错误；发送中抛出的 TypeError 按结果未知保留 intent，不再允许重发。
+- **R11B-001 P1**：`push_cr` 超时（传输层返回 124）或被信号终止按结果未知处理，不再记为拒绝后重推。
+- **R11B-002 P1**：追加到既有 CR 前核对该 CR 的分支；CR 不在目标分支时不推送。
+- **R11B-003 P1**：rebuild 推送后对账，只认明确声明创建时间晚于 intent 的 build；没有可用时间或排队早于 intent 的不认领。删除不再使用的 `_started_before`。
+- **R11B-004 P1**：build 记录声明的分支与冻结目标分支不同即不匹配，discover/monitor 都不再把别的分支的结果当作本次。
+- **R11B-005 P1**：同一 revision 的多个 BranchPipeline build 各有发布时返回 `RELEASE_AMBIGUOUS`，不再取最新 build。
+- **R11B-006 P1**：BranchPipeline build、stage 详情、发布 job 声明属于别的模块/流水线/build 时不作发布证据。
+- **R11B-007 P1**：`restart-from` 按已确认 CR 的模块与 revision 查询平台上 iCode 自动启动的流水线（`cr_builds`），未结束或查询失败即阻断。
+- **R11B-008**：`StateStore.lineage(run, as_source=True)` 只查出边；链式重开 A→B→C 时重放 B 返回 C。
+- **R11C-001**：`restart-from`、纠正消息、`ALREADY_REVISED`、`ALREADY_REBOUND` 等已提交或幂等重放的结果 CLI 退出码为 0；顺带删除已删命令遗留的成功码。
+- **R11C-002**：CLI `next` 以只读方式查询，不再触发 SUBMIT 恢复和动作缓存写入。
+- **R11C-003**：`context` 不再写回过期的 agent 租约（认领时本就会接管过期租约）。
+- **R11C-004**：`preflight PROJECT --card CARD` 预检 `profile_wizard` 生成的需求级 profile。
+- **R11C-005~007**：文档改正：REJECT/停止会停 run，只有需修改（REVISE）原地重做；`restart-from` 示例补上先预检再 `--execute --reason`；`PROFILE_CONFLICT`/漂移的处置不再指向已删除的 re-pin/原地迁移。
+- 全量 1579 个测试通过。
+
 ## 2026-11-02 · MVP 第 4 步：删除 optimize / G10
 
 - 负责人确认后删除终态后控制面优化（G10）：`run_summary.py`（RunSummary 及其提案、应用、回滚、归档链路）、CLI `optimize`、`Orchestrator.optimize`/`run_summary`、`StateStore` 的 `optimization_proposals` 读写方法、`run-summary` 与 `optimization-proposal` 两个 schema、`approval_summary` 的 G10 材料与说明。库里从未产生过 proposal 或 G10 审批。已有数据库里的 `optimization_proposals` 表不删除（不再读写）。`run_summary` 中被 preflight 使用的脱敏函数迁到新模块 `structured_redaction.py`。`workflow_spec.GATE_LABELS` 的 G10 标签进策略 hash，保留并注明，hash 不变。README、SKILL.md、OPERATIONS、phase-protocol、approval-policy、failure-taxonomy 同步。全量 1560 个测试通过。

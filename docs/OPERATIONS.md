@@ -89,9 +89,9 @@ result = worker_driver.advance(
 
 IPIPE/RELEASE 需要真实 `ipipe_api`，缺少 adapter 时会返回等待/阻断；不会凭空运行。并发驱动必须注入 `LockManager`：run 级租约串行化 WorkerDriver 的 `advance` 调用；`locks=None` 不启用该租约。`submit_draft` 不持有这把租约，依靠 ProducerJob 的事务/幂等校验及阶段、副作用的幂等键处理重复提交；这不构成覆盖所有 run 写操作的全局单写者保证。不同 run 仍可能竞争同一个仓库资源，应保留项目定义的 workspace 锁和所有权检查。
 
-同一 run 的审批输入绑定到当时的 workflow/profile/代码版本。`WORKFLOW_SPEC_DRIFT` 说明当前代码中的 workflow 定义已变化，需还原兼容版本或做显式迁移；不要删除保存的指纹绕过检查。
+同一 run 的审批输入绑定到当时的 workflow/profile/代码版本。`WORKFLOW_SPEC_DRIFT` 说明当前代码中的 workflow 定义已变化，需还原兼容版本，或用 `restart-from` 新建运行（原地迁移已删除）；不要删除保存的指纹绕过检查。
 
-`IpipeRuntime` 即使由宿主缓存，也会在新增操作或证据写入前核对当前 profile 文件与最新批准的 pin。发生 `PROFILE_CONFLICT` 后先核对配置；合法 re-pin 后通过 `Orchestrator.ipipe_runtime` 重新构造 runtime。已完成 trigger/rerun 的匹配回执仍可只读回放，结果不明的 intent 不能借回放名义继续产生写入。
+`IpipeRuntime` 即使由宿主缓存，也会在新增操作或证据写入前核对当前 profile 文件与最新批准的 pin。发生 `PROFILE_CONFLICT` 后先核对配置：恢复原 profile 文件字节即可继续；要换 profile 则 `restart-from` 新建运行（原地 re-pin 已删除）。已完成 trigger/rerun 的匹配回执仍可只读回放，结果不明的 intent 不能借回放名义继续产生写入。
 
 `Orchestrator.icode_runtime` 同样要求完整的项目 profile，提交策略从批准的配置读取。`submit_to_ipipe` 在调用提交 adapter 前检查配置；缓存的 `IcodeRuntime.submit` 在预检、远端查询和提交/回执边界再次核对。配置重新批准后应重建对象；若推送已发出才发现漂移，保留 pending intent，先恢复兼容配置并查询已有 CR，不能直接重发。已经完成的 controller 提交回执可只读重放；runtime 的 submit 会执行预检，不属于纯回放入口。
 
@@ -211,7 +211,8 @@ policy；旧 run 的事件、产物和审批保留为审计记录。
 - **需修改后按意见重做（revise）**：不需要新建 run，只追加事件，原有事件、产物、审批
   记录全部保留；重做出的每一版仍要过各自的门。G1~G6 选择“需修改”时，`status` 显示
   “已驳回待修改”。把修改意见交给 Comate（或在如流回复 `需修改 <approval_id> 修改意见`），
-  它以这条驳回为授权，带着意见和上一版草案重新进入同一阶段；输入“继续”会自动触发重做。
+  它以这条“需修改”为授权，带着意见和上一版草案重新进入同一阶段；输入“继续”会自动触发重做。
+  选择“停止 run”（REJECT，历史上的“驳回”）会停止 run，不会重做。
   新草案的审批消息附“本次修改说明”和“与上一版的差异”。旧审批只对当前等待中的那一版草案有效。
 
 ```bash

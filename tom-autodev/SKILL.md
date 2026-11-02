@@ -255,14 +255,16 @@ When a reviewer selects “需修改” on G1–G6, do not tell them to restart 
 reissue the same gate manually. The next `/tom-autodev CARD 继续` consumes the
 hash-bound feedback, re-enters the producer phase, and delivers a new Chinese approval card
 for the new content hash. G4 is the PLAN producer gate and is revisable for the same reason
-as the earlier producer gates. Historical English `REJECT` replies remain compatible.
+as the earlier producer gates. An English `REVISE` reply is the same as “需修改”; `REJECT`
+(`停止`/`驳回`) stops the run and is not a redo.
 For an explicit CLI recovery, run `scripts/cli.py revise RUN_ID --approval-id <rejected>
 --feedback <text> --actor <who>`; the producer is re-entered with
 `revision_context` (instruction plus the previous draft) from `context`, must address every
 point of the instruction, keep what was not objected to, and the new gate shows a diff. When
-an earlier phase or a repository fact must change, stop the run and use
-`scripts/cli.py restart-from RUN_ID --reason ...` for a new run that carries the lineage
-(the in-place `rewind` was removed). Never move a run by hand.
+an earlier phase or a repository fact must change, check the source's leftovers with
+`scripts/cli.py restart-from RUN_ID` (read-only plan), settle them (`--keep-open-crs` /
+`--accept-merged` where they apply), then run `scripts/cli.py restart-from RUN_ID --execute
+--reason ...` for a new run that carries the lineage (the in-place `rewind` was removed). Never move a run by hand.
 
 A requirement the user changes after G1 is never absorbed into a later draft. From PLAN or
 IMPLEMENT, report it as `USER_REQUIREMENT_CHANGED` (G5 “需修改” first re-enters IMPLEMENT so
@@ -271,8 +273,8 @@ the user what a draft contains only from the saved draft, never from the intende
 
 If a paused run returns `WORKFLOW_SPEC_DRIFT`, do not edit its event or hash in place and do
 not use ordinary `continue` to bypass the guard. The in-place `migrate-workflow-spec` was
-removed: stop the run and continue the requirement with `scripts/cli.py restart-from RUN_ID`,
-whose new run pins the current policy at its own G0. Every write of the drifted run,
+removed: continue the requirement with `scripts/cli.py restart-from RUN_ID` (read-only plan)
+and then `restart-from RUN_ID --execute --reason ...`, whose new run pins the current policy at its own G0. Every write of the drifted run,
 approval delivery and settlement included, stays refused.
 
 For a legacy run, use `scripts/backfill_knowledge.py RUN_ID CARD_ID --project PROJECT

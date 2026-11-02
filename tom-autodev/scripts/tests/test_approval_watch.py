@@ -327,6 +327,18 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertIn("已停止", content)
         self.assertIn("不会继续", content)
 
+    def test_a_rejection_of_a_card_replaced_by_a_new_input_does_not_stop_the_run(self):
+        # R11A-004: the gate's input changed (hash-a -> hash-b); the old card's REJECT
+        # is audited but must not stop the run that moved on to hash-b.
+        old_id = self._request("hash-a")
+        self.now += timedelta(seconds=1)
+        self._request("hash-b")
+        stops = []
+        self.orchestrator.stop = lambda run_id: stops.append(run_id) or {"state": "STOPPED"}
+        self.journal.add(f"REJECT {old_id}", received_at=(self.now + timedelta(minutes=1)).isoformat())
+        self.watcher.tick()
+        self.assertEqual(stops, [])
+
     def test_an_expired_approval_is_reported_as_a_timeout(self):
         # The ledger judges the deadline on real time, so the bound deadline has to
         # actually pass rather than only move the watcher's clock.

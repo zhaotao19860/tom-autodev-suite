@@ -421,6 +421,11 @@ class IcodeRuntime:
         blocked = self._profile_error()
         if blocked is not None:
             return blocked
+        if pushed["returncode"] == 124 or pushed["returncode"] < 0 or pushed.get("stderr") == "PROCESS_TIMEOUT":
+            # A timeout or a signal does not prove the push never reached iCode; only a
+            # read-back can say whether a CR exists (R11B-001).
+            return self._answer(intent, intent_executor.Verdict.unknown(
+                _failure("SUBMIT_RESULT_UNKNOWN", **_bounded_cli_output(pushed))))
         if pushed["returncode"] != 0:
             failure = _failure(
                 "SUBMIT_REJECTED",
@@ -883,6 +888,11 @@ class IcodeRuntime:
                 and number == str(change_set.get("existing_cr"))
                 and change.get("change_id") == change_set.get("change_id")
             ):
+                # The approval names that CR on the target branch: a CR that has since
+                # been found on another branch would receive a push to the target branch
+                # as a new CR, outside what G7 approved (R11B-002).
+                if change.get("branch") not in (None, "", change_set["target_branch"]):
+                    return {"reason_code": "CR_IDENTITY_CONFLICT", "change": change, "complete": complete}
                 return {"reason_code": "CR_APPEND_ALLOWED", "change": change, "complete": complete}
             # A repair inside the same run: the reworked commit keeps the Change-Id of the
             # CR this run already opened (same card, owner and branch), so the push lands

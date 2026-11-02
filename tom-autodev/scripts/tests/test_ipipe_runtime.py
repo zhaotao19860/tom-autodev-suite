@@ -296,6 +296,14 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(many["reason_code"], "BUILD_AMBIGUOUS")
         self.assertEqual(exact["build_id"], "build-1")
 
+    def test_discover_refuses_a_build_that_states_another_branch(self):
+        # R11B-004: a build of the right revision run on another branch is not this one.
+        other = {**build(), "branch": "dev-with-skips", "trigger": {"branch": "dev-with-skips"}}
+        self.api.candidates = [other]
+        self.assertEqual(self.runtime.discover(PROFILE, REVISIONS)["reason_code"], "BUILD_QUERY_REQUIRED")
+        self.api.candidates = [{**build(), "branch": "main"}]
+        self.assertEqual(self.runtime.discover(PROFILE, REVISIONS)["build_id"], "build-1")
+
     def test_trigger_rejects_forbidden_parameter_before_approval_or_write(self):
         revisions = json.loads(json.dumps(REVISIONS))
         revisions["parameters"]["shell"] = "blocked-command"
@@ -1565,6 +1573,26 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.assertEqual(released["reason_code"], "OK", released)
         self.assertEqual(released["release_version"], "26.10.27.1")
         self.assertIn("ipipe:branch-build/branch-1", released["evidence_refs"])
+
+    def test_two_branch_builds_releasing_one_revision_are_ambiguous(self):
+        # R11B-005: the newest branch build is not proof it is this run's release.
+        self.bind_build(status="SUCCESS")
+        self.api.stages["build-1"] = [{"id": "stage-1", "status": "SUCCESS"}]
+        self.runtime.monitor("build-1", (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat())
+        same = {"module": "baidu/team/app", "branch": "main", "status": "SUCCESS",
+                "revisions": {"baidu/team/app": "app-rev"}}
+        self.api.releases = [{**same, "id": "release-A"}, {**same, "id": "release-B"}]
+        self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_AMBIGUOUS")
+
+    def test_a_release_job_of_another_module_is_not_this_release(self):
+        # R11B-006: a release job that names another module is not evidence for this one.
+        self._branch_pipeline_fixture()
+        job = self.api.details["rel-stage"]["entities"]["realJobBuilds"][0][0]
+        job["realJobBuild"]["module"] = "baidu/team/other"
+        self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_WAITING")
+        job["realJobBuild"]["module"] = "baidu/team/app"
+        self.api.details["rel-stage"]["entities"]["stageBuild"] = {"pipelineBuildId": "foreign-build"}
+        self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_WAITING")
 
     def test_branch_release_of_another_revision_or_not_yet_released_waits(self):
         self._branch_pipeline_fixture(revision="older-rev")

@@ -1104,6 +1104,22 @@ class PhaseProtocol:
         approval_error = self._approval_error(action, draft)
         return approval_error
 
+    def _revised_repair_plan(self, run_id: str, current: dict[str, Any]) -> bool:
+        """A PLAN REVISE whose chain of redos starts at a PLAN entered from DIAGNOSE."""
+        payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
+        if (payload.get("reentry") or {}).get("kind") != "REVISE" or not payload.get("repair_of"):
+            return False
+        by_id = {event["event_id"]: event for event in self.state.events(run_id)}
+        origin = by_id.get(payload["repair_of"])
+        for _ in range(32):
+            if not isinstance(origin, dict) or origin.get("state") != "PLAN":
+                return False
+            origin_payload = origin.get("payload") or {}
+            if origin_payload.get("previous_state") == "DIAGNOSE":
+                return origin_payload.get("task_id") == payload.get("task_id")
+            origin = by_id.get(origin_payload.get("repair_of"))
+        return False
+
     def _task_id(self, run_id: str, state: str, current: dict[str, Any]) -> str | None:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
         reopened = self._architecture_reentry_task(run_id, current)
@@ -1130,7 +1146,7 @@ class PhaseProtocol:
             # repair. Honour the pointer whenever PLAN was entered from DIAGNOSE.
             if (
                 state == "PLAN"
-                and payload.get("previous_state") == "DIAGNOSE"
+                and (payload.get("previous_state") == "DIAGNOSE" or self._revised_repair_plan(run_id, current))
                 and self._task_dependencies_met(run_id, explicit)
             ):
                 return explicit
@@ -1527,7 +1543,27 @@ class PhaseProtocol:
             or tasks["envelope"].get("content_hash") != envelope.get("parent_artifact_hash")
         ):
             return None
+        if self._plan_only_provisional(run_id, latest):
+            return None
         return latest
+
+    def _plan_only_provisional(self, run_id: str, plan: dict[str, Any]) -> bool:
+        """Whether the Plan's G4 was only a provisional scope answer (R11A-001).
+
+        Inside an open scope segment G4 is answered `scope-pending:<scope>` so the segment
+        can reach its card; that is not a person's approval. A repair that would reuse
+        such a Plan must go back to PLAN and get a real G4.
+        """
+        lister = getattr(self.approvals, "for_run", None)
+        if not callable(lister):
+            return False
+        bound = (plan.get("envelope") or {}).get("approval_input_hash")
+        rows = [row for row in lister(run_id)
+                if gate_of(row.get("action") or "") == "G4"
+                and row.get("effective_decision") == "APPROVE"
+                and (bound is None or row.get("input_hash") == bound)]
+        return bool(rows) and all(
+            str(row.get("effective_channel") or "").startswith("scope-pending:") for row in rows)
 
     def _source_revisions(
         self, run_id: str, current: dict[str, Any], predecessor: dict[str, Any] | None,

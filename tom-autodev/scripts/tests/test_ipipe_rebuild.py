@@ -453,6 +453,22 @@ class TriggerAndRebindTests(RebuildTestCase):
         self.assertEqual(settled["reason_code"], "QUERY_REQUIRED", settled)
         self.assertEqual(self.state(), "DIAGNOSE")
 
+    def test_a_build_without_a_usable_time_is_not_claimed_by_reconciliation(self):
+        # R11B-003: after a dispatched POST, no creation time is no proof of ownership.
+        self.api.trigger_result = {}
+        input_hash = self.request()
+        grant = self.approve(input_hash)
+        ipipe_rebuild.execute(self.orch, self.runtime(), self.run, grant["approval_id"], input_hash)
+        self.add_build("101", minutes=1)
+        listed = self.api.builds_by_revision
+        self.api.builds_by_revision = lambda *a, **k: [
+            {key: value for key, value in item.items() if key not in {"startTime", "buildTime", "trigger"}}
+            | {"trigger": {k: v for k, v in (item.get("trigger") or {}).items() if k != "triggerTime"}}
+            for item in listed(*a, **k)]
+        settled = ipipe_rebuild.execute(
+            self.orch, self.runtime(), self.run, grant["approval_id"], input_hash, reconcile_only=True)
+        self.assertEqual(settled["reason_code"], "QUERY_REQUIRED", settled)
+
     def test_a_newer_build_that_already_exists_is_followed_instead_of_triggering_a_third(self):
         self.add_build("150", minutes=-30)
 

@@ -73,7 +73,8 @@ def _submitted_crs(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
         if response.get("ok") is True and number:
             found[number] = {"change_number": number, "module": response.get("module"),
                              "repo_path": response.get("repo_path"),
-                             "change_id": response.get("change_id")}
+                             "change_id": response.get("change_id"),
+                             "commit_revision": response.get("commit_revision")}
     return sorted(found.values(), key=lambda item: item["change_number"])
 
 
@@ -206,6 +207,7 @@ def requirement_diff(source: dict[str, Any], target: dict[str, Any]) -> dict[str
 def plan(
     orchestrator: Any, source_run_id: str, *, keep_open_crs: bool = False,
     accept_merged: bool = False, cr_status: Any = None, build_status: Any = None,
+    cr_builds: Any = None,
 ) -> dict[str, Any]:
     """Read-only: every leftover remote object of the source and whether restart may go."""
     events = orchestrator.state.events(source_run_id)
@@ -215,8 +217,8 @@ def plan(
     state = events[-1].get("state")
     if state == "RELEASE_SUCCESS":
         return {"ok": False, "reason_code": "RESTART_SOURCE_RELEASED", "run_id": source_run_id}
-    held = orchestrator.state.lineage(source_run_id)
-    if held is not None and held["source_run_id"] == source_run_id:
+    held = orchestrator.state.lineage(source_run_id, as_source=True)
+    if held is not None:
         return {"ok": True, "reason_code": "RESTART_REPLAY", "run_id": source_run_id,
                 "target_run_id": held["target_run_id"], "lineage": held["payload"]}
     blockers: list[dict[str, Any]] = []
@@ -240,6 +242,24 @@ def plan(
             blockers.append({"kind": "cr", "change_number": cr["change_number"], "disposition": disposition})
         crs.append({**cr, "status": status, "disposition": disposition})
     builds = _builds(orchestrator, source_run_id, build_status)
+    if cr_builds is not None:
+        # iCode starts pipelines on its own once a CR lands; a build the worker never
+        # bound is still a remote object of this run (R11B-007). `cr_builds(cr)` lists
+        # the platform builds of the CR's module and revision, or None when unreadable.
+        bound = {item["build_id"] for item in builds}
+        for cr in crs:
+            listed = cr_builds(cr) if cr.get("commit_revision") else []
+            if listed is None:
+                blockers.append({"kind": "build", "change_number": cr["change_number"],
+                                 "status": "UNKNOWN", "detail": "BUILD_DISCOVERY_FAILED"})
+                continue
+            for item in listed:
+                if str(item.get("build_id")) in bound:
+                    continue
+                bound.add(str(item.get("build_id")))
+                builds.append({"build_id": str(item.get("build_id")), "status": item.get("status"),
+                               "excluded": False, "unbound": True,
+                               "change_number": cr["change_number"]})
     for build in builds:
         if str(build["status"] or "").upper() not in _ENDED:
             blockers.append({"kind": "build", "build_id": build["build_id"], "status": build["status"]})

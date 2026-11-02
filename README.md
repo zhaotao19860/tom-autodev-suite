@@ -288,8 +288,10 @@ BGW 的模板环境只保存用于绑定远程证据的稳定声明，不承担�
 ### 3. 做只读预检
 
 ```bash
-python3 tom-autodev/scripts/cli.py preflight bgw
+python3 tom-autodev/scripts/cli.py preflight bgw --card BGW-1995
 ```
+
+`--card` 预检该需求的 profile（`profile_wizard` 生成的需求级文件）；省略时只读旧式项目级 `bgw.yaml`。
 
 预检检查项目 profile、平台访问和本机自动化配置。返回结果中的 `automation` 会说明：
 
@@ -519,7 +521,7 @@ build/stage、核对原 G8，确认后保存本地回执；它不创建新意图
 | `DRAFT_SCHEMA_INVALID` / `TASK_ID_MISMATCH` | 修正同一 job 的草案 |
 | `REVIEW_INCOMPLETE` / `REVIEW_NEEDS_CLARIFICATION` | 补齐 Review 范围或回答问题 |
 | `PROJECT_NOT_READY` / `BASELINE_UNVERIFIED` | 补配置或基线证据 |
-| `WORKFLOW_SPEC_DRIFT` / `PROFILE_CONFLICT` | 恢复兼容版本或执行显式 re-pin |
+| `WORKFLOW_SPEC_DRIFT` / `PROFILE_CONFLICT` | 恢复兼容的代码或 profile 文件；否则核对遗留远程对象后 `restart-from RUN --execute --reason ...` 新建运行 |
 | `PIPELINE_PLAN_REQUIRED` / `PIPELINE_PLAN_PROFILE_MISMATCH` / `REVISION_UNRESOLVED` / `REVISION_AMBIGUOUS` | 补齐冻结计划、仓库 revision 或匹配的配置；控制器不会猜远端 HEAD |
 | `WORKER_LEASE_HELD` | 等当前 worker 完成，不并发驱动同一 run |
 | iPipe 未结束 / `RELEASE_WAITING` | 等平台结果，不把超时当成失败 |

@@ -189,6 +189,34 @@ class RunChangeTests(unittest.TestCase):
         self.assertEqual(payload["source_revisions"], action["source_revisions"])
         self.assertEqual(set(payload), {"source_revisions", "reentry"})
 
+    def test_a_repair_plan_revise_keeps_its_task_and_repair_origin(self):
+        # R11A-003: a repair PLAN entered from DIAGNOSE keeps naming its task when redone.
+        run_id = "plan-repair-revise"
+        approval_id = "approval-repair-plan"
+        current = {"event_id": "repair-plan", "state": "PLAN",
+                   "payload": {"previous_state": "DIAGNOSE", "task_id": "T1"}}
+        action = {"ok": True, "phase": "PLAN", "state": "PLAN", "task_id": "T1",
+                  "source_event_id": current["event_id"],
+                  "source_revisions": {"business": "b", "tests": "t"}}
+        approval = {"run_id": run_id, "action": "G4", "approval_id": approval_id,
+                    "effective_decision": "REVISE", "input_hash": "h" * 64}
+        fake = MagicMock()
+        fake.state.events.return_value = [current]
+        fake.approvals.get.return_value = approval
+        fake.state.commit_transition_result.return_value = {
+            "status": "COMMITTED", "result": {"ok": True, "state": "PLAN"}}
+        with patch.object(run_change, "_current_draft", return_value=(action, "producer:old", {"task_id": "T1"})), \
+                patch.object(run_change, "_draft_approval_hash", return_value="h" * 64):
+            self.assertTrue(run_change.revise(fake, run_id, approval_id, feedback="补回滚", actor="owner")["ok"])
+        payload = fake.state.commit_transition_result.call_args.args[3]
+        self.assertEqual((payload["task_id"], payload["repair_of"]), ("T1", "repair-plan"))
+        from phase_protocol import PhaseProtocol
+        protocol = PhaseProtocol.__new__(PhaseProtocol)
+        revised = {"event_id": "redo", "state": "PLAN", "payload": payload}
+        protocol.state = MagicMock()
+        protocol.state.events.return_value = [current, revised]
+        self.assertTrue(protocol._revised_repair_plan(run_id, revised))
+
     def test_plan_revise_rejects_unvalidated_legacy_reentry_pin(self):
         protocol = self.orchestrator.phase_protocol()
         current = {"event_id": "legacy-revise", "payload": {"reentry": {

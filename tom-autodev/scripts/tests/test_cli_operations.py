@@ -630,5 +630,17 @@ class CliOperationTests(unittest.TestCase):
         parameters.assert_not_called()
 
 
+class CliExitCodeTests(unittest.TestCase):
+    def test_committed_or_replayed_effects_exit_zero(self):
+        # R11C-001: these reason codes report an effect that landed or a replay of one.
+        from orchestrator import _cli_exit_code
+
+        for reason in ("RESTART_READY", "RESTARTED", "RESTART_REPLAY", "CORRECTION_DELIVERED",
+                       "CORRECTION_ALREADY_DELIVERED", "ALREADY_REVISED", "ALREADY_REBOUND"):
+            with self.subTest(reason=reason):
+                self.assertEqual(_cli_exit_code({"ok": True, "reason_code": reason}), 0)
+        self.assertEqual(_cli_exit_code({"ok": False, "reason_code": "RESTART_SOURCE_UNRESOLVED"}), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -218,5 +218,16 @@ class StaleResumeHandoffTests(unittest.TestCase):
         self.assertEqual(self._open(), [])
 
 
+    def test_stop_hook_reaps_nothing_for_a_drifted_run(self):
+        # R11A-005: completing stale handoffs is a write, refused under policy drift.
+        self._rebuild_scenario()
+        before = sorted(self._open())
+        with mock.patch("execution_guard.execution_guard",
+                        return_value={"ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT"}), \
+                mock.patch("approval_watch.execution_guard",
+                           return_value={"ok": False, "reason_code": "WORKFLOW_SPEC_DRIFT"}):
+            auto_resume_from_hook(self.orch, {"hook_event_name": "Stop", "session_id": "sess-1"})
+        self.assertEqual(sorted(self._open()), before)
+
 if __name__ == "__main__":
     unittest.main()

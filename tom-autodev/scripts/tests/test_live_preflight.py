@@ -100,6 +100,19 @@ class LivePreflightTests(unittest.TestCase):
         self.assertTrue(all(len(probe.calls) == 1 for probe in probes.values()))
         self.assertNotIn("role_members", str([probe.calls for probe in probes.values()]))
 
+    def test_a_requirement_profile_is_preflighted_by_its_card(self):
+        # R11C-004: profile_wizard writes one profile per card; preflight must reach it.
+        from project_registry import profile_path, requirement_profile_path
+
+        legacy = profile_path("bgw", self.root)
+        per_card = requirement_profile_path("bgw", "BGW-1995", self.root)
+        per_card.parent.mkdir(parents=True, exist_ok=True)
+        legacy.replace(per_card)
+        self.assertEqual(self.orchestrator.preflight("bgw", probes=self.probes())["reason_code"],
+                         "PROJECT_NOT_READY")
+        result = self.orchestrator.preflight("bgw", probes=self.probes(), card="BGW-1995")
+        self.assertEqual(result["status"], "READY", result)
+
     def test_component_failure_is_fail_closed_and_redacted(self):
         probes = self.probes()
         probes["ku"] = ReadOnlyProbe("ku", {

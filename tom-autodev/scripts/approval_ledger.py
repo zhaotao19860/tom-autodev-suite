@@ -28,6 +28,23 @@ _DECISION_ALIASES = {
 # redo, so it must not resolve the gate. Kept here as a small stable fact to avoid a
 # workflow_spec import cycle; workflow_spec.REVISABLE_GATES is the authority.
 _REVISABLE_GATES = frozenset({"G1", "G2", "G3", "G4", "G5", "G6"})
+_REVISABLE_STATES = frozenset({"GRILL", "SPEC", "TASKS", "PLAN", "IMPLEMENT", "DIAGNOSE"})
+
+
+def revise_supported(action: Any, state_store: Any = None, run_id: Any = None) -> bool:
+    """Whether a 需修改 on this gate can be redone where the run stands.
+
+    The gate number alone is not enough: G4 is asked both for the WORKSPACE binding,
+    which has no producer to redo, and for the Task Plan (R11A-002). When the run's
+    state is known it must be a revisable producer state too.
+    """
+    if gate_of(str(action or "")) not in _REVISABLE_GATES:
+        return False
+    reader = getattr(state_store, "events", None)
+    if not callable(reader) or not isinstance(run_id, str) or not run_id:
+        return True
+    events = reader(run_id)
+    return not events or events[-1].get("state") in _REVISABLE_STATES
 
 # A timed-out/undeliverable approval is re-issued under a suffixed action
 # (e.g. "G7#retry-1") so the ledger's (run_id, action, input_hash) identity stays
@@ -101,7 +118,7 @@ class ApprovalLedger:
         with self._connect() as c:
             c.execute("BEGIN IMMEDIATE"); row = c.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
             if row is None: raise ValueError("APPROVAL_NOT_FOUND")
-            reason = _reject(row, decision, input_hash, channel, responder, run_id)
+            reason = _reject(row, decision, input_hash, channel, responder, run_id, state_store)
             deadline = _parse_deadline(row["deadline_at"]) if row["deadline_at"] else None
             if reason is None and row["effective_decision"] is None and deadline is not None and observed >= deadline:
                 reason = "APPROVAL_STATE_STORE_REQUIRED" if row["run_id"] != "legacy" and state_store is None else "APPROVAL_TIMEOUT"
@@ -410,13 +427,13 @@ def _parse_deadline(value: str) -> datetime:
     except (TypeError,ValueError): raise ValueError("APPROVAL_DEADLINE_INVALID") from None
     if parsed.tzinfo is None: raise ValueError("APPROVAL_DEADLINE_INVALID")
     return parsed.astimezone(timezone.utc)
-def _reject(row:sqlite3.Row,decision:str,input_hash:str,channel:str,responder:str|None,run_id:str|None)->str|None:
+def _reject(row:sqlite3.Row,decision:str,input_hash:str,channel:str,responder:str|None,run_id:str|None,state_store:Any=None)->str|None:
     if row["run_id"] != "legacy" and (not isinstance(run_id, str) or row["run_id"] != run_id):return "APPROVAL_RUN_MISMATCH"
     if row["run_id"] == "legacy" and run_id is not None and row["run_id"] != run_id:return "APPROVAL_RUN_MISMATCH"
     if row["input_hash"] != input_hash:return "APPROVAL_INPUT_MISMATCH"
     if channel not in APPROVAL_CHANNELS:return "APPROVAL_CHANNEL_NOT_CONFIGURED"
     if decision not in APPROVAL_DECISIONS:return "APPROVAL_DECISION_INVALID"
-    if decision=="REVISE" and gate_of(row["action"]) not in _REVISABLE_GATES:return "APPROVAL_REVISE_NOT_SUPPORTED"
+    if decision=="REVISE" and not revise_supported(row["action"], state_store, row["run_id"]):return "APPROVAL_REVISE_NOT_SUPPORTED"
     policy=json.loads(row["member_policy_json"])
     if policy.get(channel) and (not isinstance(responder,str) or responder not in policy.get(channel,[])):return "APPROVAL_RESPONDER_UNAUTHORIZED"
     if row["run_id"] != "legacy":
