@@ -672,7 +672,7 @@ class Orchestrator:
             # An explicit card reads exactly its own profile, never the legacy fallback
             # (R11-C-002): a missing card file is reported missing, not passed as READY.
             configured = (requirement_profile_path(project, card, self.config_root)
-                          if card else profile_path(project, self.config_root))
+                          if card is not None else profile_path(project, self.config_root))
         except ValueError:
             return {"ready": False, "status": "PROJECT_NOT_READY", "reason_code": "PROJECT_NOT_READY",
                     "project": project, "missing": ["card"], "components": {}}

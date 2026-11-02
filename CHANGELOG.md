@@ -4,6 +4,15 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 11 轮 Codex 全量评审第 3 轮（最后一轮）后修复
+
+复核报告（e41578c）：[A](docs/reviews/2026-11-02-r11-codex-review-3A.md)、[B](docs/reviews/2026-11-02-r11-codex-review-3B.md)、[C](docs/reviews/2026-11-02-r11-codex-review-3C.md)。第 2 轮 8 项中 5 项关闭；3 项仍有同根因残留，无新增问题。三项已在本提交修复并补回归，但三轮预算已用完，**这次修复未经 Codex 复核**。
+
+- **R11B-001**：`push_cr` 非零退出改为默认按结果未知处理，只有输出明确是拒绝（Gerrit rejected、缺 Change-Id、无法解析远端等）才记 `SUBMIT_REJECTED`；不再逐个枚举网络错误文案（第 3 轮复现的是 128 + Empty reply）。
+- **R11A-003 / R11-C-001**：修复 PLAN 的每次重做都把 `repair_of` 直接指向从 DIAGNOSE 进入的那次 PLAN，识别改为一次查找，去掉 32 层回溯上限（第 3 轮复现了第 33 次重做丢任务）。
+- **R11-C-002**：`preflight --card ''` 显式空值也按卡片校验并拒绝，不再回退项目级 profile。
+- 全量 1587 个测试通过。
+
 ## 2026-11-02 · 第 11 轮 Codex 全量评审第 2 轮修复
 
 复核报告（01f123a）：[A](docs/reviews/2026-11-02-r11-codex-review-2A.md)、[B](docs/reviews/2026-11-02-r11-codex-review-2B.md)、[C](docs/reviews/2026-11-02-r11-codex-review-2C.md)。第 1 轮 22 项中 16 项关闭；6 项部分修复（同根因残留），另新增 2 项，均已修复并补回归。

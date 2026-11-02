@@ -207,7 +207,9 @@ def revise(
         # task: without the pointer the task resolver reads it as already reviewed and
         # moves on to the next DAG node, or finds none (R11A-003).
         payload["task_id"] = action.get("task_id")
-        payload["repair_of"] = current["event_id"]
+        # Always the PLAN entered from DIAGNOSE, however many redos follow, so the
+        # check is one lookup rather than a chain walk with a depth limit (R11A-003).
+        payload["repair_of"] = entry.get("repair_of") or current["event_id"]
     if state == "DIAGNOSE":
         # The diagnosis predecessor (failure, producer block) is bound by the entry
         # event, so the redo carries that binding unchanged.

@@ -223,10 +223,14 @@ class RunChangeTests(unittest.TestCase):
                 patch.object(run_change, "_draft_approval_hash", return_value="h" * 64):
             self.assertTrue(run_change.revise(fake, run_id, approval_id + "-2", feedback="再补", actor="owner")["ok"])
         again = fake.state.commit_transition_result.call_args.args[3]
-        self.assertEqual((again["task_id"], again["repair_of"]), ("T1", "redo"))
+        self.assertEqual((again["task_id"], again["repair_of"]), ("T1", "repair-plan"))
         twice = {"event_id": "redo-2", "state": "PLAN", "payload": again}
         protocol.state.events.return_value = [current, revised, twice]
         self.assertTrue(protocol._revised_repair_plan(run_id, twice))
+        # Any number of redos points straight at the repair entry: no depth limit.
+        chain = [current] + [{"event_id": f"redo-{n}", "state": "PLAN", "payload": again} for n in range(40)]
+        protocol.state.events.return_value = chain
+        self.assertTrue(protocol._revised_repair_plan(run_id, chain[-1]))
 
     def test_plan_revise_rejects_unvalidated_legacy_reentry_pin(self):
         protocol = self.orchestrator.phase_protocol()

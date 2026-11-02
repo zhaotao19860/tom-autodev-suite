@@ -1109,16 +1109,13 @@ class PhaseProtocol:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}
         if (payload.get("reentry") or {}).get("kind") != "REVISE" or not payload.get("repair_of"):
             return False
-        by_id = {event["event_id"]: event for event in self.state.events(run_id)}
-        origin = by_id.get(payload["repair_of"])
-        for _ in range(32):
-            if not isinstance(origin, dict) or origin.get("state") != "PLAN":
-                return False
-            origin_payload = origin.get("payload") or {}
-            if origin_payload.get("previous_state") == "DIAGNOSE":
-                return origin_payload.get("task_id") == payload.get("task_id")
-            origin = by_id.get(origin_payload.get("repair_of"))
-        return False
+        origin = next((event for event in self.state.events(run_id)
+                       if event.get("event_id") == payload["repair_of"]), None)
+        if not isinstance(origin, dict) or origin.get("state") != "PLAN":
+            return False
+        origin_payload = origin.get("payload") or {}
+        return (origin_payload.get("previous_state") == "DIAGNOSE"
+                and origin_payload.get("task_id") == payload.get("task_id"))
 
     def _task_id(self, run_id: str, state: str, current: dict[str, Any]) -> str | None:
         payload = current.get("payload") if isinstance(current.get("payload"), dict) else {}

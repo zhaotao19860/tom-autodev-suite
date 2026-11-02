@@ -115,7 +115,7 @@ class LivePreflightTests(unittest.TestCase):
 
     def test_an_explicit_card_never_falls_back_to_the_project_profile(self):
         # R11-C-002: a valid legacy bgw.yaml must not stand in for a missing card file.
-        for card in ("BGW-1995", "../wrong"):
+        for card in ("BGW-1995", "../wrong", ""):
             with self.subTest(card=card):
                 probes = self.probes()
                 result = self.orchestrator.preflight("bgw", probes=probes, card=card)

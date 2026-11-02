@@ -736,6 +736,16 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual((first["reason_code"], second["reason_code"]), ("SUBMIT_RESULT_UNKNOWN", "QUERY_REQUIRED"))
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
+    def test_an_unexplained_push_failure_is_unknown_by_default(self):
+        # R11B-001: an empty reply (exit 128) is not a refusal; only a stated one is.
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 128, "stdout": "",
+                                      "stderr": "fatal: unable to access 'https://icode.example/repo': Empty reply from server"}
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "SUBMIT_RESULT_UNKNOWN")
+        self.assertEqual(self.runtime().submit(change, approval)["reason_code"], "QUERY_REQUIRED")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
     def test_one_cr_per_repo_create_new_cr_skips_baseline_drift(self):
         change = self.change_set()
         change["submission_mode"] = "create_new_cr"
