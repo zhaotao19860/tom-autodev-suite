@@ -71,10 +71,16 @@ def _submitted_crs(orchestrator: Any, run_id: str) -> list[dict[str, Any]]:
             continue
         number = str(response.get("change_number") or "")
         if response.get("ok") is True and number:
+            # Every patchset the run pushed may have started pipelines, not only the
+            # newest one (R11B-007 follow-up).
+            revisions = list((found.get(number) or {}).get("revisions") or [])
+            if response.get("commit_revision") and response["commit_revision"] not in revisions:
+                revisions.append(response["commit_revision"])
             found[number] = {"change_number": number, "module": response.get("module"),
                              "repo_path": response.get("repo_path"),
                              "change_id": response.get("change_id"),
-                             "commit_revision": response.get("commit_revision")}
+                             "commit_revision": response.get("commit_revision"),
+                             "revisions": revisions}
     return sorted(found.values(), key=lambda item: item["change_number"])
 
 
@@ -248,7 +254,13 @@ def plan(
         # the platform builds of the CR's module and revision, or None when unreadable.
         bound = {item["build_id"] for item in builds}
         for cr in crs:
-            listed = cr_builds(cr) if cr.get("commit_revision") else []
+            listed: list[dict[str, Any]] = []
+            for revision in cr.get("revisions") or ([cr["commit_revision"]] if cr.get("commit_revision") else []):
+                found = cr_builds({**cr, "commit_revision": revision})
+                if found is None:
+                    listed = None
+                    break
+                listed.extend(found)
             if listed is None:
                 blockers.append({"kind": "build", "change_number": cr["change_number"],
                                  "status": "UNKNOWN", "detail": "BUILD_DISCOVERY_FAILED"})

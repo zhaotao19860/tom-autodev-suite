@@ -1594,6 +1594,15 @@ class IpipeRuntimeTests(unittest.TestCase):
         self.api.details["rel-stage"]["entities"]["stageBuild"] = {"pipelineBuildId": "foreign-build"}
         self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_WAITING")
 
+    def test_a_stage_detail_or_job_of_another_stage_is_not_this_release(self):
+        # R11B-006 follow-up: the detail or the job names a stage other than the one asked.
+        self._branch_pipeline_fixture()
+        self.api.details["rel-stage"]["entities"]["stageBuild"] = {"stageBuildId": "foreign-stage"}
+        self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_WAITING")
+        self.api.details["rel-stage"]["entities"].pop("stageBuild")
+        self.api.details["rel-stage"]["entities"]["realJobBuilds"][0][0]["stageBuildId"] = "foreign-stage"
+        self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_WAITING")
+
     def test_branch_release_of_another_revision_or_not_yet_released_waits(self):
         self._branch_pipeline_fixture(revision="older-rev")
         self.assertEqual(self.runtime.verify_release_of_build("build-1")["reason_code"], "RELEASE_WAITING")

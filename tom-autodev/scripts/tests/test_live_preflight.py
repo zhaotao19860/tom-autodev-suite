@@ -113,6 +113,15 @@ class LivePreflightTests(unittest.TestCase):
         result = self.orchestrator.preflight("bgw", probes=self.probes(), card="BGW-1995")
         self.assertEqual(result["status"], "READY", result)
 
+    def test_an_explicit_card_never_falls_back_to_the_project_profile(self):
+        # R11-C-002: a valid legacy bgw.yaml must not stand in for a missing card file.
+        for card in ("BGW-1995", "../wrong"):
+            with self.subTest(card=card):
+                probes = self.probes()
+                result = self.orchestrator.preflight("bgw", probes=probes, card=card)
+                self.assertEqual(result["reason_code"], "PROJECT_NOT_READY", result)
+                self.assertTrue(all(not probe.calls for probe in probes.values()))
+
     def test_component_failure_is_fail_closed_and_redacted(self):
         probes = self.probes()
         probes["ku"] = ReadOnlyProbe("ku", {

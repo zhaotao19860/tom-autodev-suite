@@ -578,13 +578,34 @@ class ApprovalWatcher:
         """
         gate = gate_of(approval.get("action") or "")
         created = approval.get("created_at") or ""
+        target = self._operation_target(approval)
+        if target is None:
+            # Without the object it acted on, a newer card of the same gate may be an
+            # independent operation (another failed stage); a stop must still stop (R11-001).
+            return False
         return any(
             row.get("approval_id") != approval.get("approval_id")
             and gate_of(row.get("action") or "") == gate
             and row.get("input_hash") != approval.get("input_hash")
             and (row.get("created_at") or "") > created
+            and self._operation_target(row) == target
             for row in self.orchestrator.approvals.for_run(approval["run_id"])
         )
+
+    def _operation_target(self, approval: dict[str, Any]) -> tuple[Any, ...] | None:
+        """The remote object a delivered card's binding acts on, or None if not stated."""
+        from approval_delivery import _RECORD_KEY, _request_id
+
+        try:
+            stored = self.orchestrator.state.idempotency_result(f"{_RECORD_KEY}:{_request_id(approval)}")
+        except (KeyError, TypeError):
+            return None
+        gate = (((stored or {}).get("evidence") or {}).get("gate") or {}) if isinstance(stored, dict) else {}
+        binding = (gate.get("_review_content") or {}).get("binding") if isinstance(gate.get("_review_content"), dict) else None
+        if not isinstance(binding, dict):
+            return None
+        target = tuple(binding.get(key) for key in ("operation", "module", "pipeline_id", "build_id", "stage_build_id"))
+        return target if any(value not in (None, "") for value in target) else None
 
     def _responder(self, approval_id: str) -> str | None:
         effective = [

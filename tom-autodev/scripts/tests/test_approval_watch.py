@@ -91,13 +91,14 @@ class ApprovalWatcherTests(unittest.TestCase):
             )
         )
 
-    def _request(self, input_hash="hash-a"):
+    def _request(self, input_hash="hash-a", action="G0", binding=None):
         requested = self.orchestrator.request_infoflow_approval(
             "run-1",
-            "G0",
+            action,
             input_hash,
             member_policy=_POLICY,
             deadline_at=self.deadline,
+            **({"evidence": {"gate": {"_review_content": {"binding": binding}}}} if binding else {}),
             comate_client=ComateApprovalClient(),
             infoflow_client=self._client(),
         )
@@ -328,16 +329,28 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertIn("不会继续", content)
 
     def test_a_rejection_of_a_card_replaced_by_a_new_input_does_not_stop_the_run(self):
-        # R11A-004: the gate's input changed (hash-a -> hash-b); the old card's REJECT
-        # is audited but must not stop the run that moved on to hash-b.
-        old_id = self._request("hash-a")
+        # R11A-004: the same stage's G8 input changed (hash-a -> hash-b); the old card's
+        # REJECT is audited but must not stop the run that moved on to hash-b.
+        stage = {"operation": "ipipe.rerun", "build_id": "b1", "stage_build_id": "s1"}
+        old_id = self._request("hash-a", "G8", stage)
         self.now += timedelta(seconds=1)
-        self._request("hash-b")
+        self._request("hash-b", "G8", stage)
         stops = []
         self.orchestrator.stop = lambda run_id: stops.append(run_id) or {"state": "STOPPED"}
         self.journal.add(f"REJECT {old_id}", received_at=(self.now + timedelta(minutes=1)).isoformat())
         self.watcher.tick()
         self.assertEqual(stops, [])
+
+    def test_a_rejection_of_an_independent_card_of_the_same_gate_stops_the_run(self):
+        # R11-001: two failed stages each have their own G8; stopping either stops the run.
+        old_id = self._request("hash-a", "G8", {"operation": "ipipe.rerun", "build_id": "b1", "stage_build_id": "s1"})
+        self.now += timedelta(seconds=1)
+        self._request("hash-b", "G8", {"operation": "ipipe.rerun", "build_id": "b1", "stage_build_id": "s2"})
+        stops = []
+        self.orchestrator.stop = lambda run_id: stops.append(run_id) or {"state": "STOPPED"}
+        self.journal.add(f"REJECT {old_id}", received_at=(self.now + timedelta(minutes=1)).isoformat())
+        self.watcher.tick()
+        self.assertEqual(stops, ["run-1"])
 
     def test_an_expired_approval_is_reported_as_a_timeout(self):
         # The ledger judges the deadline on real time, so the bound deadline has to

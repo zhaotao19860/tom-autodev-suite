@@ -149,6 +149,26 @@ class ScopeWorkerTests(unittest.TestCase):
         self.assertFalse(scope_approval.answers_gate("SCOPE:C", "G4"))
         self.assertTrue(scope_approval.answers_gate("G7#retry-1", "G7"))
 
+    def test_an_approved_scope_card_is_shown_as_approved_at_its_exit_gate(self):
+        # R11A-006 follow-up: once SCOPE:D is approved, status must not say the approval
+        # record has not been created.
+        import run_brief
+
+        self._enter("GRILL"); self._ask("G1", "a" * 64)
+        self._enter("SPEC"); self._ask("G2", "b" * 64)
+        self._enter("WORKSPACE")
+        card = self._ask("G4", "c" * 64)
+        bound = self.delivered[1]
+        for channel in ("comate", "infoflow"):
+            self.orch.approvals.record_delivery(card["approval_id"], channel, {"id": channel}, payload_hash=bound)
+        self.orch.approvals.resolve(card["approval_id"], "APPROVE", bound, "comate",
+                                    run_id=self.run_id, responder=OWNER)
+        with patch.object(run_brief, "_read_only_next",
+                          return_value={"ok": True, "phase": "WORKSPACE", "required_human_gate": "G4"}):
+            brief = run_brief.build(self.orch, self.run_id, include_progress=False)
+        self.assertNotIn("审批记录尚未创建", brief["next"]["text"])
+        self.assertEqual(brief["status_label"], "已批准待提交")
+
     def test_g7_outside_submit_and_a_repair_round_are_per_gate(self):
         self._enter("IPIPE")
         self.assertIsNone(scope_approval.segment(self.orch.state.events(self.run_id), "G7"))

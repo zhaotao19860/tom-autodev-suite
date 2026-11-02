@@ -96,6 +96,24 @@ class RestartTests(unittest.TestCase):
                              cr_builds=lambda _cr: [{"build_id": "auto-1", "status": "SUCC"}])
         self.assertTrue(ended["ok"], ended)
 
+    def test_a_pipeline_of_an_earlier_patchset_is_found_too(self):
+        # R11B-007 follow-up: CR 1001 got two patchsets; the old one's build still runs.
+        self._submitted_cr()
+        claim = self.orch.state.claim_intent(self.source, "icode.submit", "icode:1001:b", {"n": "b"})
+        self.orch.state.receipt(claim["intent"]["intent_id"], {
+            "ok": True, "change_number": "1001", "module": "bgw", "change_id": "I1",
+            "commit_revision": "d" * 40}, ["icode-cr-1001"])
+        seen = []
+
+        def builds(cr):
+            seen.append(cr["commit_revision"])
+            return [{"build_id": "old", "status": "RUNNING"}] if cr["commit_revision"] == "c" * 40 else []
+
+        planned = restart.plan(self.orch, self.source, cr_status=lambda _cr: "MERGED",
+                               accept_merged=True, cr_builds=builds)
+        self.assertFalse(planned["ok"], planned)
+        self.assertEqual(sorted(seen), ["c" * 40, "d" * 40])
+
     def test_a_running_or_unreadable_build_blocks(self):
         self.orch.state.save_idempotency_result(f"ipipe.build-binding:{self.source}:b1", {"build_id": "b1"})
         for status, ok in [("RUNNING", False), (None, False), ("SUCC", True), ("FAILING", True), ("SUCCEEDING", True)]:

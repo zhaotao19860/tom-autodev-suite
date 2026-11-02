@@ -4,6 +4,20 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 第 11 轮 Codex 全量评审第 2 轮修复
+
+复核报告（01f123a）：[A](docs/reviews/2026-11-02-r11-codex-review-2A.md)、[B](docs/reviews/2026-11-02-r11-codex-review-2B.md)、[C](docs/reviews/2026-11-02-r11-codex-review-2C.md)。第 1 轮 22 项中 16 项关闭；6 项部分修复（同根因残留），另新增 2 项，均已修复并补回归。
+
+- **R11B-001 残留**：`push_cr` 以非零退出但输出显示连接中断（RPC failed、connection reset、broken pipe 等）时按结果未知处理，不再记拒绝后重推。
+- **R11B-002 残留**：追加前同时核对目标 CR 声明的仓库（module/project/repo）。
+- **R11B-006 残留**：stage 详情或发布 job 声明属于另一个 stage 时不作发布证据。
+- **R11B-007 残留**：`restart-from` 对同一 CR 的每个已确认 patchset revision 都查询自动启动的流水线，不只查最新一个。
+- **R11A-003 / R11-C-001 残留**：修复 PLAN 被连续多次“需修改”时一直保留任务与修复来源链。
+- **R11A-006 残留**：已批准的 scope 卡在 status 中按出口门显示为“已批准待提交”。
+- **R11-001 P1（新增，R11A-004 的修法引入）**：旧卡只有在新卡作用于同一远程对象（operation/module/pipeline/build/stage）且输入变化时才算被取代；两个独立 stage 的 G8 并存时，在任一卡上停止仍会停止 run。
+- **R11-C-002（新增）**：`preflight --card` 只读该卡片的需求级 profile，文件缺失或卡片 ID 非法时返回 `PROJECT_NOT_READY`，不回退项目级 `bgw.yaml`。
+- 全量 1586 个测试通过。
+
 ## 2026-11-02 · 第 11 轮 Codex 全量评审第 1 轮修复
 
 报告（9b8daff，分三片）：[A 审批与状态机](docs/reviews/2026-11-02-r11-codex-review-1A.md)、[B 外部写入与发布](docs/reviews/2026-11-02-r11-codex-review-1B.md)、[C CLI 与文档](docs/reviews/2026-11-02-r11-codex-review-1C.md)。共 22 项（P1 11、P2 11），逐条对照代码核实后全部修复，每项有回归测试。

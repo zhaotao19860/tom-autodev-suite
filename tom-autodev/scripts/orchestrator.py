@@ -669,7 +669,9 @@ class Orchestrator:
         # A card names its own profile (profile_wizard writes one per requirement); without
         # one only the legacy per-project file is read, never the newest card (R11C-004).
         try:
-            configured = (resolve_active_profile_path(project, card, self.config_root)
+            # An explicit card reads exactly its own profile, never the legacy fallback
+            # (R11-C-002): a missing card file is reported missing, not passed as READY.
+            configured = (requirement_profile_path(project, card, self.config_root)
                           if card else profile_path(project, self.config_root))
         except ValueError:
             return {"ready": False, "status": "PROJECT_NOT_READY", "reason_code": "PROJECT_NOT_READY",

@@ -421,7 +421,9 @@ class IcodeRuntime:
         blocked = self._profile_error()
         if blocked is not None:
             return blocked
-        if pushed["returncode"] == 124 or pushed["returncode"] < 0 or pushed.get("stderr") == "PROCESS_TIMEOUT":
+        if (pushed["returncode"] == 124 or pushed["returncode"] < 0
+                or pushed.get("stderr") == "PROCESS_TIMEOUT"
+                or _TRANSPORT_LOST.search(f"{pushed.get('stdout') or ''}\n{pushed.get('stderr') or ''}")):
             # A timeout or a signal does not prove the push never reached iCode; only a
             # read-back can say whether a CR exists (R11B-001).
             return self._answer(intent, intent_executor.Verdict.unknown(
@@ -891,7 +893,9 @@ class IcodeRuntime:
                 # The approval names that CR on the target branch: a CR that has since
                 # been found on another branch would receive a push to the target branch
                 # as a new CR, outside what G7 approved (R11B-002).
-                if change.get("branch") not in (None, "", change_set["target_branch"]):
+                declared = change.get("module") or change.get("project") or change.get("repo")
+                if (change.get("branch") not in (None, "", change_set["target_branch"])
+                        or declared not in (None, "", change_set["module"])):
                     return {"reason_code": "CR_IDENTITY_CONFLICT", "change": change, "complete": complete}
                 return {"reason_code": "CR_APPEND_ALLOWED", "change": change, "complete": complete}
             # A repair inside the same run: the reworked commit keeps the Change-Id of the
@@ -980,6 +984,14 @@ _SUBMIT_PUSH_TIMEOUT_SECONDS = 600
 _SUBMIT_ABSENCE_GRACE_SECONDS = _SUBMIT_PUSH_TIMEOUT_SECONDS + 300
 _SUBMIT_DISPATCH_MARKER = "icode.submit.dispatch"
 
+
+# A push that lost its connection mid-transfer may have reached iCode; git reports these
+# with a non-zero exit like any refusal, so they are told apart by what git says
+# (R11B-001 follow-up). Anything else non-zero is iCode's or git's refusal.
+_TRANSPORT_LOST = re.compile(
+    r"(?i)rpc failed|connection (?:reset|timed out|closed)|broken pipe|early eof"
+    r"|remote end hung up|unexpected disconnect|operation timed out|transfer closed"
+)
 
 def _default_candidates() -> list[str]:
     return [

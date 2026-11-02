@@ -216,6 +216,17 @@ class RunChangeTests(unittest.TestCase):
         protocol.state = MagicMock()
         protocol.state.events.return_value = [current, revised]
         self.assertTrue(protocol._revised_repair_plan(run_id, revised))
+        # A second REVISE of the redone Plan keeps the chain (R11A-003 follow-up).
+        fake.state.events.return_value = [current, revised]
+        action = {**action, "source_event_id": "redo"}
+        with patch.object(run_change, "_current_draft", return_value=(action, "producer:redo", {"task_id": "T1"})), \
+                patch.object(run_change, "_draft_approval_hash", return_value="h" * 64):
+            self.assertTrue(run_change.revise(fake, run_id, approval_id + "-2", feedback="再补", actor="owner")["ok"])
+        again = fake.state.commit_transition_result.call_args.args[3]
+        self.assertEqual((again["task_id"], again["repair_of"]), ("T1", "redo"))
+        twice = {"event_id": "redo-2", "state": "PLAN", "payload": again}
+        protocol.state.events.return_value = [current, revised, twice]
+        self.assertTrue(protocol._revised_repair_plan(run_id, twice))
 
     def test_plan_revise_rejects_unvalidated_legacy_reentry_pin(self):
         protocol = self.orchestrator.phase_protocol()

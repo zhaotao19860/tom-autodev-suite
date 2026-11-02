@@ -4,6 +4,7 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-11-02
 
+- 第 11 轮 Codex 全量评审第 2 轮：修复 6 项残留与 2 项新增（推送中断、追加身份、发布 stage 身份、多 patchset 构建、连续重做、scope 状态、独立 G8 停止、preflight --card），详见根 CHANGELOG。
 - 第 11 轮 Codex 全量评审第 1 轮：修复 22 项（审批/状态机、外部写入与发布身份、CLI 与文档），详见根 CHANGELOG。
 - MVP 第 4 步删除 `optimize` / G10 终态后优化（负责人确认）；脱敏函数迁到 `structured_redaction.py`。
 - 第 10 轮 Codex 评审第 2 轮修复：无 build 的 restart-from 不再需要 iPipe 认证。

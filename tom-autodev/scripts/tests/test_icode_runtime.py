@@ -725,6 +725,17 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.assertEqual(second["reason_code"], "QUERY_REQUIRED")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
 
+    def test_a_push_that_lost_its_connection_is_unknown(self):
+        # R11B-001 follow-up: a reset mid-transfer may have landed the push.
+        change = self.change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.push_result = {"returncode": 1, "stdout": "",
+                                      "stderr": "error: RPC failed; recv failure: Connection reset by peer"}
+        first = self.runtime().submit(change, approval)
+        second = self.runtime().submit(change, approval)
+        self.assertEqual((first["reason_code"], second["reason_code"]), ("SUBMIT_RESULT_UNKNOWN", "QUERY_REQUIRED"))
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 1)
+
     def test_one_cr_per_repo_create_new_cr_skips_baseline_drift(self):
         change = self.change_set()
         change["submission_mode"] = "create_new_cr"
@@ -793,6 +804,14 @@ class IcodeRuntimeTests(unittest.TestCase):
         self.transport.changes = [{**self.append_target(self.revision), "branch": "release"}]
         result = self.runtime().submit(change, approval)
         self.assertNotEqual(result["reason_code"], "OK")
+        self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 0)
+
+    def test_an_append_target_of_another_project_is_never_pushed(self):
+        # R11B-002 follow-up: CR 41 names another repository.
+        change = self.append_change_set()
+        approval = approved(self.ledger, "run-1", "G7", change["input_hash"])
+        self.transport.changes = [{**self.append_target(self.revision), "project": "baidu/foreign/repo"}]
+        self.assertNotEqual(self.runtime().submit(change, approval)["reason_code"], "OK")
         self.assertEqual(sum(_is_push(call[0]) for call in self.transport.calls), 0)
 
     def test_append_existing_cr_restart_replays_receipt_without_pushing_again(self):

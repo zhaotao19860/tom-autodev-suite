@@ -2382,9 +2382,13 @@ class IpipeRuntime:
                 if stage.get("status") not in _SUCCESS:
                     continue
                 detail = self.api.stage_detail(str(stage["stage_build_id"]))
-                if _foreign_stage_detail(detail, branch_build_id, found["branch_pipeline_id"]):
+                if _foreign_stage_detail(detail, branch_build_id, found["branch_pipeline_id"],
+                                         str(stage["stage_build_id"])):
                     continue
                 for job in _real_jobs(detail):
+                    # A job that names another stage is not part of the stage queried.
+                    if str(job.get("stageBuildId") or stage["stage_build_id"]) != str(stage["stage_build_id"]):
+                        continue
                     real = job.get("realJobBuild") if isinstance(job.get("realJobBuild"), dict) else job
                     if (job.get("jobType") == "AGILE_RELEASE"
                             and str(job.get("status") or "").upper() in _SUCCESS
@@ -2915,16 +2919,19 @@ def _matches_build(build: Any, context: dict[str, Any]) -> bool:
     return parameters is None or parameters == context["parameters"]
 
 
-def _foreign_stage_detail(detail: Any, build_id: str, pipeline_id: str) -> bool:
-    """Whether a stage detail states it belongs to another build or pipeline."""
+def _foreign_stage_detail(detail: Any, build_id: str, pipeline_id: str, stage_id: str = "") -> bool:
+    """Whether a stage detail states it belongs to another stage, build or pipeline."""
     entities = detail.get("entities") if isinstance(detail, dict) else None
     stage = entities.get("stageBuild") if isinstance(entities, dict) else None
     if not isinstance(stage, dict):
         return False
-    owner_build = stage.get("pipelineBuildId")
-    owner_pipeline = stage.get("pipelineConfId")
-    return bool((owner_build not in (None, "") and str(owner_build) != str(build_id))
-                or (owner_pipeline not in (None, "") and str(owner_pipeline) != str(pipeline_id)))
+    declared = (
+        (stage.get("stageBuildId") or stage.get("id"), stage_id),
+        (stage.get("pipelineBuildId"), build_id),
+        (stage.get("pipelineConfId"), pipeline_id),
+    )
+    return any(owner not in (None, "") and expected and str(owner) != str(expected)
+               for owner, expected in declared)
 
 
 def _build_id(build: Any) -> str:
