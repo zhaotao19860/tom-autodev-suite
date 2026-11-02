@@ -19,12 +19,10 @@ from collaboration import CollaborationSession
 from evidence_gate import EvidenceGate
 from orchestrator import Orchestrator
 from run_brief import build as build_brief
-from run_summary import RunSummary
 from test_approval_watch import FakeNotifyClient
 from test_collaboration import FakeGroupClient, g0_binding, members
 from test_phase_protocol import FakeKnowledgeSync, _seed_envelope
 from test_phase_protocol_repair import strict_intake_payload
-from test_run_summary import KnowledgeFake
 from test_schema_validation import specialized_examples
 import worker_driver
 import workflow_spec
@@ -169,28 +167,6 @@ class RetryConsumerTests(unittest.TestCase):
         self.assertEqual(waiting["reason_code"], "APPROVAL_REQUIRED", waiting)
         self.assertEqual(waiting["gate"], "G4")
         return job_id, draft, waiting["approval_input_hash"]
-
-    def _proposal(self):
-        target = self.root / "scripts" / "guard.py"
-        target.parent.mkdir()
-        target.write_text("before", encoding="utf-8")
-        self.orch.state.transition(self.run_id, "DIAGNOSE", {
-            "reason_code": "REVIEW_FAILURE", "failure_signature": "review:rule-1",
-            "optimization_candidate": {
-                "schema_version": "1", "root_cause": "missing retry gate normalization",
-                "expected_benefit": "resume from an approved retry", "risk": "bounded edit",
-                "rollback": "restore the prior bytes",
-                "target_files": [{"path": str(target), "content": "after"}],
-                "verification_commands": ["python3 -m unittest"],
-            },
-        })
-        summary = RunSummary(
-            self.orch.state, self.orch.artifacts, self.orch.approvals,
-            knowledge_sync=KnowledgeFake(), control_root=self.root,
-            validation_runner=lambda _commands, _root: {"ok": True, "reason_code": "OK"})
-        proposal = summary.propose(summary.build(self.run_id), [self.root])
-        self.assertTrue(proposal["ok"], proposal)
-        return summary, proposal, target
 
     def test_worker_consumes_reissued_approval_and_persisted_gated_draft_after_restart(self):
         job_id, draft, input_hash = self._plan_draft()
@@ -382,40 +358,6 @@ class RetryConsumerTests(unittest.TestCase):
         exhausted = watcher._reissue(self._timeout(record), self.client)
         self.assertEqual(exhausted["reason_code"], "APPROVAL_RETRY_EXHAUSTED", exhausted)
         self.assertEqual(len(self.orch.approvals.for_run(self.run_id)), MAX_APPROVAL_RETRIES + 1)
-
-    def test_g10_reissued_approval_applies_and_replays_exact_candidate(self):
-        summary, proposal, target = self._proposal()
-        record = self._reissued("G10", proposal["candidate_hash"])
-        applied = summary.apply(proposal["proposal_id"], record["approval_id"])
-        self.assertTrue(applied["ok"], applied)
-        self.assertEqual(target.read_text(encoding="utf-8"), "after")
-        self.assertEqual(summary.apply(proposal["proposal_id"], record["approval_id"]), applied)
-
-    def test_g10_retry_keeps_gate_hash_run_and_pending_approval_binding(self):
-        summary, proposal, target = self._proposal()
-        input_hash = proposal["candidate_hash"]
-        for gate, approved_hash, run_id, decision, reason in (
-            ("G9#retry-1", input_hash, self.run_id, "APPROVE", "G10_APPROVAL_REQUIRED"),
-            ("G10#retry-1", "changed-input", self.run_id, "APPROVE", "G10_APPROVAL_HASH_MISMATCH"),
-            ("G10#retry-1", input_hash, "other-run", "APPROVE", "G10_APPROVAL_REQUIRED"),
-            ("G10#retry-2", input_hash, self.run_id, None, "G10_APPROVAL_REQUIRED"),
-        ):
-            with self.subTest(gate=gate, input_hash=approved_hash, run_id=run_id, decision=decision):
-                record = self._record(gate, approved_hash, run_id=run_id, decision=decision)
-                result = summary.apply(proposal["proposal_id"], record["approval_id"])
-                self.assertEqual(result["reason_code"], reason, result)
-                self.assertEqual(target.read_text(encoding="utf-8"), "before")
-
-    def test_g10_rejected_retry_remains_rejected_on_terminal_replay(self):
-        summary, proposal, target = self._proposal()
-        record = self._reissued("G10", proposal["candidate_hash"], decision="REJECT")
-        rejected = summary.apply(proposal["proposal_id"], record["approval_id"])
-        self.assertEqual(rejected["reason_code"], "G10_REJECTED", rejected)
-        replay = summary.apply(proposal["proposal_id"], record["approval_id"])
-        self.assertEqual(replay["reason_code"], "G10_REJECTED", replay)
-        self.assertEqual(replay["proposal_id"], proposal["proposal_id"])
-        self.assertEqual(target.read_text(encoding="utf-8"), "before")
-
 
 if __name__ == "__main__":
     unittest.main()

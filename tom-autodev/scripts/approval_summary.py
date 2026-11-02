@@ -45,8 +45,6 @@ _REVIEW = {
            "重新构建为 rebuild binding 与下载探测状态"),
     "G9": ("全部必需模块的 build、版本、环境、发布规则和发布证据一致",
            "冻结 pipeline plan 与本次 action 钉住的全部 iPipe 产物；旧 build 不可替代"),
-    "G10": ("控制面候选 diff、允许目录、收益、风险、验证命令与回滚",
-            "Run Summary、Optimization Proposal、candidate.target_files 与 before_sha256"),
 }
 _EFFECTS = {
     "G0": "批准当前需求/协作/路由绑定；控制器随后建群并进入 GRILL，不授权代码提交或发布",
@@ -57,7 +55,6 @@ _EFFECTS = {
     "G7": "仅执行本次 hash 绑定的 iCode 提交或单模块 iPipe 触发；不是两种操作的通用授权",
     "G8": "仅重跑或继续本次 build/stage 和参数绑定的阶段，或对同一 CR 版本重新构建一次；不批准新代码或发布",
     "G9": "只读核验平台发布并记录匹配证据；全部模块通过才进入 RELEASE_SUCCESS，未发布则等待，不强制发布",
-    "G10": "仅应用允许目录内的控制面候选改动并验证/失败回滚；不修改业务 run 的授权",
 }
 
 
@@ -352,25 +349,6 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
             workspace = _workspace_context(orchestrator, run_id, input_hash)
             if workspace.get("material_status") == "PINNED":
                 return workspace
-        if gate_name == "G10":
-            proposal_reader = getattr(orchestrator.state, "optimization_proposal", None)
-            if callable(proposal_reader):
-                # The proposal id is derived from the run and candidate hash. A
-                # state adapter may accept the candidate hash directly, so both
-                # forms are attempted without selecting a latest proposal.
-                from run_summary import _proposal_id
-                stored = proposal_reader(_proposal_id(run_id, input_hash))
-                proposal = stored.get("proposal") if isinstance(stored, dict) else None
-                proposal = proposal if isinstance(proposal, dict) else stored
-                candidate = proposal.get("candidate") if isinstance(proposal, dict) else None
-                if isinstance(candidate, dict) and _hash(candidate) == input_hash:
-                    return {
-                        "summary": content_summary(proposal),
-                        "references": references(proposal),
-                        "content_hash": _hash(proposal),
-                        "material_status": "PINNED",
-                        "_review_content": proposal,
-                    }
         action = _read_only_next(orchestrator, run_id)
         if (
             not action.get("ok")
@@ -478,14 +456,14 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
                 "material_status": "PINNED",
                 "_review_content": {"pipeline_plan": plan, "artifacts": contents},
             }
-        # Submission and G10 are not producer envelopes. Match the exact canonical
+        # A submission is not a producer envelope. Match the exact canonical
         # object hash rather than selecting the latest artifact for a phase.
-        if gate_name in {"G7", "G10"}:
+        if gate_name == "G7":
             for artifact in orchestrator.artifacts.artifacts_for_run(run_id):
                 if not artifact.get("valid"):
                     continue
                 content = json.loads(artifact["content"])
-                candidate = content.get("candidate") if gate_name == "G10" else content
+                candidate = content
                 if isinstance(candidate, dict) and _hash(candidate) == input_hash:
                     return {"summary": content_summary(content),
                             "references": [{"label": "固定审批产物", "ref": artifact["path"]}] + references(content),

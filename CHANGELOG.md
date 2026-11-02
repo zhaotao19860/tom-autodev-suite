@@ -4,6 +4,10 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · MVP 第 4 步：删除 optimize / G10
+
+- 负责人确认后删除终态后控制面优化（G10）：`run_summary.py`（RunSummary 及其提案、应用、回滚、归档链路）、CLI `optimize`、`Orchestrator.optimize`/`run_summary`、`StateStore` 的 `optimization_proposals` 读写方法、`run-summary` 与 `optimization-proposal` 两个 schema、`approval_summary` 的 G10 材料与说明。库里从未产生过 proposal 或 G10 审批。已有数据库里的 `optimization_proposals` 表不删除（不再读写）。`run_summary` 中被 preflight 使用的脱敏函数迁到新模块 `structured_redaction.py`。`workflow_spec.GATE_LABELS` 的 G10 标签进策略 hash，保留并注明，hash 不变。README、SKILL.md、OPERATIONS、phase-protocol、approval-policy、failure-taxonomy 同步。全量 1560 个测试通过。
+
 ## 2026-11-02 · 第 10 轮 Codex 评审第 3 轮：局部复核 PASS
 
 - 报告：[docs/reviews/2026-11-02-r10-codex-review-3.md](docs/reviews/2026-11-02-r10-codex-review-3.md)（4e7417d..ae3c5d9）。R10-NEW-001 关闭，无新增 finding。本批次三轮评审结束；全量 C、M、P 未在本批次重新验证。仅文档改动，无用户可见行为变化。

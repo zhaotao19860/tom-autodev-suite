@@ -220,7 +220,7 @@ The platform's own review (小码哥) is a second opinion taken after SUBMIT, wh
 
 Project skills supply repository topology, environment, iPipe parameter names, log locations, and version/counter inspection. This controller sequences `next` / G8 / `ipipe-rerun` / evidence ingest. For BGW, read `tom-project-bgw/references/runtime-topology.md` before filling or rerunning `P0新case回归`.
 
-Every child phase follows [`references/phase-protocol.md`](references/phase-protocol.md): consume and emit a schema-validated, content-hashed `ArtifactEnvelope`, persist the human-readable phase document to KU, and link only the required milestone/evidence to iCafe. Child skills return artifacts and evidence to this controller; only this controller owns iCafe/KU/iCode/iPipe adapters and G0-G10 gates.
+Every child phase follows [`references/phase-protocol.md`](references/phase-protocol.md): consume and emit a schema-validated, content-hashed `ArtifactEnvelope`, persist the human-readable phase document to KU, and link only the required milestone/evidence to iCafe. Child skills return artifacts and evidence to this controller; only this controller owns iCafe/KU/iCode/iPipe adapters and G0-G9 gates.
 
 ### Knowledge-base collaboration contract
 
@@ -282,12 +282,6 @@ It must not alter run state, repin workflow policy, create approvals, or emit du
 iCafe comments. Use `--dry-run` before any external write.
 
 Persist events, artifacts, approvals, locks, heartbeats, external results, and handoffs. Resume only from a confirmed checkpoint; never submit, notify, rerun, or release twice.
-
-## Post-Run Optimization (G10)
-
-After a terminal run, build `RunSummary` from durable events, approvals, phase artifacts, collaboration receipts, and iPipe evidence. It must redact secrets and nonessential personal data. A candidate optimization must identify root cause, exact target files, expected benefit, risk, rollback, and control-plane-only verification commands.
-
-Only a proposal created from archived run evidence may be applied. Bind a `G10` approval to the exact candidate hash, require an approved agent/Infoflow ledger record, constrain every target to approved tom-autodev roots, and reject business-repository, project-profile, iPipe, or pipeline changes. Archive proposal and result through `KnowledgeSync`; rollback every changed file if validation fails. Never use G10 to modify a production repository, profile, or pipeline template.
 
 ## References
 

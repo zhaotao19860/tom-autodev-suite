@@ -36,8 +36,7 @@ _PHASE_SCHEMAS = {
 # its schema from the phase, so phase artifacts were always validated; everything else
 # was archived, hashed, indexed, and then read back as evidence without anyone having
 # looked at its shape. A submit descriptor missing `revision_set` got as far as iCode
-# rejecting it, and a run summary in a shape G10 does not understand was still the
-# document G10 reasoned from.
+# rejecting it.
 #
 # `change-set` here is the submit descriptor, NOT the IMPLEMENT phase artifact: that
 # one is stored under kind `implement`. Mapping each kind to a same-named schema is
@@ -45,7 +44,6 @@ _PHASE_SCHEMAS = {
 # against `change-set.schema.json` and reject every SUBMIT.
 _KIND_SCHEMAS = {
     "change-set": "submit-descriptor",
-    "run-summary": "run-summary",
 }
 # Kinds archived unchecked on purpose, so an absent kind can be told from a considered
 # exemption. Both wrap a remote response verbatim: their shape belongs to iCode, and

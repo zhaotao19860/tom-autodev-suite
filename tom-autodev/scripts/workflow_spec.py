@@ -207,6 +207,8 @@ GATE_LABELS: dict[str, tuple[str, str]] = {
     "G8": ("重跑失败的流水线阶段，或为产物已失效的构建重新触发整条流水线",
            "按当前远程证据重跑该阶段，或对同一 CR 版本重新构建"),
     "G9": ("正式发布", "执行发布阶段"),
+    # G10 (post-run optimization) was removed; the label stays because GATE_LABELS is
+    # part of the pinned policy hash.
     "G10": ("控制面优化建议", "应用优化建议"),
     "WORKFLOW_SPEC_MIGRATION": (
         "暂停运行的 workflow policy 版本迁移",

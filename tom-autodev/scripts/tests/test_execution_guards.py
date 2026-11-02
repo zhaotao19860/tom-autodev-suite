@@ -100,7 +100,6 @@ class ExecutionGuardTests(unittest.TestCase):
         cases = {
             "advance": lambda: owner.advance(run, "IPIPE", {}),
             "failure routing": lambda: owner.route_failure(run, "CODE_FAILURE", {}),
-            "summary archival": lambda: owner.optimize(run, "build"),
             "approval request": lambda: owner.request_infoflow_approval(run, "G7", "hash", member_policy={"comate": ["a@test.example"], "infoflow": ["a@test.example"]}, comate_client=SimpleNamespace(request=self.effect), infoflow_client=SimpleNamespace(request=self.effect)),
             "approval reply": lambda: owner.receive_infoflow_reply(run, approval_id, "hash", {}),
             "approval wait": lambda: owner.wait_infoflow_approval(run, approval_id, "hash", SimpleNamespace(wait=self.effect), 0),
@@ -158,7 +157,6 @@ class ExecutionGuardTests(unittest.TestCase):
             "phase publication": lambda: sync.publish_phase(self.run_id, {"content_hash": "hash"}),
             "group create": lambda: collaboration.create(self.run_id, "bgw", {}, {}),
             "group message": lambda: collaboration.send_message(self.run_id, "message", [], "key"),
-            "summary build": lambda: self.owner.run_summary().build(self.run_id),
         }
         for name, invoke in cases.items():
             with self.subTest(entry=name):
@@ -221,15 +219,6 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(results[0].get("reason_code"), "WORKFLOW_SPEC_DRIFT", results)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.calls, [])
-
-    def test_optimization_recovery_guard_precedes_archive_or_apply(self):
-        summary = self.owner.run_summary()
-        self.blocked(lambda: summary.propose({"run_id": self.run_id}, [self.root]))
-        self.owner.state.save_optimization_proposal({
-            "proposal_id": "proposal", "run_id": self.run_id,
-            "candidate_hash": "candidate", "envelope_hash": "envelope"})
-        self.blocked(lambda: summary.apply("proposal", "approval"))
-        self.blocked(lambda: summary.heartbeat("proposal", "owner"))
 
     def test_direct_phase_write_entries_and_policy_errors_are_guarded(self):
         protocol = self.owner.phase_protocol(object())

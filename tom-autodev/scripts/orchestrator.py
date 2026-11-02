@@ -73,7 +73,6 @@ class Orchestrator:
         self.workspaces = WorkspaceManager(self.config_root / "worktrees")
         self.evidence_gate = EvidenceGate()
         self.transition_policy = TransitionPolicy()
-        self._run_summary_options: dict[str, Any] = {}
         self._knowledge_sync_transport_options: dict[str, Any] = {}
 
     def start(
@@ -657,52 +656,6 @@ class Orchestrator:
             result = {**result, "submit_descriptor": descriptor}
         return result
 
-    @guard_execution
-    def optimize(
-        self,
-        run_id: str,
-        operation: str,
-        *,
-        summary: dict[str, Any] | None = None,
-        allowed_roots: list[Path] | None = None,
-        proposal_id: str | None = None,
-        approval_id: str | None = None,
-    ) -> dict[str, Any]:
-        current = self.status(run_id)
-        if current["state"] == "RUN_NOT_FOUND":
-            return {"ok": False, "reason_code": "RUN_NOT_FOUND", "run_id": run_id}
-        pinned = self._runtime_profile(run_id)
-        if not pinned.get("ok"):
-            return pinned
-        if operation == "build":
-            return self.run_summary().build(run_id)
-        if operation == "propose":
-            if not isinstance(summary, dict) or not isinstance(allowed_roots, list):
-                return {"ok": False, "reason_code": "INVALID_INPUT", "run_id": run_id}
-            if summary.get("run_id") != run_id:
-                return {"ok": False, "reason_code": "OPTIMIZATION_RUN_MISMATCH", "run_id": run_id}
-            knowledge_sync = self._owned_knowledge_sync(run_id)
-            if isinstance(knowledge_sync, dict):
-                return knowledge_sync
-            return self.run_summary(knowledge_sync).propose(summary, allowed_roots)
-        if operation == "apply":
-            if not all(isinstance(value, str) and value for value in (proposal_id, approval_id)):
-                return {"ok": False, "reason_code": "INVALID_INPUT", "run_id": run_id}
-            proposal = self.state.optimization_proposal(proposal_id)
-            approval = self.approvals.get(approval_id)
-            if (
-                not isinstance(proposal, dict)
-                or proposal.get("run_id") != run_id
-                or not isinstance(approval, dict)
-                or approval.get("run_id") != run_id
-            ):
-                return {"ok": False, "reason_code": "OPTIMIZATION_RUN_MISMATCH", "run_id": run_id}
-            knowledge_sync = self._owned_knowledge_sync(run_id)
-            if isinstance(knowledge_sync, dict):
-                return knowledge_sync
-            return self.run_summary(knowledge_sync).apply(proposal_id, approval_id)
-        return {"ok": False, "reason_code": "OPTIMIZATION_OPERATION_INVALID", "run_id": run_id}
-
     def preflight(self, project: str, *, probes: dict[str, Any] | None = None) -> dict[str, Any]:
         """Query configured dependencies without creating run state or remote intents."""
         if not isinstance(project, str) or not _PROJECT_ID.fullmatch(project):
@@ -792,19 +745,6 @@ class Orchestrator:
             approval_ledger=self.approvals,
             evidence_gate=self.evidence_gate,
             transition_policy=self.transition_policy,
-        )
-
-    def run_summary(self, knowledge_sync: Any | None = None) -> Any:
-        """Return the owned G10 summary boundary without exposing mutable stores to callers."""
-        from run_summary import RunSummary
-
-        return RunSummary(
-            self.state,
-            self.artifacts,
-            self.approvals,
-            knowledge_sync=knowledge_sync,
-            control_root=self._run_summary_options.get("control_root"),
-            validation_runner=self._run_summary_options.get("validation_runner"),
         )
 
     def knowledge_sync(
@@ -3218,14 +3158,6 @@ def main(argv: list[str] | None = None) -> int:
     adopt_repair.add_argument("diagnosis_artifact_id")
     adopt_repair.add_argument("plan_artifact_id")
 
-    optimize = subparsers.add_parser("optimize")
-    optimize.add_argument("run_id")
-    optimize.add_argument("operation", choices=("build", "propose", "apply"))
-    optimize.add_argument("--summary")
-    optimize.add_argument("--allowed-root", action="append", default=[])
-    optimize.add_argument("--proposal-id")
-    optimize.add_argument("--approval-id")
-
     preflight = subparsers.add_parser("preflight")
     preflight.add_argument("project")
 
@@ -3650,31 +3582,6 @@ def main(argv: list[str] | None = None) -> int:
                 orchestrator, args.run_id, _infoflow_notify_client(orchestrator)
             )
             result = {**result, "ide_turn_notice": notice.get("reason_code")}
-    elif args.command == "optimize":
-        options: dict[str, Any] = {}
-        if args.operation == "propose":
-            loaded = _json_file(args.summary)
-            if not isinstance(loaded, dict):
-                result = loaded
-            else:
-                result = orchestrator.optimize(
-                    args.run_id,
-                    args.operation,
-                    summary=loaded,
-                    allowed_roots=[Path(item).expanduser().resolve() for item in args.allowed_root],
-                )
-        elif args.operation == "apply":
-            result = _settle_consumed_approval(
-                orchestrator, args.run_id, args.approval_id, "optimize",
-                orchestrator.optimize(
-                    args.run_id,
-                    args.operation,
-                    proposal_id=args.proposal_id,
-                    approval_id=args.approval_id,
-                ),
-            )
-        else:
-            result = orchestrator.optimize(args.run_id, args.operation, **options)
     elif args.command == "acceptance-candidates":
         result = _ku_acceptance_candidates(args.project, args.config_root)
     elif args.command == "request-approval":
@@ -4647,7 +4554,7 @@ def _approval_context(
     else:
         gate = {"gate": pinned_context(orchestrator, run_id, str(action or ""), input_hash or "")}
         if gate["gate"].get("material_status") == "MISSING":
-            if str(action or "") in {"G0", "G4", "G5", "G9", "G10"}:
+            if str(action or "") in {"G0", "G4", "G5", "G9"}:
                 reason = (
                     "APPROVAL_CONTENT_MISMATCH"
                     if input_hash != payload.get("g0_input_hash") and str(action or "") == "G0"

@@ -111,7 +111,6 @@ IPIPE/RELEASE 需要真实 `ipipe_api`，缺少 adapter 时会返回等待/阻�
 | G7 | iCode 提交及初始 iPipe 触发，各自绑定准确的动作输入 |
 | G8 | 失败阶段重跑或人工阶段继续 |
 | G9 | 发布相关动作和版本证据；worker 校验已发布的锁定 build |
-| G10 | 终态后对控制面自身的优化提案 |
 
 Comate 和如流共享 `approval_id`，首个有效回应生效。审批卡应列出仓库/模块、目标分支、revision 和批准后的动作；跨仓逐仓列出，G7 区分新 CR 与追加 revision。
 
@@ -249,13 +248,5 @@ python3 tom-autodev/scripts/cli.py --config-root /path/to/autodev-state status "
 | GRILL、TASKS、PLAN、IMPLEMENT、REVIEW、DIAGNOSE | 保留本地产物，不逐阶段写 KU/iCafe |
 
 读取归档使用 `cli.py artifact show ARTIFACT_ID` 的完整性校验入口。需要查看全部事件可用 `status RUN --json`；CLI 没有 `trace` 子命令。
-
-## 终态后优化
-
-G10 基于已归档运行生成总结和提案，经批准后才应用；允许目标限定在控制面目录，拒绝修改业务仓、profile、流水线或密钥。先查看精确参数：
-
-```bash
-python3 tom-autodev/scripts/cli.py optimize --help
-```
 
 发生过一次的现象应先核对版本、触发条件和反例；只有适用的结论才进入可复用知识。机械故障优先补脚本校验和回归，模型决策变化使用 [行为场景](../evals/README.md) 比较。

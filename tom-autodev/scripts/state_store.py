@@ -133,18 +133,6 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS handoffs_run_id
                     ON handoffs(run_id, handoff_id);
-                CREATE TABLE IF NOT EXISTS optimization_proposals (
-                    proposal_id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    candidate_hash TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    result_json TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS optimization_proposals_run_id
-                    ON optimization_proposals(run_id, created_at);
                 CREATE TABLE IF NOT EXISTS producer_jobs (
                     job_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -238,7 +226,6 @@ class StateStore:
                 );
                 """
             )
-            _optimization_migrate(connection)
             _producer_job_migrate(connection)
 
     def transition(self, run_id: str, state: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1834,186 +1821,6 @@ class StateStore:
             ).fetchall()
         return [_failure_case_row(row) for row in rows]
 
-    def save_optimization_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
-        """Persist one immutable G10 candidate and its mutable result status."""
-        required = ("proposal_id", "run_id", "candidate_hash", "envelope_hash")
-        if any(not isinstance(proposal.get(key), str) or not proposal[key] for key in required):
-            raise ValueError("OPTIMIZATION_PROPOSAL_INVALID")
-        encoded = _encode(proposal)
-        now = _now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT * FROM optimization_proposals WHERE proposal_id = ?",
-                (proposal["proposal_id"],),
-            ).fetchone()
-            if existing is not None:
-                if existing["payload_json"] != encoded or existing["candidate_hash"] != proposal["candidate_hash"] or existing["envelope_hash"] != proposal["envelope_hash"]:
-                    raise ValueError("OPTIMIZATION_PROPOSAL_CONFLICT")
-                return _optimization_row(existing)
-            connection.execute(
-                """INSERT INTO optimization_proposals(
-                    proposal_id, run_id, candidate_hash, envelope_hash, payload_json, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'ARCHIVING', ?, ?)""",
-                (proposal["proposal_id"], proposal["run_id"], proposal["candidate_hash"], proposal["envelope_hash"], encoded, now, now),
-            )
-            row = connection.execute(
-                "SELECT * FROM optimization_proposals WHERE proposal_id = ?",
-                (proposal["proposal_id"],),
-            ).fetchone()
-        return _optimization_row(row)
-
-    def mark_optimization_archived(self, proposal_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
-        encoded = _encode(receipt)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-            if row is None: raise ValueError("OPTIMIZATION_PROPOSAL_NOT_FOUND")
-            if row["status"] == "PROPOSED" and row["proposal_receipt_json"] == encoded: return _optimization_row(row)
-            if row["status"] != "ARCHIVING": raise ValueError("OPTIMIZATION_ARCHIVE_STATE_INVALID")
-            connection.execute("UPDATE optimization_proposals SET status='PROPOSED', proposal_receipt_json=?, archive_receipt_json=?, updated_at=? WHERE proposal_id=?", (encoded, encoded, _now(), proposal_id))
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-        return _optimization_row(row)
-
-    def claim_optimization_apply(self, proposal_id: str, approval_id: str, journal: dict[str, Any]) -> dict[str, Any]:
-        """CAS PROPOSED -> APPLYING after a complete backup journal is durable."""
-        token = uuid.uuid4().hex
-        heartbeat_at = datetime.now(timezone.utc)
-        lease_expires_at = (heartbeat_at + timedelta(seconds=300)).isoformat()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
-            if row is None:
-                return {"status": "NOT_FOUND"}
-            if row["status"] != "PROPOSED":
-                return {"status": row["status"], "proposal": _optimization_row(row)}
-            proposal = json.loads(row["payload_json"])
-            expected = {
-                "schema_version": "2", "proposal_id": proposal_id, "run_id": row["run_id"],
-                "candidate_hash": row["candidate_hash"], "approval_id": approval_id,
-                "allowed_roots": proposal.get("allowed_roots"),
-                "target_identities": [
-                    {"path": item["path"], "before_sha256": item["before_sha256"], "content_sha256": item["content_sha256"]}
-                    for item in proposal.get("candidate", {}).get("target_files", [])
-                ],
-            }
-            if not _claim_journal_matches(journal, expected):
-                return {"status": "JOURNAL_INVALID"}
-            journal = dict(journal)
-            # The journal stores a non-secret ownership proof; the actual token remains in its dedicated column.
-            journal["claim"] = {"owner_proof": hashlib.sha256(token.encode("utf-8")).hexdigest(), "owner_pid": os.getpid(), "heartbeat_at": heartbeat_at.isoformat(), "lease_expires_at": lease_expires_at}
-            journal["journal_hash"] = _journal_hash({key: value for key, value in journal.items() if key != "journal_hash"})
-            encoded = _encode(journal)
-            connection.execute(
-                """UPDATE optimization_proposals SET status = 'APPLYING', approval_id = ?, owner_token = ?,
-                   owner_pid = ?, apply_journal_json = ?, heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
-                   WHERE proposal_id = ? AND status = 'PROPOSED'""",
-                (approval_id, token, os.getpid(), encoded, heartbeat_at.isoformat(), lease_expires_at, _now(), proposal_id),
-            )
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
-        return {"status": "CLAIMED", "owner_token": token, "proposal": _optimization_row(row)}
-
-    def heartbeat_optimization_apply(self, proposal_id: str, owner_token: str, lease_seconds: int = 300) -> dict[str, Any]:
-        if not isinstance(lease_seconds, int) or lease_seconds <= 0: raise ValueError("OPTIMIZATION_LEASE_INVALID")
-        now = datetime.now(timezone.utc); expiry = (now + timedelta(seconds=lease_seconds)).isoformat()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row=connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?",(proposal_id,)).fetchone()
-            if row is None or row["status"] != "APPLYING" or row["owner_token"] != owner_token: raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
-            connection.execute("UPDATE optimization_proposals SET heartbeat_at=?, lease_expires_at=?, updated_at=? WHERE proposal_id=?",(now.isoformat(),expiry,_now(),proposal_id))
-            row=connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?",(proposal_id,)).fetchone()
-        return _optimization_row(row)
-
-    def finalize_optimization_apply(self, proposal_id: str, owner_token: str, status: str, result: dict[str, Any]) -> dict[str, Any]:
-        encoded = _encode(result)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
-            if row is None or row["status"] not in {"APPLYING", "RECOVERY_REQUIRED"} or row["owner_token"] != owner_token:
-                raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
-            connection.execute("UPDATE optimization_proposals SET status=?, result_json=?, updated_at=? WHERE proposal_id=?", (status, encoded, _now(), proposal_id))
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
-        return _optimization_row(row)
-
-    def begin_optimization_result_archive(self, proposal_id: str, owner_token: str, result: dict[str, Any], terminal_status: str) -> dict[str, Any]:
-        """Persist the result before publishing it; terminal states require a receipt."""
-        if terminal_status not in {"APPLIED", "ROLLED_BACK"}:
-            raise ValueError("OPTIMIZATION_TERMINAL_STATUS_INVALID")
-        encoded = _encode(result)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-            if row is None or row["status"] not in {"APPLYING", "RECOVERY_REQUIRED"} or row["owner_token"] != owner_token:
-                raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
-            connection.execute("UPDATE optimization_proposals SET status='RESULT_ARCHIVING', result_json=?, pending_terminal_status=?, updated_at=? WHERE proposal_id=?", (encoded, terminal_status, _now(), proposal_id))
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-        return _optimization_row(row)
-
-    def mark_optimization_result_archive_pending(self, proposal_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        encoded = _encode(result)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-            if row is None or row["status"] not in {"RESULT_ARCHIVING", "ARCHIVE_PENDING"}:
-                raise ValueError("OPTIMIZATION_RESULT_ARCHIVE_STATE_INVALID")
-            connection.execute("UPDATE optimization_proposals SET status='ARCHIVE_PENDING', result_json=?, updated_at=? WHERE proposal_id=?", (encoded, _now(), proposal_id))
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-        return _optimization_row(row)
-
-    def complete_optimization_result_archive(self, proposal_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
-        encoded = _encode(receipt)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-            if row is None or row["status"] not in {"RESULT_ARCHIVING", "ARCHIVE_PENDING"} or row["pending_terminal_status"] not in {"APPLIED", "ROLLED_BACK"}:
-                raise ValueError("OPTIMIZATION_RESULT_ARCHIVE_STATE_INVALID")
-            connection.execute("UPDATE optimization_proposals SET status=?, result_receipt_json=?, pending_terminal_status=NULL, updated_at=? WHERE proposal_id=?", (row["pending_terminal_status"], encoded, _now(), proposal_id))
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-        return _optimization_row(row)
-
-    def mark_optimization_recovery_required(self, proposal_id: str, owner_token: str | None, result: dict[str, Any]) -> dict[str, Any]:
-        encoded = _encode(result)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-            if row is None or row["status"] not in {"APPLYING", "ROLLBACK_FAILED", "RECOVERY_REQUIRED"} or (owner_token is not None and row["owner_token"] != owner_token):
-                raise ValueError("OPTIMIZATION_OWNER_MISMATCH")
-            connection.execute("UPDATE optimization_proposals SET status='RECOVERY_REQUIRED', result_json=?, updated_at=? WHERE proposal_id=?", (encoded, _now(), proposal_id))
-            row = connection.execute("SELECT * FROM optimization_proposals WHERE proposal_id=?", (proposal_id,)).fetchone()
-        return _optimization_row(row)
-
-    def optimization_proposal(self, proposal_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)
-            ).fetchone()
-        return _optimization_row(row) if row is not None else None
-
-    def update_optimization_proposal(
-        self, proposal_id: str, status: str, result: dict[str, Any], approval_id: str | None = None
-    ) -> dict[str, Any]:
-        encoded = _encode(result)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)
-            ).fetchone()
-            if row is None:
-                raise ValueError("OPTIMIZATION_PROPOSAL_NOT_FOUND")
-            if row["status"] == status and row["result_json"] == encoded:
-                return _optimization_row(row)
-            if row["status"] in {"APPLIED", "ROLLED_BACK", "REJECTED", "ARCHIVE_FAILED"}:
-                if row["status"] != status:
-                    raise ValueError("OPTIMIZATION_PROPOSAL_FINAL")
-            connection.execute(
-                "UPDATE optimization_proposals SET status = ?, result_json = ?, approval_id = COALESCE(?, approval_id), updated_at = ? WHERE proposal_id = ?",
-                (status, encoded, approval_id, _now(), proposal_id),
-            )
-            row = connection.execute(
-                "SELECT * FROM optimization_proposals WHERE proposal_id = ?", (proposal_id,)
-            ).fetchone()
-        return _optimization_row(row)
-
 
 def _encode(value: dict[str, Any]) -> str:
     ensure_persistable(value)
@@ -2207,40 +2014,6 @@ def _failure_case_row(row: sqlite3.Row) -> dict[str, Any]:
         "last_seen_run": row["last_seen_run"],
         "last_seen_at": row["last_seen_at"],
     }
-
-
-def _optimization_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "proposal_id": row["proposal_id"],
-        "run_id": row["run_id"],
-        "candidate_hash": row["candidate_hash"],
-        "envelope_hash": row["envelope_hash"],
-        "proposal": json.loads(row["payload_json"]),
-        "status": row["status"],
-        "result": json.loads(row["result_json"]) if row["result_json"] else None,
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "approval_id": row["approval_id"],
-        "owner_token": row["owner_token"],
-        "owner_pid": row["owner_pid"],
-        "apply_journal": json.loads(row["apply_journal_json"]) if row["apply_journal_json"] else None,
-        "archive_receipt": json.loads(row["proposal_receipt_json"] or row["archive_receipt_json"]) if (row["proposal_receipt_json"] or row["archive_receipt_json"]) else None,
-        "proposal_receipt": json.loads(row["proposal_receipt_json"]) if row["proposal_receipt_json"] else None,
-        "result_receipt": json.loads(row["result_receipt_json"]) if row["result_receipt_json"] else None,
-        "pending_terminal_status": row["pending_terminal_status"],
-        "heartbeat_at": row["heartbeat_at"], "lease_expires_at": row["lease_expires_at"],
-    }
-
-
-def _optimization_migrate(connection: sqlite3.Connection) -> None:
-    fields = {
-        "envelope_hash": "TEXT NOT NULL DEFAULT ''", "approval_id": "TEXT",
-        "owner_token": "TEXT", "owner_pid": "INTEGER", "apply_journal_json": "TEXT", "archive_receipt_json": "TEXT", "proposal_receipt_json": "TEXT", "result_receipt_json": "TEXT", "pending_terminal_status": "TEXT", "heartbeat_at": "TEXT", "lease_expires_at": "TEXT",
-    }
-    existing = {row["name"] for row in connection.execute("PRAGMA table_info(optimization_proposals)")}
-    for field, definition in fields.items():
-        if field not in existing:
-            connection.execute(f"ALTER TABLE optimization_proposals ADD COLUMN {field} {definition}")
 
 
 def _producer_job_migrate(connection: sqlite3.Connection) -> None:

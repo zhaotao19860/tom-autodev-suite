@@ -111,31 +111,6 @@ def specialized_examples():
             "failure_signature": None, "release_rule": "all stages pass", "release_evidence": ["ipipe:build-1/job-1"],
             "remote_evidence_refs": ["ipipe:build-1/job-1"],
         },
-        "run-summary": {
-            "run_id": "run-1", "schema_version": "1", "terminal_state": "RELEASE_SUCCESS", "outcome": "SUCCESS",
-            "metrics": {"event_count": 12, "artifact_count": 9, "valid_artifact_count": 9,
-                        "external_receipt_count": 4, "unreconciled_intent_count": 0,
-                        "abandoned_intent_count": 0},
-            "approval_metrics": {"approved": 8, "rejected": 0, "pending": 0, "timed_out": 0},
-            "failure_groups": [], "collaboration_receipt_count": 2, "pipeline_evidence_count": 1,
-            "artifact_integrity_failures": [], "content_hash": HASH,
-        },
-        "optimization-proposal": {
-            "schema_version": "1", "proposal_id": HASH, "run_id": "run-1", "summary_hash": HASH,
-            "summary_artifact_id": HASH, "candidate_hash": HASH,
-            "candidate": {
-                "root_cause": "duplicate manual reconciliation",
-                "expected_benefit": "one fewer manual step", "risk": "low", "rollback": "revert candidate",
-                "target_files": [{"path": "/skills/tom-autodev/scripts/phase_protocol.py",
-                                  "before_sha256": HASH, "content": "print()", "content_sha256": HASH}],
-                "verification_commands": ["python3 -m unittest tests.test_phase_protocol"],
-            },
-            "candidate_diff": "--- /skills/tom-autodev/scripts/phase_protocol.py",
-            "allowed_roots": ["/skills/tom-autodev/scripts"], "approval_gate": "G10",
-            "expected_benefit": "one fewer manual step", "risk": "low", "rollback": "revert candidate",
-            "evidence": {"failure_groups": [], "summary_artifact_id": HASH},
-            "envelope_hash": HASH,
-        },
     }
     change = examples["change-set"]
     change["full_diff_hash"] = canonical_hash({
@@ -199,32 +174,6 @@ class NamedSchemaValidationTests(unittest.TestCase):
         self.assertEqual([(issue.path, issue.kind) for issue in issues], [
             ("acceptance_coverage", "incomplete"), ("edges", "cycle"), ("edges[2].from", "unknown"),
         ])
-
-    def test_optimization_rejects_targets_outside_skill_control_plane_roots(self):
-        """The deny list reads the nested, resolved target paths a proposal really has.
-
-        It used to read a top-level `target_files` of relative strings, which the
-        proposal builder has never produced. Nothing loaded this schema, so the check
-        passed its own fixture and would have flagged every genuine candidate.
-        """
-        if validate_named_schema is None:
-            self.fail("named schema validation is not implemented")
-        proposal = specialized_examples()["optimization-proposal"]
-        target = proposal["candidate"]["target_files"][0]
-        proposal["candidate"]["target_files"] = [
-            {**target, "path": "/skills/tom-autodev/profiles/bgw.yaml"},
-            {**target, "path": "/skills/tom-autodev/scripts/pipeline_templates.py"},
-            {**target, "path": "/skills/tom-autodev/scripts/state.sqlite"},
-            {**target, "path": "/skills/tom-autodev/scripts/orchestrator.py"},
-        ]
-        self.assertEqual(
-            [(issue.path, issue.kind) for issue in validate_named_schema(proposal, "optimization-proposal")],
-            [
-                ("candidate.target_files[0].path", "forbidden"),
-                ("candidate.target_files[1].path", "forbidden"),
-                ("candidate.target_files[2].path", "forbidden"),
-            ],
-        )
 
     def test_named_loader_rejects_path_traversal(self):
         if load_named_schema is None:

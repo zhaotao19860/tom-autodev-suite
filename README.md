@@ -97,7 +97,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 
 ### 审批消息与进度通知
 
-- 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G10 都有各自的检查重点。
+- 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G9 都有各自的检查重点。
 - 自动草案审批会提供本次材料的本地 JSON 快照路径；这是阅读副本，不是已验收产物。路径只能在运行机器打开，已有 KU 文档才显示网页链接。缺少与 hash 匹配的材料会明确提示“请勿批准”。
 - 如流正文旁有“同意 / 需修改 / 停止run”按钮（“停止run”即原“驳回”，停止本 run）。有协作群时发群；G0 尚未建群时发给审批成员的机器人单聊。
   后续审批正文和操作示例统一使用中文：“同意 <approval_id>”会继续当前 run；
@@ -143,8 +143,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
   已处理的卡不会因重复点击重新出现按钮。提醒优先重放最近一次已送达的纠正正文。
 - 进度路线只把沿正常路线离开的阶段标为 ✓；进入 DIAGNOSE 或恢复分支的前驱阶段标为 ✗
   （例如 IMPLEMENT 被 producer-block 阻断），回退到较早阶段时其后阶段全部重置为 ○。
-- 显式命令（`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`、
-  `optimize apply`）成功消费审批后，会完成该审批对应的 `APPROVAL_RESUME` handoff；
+- 显式命令（`ipipe-rebuild`、`ipipe-rerun`、`submit`、`advance`）成功消费审批后，会完成该审批对应的 `APPROVAL_RESUME` handoff；
   `continue` 遇到多条 handoff 时，只清理指向旧事件且审批已被消费/门禁已不符的过期项（审计原因 `STALE_EVENT`），
   匹配最新事件的有效 handoff 与 REJECT 审批的 handoff 不受影响。
 
@@ -436,7 +435,6 @@ python3 tom-autodev/scripts/cli.py resume RUN_ID
 | G6 | 诊断结论和修复方向 |
 | G7/G8 | iCode 提交、iPipe 初次触发、失败阶段重跑 |
 | G9 | 发布动作和版本证据 |
-| G10 | 终态后对控制面自身的优化提案 |
 
 **scope 授权（可选）**：`start --scope-approval CARD PROJECT` 启动的 run 把 G1/G2/首个 G4 合成一张 D 卡、把任务的 G4/G5/G7 合成一张 C 卡。段内门照常按 hash 建台账，由临时放行（`scope-pending:<段>`）推进到段末才出卡；卡批准后为每个门写派生同意（`scope:<approval_id>`）。任一产物变化都会改变 scope hash，旧卡失效；修复轮次、后续任务的 G4、IPIPE 的 G7 仍逐门审批。
 
@@ -539,18 +537,6 @@ python3 tom-autodev/scripts/cli.py work-card reconcile --help
 **在新 run 中重开需求（合同 3.4）**：`restart-from SOURCE_RUN` 默认只读列出旧 run 留下的 CR、build、未回执写入和工作树及其处置；有任何未决项返回 `RESTART_SOURCE_UNRESOLVED`。确认处置后加 `--execute --reason "..."`（未合入的旧 CR 用 `--keep-open-crs` 保留，已合入的用 `--accept-merged` 接受）：同一事务内停止旧 run、写 `run_lineage`、建新 run 的 INTAKE，新 run 重走需求研判/规格/任务拆解，修复轮次继承。一个旧 run 只能重开一次，重复执行返回同一个新 run。
 
 `abandon-intent` 写入带原因和操作人的放弃记录，不把未知结果当成功。对 `ipipe.rerun`，只有当观察记录了 `before_dispatch: true`（运行时确认错误发生在调用点、请求尚未发出）且无 `http_status` 时，才可加 `--local-error-proven` 让同一审批重发一次；被调方内部抛出的同类错误，以及没有 `before_dispatch` 字段的旧观察，一律拒绝（`LOCAL_ERROR_NOT_PROVEN`）。无该标志的放弃仍是终局。观察、回执、G8/重建审批材料写入前统一脱敏：`IREPO-TOKEN:`、`access_token=`、Authorization/Bearer 值以及本进程已加载的 irepo/iPipe token 原值（任意长度）。未变更模块的发布产物必须与冻结 revision 精确一致，否则返回 `PRODUCT_REVISION_MISMATCH`。不要手改数据库或删除记录解除阻断。
-
-### 终态后优化
-
-G10 只针对 Tom Autodev 自己的控制面，属于终态后的可选动作，不参与业务交付主路径：
-
-```bash
-python3 tom-autodev/scripts/cli.py optimize RUN_ID build
-python3 tom-autodev/scripts/cli.py optimize RUN_ID propose --summary SUMMARY.json --allowed-root /path/to/tom-autodev
-python3 tom-autodev/scripts/cli.py optimize RUN_ID apply --proposal-id PROPOSAL_ID --approval-id APPROVAL_ID
-```
-
-候选必须来自已归档的 `RunSummary`，目标只能在批准的 tom-autodev 控制面目录内。G10 审批绑定候选 hash；校验失败会回滚。它不能修改业务仓、项目 profile、iPipe pipeline、发布规则或外部 skill。
 
 默认状态库是 `~/.tom-autodev/state.sqlite`。使用自定义目录时，把 `--config-root` 放在子命令前，并在后续命令保持一致；Stop-hook 默认读取 `~/.tom-autodev`，自定义目录还要同步配置宿主集成：
 

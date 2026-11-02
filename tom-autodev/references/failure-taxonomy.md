@@ -50,7 +50,7 @@ Two rules follow, and both were learned the hard way:
 
 ### When the outcome will never be known
 
-An `outcome unknown` intent that nobody can reconcile — the bot is gone, the build was garbage-collected, the person who could look has moved on — still holds the run. `tom-autodev abandon-intent <intent_id> --reason R --actor A` releases it by *writing* an abandonment receipt (`ok: false`, `INTENT_ABANDONED`, carrying who decided and why), never by deleting the intent. The row therefore stays in `external_results`, in `trace`, and in the run summary's failure groups, where `abandoned_intent_count` keeps it out of `external_receipt_count` so G10 cannot read a hand-cut knot as a clean external write.
+An `outcome unknown` intent that nobody can reconcile — the bot is gone, the build was garbage-collected, the person who could look has moved on — still holds the run. `tom-autodev abandon-intent <intent_id> --reason R --actor A` releases it by *writing* an abandonment receipt (`ok: false`, `INTENT_ABANDONED`, carrying who decided and why), never by deleting the intent. The row therefore stays in `external_results` and in `trace`, so nobody can read a hand-cut knot as a clean external write.
 
 It is deliberately not approval-gated: the intents that strand a run are frequently the approval deliveries themselves, and a gate that needs the stuck channel to open it is not an escape hatch. `reason` and `actor` are required in its place. A real outcome arriving afterwards fails loudly with `RECEIPT_CONFLICT` rather than being absorbed.
 

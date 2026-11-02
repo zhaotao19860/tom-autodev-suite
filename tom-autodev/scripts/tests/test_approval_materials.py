@@ -58,22 +58,6 @@ class ApprovalMaterialsTests(unittest.TestCase):
         self.assertIn("请勿批准", " ".join(sent[0]["lines"]))
         self.assertLessEqual(len(sent[0]["lines"]), 8)
 
-    def test_g10_reads_verified_proposal_from_its_actual_state_store(self):
-        from run_summary import _proposal_id
-        candidate = {"target_files": [{"path": "/control/script.py", "before_sha256": "c" * 64}]}
-        binding = _hash(candidate)
-        proposal = {"run_id": "run-1", "proposal_id": _proposal_id("run-1", binding),
-                    "candidate": candidate, "candidate_hash": binding}
-        proposal["envelope_hash"] = _hash(proposal)
-        stored = {**proposal, "proposal": proposal}
-        orch = SimpleNamespace(state=SimpleNamespace(optimization_proposal=lambda _: stored))
-        detail = pinned_context(orch, "run-1", "G10", binding)
-        self.assertEqual(detail["material_status"], "PINNED")
-        self.assertEqual(detail["_review_content"], proposal)
-        self.assertIn("/control/script.py", [ref["ref"] for ref in detail["references"]])
-        proposal["candidate"]["target_files"][0]["path"] = "/different.py"
-        self.assertEqual(pinned_context(orch, "run-1", "G10", binding)["material_status"], "MISSING")
-
     def test_g0_exports_actual_profile_selection_without_advancing_or_requesting(self):
         _write_profile(self.root, PROFILE)
         orch = Orchestrator(self.root)

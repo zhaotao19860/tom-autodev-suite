@@ -12,7 +12,6 @@
 | G7 | iCode submission or patchset |
 | G8 | iPipe failed-stage rerun or manual-stage continuation |
 | G9 | release evidence and release action |
-| G10 | bounded control-plane optimization candidate |
 
 Publish the same `approval_id`, evidence summary, and `input_hash` to Comate and Infoflow. Accept the first valid response. Audit later responses without changing the effective decision. Expire an approval whenever its bound input changes. Default wait limit is ten hours; timeout stops the run.
 
@@ -92,7 +91,7 @@ Every approval detail states its object (`本次审批`), checklist (`审批重�
 python3 scripts/cli.py request-approval RUN_ID G1 INPUT_HASH --content /path/to/artifact-envelope.json
 ```
 
-`--content` takes a phase envelope (or a bare `content` object). Envelopes are checked against the current run/action/task/source-event/version identity, and the approval hash is rebuilt from the actual content; copying a correct `approval_input_hash` into unrelated content is rejected with `APPROVAL_CONTENT_MISMATCH`. Bare producer content uses the same rebuilt binding. Manual G7/G8 binding objects must match their canonical object hash; G10 proposals must identify the run and match their candidate hash.
+`--content` takes a phase envelope (or a bare `content` object). Envelopes are checked against the current run/action/task/source-event/version identity, and the approval hash is rebuilt from the actual content; copying a correct `approval_input_hash` into unrelated content is rejected with `APPROVAL_CONTENT_MISMATCH`. Bare producer content uses the same rebuilt binding. Manual G7/G8 binding objects must match their canonical object hash;
 
 Without `--content`, automatic producer gates inspect the current saved draft and reconstruct its envelope hash; controller gates inspect the exact action and referenced artifacts. G0 reads the start snapshot and pinned profile selection. Review copies are archived under kind `approval-material` and shown as real local JSON paths, not fabricated KU links or accepted phase artifacts. Missing or mismatched content is explicitly marked `MISSING` / “请勿批准”. For a manual G8 or G7 trigger request, supply the exact prepared binding and source evidence with `--content` if it is not available as a pinned artifact.
 
@@ -149,7 +148,6 @@ before a revise are superseded: they are not nudged, reissued or listed as waiti
 | G7 | Exact iCode descriptor + Review OR one module's iPipe trigger binding; these are different authorizations |
 | G8 | Current build/stage evidence, case failures, rerun/manual continuation binding and sanitized parameters |
 | G9 | Frozen plan and all current-action-pinned module evidence, versions, environment and release rules; this authorizes read-only platform release verification, not forced publication |
-| G10 | Run Summary, Optimization Proposal, allowed target files, before hashes, validation and rollback |
 
 Progress notices are titled “进度通知（非审批）” and say they neither request approval nor authorize anything. A named future gate is not a pending request; the next actor is derived from the ledger. No pending row means no instruction to approve a nonexistent card. An approval-resume notice reports an already accepted decision and is not a new approval.
 

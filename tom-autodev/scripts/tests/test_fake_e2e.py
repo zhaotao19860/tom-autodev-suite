@@ -533,10 +533,8 @@ class FakeE2ETests(unittest.TestCase):
             with self.subTest(project=project):
                 results[project] = self._integrated_run(project, card, parent, decision)
 
-        self.assertEqual(results["bgw"]["optimization"]["reason_code"], "G10_REJECTED")
-        self.assertEqual(results["bgw"]["target"].read_text(encoding="utf-8"), "before\n")
-        self.assertEqual(results["xflow"]["optimization"]["reason_code"], "OK")
-        self.assertEqual(results["xflow"]["target"].read_text(encoding="utf-8"), "after\n")
+        for project in ("bgw", "xflow"):
+            self.assertEqual(results[project]["trace"]["events"][-1]["state"], "DIAGNOSE")
 
     def test_trace_collects_artifacts_group_receipts_and_role_routing(self):
         started = self.orchestrator.start("BGW-303", "bgw", requirement_snapshot=snapshot("BGW-303"))
@@ -1999,61 +1997,6 @@ class FakeE2ETests(unittest.TestCase):
                 self.assertEqual(result["reason_code"], "WORKSPACE_BINDING_MISMATCH")
                 self.assertEqual(self.orchestrator.status(run_id)["state"], "WORKSPACE")
 
-    def test_optimize_rejects_missing_run_and_runtime_replacement(self):
-        missing = self.orchestrator.optimize("missing-run", "build")
-
-        self.assertEqual(missing["reason_code"], "RUN_NOT_FOUND")
-        with self.assertRaises(TypeError):
-            self.orchestrator.optimize("missing-run", "build", summary_runtime=object())
-        with self.assertRaises(TypeError):
-            self.orchestrator.optimize("missing-run", "build", knowledge_sync=object())
-
-    def test_optimize_rejects_a_summary_owned_by_another_run(self):
-        run_a = self.orchestrator.start(
-            "BGW-801", "bgw", requirement_snapshot=snapshot("BGW-801")
-        )["run_id"]
-        run_b = self.orchestrator.start(
-            "BGW-802", "bgw", requirement_snapshot=snapshot("BGW-802")
-        )["run_id"]
-        control_root, _target = self._optimization_candidate(run_a, "summary-cross-run")
-        summary_a = self.orchestrator.optimize(run_a, "build")
-        ku, cafe = self._install_knowledge_transports()
-
-        result = self.orchestrator.optimize(
-            run_b, "propose", summary=summary_a, allowed_roots=[control_root]
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason_code"], "OPTIMIZATION_RUN_MISMATCH")
-        self.assertEqual(ku.calls, [])
-        self.assertEqual(cafe.calls, [])
-
-    def test_optimize_rejects_another_runs_proposal_and_approval(self):
-        run_a = self.orchestrator.start(
-            "BGW-803", "bgw", requirement_snapshot=snapshot("BGW-803")
-        )["run_id"]
-        run_b = self.orchestrator.start(
-            "BGW-804", "bgw", requirement_snapshot=snapshot("BGW-804")
-        )["run_id"]
-        control_root, target = self._optimization_candidate(run_a, "apply-cross-run")
-        summary_a = self.orchestrator.optimize(run_a, "build")
-        ku, cafe = self._install_knowledge_transports()
-        proposal_a = self.orchestrator.optimize(
-            run_a, "propose", summary=summary_a, allowed_roots=[control_root]
-        )
-        approval_a = self._approval(run_a, "G10", proposal_a["candidate_hash"])
-
-        calls_before = (len(ku.calls), len(cafe.calls))
-        result = self.orchestrator.optimize(
-            run_b, "apply", proposal_id=proposal_a["proposal_id"],
-            approval_id=approval_a["approval_id"],
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason_code"], "OPTIMIZATION_RUN_MISMATCH")
-        self.assertEqual(target.read_text(encoding="utf-8"), "before\n")
-        self.assertEqual((len(ku.calls), len(cafe.calls)), calls_before)
-
     def test_trace_fails_closed_when_the_pinned_profile_drifts(self):
         run_id = self.orchestrator.start(
             "BGW-601", "bgw", requirement_snapshot=snapshot("BGW-601")
@@ -2068,25 +2011,19 @@ class FakeE2ETests(unittest.TestCase):
         self.assertEqual(result["reason_code"], "PROFILE_CONFLICT")
         self.assertNotIn("project", result)
 
-    def test_cli_exposes_next_complete_phase_optimize_and_preflight(self):
+    def test_cli_exposes_next_complete_phase_and_preflight(self):
         class Controller:
             def __init__(self): self.calls = []
             def next(self, run_id): self.calls.append(("next", run_id)); return {"ok": True, "reason_code": "OK"}
             def complete_phase(self, run_id, envelope): self.calls.append(("complete", run_id, envelope)); return {"ok": True, "reason_code": "OK"}
-            def optimize(self, run_id, operation, **options): self.calls.append(("optimize", run_id, operation, options)); return {"ok": True, "reason_code": "OK"}
             def preflight(self, project): self.calls.append(("preflight", project)); return {"ready": True, "status": "READY", "reason_code": "READY"}
 
         controller = Controller()
         envelope = self.root / "envelope.json"
         envelope.write_text('{"run_id":"run-1"}', encoding="utf-8")
-        summary = self.root / "summary.json"
-        summary.write_text('{"run_id":"run-1"}', encoding="utf-8")
         commands = (
             ["next", "run-1"],
             ["complete-phase", "run-1", str(envelope)],
-            ["optimize", "run-1", "build"],
-            ["optimize", "run-1", "propose", "--summary", str(summary), "--allowed-root", str(self.root)],
-            ["optimize", "run-1", "apply", "--proposal-id", "p1", "--approval-id", "g10"],
             ["preflight", "bgw"],
         )
         with patch("orchestrator.Orchestrator", return_value=controller):
@@ -2095,11 +2032,11 @@ class FakeE2ETests(unittest.TestCase):
                     self.assertEqual(cli_main(argv), 0)
 
         self.assertEqual([call[0] for call in controller.calls], [
-            "next", "complete", "optimize", "optimize", "optimize", "preflight"
+            "next", "complete", "preflight"
         ])
 
     def _integrated_run(
-        self, project, card, parent, optimization_decision,
+        self, project, card, parent, _decision,
         *, failure_reason="CODE_FAILURE", failure_classification="CODE",
         stop_after_routing=False,
     ):
@@ -2269,24 +2206,11 @@ class FakeE2ETests(unittest.TestCase):
         self.assertTrue(ingested["ok"], ingested)
         self.assertEqual(self.orchestrator.status(run_id)["state"], "RELEASE")
 
-        control_root = self.root / f"control-{hashlib.sha256(card.encode()).hexdigest()[:12]}"
-        target = control_root / "scripts" / "guard.py"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("before\n", encoding="utf-8")
-        candidate_fix = {
-            "schema_version": "1", "root_cause": "missing durable retry guard",
-            "expected_benefit": "deterministic retry", "risk": "low",
-            "rollback": "restore previous bytes",
-            "target_files": [{"path": str(target), "content": "after\n"}],
-            "verification_commands": ["python3 -m unittest scripts.tests.test_fake_e2e"],
-        }
         routed = self.orchestrator.route_failure(run_id, failure_reason, {
             "classification": failure_classification, "failure_signature": f"SIG-{project}",
-            "optimization_candidate": candidate_fix,
         })
         duplicate_route = self.orchestrator.route_failure(run_id, failure_reason, {
             "classification": failure_classification, "failure_signature": f"SIG-{project}",
-            "optimization_candidate": candidate_fix,
         })
         self.assertEqual(routed, duplicate_route)
         failure_message = collaboration.route_failure({
@@ -2312,24 +2236,6 @@ class FakeE2ETests(unittest.TestCase):
                 "pending_after_recovery": self.orchestrator.state.pending_intents(run_id),
             }
 
-        self.orchestrator._run_summary_options = {
-            "control_root": control_root,
-            "validation_runner": lambda _commands, _root: {"ok": True, "reason_code": "OK"},
-        }
-        summary = self.orchestrator.optimize(run_id, "build")
-        self.assertEqual(summary["collaboration_receipt_count"], 2)
-        self.assertEqual(summary["pipeline_evidence_count"], 1)
-        self._install_knowledge_transports()
-        proposal = self.orchestrator.optimize(
-            run_id, "propose", summary=summary, allowed_roots=[control_root]
-        )
-        self.assertTrue(proposal["ok"], proposal)
-        g10 = self._approval(run_id, "G10", proposal["candidate_hash"], optimization_decision)
-        optimization = self.orchestrator.optimize(
-            run_id, "apply", proposal_id=proposal["proposal_id"],
-            approval_id=g10["approval_id"],
-        )
-
         trace = self.orchestrator.trace(run_id)
         self.assertEqual(trace["project"], {
             "project_id": project,
@@ -2348,12 +2254,12 @@ class FakeE2ETests(unittest.TestCase):
             "roles": ["development"] if routed["collaboration_category"] == "code" else trace["role_routing"][-1]["roles"],
         })
         self.assertEqual(
-            {"intake", "grill", "spec", "tasks", "plan", "implement", "review", "change-set", "submission", "ipipe", "run-summary"},
+            {"intake", "grill", "spec", "tasks", "plan", "implement", "review", "change-set", "submission", "ipipe"},
             {artifact["kind"] for artifact in trace["artifacts"]},
         )
         self.assertEqual(ku.calls[0][1], parent)
         return {
-            "trace": trace, "optimization": optimization, "target": target,
+            "trace": trace,
             "blocked_after_restart": blocked_after_restart,
             "recovered_trigger": recovered_trigger,
             "replayed_trigger": replayed_trigger,
@@ -2405,28 +2311,6 @@ class FakeE2ETests(unittest.TestCase):
             )
             revisions[role] = _commit_if_dirty(str(worktree), f"reviewed {role} change set")
         return revisions
-
-    def _optimization_candidate(self, run_id, label):
-        control_root = self.root / f"control-{label}"
-        target = control_root / "scripts" / "guard.py"
-        target.parent.mkdir(parents=True)
-        target.write_text("before\n", encoding="utf-8")
-        candidate = {
-            "schema_version": "1", "root_cause": "missing run binding",
-            "expected_benefit": "reject cross-run dispatch", "risk": "low",
-            "rollback": "restore previous bytes",
-            "target_files": [{"path": str(target), "content": "after\n"}],
-            "verification_commands": ["python3 -m unittest scripts.tests.test_fake_e2e"],
-        }
-        self.orchestrator.state.transition(run_id, "DIAGNOSE", {
-            "classification": "CODE", "failure_signature": f"SIG-{label}",
-            "optimization_candidate": candidate,
-        })
-        self.orchestrator._run_summary_options = {
-            "control_root": control_root,
-            "validation_runner": lambda _commands, _root: {"ok": True, "reason_code": "OK"},
-        }
-        return control_root, target
 
     def _install_knowledge_transports(self):
         ku = StatefulKuTransport()

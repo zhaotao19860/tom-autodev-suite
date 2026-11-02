@@ -247,14 +247,14 @@ class EvidenceGateTests(unittest.TestCase):
 
     def test_malformed_timestamps_return_a_structured_gate_block(self):
         result = EvidenceGate().check(
-            "G10",
+            "G9",
             {
                 "input_hash": "same",
                 "approved_input_hash": "same",
-                "approval_id": "approval-g10",
+                "approval_id": "approval-g9",
                 "approval_record": {
-                    "approval_id": "approval-g10",
-                    "action": "G10",
+                    "approval_id": "approval-g9",
+                    "action": "G9",
                     "input_hash": "same",
                     "effective_decision": "APPROVE",
                 },

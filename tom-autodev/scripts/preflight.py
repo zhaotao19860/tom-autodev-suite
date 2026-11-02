@@ -11,7 +11,7 @@ from typing import Any
 
 from cli_transport import CliTransport, CliTransportError
 from clients.ku_client import resolve_ku_binary
-from run_summary import redact_structured
+from structured_redaction import redact_structured
 
 
 COMPONENTS = ("icafe", "ku", "icode", "review", "infoflow", "ipipe")

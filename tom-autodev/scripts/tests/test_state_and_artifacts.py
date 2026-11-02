@@ -618,8 +618,7 @@ class GenericPutSchemaTests(unittest.TestCase):
     """Content checks on the plain `put` path, which had none.
 
     `put_envelope` derives a schema from the phase, so phase artifacts were always
-    checked. Everything else -- the submit descriptor iCode is asked to take, the run
-    summary G10 reasons from -- was archived, hashed, indexed, and read back as
+    checked. Everything else -- such as the submit descriptor iCode is asked to take -- was archived, hashed, indexed, and read back as
     evidence with nobody having looked at its shape.
     """
 
