@@ -552,10 +552,10 @@ python3 tom-autodev/scripts/cli.py --config-root /path/to/autodev-state status R
 
 | 阶段 | 写入 |
 |---|---|
-| INTAKE、RELEASE | KU 与 iCafe |
-| SPEC | KU |
-| IPIPE | iCafe 里程碑 |
-| GRILL、TASKS、PLAN、IMPLEMENT、REVIEW、DIAGNOSE | 本地产物，不逐阶段写 KU/iCafe |
+| INTAKE、IPIPE、RELEASE | KU 与 iCafe |
+| GRILL、SPEC、TASKS、PLAN、IMPLEMENT、REVIEW、DIAGNOSE | KU |
+
+**一个 run 一篇 KU 文档。** 新 run 在 INTAKE 固定 `knowledge_layout: single`：KU 里只建一篇本次运行文档，每个阶段完成后在「阶段记录」下追加一节（标题下移一级，不重复规范化 JSON；规范化内容与哈希在本地产物库）。每节末尾有校验标记，绑定该阶段的内容哈希。审批卡片的「相关文档」第一条就是这篇运行文档，并写明要看哪一节。之前开始的 run 仍按每阶段一篇子文档加目录索引写入，不受影响。
 
 所有动作都绑定来源事件、输入 hash、前驱产物和版本。完成所有任务后，控制器生成冻结的 `pipeline_plan`，明确模块、仓库 revision、依赖、流水线和环境；iPipe 与发布校验只认这份计划。配置、workflow 或代码规则漂移会阻断新的写操作，不能删除 hash 绕过。
 

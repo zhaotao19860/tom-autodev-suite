@@ -200,6 +200,9 @@ class Orchestrator:
         # artifact and the approval ledger do. Pinned per run, so runs started before keep
         # completing under v1 (dual read until they are all terminal).
         payload["evidence_contract"] = workflow_spec.EVIDENCE_CONTRACT
+        # One KU document per run, each phase a section of it. Pinned per run so runs
+        # started before keep their per-phase documents. Presentation only: not in G0.
+        payload["knowledge_layout"] = "single"
         payload["intake_hash_version"] = "v3"
         if approval_mode == "scope":
             # MVP §2: D/C scope cards instead of per-gate approval, bound into G0.
@@ -817,6 +820,7 @@ class Orchestrator:
                 cafe_transport=cafe_transport,
                 username=username,
                 cafe_preflight=cafe_preflight,
+                layout=intake.get("knowledge_layout"),
             )
         except ValueError as exc:
             return {"ok": False, "reason_code": str(exc), "run_id": run_id}
@@ -4665,7 +4669,7 @@ def _approval_context(
             "card_title": binding.get("card_title", ""),
             "card_url": _icafe_url(card_id),
             "group_name": binding.get("group_name", ""),
-            "documents": _requirement_documents(loaded["profile"]),
+            "documents": _run_document(orchestrator, run_id, action) + _requirement_documents(loaded["profile"]),
             "gate": gate_payload,
         },
     }
@@ -4982,6 +4986,35 @@ def _icafe_url(card_id: Any) -> str:
     if not isinstance(card_id, str) or "-" not in card_id:
         return ""
     return f"https://console.cloud.baidu-int.com/devops/icafe/issue/{card_id}/show"
+
+
+_GATE_PHASE = {"G0": "INTAKE", "G1": "GRILL", "G2": "SPEC", "G3": "TASKS", "G4": "PLAN",
+               "G5": "IMPLEMENT", "G6": "DIAGNOSE", "G7": "SUBMIT", "G8": "IPIPE", "G9": "RELEASE"}
+
+
+def _run_document(orchestrator: Any, run_id: str, action: Any) -> list[dict[str, str]]:
+    """The run's own KU document, naming the section this gate's phase wrote.
+
+    Only in the single-document layout, where every phase is a section of it. KU links
+    carry no anchor, so the label names the section to read.
+    """
+    events = orchestrator.state.events(run_id)
+    intake = (events[0].get("payload") or {}) if events else {}
+    if intake.get("knowledge_layout") != "single":
+        return []
+    url = next((
+        ((item.get("receipt") or {}).get("response") or {}).get("url")
+        for item in reversed(orchestrator.state.external_results(run_id))
+        if (item.get("intent") or {}).get("operation") in {"ku.run-root.create", "ku.run-root.create.reconcile"}
+        and ((item.get("receipt") or {}).get("response") or {}).get("ok")
+    ), None)
+    if not isinstance(url, str) or not url:
+        return []
+    from phase_document import phase_guide
+
+    phase = _GATE_PHASE.get(gate_of(str(action or "")))
+    label = f"本次运行文档（看「{phase_guide(phase)['name']}」一节）" if phase else "本次运行文档"
+    return [{"label": label, "url": url}]
 
 
 def _requirement_documents(profile: Any) -> list[dict[str, str]]:

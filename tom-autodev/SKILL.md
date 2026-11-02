@@ -231,13 +231,15 @@ opening the control-plane database or reading raw JSON.
 For every phase that produces a requirement, decision, specification, task, workspace,
 plan, change, review, diagnosis, iPipe, or release artifact:
 
-- Publish a readable Markdown child document under the run root. Do not publish only a phase
-  title, a field summary, or a JSON dump.
+- Publish readable Markdown: for runs pinned `knowledge_layout: single` (new runs) as a section
+  appended to the run's single KU document, otherwise as a child document under the run root.
+  Do not publish only a phase title, a field summary, or a JSON dump.
 - The document must explain the one-line conclusion, purpose, upstream inputs, actual
   analysis/design/change/verification content, confirmed items, outputs, upstream/downstream
   relationship, risks/open items, and a hand-off checklist.
 - Put canonical JSON, content hash, input hash, approval binding, artifact id, revision,
-  iCafe/iPipe links, and external receipts in the audit section and canonical appendix.
+  iCafe/iPipe links, and external receipts in the audit section and canonical appendix (a
+  section in the single document omits the appendix; ArtifactStore keeps the canonical bytes).
 - Keep the body useful for comments and review. Large diffs, raw HTML, and unbounded logs
   remain in ArtifactStore; the KU page shows file-level summaries, counts, reasons, tests,
   and controlled references to the complete artifact.

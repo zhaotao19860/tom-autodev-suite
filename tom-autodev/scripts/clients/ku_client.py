@@ -144,6 +144,10 @@ class KuClient:
         marker = cls.index_marker(
             root_doc_id, entry["title"], entry["doc_id"], entry["content_hash"]
         )
+        if isinstance(entry.get("body"), str) and entry["body"]:
+            # Single-document layout: the entry is the phase's own section of the run
+            # document, bound by the same marker an index line carries.
+            return f"{entry['body'].rstrip()}\n\n{marker}"
         phase = entry.get("phase") or "未分类"
         status = entry.get("status") or "已生成"
         purpose = entry.get("purpose") or "查看本阶段实际产出。"

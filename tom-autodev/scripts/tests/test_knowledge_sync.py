@@ -868,3 +868,59 @@ class KnowledgeSyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SingleDocumentLayoutTests(unittest.TestCase):
+    """Option A: one KU document per run; each phase is a section appended to it."""
+
+    def _sync(self, state, ku, cafe):
+        return KnowledgeSync(
+            state_store=state, ku_client=ku, cafe_client=cafe, parent_doc_id=None,
+            project_parent_doc_id="project-root", run_root_title="BGW-1-run-协作",
+            card_id="BGW-1", run_id="run-1", layout="single",
+        )
+
+    def _artifact(self, title, body):
+        from phase_document import canonical_appendix
+        canonical = json.dumps({"title": title}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        markdown = (f"# {title}\n\n## 一句话结论\n\n{body}\n\n## 附录：规范化 JSON\n\n```json\n"
+                    f"{canonical_appendix(canonical)}\n```")
+        return {"title": title, "markdown": markdown, "canonical": canonical,
+                "content_hash": hashlib.sha256(canonical.encode()).hexdigest(), "phase": "SPEC"}
+
+    def test_each_phase_is_a_section_of_the_run_document_not_a_new_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            ku, cafe = FakeKuClient(), FakeCafeClient()
+            sync = self._sync(state, ku, cafe)
+            first = sync.publish_phase("run-1", self._artifact("02-spec", "规格结论"))
+            second = sync.publish_phase("run-1", self._artifact("03-task-dag", "拆解结论"))
+        self.assertTrue(first["ok"] and second["ok"], (first, second))
+        kinds = [call[0] for call in ku.calls]
+        self.assertNotIn("create", kinds)
+        self.assertEqual(kinds.count("index"), 2)
+        section = ku.calls[1][2]
+        self.assertEqual((section["doc_id"], section["url"]), ("root-1", ku.root["url"]))
+        self.assertIn("## 02-spec", section["body"])
+        self.assertIn("### 一句话结论", section["body"])
+        self.assertNotIn("规范化 JSON", section["body"])
+        self.assertEqual((first["child_doc_id"], first["child_url"], first["child_version"]),
+                         ("root-1", ku.root["url"], "9"))
+        self.assertIn("ku:root-1/9", first["evidence_refs"])
+        self.assertIn("## 阶段记录", ku.calls[0][3])
+
+    def test_the_section_entry_carries_the_index_marker_for_its_hash(self):
+        entry = {"title": "02-spec", "doc_id": "root-1", "url": "https://ku.example.test/root-1",
+                 "content_hash": "a" * 64, "body": "## 02-spec\n\n正文"}
+        rendered = KuClient.index_entry_markdown("root-1", entry)
+        self.assertTrue(rendered.startswith("## 02-spec\n\n正文"))
+        self.assertTrue(rendered.endswith(KuClient.index_marker("root-1", "02-spec", "root-1", "a" * 64)))
+
+    def test_runs_without_the_layout_keep_one_document_per_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = StateStore(Path(directory) / "state.sqlite")
+            ku, cafe = FakeKuClient(), FakeCafeClient()
+            sync = KnowledgeSync(state_store=state, ku_client=ku, cafe_client=cafe,
+                                 parent_doc_id="root-1", card_id="BGW-1", run_id="run-1")
+            self.assertTrue(sync.publish_phase("run-1", self._artifact("02-spec", "x"))["ok"])
+        self.assertIn("create", [call[0] for call in ku.calls])

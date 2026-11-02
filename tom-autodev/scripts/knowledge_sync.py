@@ -60,6 +60,7 @@ class KnowledgeSync:
         project_parent_doc_id: str | None = None,
         run_root_title: str | None = None,
         run_id: str,
+        layout: str | None = None,
     ):
         self.state = state_store
         self.ku = ku_client
@@ -69,6 +70,9 @@ class KnowledgeSync:
         self.project_parent_doc_id = project_parent_doc_id
         self.run_root_title = run_root_title
         self.run_id = run_id
+        # "single": every phase is a section appended to the run document; anything
+        # else (runs started before) keeps one document per phase plus an index.
+        self.layout = layout
 
     @classmethod
     def from_profile(
@@ -83,6 +87,7 @@ class KnowledgeSync:
         username: str | None = None,
         cafe_preflight: bool = True,
         run_root_title: str | None = None,
+        layout: str | None = None,
     ) -> "KnowledgeSync":
         expected = project_ku_target(profile)
         if expected is None:
@@ -124,6 +129,7 @@ class KnowledgeSync:
             run_root_title=root_title,
             card_id=card_id,
             run_id=run_id,
+            layout=layout,
         )
 
     @guard_execution
@@ -180,9 +186,28 @@ class KnowledgeSync:
         do_ku = scope in ("both", "ku_only")
         do_icafe = scope in ("both", "icafe_only")
         child: dict[str, Any] | None = None
+        section: dict[str, Any] | None = None
         index: dict[str, Any] | None = None
         comment: dict[str, Any] | None = None
-        if do_ku:
+        if do_ku and self.layout == "single":
+            # One document per run: append this phase as a section of the run document
+            # instead of creating a child document and an index line (one write, not two).
+            root_url = root.get("url")
+            if not isinstance(root_url, str) or not root_url:
+                return self._settled(intent, _failure("KNOWLEDGE_TARGET_INVALID"))
+            entry = {
+                "title": title, "doc_id": root_doc_id, "url": root_url,
+                "content_hash": content_hash,
+                "phase": artifact.get("phase") or _phase_from_title(title),
+                "status": artifact.get("status") or "已生成",
+                "body": _section_markdown(markdown),
+            }
+            index = self.ku.update_index(root_doc_id, entry)
+            index_error = self._verify_index(index, root_doc_id)
+            if index_error is not None:
+                return index_error
+            section = {"doc_id": root_doc_id, "url": root_url, "version": index["version"]}
+        elif do_ku:
             child = self.ku.create_artifact(root_doc_id, title, markdown)
             # The document is verified against what was written to it; the index entry
             # carries the artifact hash, which is what the control plane records.
@@ -221,10 +246,11 @@ class KnowledgeSync:
                     return reconciled
 
         if do_icafe:
+            located = child or section
             body = (
-                f"Published phase artifact: {title}\nKnowledge: {child['url']}\n"
+                f"Published phase artifact: {title}\nKnowledge: {located['url']}\n"
                 f"Content hash: {content_hash}"
-            ) if child is not None else (
+            ) if located is not None else (
                 # icafe_only milestone: no child doc, so point at the run's KU root.
                 f"Phase milestone: {title}\nRun knowledge doc: {root_doc_id}\n"
                 f"Content hash: {content_hash}"
@@ -251,11 +277,14 @@ class KnowledgeSync:
             evidence_refs = validate_evidence_refs(evidence_refs)
         except ValueError:
             return _failure("KNOWLEDGE_EVIDENCE_INVALID")
+        # In the single layout the phase lives in the run document, at the version the
+        # section landed in; its evidence ref is the index edit's `ku:<root>/<version>`.
+        located = child or section
         knowledge_fields = {
             "artifact_hash": content_hash,
-            "child_doc_id": child["doc_id"] if child else None,
-            "child_url": child["url"] if child else None,
-            "child_version": child["version"] if child else None,
+            "child_doc_id": located["doc_id"] if located else None,
+            "child_url": located["url"] if located else None,
+            "child_version": located["version"] if located else None,
             "index_doc_id": index["doc_id"] if index else None,
             "index_version": index["version"] if index else None,
             "comment_id": str(comment["comment_id"]) if comment else None,
@@ -320,7 +349,7 @@ class KnowledgeSync:
             or not self.run_root_title
         ):
             return _failure("KNOWLEDGE_TARGET_INVALID")
-        markdown = _run_root_markdown(self.run_root_title, run_id, self.card_id)
+        markdown = _run_root_markdown(self.run_root_title, run_id, self.card_id, layout=self.layout)
         root = self.ku.ensure_run_root(
             self.project_parent_doc_id, self.run_root_title, markdown
         )
@@ -401,7 +430,36 @@ class KnowledgeSync:
         return None
 
 
-def _run_root_markdown(title: str, run_id: str, card_id: str) -> str:
+def _section_markdown(markdown: str) -> str:
+    """A phase document as a section of the run document.
+
+    Headings move down one level so the phase title is a `##` under the run title, and
+    the canonical-JSON appendix is left out: the artifact store keeps the canonical
+    bytes and the section's marker binds their hash, so the page need not repeat them.
+    """
+    lines, fenced = [], False
+    for line in markdown.splitlines():
+        if line.startswith("## 附录：规范化 JSON") and not fenced:
+            break
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        lines.append(f"#{line}" if line.startswith("#") and not fenced else line)
+    return "\n".join(lines).rstrip()
+
+
+def _run_root_markdown(title: str, run_id: str, card_id: str, layout: str | None = None) -> str:
+    if layout == "single":
+        return (
+            f"# {title}\n\n"
+            f"本文档由 tom-autodev 自动维护，是 iCafe 卡片 {card_id} 本次运行的唯一知识库文档。\n\n"
+            f"* iCafe 卡片：{card_id}\n"
+            f"* 运行编号：{run_id}\n"
+            "* 阅读原则：每个阶段一节，最新完成的阶段在最上面；先读该节的结论、实际内容和交接清单。\n"
+            "* 规范化 JSON 与审批绑定的内容哈希保存在控制面产物库，不在本文档重复。\n\n"
+            "## 阶段记录\n\n"
+            "每个阶段完成后在本段下方追加该阶段的一节。各节末尾的 `tom-autodev-index` 注释与文末的 "
+            "`tom-autodev-run-root` 注释是校验标记，工具靠它们核对内容哈希，请不要手工修改。"
+        )
     """The run root is a directory people read, so it says what it is.
 
     Phase entries are appended after the last block, so the section note below is

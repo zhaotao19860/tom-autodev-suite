@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · KU 文档精简：一个 run 一篇
+
+- 新 run 在 INTAKE 钉住 `knowledge_layout: single`（只影响展示，不进 G0 哈希）。`KnowledgeSync` 在此布局下不再为每个阶段新建子文档并改目录，而是把阶段文档作为一节追加到本次运行文档的「阶段记录」下（一次写入代替两次）。小节标题下移一级、去掉规范化 JSON 附录；节末沿用 `tom-autodev-index` 标记绑定内容哈希。阶段回执记运行文档的 doc_id、url 和该节落地的版本，回执校验、产物信封校验不变。
+- 审批卡片「相关文档」第一条为本次运行文档，并写明看哪一节（`_run_document`）。
+- 之前开始的 run 不变：仍是每阶段一篇子文档加索引；回填（backfill_knowledge）按各 run 钉住的布局写入。
+- 以合并验证 run 5c66c1f1 估算：原 1 个目录 + 9 篇子文档 + 8 次目录修改（KU 相关外部写入 35 次）；改后 1 篇文档、每阶段一次追加，全文约 42 KB（原各篇合计约 71 KB）。
+- 新增回归：单文档布局不建子文档、每阶段一次追加、小节格式与回执字段；旧布局仍建子文档。全量 1598 个测试通过。README、SKILL.md 同步。
+
 ## 2026-11-02 · 第 11 轮定向复核（第 6 轮）后修复
 
 报告（ed34c1c）：[6B](docs/reviews/2026-11-02-r11-codex-review-6B.md) FAIL。完整输出下的多推送目标已修好，但已接受的那个目标如果什么都没打印，只剩另一个目标的拒绝行，仍会被当成整次拒绝并重推。本提交修复，**尚未经 Codex 复核**。
