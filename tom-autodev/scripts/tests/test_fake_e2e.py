@@ -1566,6 +1566,25 @@ class FakeE2ETests(unittest.TestCase):
         self.assertIsNone(repair_policy.known_failure_verdict({"distinct_runs": 1, "resolved": False}))
         self.assertIsNone(repair_policy.known_failure_verdict({"distinct_runs": 3, "resolved": True}))
 
+    def test_submit_draft_records_the_reported_model(self):
+        # tom-model-router integration: `submit-draft --model` lands in the receipt, and
+        # the later auto-consume replay of the same draft keeps it.
+        from agent_bridge import AgentBridge
+        run_id, knowledge, requirement = self._run_to_grill_action("BGW-MODEL", "I15ClP2KW4ZGAK", "standard")
+        parked = worker_driver.advance(self.orchestrator, run_id, knowledge_sync=knowledge)
+        job_id = parked["producer_job"]["job_id"]
+        draft = self._phase_content(self.orchestrator.next(run_id), requirement)
+        worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft,
+                                   knowledge_sync=knowledge, model="gpt-6.1-sol")
+        receipts = self.orchestrator.state.model_execution_receipts(run_id)
+        self.assertEqual([r["model"] for r in receipts], ["gpt-6.1-sol"])
+        worker_driver.submit_draft(self.orchestrator, run_id, job_id, draft, knowledge_sync=knowledge)
+        self.assertEqual([r["model"] for r in self.orchestrator.state.model_execution_receipts(run_id)],
+                         ["gpt-6.1-sol"])
+        with patch("agent_host.find_skill", return_value=None):
+            context = AgentBridge(self.orchestrator, locks=self.orchestrator.recovery.locks).context(run_id)
+        self.assertEqual(context["model_route"]["role"], "design")
+
     def test_worker_caches_producer_drafts_for_reuse(self):
         # Phase 2: every producer fill also caches its DraftContent under
         # (input_hash, prompt_version, model), so a worker re-driving the same frontier can

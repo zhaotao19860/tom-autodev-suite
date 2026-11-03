@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-03 · ProducerJob 接入 tom-model-router 模型建议
+
+- 新增 `scripts/model_routing.py`：把当前 skill 阶段映射为 tom-model-router 的角色和档位（GRILL/SPEC/TASKS/PLAN/DIAGNOSE→design；IMPLEMENT 首次→implement，诊断回流或同任务再次产出→repair 并按已有回执计 attempt；REVIEW→review 且带实现者模型避开同家族；hotfix/express→S、standard→M、full→L），调用已安装的 `tom-model-router/router.py pick` 取建议。Claude Code 下可选子代理，其他 Agent 只给 CLI 执行方式。
+- `context` 在有 ProducerJob 时返回 `model_route`；路由器未安装或调用失败时为 `available: false`，不阻断、不改变门、校验和状态。
+- `submit-draft` 新增 `--model`，写入 ModelExecutionReceipt 的 `model` 与 `task_id`；审批后自动消费同一草案时不覆盖已有回执。
+- 文档里“Comate 专用”的残留表述改为与 Code Agent 无关（README 角色表、流程图、状态处理表、当前边界，OPERATIONS 的 PRODUCER_WAIT，setup 与 producer-contract）。审批通道名 `comate` 和信封 `host: "comate"` 是控制面合同标签，保持不变。
+- 回归：新增 `test_model_routing.py`（8 例）与 e2e 回执用例，适配 2 个 submit_draft 调用断言。
+
 ## 2026-11-02 · 验证过的结论经审批写回 workspace（阶段 3）
 
 - `diagnosis.knowledge_candidates` 支持有证据、跨 run 可复用的环境/流程结论，不包含业务代码结论；候选字段非空，目标限定安全的 `docs/` Markdown 路径，拒绝 `..` 与 `index.md`、`template.md`、`README.md`。

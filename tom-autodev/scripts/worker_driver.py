@@ -469,20 +469,34 @@ def _consume_producer_block(orchestrator: Any, run_id: str, decision: dict[str, 
 
 def _record_model_receipt(
     orchestrator: Any, run_id: str, action: dict[str, Any], draft: dict[str, Any],
-    validators: list[Any],
+    validators: list[Any], model: str | None = None,
 ) -> None:
     """Record how a ProducerJob's DraftContent was produced, for replay and cross-model
     diffing. The agent-turn backend knows no provider/model/temperature/seed, so those are
     null; the load-bearing fields are the pinned input_hash, the draft's output_hash, the
     prompt/spec versions, and which schema validators the draft is about to be checked
-    against. Best-effort: a receipt failure must never block completing the phase."""
+    against. `model` is what the producer reported (a tom-model-router key), if anything;
+    the auto-consume path passes none and leaves an existing receipt untouched.
+    Best-effort: a receipt failure must never block completing the phase."""
+    job_id = f"producer:{action['action_id']}"
+    output_hash = _canonical_hash(draft)
     try:
+        recorded = any(
+            row.get("job_id") == job_id and row.get("output_hash") == output_hash
+            for row in orchestrator.state.model_execution_receipts(run_id)
+        )
+    except Exception:
+        recorded = False
+    try:
+        if recorded:
+            raise _ReceiptRecorded
         orchestrator.state.record_model_execution_receipt(run_id, {
-            "job_id": f"producer:{action['action_id']}",
+            "job_id": job_id,
             "action_id": action.get("action_id"),
             "phase": action.get("phase"),
+            "task_id": action.get("task_id"),
             "backend": "agent-turn",
-            "provider": None, "model": None, "model_version": None,
+            "provider": None, "model": model, "model_version": None,
             "temperature": None, "seed": None,
             "prompt_version": workflow_spec.WORKFLOW_VERSION,
             "workflow_spec_hash": (
@@ -491,9 +505,11 @@ def _record_model_receipt(
             ),
             "skill_version": action.get("child_skill"),
             "input_hash": action.get("input_hash"),
-            "output_hash": _canonical_hash(draft),
+            "output_hash": output_hash,
             "validators_passed": [name for name in validators if name],
         })
+    except _ReceiptRecorded:
+        pass
     except Exception:
         _log.warning("model-execution-receipt write failed for %s (best-effort)",
                      action.get("action_id"), exc_info=True)
@@ -506,6 +522,10 @@ def _record_model_receipt(
     except Exception:
         _log.warning("draft-cache write failed for %s (best-effort)",
                      action.get("input_hash"), exc_info=True)
+
+
+class _ReceiptRecorded(Exception):
+    """This fill already has a receipt; the auto-consume replay must not rewrite it."""
 
 
 def cached_draft_for(orchestrator: Any, action: dict[str, Any]) -> dict[str, Any] | None:
@@ -524,7 +544,7 @@ def cached_draft_for(orchestrator: Any, action: dict[str, Any]) -> dict[str, Any
 def submit_draft(
     orchestrator: Any, run_id: str, job_id: str, draft: dict[str, Any],
     knowledge_sync: Any | None = None,
-    *, locks: Any | None = None, owner_token: str | None = None,
+    *, locks: Any | None = None, owner_token: str | None = None, model: str | None = None,
 ) -> dict[str, Any]:
     """Fulfil a ProducerJob with model-authored DraftContent and complete the phase.
 
@@ -551,7 +571,7 @@ def submit_draft(
         try:
             return submit_draft(
                 orchestrator, run_id, job_id, draft, knowledge_sync=knowledge_sync,
-                locks=None,
+                locks=None, model=model,
             )
         finally:
             released = locks.release(key, token)
@@ -609,7 +629,8 @@ def submit_draft(
             orchestrator.state.claim_producer_job(run_id, job_id, agent_id)
         except ValueError as error:
             return {"ok": False, "reason_code": str(error), "job_id": job_id}
-        result = _produce(orchestrator, run_id, job_id, action, draft, knowledge_sync)
+        result = _produce(orchestrator, run_id, job_id, action, draft, knowledge_sync,
+                          model=model)
         return result
     finally:
         try:
@@ -642,7 +663,7 @@ def _redacted_fresh_draft(previous: Any, action: dict[str, Any], draft: Any) -> 
 
 def _produce(
     orchestrator: Any, run_id: str, job_id: str, action: dict[str, Any],
-    draft: dict[str, Any], knowledge_sync: Any | None,
+    draft: dict[str, Any], knowledge_sync: Any | None, model: str | None = None,
 ) -> dict[str, Any]:
     """Validate a DraftContent, persist it, and complete the phase (or park on its gate).
 
@@ -664,11 +685,12 @@ def _produce(
         return {"ok": False, "reason_code": str(error), "job_id": job_id}
     events = orchestrator.state.events(run_id)
     if workflow_spec.phase_mode_for_run(events, action["phase"]) == "merged":
-        return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync)
+        return _submit_merged(orchestrator, run_id, job_id, action, draft, knowledge_sync,
+                              model=model)
 
     envelope = build_envelope(action, draft)
     schema_name = action.get("result_schema")
-    _record_model_receipt(orchestrator, run_id, action, draft, [schema_name])
+    _record_model_receipt(orchestrator, run_id, action, draft, [schema_name], model)
     if action.get("phase") == "GRILL" and draft.get("decision_result") == "UNRESOLVED":
         return {
             "ok": False,
@@ -748,7 +770,7 @@ def _recover_invalid_producer_draft(
 
 def _submit_merged(
     orchestrator: Any, run_id: str, job_id: str, action: dict[str, Any],
-    draft: dict[str, Any], knowledge_sync: Any | None,
+    draft: dict[str, Any], knowledge_sync: Any | None, model: str | None = None,
 ) -> dict[str, Any]:
     """Complete a merged design front (SPEC + TASKS) from one {spec, dag} DraftContent.
 
@@ -757,7 +779,7 @@ def _submit_merged(
     their own schemas, so everything downstream reads a normal spec and a normal task-dag.
     """
     spec_envelope = build_envelope(action, draft["spec"])
-    _record_model_receipt(orchestrator, run_id, action, draft, ["spec", "task-dag"])
+    _record_model_receipt(orchestrator, run_id, action, draft, ["spec", "task-dag"], model)
 
     gate = action.get("required_human_gate")
     if gate is not None:

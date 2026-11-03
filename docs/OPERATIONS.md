@@ -81,7 +81,7 @@ result = worker_driver.advance(
 
 按返回值安排下一步，而不是不加判断地循环：
 
-1. `PRODUCER_WAIT`：从返回的 `producer_job` 读取 ID、phase、mode、result schema 和固定输入；让当前 Comate Agent 按对应 skill 生成内容。
+1. `PRODUCER_WAIT`：从返回的 `producer_job` 读取 ID、phase、mode、result schema 和固定输入；让驱动本 run 的 Agent（Comate / Claude Code / Codex）按对应 skill 生成内容。`context` 返回的 `model_route` 是 tom-model-router 给出的建议模型与执行方式（仅建议，未安装时为 `available: false`）；用该模型产出后以 `submit-draft ... --model <key>` 提交，模型写入执行回执。
 2. 将内容交给 `worker_driver.submit_draft(orch, run_id, job_id, draft, knowledge_sync=knowledge_sync)`。普通阶段只交 schema 对应的 content；merged SPEC 交 `{spec, dag}`。IMPLEMENT 在自有 worktree 生成实际代码和提交，再提交候选内容。
 3. 遇到 `APPROVAL_REQUIRED` 或 `APPROVAL_WAIT`，由宿主展示对应 gate 和准确的 `approval_input_hash`。审批结算后再次调用 `advance`，或消费 handoff 的 `resume`。
 4. 已保存、已获批的草案由 worker 继续消费，不再唤醒模型重写。`DRAFT_SCHEMA_INVALID` 等可重试错误按返回信息修正草案；输入漂移、外部结果不明或能力缺失先处理阻断原因。

@@ -149,7 +149,7 @@ class CliOperationTests(unittest.TestCase):
         self.assertTrue(got["draft_saved"])
         self.assertEqual(got["approval"], approval)
         request.assert_called_once_with(self.orchestrator, self.run_id, "G2", "a" * 64)
-        bridge.return_value.submit_draft.assert_called_once_with(self.run_id, "producer:a1", draft)
+        bridge.return_value.submit_draft.assert_called_once_with(self.run_id, "producer:a1", draft, model=None)
 
     def test_submit_draft_preserves_saved_state_when_approval_delivery_fails(self):
         draft_path = self.root / "draft.json"

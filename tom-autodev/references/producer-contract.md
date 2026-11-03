@@ -9,7 +9,7 @@ For a historical FULFILLED invalid draft, normal resume/submit revalidates it. O
 content invalidity or a GRILL `DECISION_REQUIRED` draft for the same current action permits
 a transactional CAS reopen; the old draft, payload, hashes, validation and matching cache
 entries are archived in `producer_job_attempts`. Model receipts and approval history remain.
-An unresolved GRILL draft is deliberately parked without creating G1, so Comate can submit
+An unresolved GRILL draft is deliberately parked without creating G1, so the driving agent can submit
 the next answer round against the same ProducerJob. Valid complete drafts awaiting approval,
 stale actions, damaged context, published artifacts and uncertain external writes are not
 automatically replaced. A corrected draft receives its own approval input hash.

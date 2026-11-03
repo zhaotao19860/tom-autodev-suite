@@ -2,7 +2,7 @@
 
 Register a new project or language before `tom-autodev.start` will process its requirements. Setup is a one-time, human-supervised operation; it does not start a run, generate code, submit iCode, trigger iPipe, or modify pipeline templates.
 
-Comate host only. Do not add a second adapter or entrypoint; release stays a controller action, never a separately registered runtime component.
+The setup entrypoint is agent-neutral (Comate, Claude Code or Codex drive the same `cli.py`). Do not add a second adapter or entrypoint; release stays a controller action, never a separately registered runtime component.
 
 ## Template + per-requirement profile
 

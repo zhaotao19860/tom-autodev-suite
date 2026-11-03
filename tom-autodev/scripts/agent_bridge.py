@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
+import model_routing
 import worker_driver
 import run_brief
 import workflow_spec
@@ -384,7 +385,8 @@ class AgentBridge:
         return _json_safe(result)
 
     def submit_draft(
-        self, run_id: str, job_id: str, draft_content: dict[str, Any]
+        self, run_id: str, job_id: str, draft_content: dict[str, Any],
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Submit producer content under state-level idempotency, without a run lease.
 
@@ -393,7 +395,7 @@ class AgentBridge:
         global single-writer guarantee across every run mutation.
         """
         result = worker_driver.submit_draft(
-            self.orchestrator, run_id, job_id, draft_content, locks=self.locks
+            self.orchestrator, run_id, job_id, draft_content, locks=self.locks, model=model
         )
         return _json_safe(result)
 
@@ -502,6 +504,10 @@ class AgentBridge:
         revision = _revision_context(self.orchestrator, action)
         if revision is not None:
             result["revision_context"] = revision
+        if jobs:
+            route = model_routing.advise(self.orchestrator, run_id, action)
+            if route is not None:
+                result["model_route"] = route
         return _json_safe(result)
 
     def stop(self, target: str) -> dict[str, Any]:

@@ -2,6 +2,10 @@
 
 tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套件根目录 [CHANGELOG.md](../CHANGELOG.md) 的同日条目。
 
+## 2026-11-03
+
+- `context` 返回 tom-model-router 给出的 `model_route` 建议；`submit-draft --model` 把产出模型写入执行回执。路由只是建议，不影响门与状态。文档去掉 Comate 专用表述。详见根 CHANGELOG 同日条目。
+
 ## 2026-11-02
 
 - 写回的临时 worktree 为 iCode 提供可恢复的 `.git` 目录视图，保持准确提交及全部 push URLs，不改公共配置；仅以本地 Git 与假 transport 回归验证。

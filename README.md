@@ -172,7 +172,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 | 角色 | 负责什么 | 不能做什么 |
 |---|---|---|
 | 人 | 确认需求和验收标准；审批设计、改动、提交、重跑和发布 | 不能用聊天内容替代绑定具体版本的审批 |
-| Comate + skill | 澄清、设计、拆任务、生成代码和测试、Review、诊断 | 不能直接改状态、伪造 envelope、提交 iCode 或触发 iPipe |
+| Code Agent（Comate / Claude Code / Codex）+ skill | 澄清、设计、拆任务、生成代码和测试、Review、诊断 | 不能直接改状态、伪造 envelope、提交 iCode 或触发 iPipe |
 | Python 控制器 + WorkerDriver | 计算下一步、校验 schema/hash/版本/前驱、保存状态、执行已批准动作 | 不猜测缺失输入，不重复外部副作用 |
 | iPipe | 在固定版本和环境中编译、测试、回归并返回证据 | 不接受本地模拟结果冒充平台证据 |
 
@@ -182,7 +182,7 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 flowchart LR
     A[需求卡 + 项目 profile] --> B[Worker 读取当前 frontier]
     B --> C{下一步类型}
-    C -->|需要判断| D[Comate 按 skill 生成 DraftContent]
+    C -->|需要判断| D[Agent 按 skill 生成 DraftContent]
     D --> E[Schema / 上下文 / hash 校验]
     E --> B
     C -->|需要审批| F[如流审批]
@@ -542,7 +542,7 @@ build/stage、核对原 G8，确认后保存本地回执；它不创建新意图
 
 | 状态或错误 | 处理方式 |
 |---|---|
-| `PRODUCER_WAIT` | 回到 Comate 填当前 job，不创建新 run |
+| `PRODUCER_WAIT` | 回到驱动本 run 的 Agent 填当前 job，不创建新 run |
 | `APPROVAL_WAIT` / `APPROVAL_REQUIRED` | 等如流审批；审批后 `continue` |
 | `DRAFT_SCHEMA_INVALID` / `TASK_ID_MISMATCH` | 修正同一 job 的草案 |
 | `REVIEW_INCOMPLETE` / `REVIEW_NEEDS_CLARIFICATION` | 补齐 Review 范围或回答问题 |
@@ -610,7 +610,8 @@ python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --approva
 
 ## 当前边界
 
-- 当前入口支持 Comate，没有独立常驻的后台 LLM 服务。
+- 入口与 Code Agent 无关，Comate、Claude Code、Codex 都可驱动；没有独立常驻的后台 LLM 服务。
+- 模型选择是建议：`context` 的 `model_route` 来自可选的 tom-model-router（按 Comate 实时倍率、阶段角色和变更档位选模型），控制器不运行模型，也不因路由失败阻断 run。
 - 生产运行依赖内网 iCafe、iCode、KU、如流和 iPipe 配置。
 - 一个任务绑定一个业务仓和一个独立产品测试仓；复杂跨仓需求要拆成可独立验证的任务。
 - `STOPPED` 表示运行被停止，不表示交付成功。

@@ -3148,6 +3148,9 @@ def main(argv: list[str] | None = None) -> int:
     submit_draft.add_argument("target", help="run id 或唯一的 iCafe 卡片 id")
     submit_draft.add_argument("job_id")
     submit_draft.add_argument("draft_json")
+    submit_draft.add_argument(
+        "--model", default=None,
+        help="产出该 DraftContent 的模型（tom-model-router 的 model key），写入执行回执")
     prepare_change = subparsers.add_parser(
         "prepare-change-set", help="只读提取当前 IMPLEMENT 自有干净 HEAD 的完整 diff 并返回 JSON"
     )
@@ -3569,7 +3572,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "submit-draft":
             draft = _draft_content_file(args.draft_json)
             result = draft if draft.get("ok") is False else bridge.submit_draft(
-                resolved["run_id"], args.job_id, draft
+                resolved["run_id"], args.job_id, draft, model=args.model
             )
             result = _continue_preauthorized(
                 orchestrator, bridge, resolved["run_id"],
