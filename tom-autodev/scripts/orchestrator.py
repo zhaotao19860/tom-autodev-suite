@@ -10,6 +10,7 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +165,28 @@ class Orchestrator:
         requirement_diff: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """A new run's id and INTAKE payload, without writing anything."""
+        workspace_source = next((
+            source for source in profile_result["profile"].get("knowledge_sources", [])
+            if source.get("provider") == "workspace"
+        ), None)
+        knowledge_workspace = None
+        if workspace_source is not None:
+            try:
+                workspace_path = str(Path(workspace_source["path"]).expanduser().resolve())
+                commit = subprocess.run(
+                    ["git", "-C", workspace_path, "rev-parse", "HEAD"],
+                    check=True, capture_output=True, text=True, timeout=30,
+                ).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                commit = ""
+            if not commit:
+                return {
+                    "ok": False, "reason_code": "PROJECT_NOT_READY",
+                    "missing": ["knowledge_sources.workspace"],
+                }
+            knowledge_workspace = {
+                "repository": workspace_source["repository"], "path": workspace_path, "commit": commit,
+            }
         run_id = uuid.uuid4().hex
         prepared = _collaboration_binding(
             run_id, requirement_id, project, profile_hash,
@@ -212,6 +235,9 @@ class Orchestrator:
             # MVP §3.4: a restart whose card changed shows and binds the diff at G0.
             payload["requirement_diff"] = requirement_diff
             payload["intake_hash_version"] = "v5"
+        if knowledge_workspace is not None:
+            payload["knowledge_workspace"] = knowledge_workspace
+            payload["intake_hash_version"] = "v6"
         payload["g0_input_hash"] = intake_input_hash(payload)
         return {
             "run_id": run_id,

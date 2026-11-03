@@ -5,6 +5,8 @@ description: Use when an approved Task Plan must be executed to generate coordin
 
 # Tom Implement
 
+When the action carries `knowledge_workspace`, first read every listed file with its `show` command: this team-maintained project knowledge takes precedence over same-named content in the project skill, while business source code at the pinned revision remains the final source of truth.
+
 ## Preconditions
 
 Require the exact pinned Task Plan, parent-validated approval/mode, matching input hash, WorkspaceGate evidence, owned worktrees, baseline revisions and language/project rules. If required authorization, evidence or identity is absent or changed, return `PLAN_INCOMPLETE` or `INPUT_HASH_MISMATCH` and generate no code. Do not add a gate when the controller has resolved a different authorized mode.

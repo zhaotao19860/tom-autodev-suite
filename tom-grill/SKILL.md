@@ -5,6 +5,8 @@ description: Use when an iCafe requirement is ambiguous, carries no acceptance c
 
 # Tom Grill
 
+When the action carries `knowledge_workspace`, first read every listed file with its `show` command: this team-maintained project knowledge takes precedence over same-named content in the project skill, while business source code at the pinned revision remains the final source of truth.
+
 ## Overview
 
 Close only the human decisions that block a reliable Spec, and record the acceptance criteria the requirement owner commits to. Facts belong to iCafe, code, project docs, GitNexus, or approved knowledge sources; do not ask the user for facts that can be verified. Acceptance criteria are not facts: they are intent that only the requirement owner can state, so asking for them is in scope.

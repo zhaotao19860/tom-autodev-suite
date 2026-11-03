@@ -10,6 +10,7 @@
 #   - business_repos[].branch / .lock         (from branches; lock last segment = branch)
 #   - test_repo.branch / .lock                (from test_branch)
 #   - knowledge_sources[ku].repo_id/parent_doc_id/revision   (from ku)
+#   - knowledge_sources[workspace].path       (optional workspace_knowledge_path)
 #   - approval_channels.role_members          (from members)
 # Auto-discovered defaults (suggested, override if wrong):
 #   - branches + revisions   = each repo's current git checkout branch and HEAD
@@ -53,6 +54,12 @@ test_repo:
   lock: bgw/x86bgw-qa/__TEST_BRANCH__
 
 knowledge_sources:
+- provider: workspace
+  priority: 0
+  repository: baidu/sysip/bgw-workspace
+  path: __WORKSPACE_KNOWLEDGE_PATH__
+  revision: master
+  search_scope: BGW team knowledge (environment, testing, repos)
 - provider: ku
   priority: 0
   repo_id: __KU_REPO_ID__

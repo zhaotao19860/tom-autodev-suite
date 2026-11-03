@@ -278,6 +278,31 @@ profile。注册只保存和验证配置，不启动需求、不生成代码、�
 iPipe。字段说明见 [项目注册说明](tom-autodev/references/setup.md) 和
 [profile schema](tom-autodev/schemas/project-profile.schema.json)。
 
+`knowledge_sources` 可选配置**至多一个** `provider: workspace`，用于团队维护的项目知识；
+`repository` 与 `path` 必填，`path` 必须指向本地 Git checkout 的仓库根目录（不能是子目录）。
+KU 知识源仍然必填，workspace 不替代 KU 文档发布位置。BGW 模板已包含可选 workspace 源：
+在向导的 `answers.json` 中填写 `workspace_knowledge_path: "/path/to/bgw-workspace"`，
+并在 `confirmed_inputs` 中确认该路径；省略此答案时，向导移除模板中的该占位源，不影响原有配置。
+
+INTAKE 将 workspace 当前 `HEAD` 钉为 `knowledge_workspace = {repository, path, commit}`，
+使用 `intake_hash_version: v6` 把它连同既有字段（含需求差异）纳入 G0 哈希；
+无法读取 commit 时返回 `PROJECT_NOT_READY`，不创建 run。没有 workspace 源的运行仍沿用
+原来的 v3/v4/v5 版本与哈希，不改变已有 run 的 G0。
+
+Producer action 与 `context` 返回 `knowledge_workspace` 的仓库、commit 和文件列表；
+子 skill 先执行每项的 `show` 命令读取钉住版本，不读取之后的新提交。只列出实际存在的 `.md`，
+排除所有 `template.md`；该展示字段不改变 action 的 `input_hash` 或 `action_id`：
+
+| 阶段 | workspace 知识前缀 |
+|---|---|
+| GRILL、SPEC、TASKS | `docs/`、`repos/` |
+| PLAN、IMPLEMENT、REVIEW | `docs/development/`、`docs/testing/`、`repos/` |
+| DIAGNOSE | `docs/environment/`、`docs/testing/`、`repos/` |
+
+钉住的 commit 在本地不可用时，producer 阻断为 `WORKSPACE_COMMIT_UNAVAILABLE`，不创建 job，
+不会回退到最新 `HEAD`。团队 workspace 知识优先于项目 skill 中同名内容；
+钉住 revision 上的业务源码仍是最终事实。本次不涉及项目知识本地去重或结论写回 workspace。
+
 BGW 的模板环境只保存用于绑定远程证据的稳定声明，不承担本地平台可用性验证。runner、
 编译器、测试拓扑、数据和服务由 iPipe 与 `tom-project-bgw` 管理；向导不再询问
 `environment_provenance`，profile 也不会因为缺少本地 runner/image/toolchain 证据而

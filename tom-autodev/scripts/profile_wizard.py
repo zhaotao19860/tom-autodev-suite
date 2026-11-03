@@ -17,6 +17,7 @@ answers = {
   "test_branch": "<branch>",                    # product-test repo branch
   "revisions": {"<module>": "<revision>", ...}, # pinned source revisions
   "ku": [{"repo_id": .., "parent_doc_id": .., "revision": ..}, ...],  # by order of ku sources
+  "workspace_knowledge_path": "<optional workspace knowledge checkout>",
   "members": {"development": [...], "test": [...], "project": [...]},
 }
 """
@@ -100,6 +101,13 @@ def build_profile(template: dict[str, Any], answers: dict[str, Any]) -> dict[str
 
     ku_answers = list(answers.get("ku") or [])
     ku_index = 0
+    workspace_knowledge_path = answers.get("workspace_knowledge_path")
+    profile["knowledge_sources"] = [
+        source for source in profile.get("knowledge_sources", [])
+        if not (source.get("provider") == "workspace"
+                and source.get("path") == "__WORKSPACE_KNOWLEDGE_PATH__"
+                and not workspace_knowledge_path)
+    ]
     for source in profile.get("knowledge_sources", []):
         provider = source.get("provider")
         if provider == "ku":
@@ -113,6 +121,8 @@ def build_profile(template: dict[str, Any], answers: dict[str, Any]) -> dict[str
             repo_key = source.get("repository")
             if repo_key in revision_by_key:
                 source["revision"] = revision_by_key[repo_key]
+        elif provider == "workspace" and workspace_knowledge_path:
+            source["path"] = str(Path(workspace_knowledge_path).expanduser().resolve())
 
     primary_branch = None
     business = profile.get("business_repos")
@@ -184,6 +194,10 @@ def confirmed_inputs(profile: dict[str, Any]) -> dict[str, Any]:
         for source in profile.get("knowledge_sources", [])
         if isinstance(source, dict) and source.get("provider") == "ku"
     ]
+    workspace = next((
+        source for source in profile.get("knowledge_sources", [])
+        if isinstance(source, dict) and source.get("provider") == "workspace"
+    ), None)
     pipeline_ids = {
         entry.get("module"): str(entry.get("pipeline_id"))
         for entry in (profile.get("pipeline_profile", {}).get("pipelines", []) or [])
@@ -204,6 +218,7 @@ def confirmed_inputs(profile: dict[str, Any]) -> dict[str, Any]:
         "test_branch": (profile.get("test_repo") or {}).get("branch"),
         "revisions": revisions,
         "ku": ku,
+        **({"workspace_knowledge_path": workspace.get("path")} if workspace is not None else {}),
         "pipeline_ids": pipeline_ids,
         "members": {
             role: list(members.get(role, []))

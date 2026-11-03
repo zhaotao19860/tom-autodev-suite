@@ -44,6 +44,7 @@ _INTAKE_PREREQUISITE_KEYS_V4 = _INTAKE_PREREQUISITE_KEYS_V3 + ("approval_mode",)
 # v5 also binds a restarted run's requirement diff against its source (MVP §3.4); v4 is
 # left exactly as it was hashed, so a scope run created before keeps its G0 (R9-NEW-001).
 _INTAKE_PREREQUISITE_KEYS_V5 = _INTAKE_PREREQUISITE_KEYS_V4 + ("requirement_diff",)
+_INTAKE_PREREQUISITE_KEYS_V6 = _INTAKE_PREREQUISITE_KEYS_V5 + ("knowledge_workspace",)
 _GROUP_TOPIC_MAX = 12
 # Failures the group client raises before it dispatches anything: the request was
 # rejected locally or the gateway was unreachable, so no group can exist yet.
@@ -154,6 +155,7 @@ def group_id_for_run(state_store: Any, run_id: Any) -> str | None:
 def _intake_keys(source: dict[str, Any]) -> tuple[str, ...]:
     version = source.get("intake_hash_version")
     keys = {
+        "v6": _INTAKE_PREREQUISITE_KEYS_V6,
         "v5": _INTAKE_PREREQUISITE_KEYS_V5,
         "v4": _INTAKE_PREREQUISITE_KEYS_V4,
         "v3": _INTAKE_PREREQUISITE_KEYS_V3,

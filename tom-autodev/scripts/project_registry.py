@@ -203,6 +203,11 @@ def _semantic_invalid_paths(profile: dict[str, Any]) -> list[str]:
     mapping ambiguous, which is worse than having no entry at all.
     """
     invalid: list[str] = []
+    sources = profile.get("knowledge_sources")
+    if isinstance(sources, list) and sum(
+        isinstance(source, dict) and source.get("provider") == "workspace" for source in sources
+    ) > 1:
+        invalid.append("knowledge_sources.workspace")
     pipeline = profile.get("pipeline_profile")
     entries = pipeline.get("pipelines") if isinstance(pipeline, dict) else None
     if not isinstance(entries, list):
@@ -240,12 +245,18 @@ def _semantic_missing_paths(profile: dict[str, Any]) -> list[str]:
     if isinstance(sources, list):
         ku_sources = [source for source in sources if isinstance(source, dict) and source.get("provider") == "ku"]
         if not ku_sources:
-            return ["knowledge_sources.ku"]
+            missing.append("knowledge_sources.ku")
         for index, source in enumerate(sources):
-            if isinstance(source, dict) and source.get("provider") == "ku":
-                for field in ("repo_id", "parent_doc_id"):
-                    if not isinstance(source.get(field), str) or not source[field]:
-                        missing.append(f"knowledge_sources[{index}].{field}")
+            if not isinstance(source, dict):
+                continue
+            fields = ()
+            if source.get("provider") == "ku":
+                fields = ("repo_id", "parent_doc_id")
+            elif source.get("provider") == "workspace":
+                fields = ("repository", "path")
+            for field in fields:
+                if not isinstance(source.get(field), str) or not source[field]:
+                    missing.append(f"knowledge_sources[{index}].{field}")
     return missing
 
 
@@ -269,6 +280,15 @@ def _path_invalid_paths(profile: dict[str, Any]) -> list[str]:
             skill_path = Path(value).expanduser()
             if not skill_path.is_dir() or not (skill_path / "SKILL.md").is_file():
                 invalid.append(field)
+    sources = profile.get("knowledge_sources")
+    for index, source in enumerate(sources if isinstance(sources, list) else []):
+        if not isinstance(source, dict) or source.get("provider") != "workspace":
+            continue
+        value = source.get("path")
+        if isinstance(value, str) and value:
+            top_level = _repository_top_level(value)
+            if top_level is None or top_level != Path(value).expanduser().resolve():
+                invalid.append(f"knowledge_sources[{index}].path")
     return invalid
 
 
@@ -293,14 +313,16 @@ def _repository_top_level(value: Any) -> Path | None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         ).stdout.strip()
         top_level = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             check=True,
             capture_output=True,
             text=True,
+            timeout=30,
         ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.SubprocessError):
         return None
     return Path(top_level).resolve() if inside == "true" else None
 

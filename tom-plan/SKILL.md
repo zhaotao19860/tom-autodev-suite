@@ -5,6 +5,8 @@ description: Use when an approved frontier task needs a concrete per-task implem
 
 # Tom Plan
 
+When the action carries `knowledge_workspace`, first read every listed file with its `show` command: this team-maintained project knowledge takes precedence over same-named content in the project skill, while business source code at the pinned revision remains the final source of truth.
+
 ## Overview
 
 Turn one approved Task DAG node into an executable plan another agent can follow without rediscovering architecture. Resolve plan ambiguity before G4; do not defer missing decisions to implementation.

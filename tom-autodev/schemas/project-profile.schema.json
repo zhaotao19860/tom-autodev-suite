@@ -391,7 +391,8 @@
      "enum": [
       "ku",
       "gitnexus",
-      "repository"
+      "repository",
+      "workspace"
      ]
     },
     "repository": {
@@ -415,6 +416,10 @@
      "minLength": 1
     },
     "parent_doc_id": {
+     "type": "string",
+     "minLength": 1
+    },
+    "path": {
      "type": "string",
      "minLength": 1
     }

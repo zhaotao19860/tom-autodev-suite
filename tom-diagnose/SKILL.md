@@ -5,6 +5,8 @@ description: Use when Review, iPipe, release or product-test evidence needs root
 
 # Tom Diagnose
 
+When the action carries `knowledge_workspace`, first read every listed file with its `show` command: this team-maintained project knowledge takes precedence over same-named content in the project skill, while business source code at the pinned revision remains the final source of truth.
+
 ## Select the context
 
 | Supplied context | Mode and output |

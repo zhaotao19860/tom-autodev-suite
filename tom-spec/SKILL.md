@@ -5,6 +5,8 @@ description: Use when clarified iCafe requirements need a versioned behavioral S
 
 # Tom Spec
 
+When the action carries `knowledge_workspace`, first read every listed file with its `show` command: this team-maintained project knowledge takes precedence over same-named content in the project skill, while business source code at the pinned revision remains the final source of truth.
+
 ## Overview
 
 Convert closed requirement decisions into a reviewable behavioral contract. Specify what must be observable and verifiable without embedding implementation code or volatile line-level plans.

@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · Workspace 知识源（阶段 2）
+
+- 实现 workspace 集成设计 2.1–2.3、2.5：profile 支持至多一个 `workspace` 源，必填 `repository`、Git 仓库根目录 `path`，KU 仍必填；BGW 模板和向导支持可选的 `workspace_knowledge_path` 及路径确认。
+- INTAKE 钉住 workspace HEAD，在 v5 字段集上以 v6 将 `knowledge_workspace` 纳入 G0；无源运行保持原版本与哈希。读不到 HEAD 不建 run。
+- 新增 `workspace_knowledge.py`：校验钉住 commit、按阶段前缀列出该版本的 Markdown（排除 `template.md`）、生成安全引用路径的 `git show` 命令；Git 调用超时 30 秒，失败按不可用处理。
+- Producer action 与 `context` 透出知识上下文，不改变 action 输入哈希与身份；钉住 commit 不可用时阻断，不回退 HEAD、不建 job。七个子 skill 同步知识优先级与源码最终事实规则。
+- 新增临时 Git 仓回归，覆盖 profile、向导、v6/G0、旧版本兼容、阶段过滤、commit 丢失和新增提交后的版本固定。未实施 2.4 本地去重或阶段 3 写回，未修改 `tom-project-bgw/references`。
+
 ## 2026-11-02 · KU 文档精简：一个 run 一篇
 
 - 新 run 在 INTAKE 钉住 `knowledge_layout: single`（只影响展示，不进 G0 哈希）。`KnowledgeSync` 在此布局下不再为每个阶段新建子文档并改目录，而是把阶段文档作为一节追加到本次运行文档的「阶段记录」下（一次写入代替两次）。小节标题下移一级、去掉规范化 JSON 附录；节末沿用 `tom-autodev-index` 标记绑定内容哈希。阶段回执记运行文档的 doc_id、url 和该节落地的版本，回执校验、产物信封校验不变。

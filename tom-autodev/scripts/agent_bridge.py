@@ -469,6 +469,7 @@ class AgentBridge:
                     "action_id", "source_event_id", "state", "phase", "task_id", "child_skill",
                     "controller", "result_schema", "required_human_gate", "input_hash",
                     "parent_artifact_hash", "source_revisions", "input_artifacts", "reentry",
+                    "knowledge_workspace",
                 )
                 if action.get(key) is not None
             }

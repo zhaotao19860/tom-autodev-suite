@@ -5,6 +5,8 @@ description: Use when a fixed-baseline Change Set needs independent Standards an
 
 # Tom Review
 
+When the action carries `knowledge_workspace`, first read every listed file with its `show` command: this team-maintained project knowledge takes precedence over same-named content in the project skill, while business source code at the pinned revision remains the final source of truth.
+
 ## Suite Maintenance Review
 
 When the user is reviewing **tom-autodev-suite itself**, first read

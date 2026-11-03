@@ -5,6 +5,8 @@ description: Use when an approved Spec must be decomposed into an acyclic DAG of
 
 # Tom Tasks
 
+When the action carries `knowledge_workspace`, first read every listed file with its `show` command: this team-maintained project knowledge takes precedence over same-named content in the project skill, while business source code at the pinned revision remains the final source of truth.
+
 ## Overview
 
 Turn behavior into a small frontier of end-to-end capability slices. A task is not a repository layer, module, test-only change, or final regression phase; it is one externally observable behavior that can obtain its own iPipe evidence.

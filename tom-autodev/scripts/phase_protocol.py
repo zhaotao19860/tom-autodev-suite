@@ -25,6 +25,7 @@ from requirement_snapshot import AcceptanceValueError, normalized_acceptance_ids
 from schema_validator import validate_named_schema
 
 import workflow_spec
+import workspace_knowledge
 
 
 _log = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ _STABLE_DEPENDENCY_REASONS = frozenset({
     "PIPELINE_PLAN_INVALID", "PIPELINE_PLAN_MISMATCH", "RELEASE_EVIDENCE_INCOMPLETE",
     "ARTIFACT_INTEGRITY_FAILED",
     "BUILD_BINDING_MISMATCH",
+    "WORKSPACE_COMMIT_UNAVAILABLE",
 })
 _DRAFT_KEYS = frozenset(
     {
@@ -300,6 +302,16 @@ class PhaseProtocol:
                 human_gate = None
         elif mode == "ungated":
             human_gate = None
+        knowledge_workspace = None
+        pin = workspace_knowledge.pinned(events) if child_skill else None
+        if pin is not None:
+            workspace_error = workspace_knowledge.verify(pin)
+            if workspace_error is not None:
+                return _failure(workspace_error, run_id=run_id)
+            knowledge_workspace = {
+                "repository": pin["repository"], "commit": pin["commit"],
+                "documents": workspace_knowledge.documents(pin, state),
+            }
         action = {
             "ok": True,
             "reason_code": "OK",
@@ -326,6 +338,7 @@ class PhaseProtocol:
                 state, selected.get("schema"), workflow_spec.run_evidence_contract(events)),
             "result_schema": selected.get("schema"),
             "target_state": target,
+            **({"knowledge_workspace": knowledge_workspace} if knowledge_workspace is not None else {}),
             **({"reentry": reentry} if reentry is not None else {}),
             **(
                 {"content": _intake_snapshot(events)} if state == "INTAKE"
