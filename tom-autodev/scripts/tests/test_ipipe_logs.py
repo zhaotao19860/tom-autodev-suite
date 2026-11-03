@@ -3,8 +3,8 @@ import unittest
 
 import ipipe_logs
 
-REAL = """2026-09-09 04:01:45 [INFO] Running on bjkjy-sys-ip-base-sep6.bjkjy.baidu.com(10.130.21.26) with agent(v1.2.6) in workspace /root/workspace/021389e4
-2026-09-09 04:01:45 + cd /home/work/yueyufei/x86bgw/
+REAL = """2026-09-09 04:01:45 [INFO] Running on agent-host.example.test(192.0.2.26) with agent(v1.2.6) in workspace /root/workspace/021389e4
+2026-09-09 04:01:45 + cd /home/work/qa/x86bgw/
 2026-09-09 04:01:45 + script/fetch_cr.sh 122402145 --run
 2026-09-09 04:01:45 ==> 拉取 refs/changes/45/122402145/4
 2026-09-09 04:01:46   [保留] bgw_auto/case_stun_route_tcp/test_stun_route_NAT44_cc_tcp_001.py (评审删除，本地保留)
@@ -23,8 +23,8 @@ class IpipeLogTests(unittest.TestCase):
     def test_a_zero_ratio_run_is_readable_from_the_log(self):
         parsed = ipipe_logs.parse(REAL)
 
-        self.assertEqual(parsed["agent_host"], "bjkjy-sys-ip-base-sep6.bjkjy.baidu.com")
-        self.assertEqual(parsed["agent_ip"], "10.130.21.26")
+        self.assertEqual(parsed["agent_host"], "agent-host.example.test")
+        self.assertEqual(parsed["agent_ip"], "192.0.2.26")
         self.assertEqual(parsed["workspace"], "/root/workspace/021389e4")
         self.assertIn("script/fetch_cr.sh", parsed["scripts"])
         self.assertEqual(parsed["success_ratios"], [0.0])

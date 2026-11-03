@@ -149,7 +149,7 @@ python3 tom-autodev/scripts/cli.py ipipe-adopt --help
 python3 tom-autodev/scripts/cli.py ai-review --help
 ```
 
-`ipipe-rerun` 的 `--parameter` 接受**参数名**，值由本次运行的产品/提交证据推导；不是任意 `NAME=VALUE`。例如 BGW 的 `get_bgw_test_case`、`get_bgwagent` 应先核对 [参数映射](../tom-project-bgw/references/runtime-topology.md)。`--print-parameters` 只展示脱敏后的参数，`--print-input-hash` 返回本次 G8 绑定值；实际重跑仍需匹配的批准。
+`ipipe-rerun` 的 `--parameter` 接受**参数名**，值由本次运行的产品/提交证据推导；不是任意 `NAME=VALUE`。例如 BGW 的 `get_bgw_test_case`、`get_bgwagent` 应先核对 bgw-workspace 的 `docs/environment/ipipe-pipelines.md`（参数映射）。`--print-parameters` 只展示脱敏后的参数，`--print-input-hash` 返回本次 G8 绑定值；实际重跑仍需匹配的批准。
 
 `ipipe-rebuild` 用于失败 build 的编译产物已被平台清理（下载 403/404）的情形：`ipipe-rerun` 对这种 build 的任何 stage 都会在环境任务失败。流程是 预检 → `--request-g8` → 批准 → `--approval-id/--input-hash` 触发并换绑 →（结果不明时）`--reconcile-only` → `continue`。已 pin 旧 workflow 的 run 因新增 `DIAGNOSE -> IPIPE` 边需 `restart-from` 新建运行。触发响应无法解析时只会用 GET 按 revision 和时间窗口认领比原 build 更新的唯一 build；多个候选返回 `BUILD_AMBIGUOUS`，不猜。
 

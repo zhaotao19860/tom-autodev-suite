@@ -2,6 +2,10 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-11-02
+
+- BGW 项目知识迁到团队 workspace `baidu/sysip/bgw-workspace`（BGW-2020，CR 123095131）：删除 `references/runtime-topology.md` 与 `references/knowledge-and-evidence.md`，SKILL.md 改为「Team Knowledge」指引（列出 workspace 中对应文件），保留与控制面的调度合同。读取流水线声明的通用规则移到 tom-autodev 的 `references/phase-protocol.md`。
+
 ## 2026-10-31
 
 - `references/runtime-topology.md`：补 `get_bgw` 参数映射与上游参数规则；记录 autodev 测试分支的发布约定——提测由需求负责人在平台跳过，x86bgw 348101 的测试准出随之自动通过，bgwagent 348141 的测试准出为人工确认、跳过不算准出（发布会被拒“没有执行准出，不能发布”）。

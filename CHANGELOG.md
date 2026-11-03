@@ -12,6 +12,13 @@ suite had no version control before then.
 - Producer action 与 `context` 透出知识上下文，不改变 action 输入哈希与身份；钉住 commit 不可用时阻断，不回退 HEAD、不建 job。七个子 skill 同步知识优先级与源码最终事实规则。
 - 新增临时 Git 仓回归，覆盖 profile、向导、v6/G0、旧版本兼容、阶段过滤、commit 丢失和新增提交后的版本固定。未实施 2.4 本地去重或阶段 3 写回，未修改 `tom-project-bgw/references`。
 
+## 2026-11-02 · workspace 接入阶段 2 收尾：本地去重
+
+- BGW 项目知识已由 bgw-workspace CR 123095131（BGW-2020）合入。删除 `tom-project-bgw/references/runtime-topology.md` 与 `knowledge-and-evidence.md`；`tom-project-bgw/SKILL.md` 改为「Team Knowledge」指引，列出 workspace 中对应文件，保留与控制面的调度合同。
+- 读取流水线 stage 声明的通用规则（看配置 `paramBeans`/`inParamsMap`，不看 `manualParams`；`required: false` 不等于可空）移到 `tom-autodev/references/phase-protocol.md` 的 G8 一节。`docs/OPERATIONS.md` 的参数映射链接改指 workspace。
+- 公开套件清理主机名与人名：iPipe 日志测试改用示例主机 `agent-host.example.test`、`192.0.2.26`；MVP 文档里的准出人改为「QA 准出人」；平台夹具标记检查增加 QA 人名。平台录制夹具中的 job 名（含 `sep5`/`sep6` 字样）是流水线配置原文，保留。
+- 本机两条 BGW 记忆替换为一条指向 workspace 的引用（不在仓库内）。
+
 ## 2026-11-02 · KU 文档精简：一个 run 一篇
 
 - 新 run 在 INTAKE 钉住 `knowledge_layout: single`（只影响展示，不进 G0 哈希）。`KnowledgeSync` 在此布局下不再为每个阶段新建子文档并改目录，而是把阶段文档作为一节追加到本次运行文档的「阶段记录」下（一次写入代替两次）。小节标题下移一级、去掉规范化 JSON 附录；节末沿用 `tom-autodev-index` 标记绑定内容哈希。阶段回执记运行文档的 doc_id、url 和该节落地的版本，回执校验、产物信封校验不变。

@@ -31,17 +31,35 @@ The profile must explicitly name each business repository/module, independent pr
 
 BGW tests must assert the stable externally observable gateway/API/protocol boundary and include valid, boundary, malformed, compatibility, and regression cases. The iPipe pipeline and this skill define runner OS/architecture, image/toolchain, services/data/capacity, topology, and cleanup. All build, unit, regression, integration, packaging, and release commands run only in the pinned iPipe runner; Mac performs source generation/Review and evidence parsing.
 
-## Runtime Topology and Manual Stages
+## Team Knowledge
 
-Read [`references/runtime-topology.md`](references/runtime-topology.md) before diagnosing or continuing a BGW iPipe product-case stage. It names the live client/BGW/RS topology, associated logs, version and counter inspection, and the `P0新case回归` parameter map (`get_bgw_test_case`, `get_bgwagent`). That stage updates client `bgw_auto` and `tool/bgwagent` only; the server BGW binary is replaced by earlier compile/regression stages.
+BGW's project facts live in the team workspace `baidu/sysip/bgw-workspace`, reviewed and
+merged there; this skill no longer carries them. A run pins the workspace commit at INTAKE
+and each producer action lists the files to read (`knowledge_workspace`). For BGW:
 
-Empty `manualParams` does not mean no job inputs. `get_bgwagent` can inherit an upstream
-static default. Resolve it from the run's frozen changed status: unchanged uses target
-branch BranchPipeline successful release; changed uses owned exact-candidate ChangePipeline
-compile, with verifiable revision/branch and download. Require a proven job override
-contract without changing the external template; unsupported override or compile-only
-trigger blocks explicitly. Never report `params={}` as dynamic resolution or a fixed old
-node as this run's product.
+- `docs/environment/bgw-test-topology.md`: client/RS and server hosts, binaries, control
+  plane, qa branches, and which stage replaces which artifact.
+- `docs/environment/ipipe-pipelines.md`: pipeline ids, stage parameters and their product
+  sources (`get_bgw_test_case`, `get_bgw`, `get_bgwagent`), release stages, and the test-branch
+  submit-test / permit-out conventions.
+- `docs/testing/product-case-triage.md`: log order and known misreadings after a product-case
+  failure.
+- `docs/testing/p0-regression-policy.md`: when `P0新case回归` may be skipped.
+- `repos/<repo>/overview.md`: modules, pipelines and cross-repository relations.
+
+When a run has no pinned workspace, read the same files from the workspace's current master
+and say so. Rules that apply to every project (reading stage declarations from the live
+pipeline configuration) are in the parent's `references/phase-protocol.md`.
+
+## Parent Scheduling Contract
+
+Return knowledge to `tom-autodev`. The parent discovers stage/job declarations and upstream
+inputs even with empty manualParams; resolves verified products under the frozen
+changed/branch/revision policy; fills the stage parameters; requests the exact G8 only if
+runtime override is supported, otherwise blocks (no pipeline template changes; unknown write
+results only reconcile the persisted intent); reads the new job log, then the client results,
+then the server log; and classifies `ENV_UNSATISFIED` versus product `TEST_FAILURE` before
+repair. This skill never calls iPipe, never reruns a stage, and never writes a BGW binary.
 
 ## Verification Contract
 

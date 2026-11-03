@@ -117,6 +117,15 @@ proofs. BGW maps `get_bgw_test_case` to `baidu/nsiqa/x86bgw` and `get_bgwagent` 
 must still inspect full configuration `stages[].paramBeans`, job inputs and upstream
 `upstreamStageId` dependencies; shell references without declarations block.
 Live configuration is labelled as live, never claimed to be a historical build snapshot.
+
+Reading declarations: a stage's inputs are declared in the pipeline *configuration*
+(`stages[].paramBeans` / `inParamsMap`, and job configuration), not in a build's
+`stageBuild.manualParams`, which can be `null` for every stage, including one whose job
+requires an input. Never report a stage as parameterless from `manualParams`, a stage
+detail, or one build's run record; read the live configuration
+(`get_pipeline_by_id(..., brief=False)`) and, when unsure, confirm against a successfully
+released build's job log of the same pipeline. `required: false` is not proof that a value
+may be empty: read how the job consumes it.
 Only an adapter with a verified exact job override contract can execute task overrides.
 The real adapter blocks with `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`; arbitrary POST JSON or
 CLI `--param` alone does not establish override precedence. No template modification is allowed.

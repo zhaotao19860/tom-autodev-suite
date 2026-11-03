@@ -333,7 +333,7 @@ derived_from (DERIVED 时必填：源 fixture_id + 改了什么), response
 | 类别 | 介入 |
 |---|---|
 | 控制面 bug | 5 次修复（见上表）；`RERUN_RESPONSE_INVALID` 手工 `--reconcile-only` 2 次；`submit-companion` 补提测试库 1 次；旧 watcher 误报 drift，杀进程 1 次 |
-| 平台行为 | 「P0新case回归」被表达式跳过，用户接受（测试环境未建好的临时豁免）；QA 在 build 运行中从 348101 配置删除「系统测试功能回归」，控制器 fail-closed 停在 `STAGE_PARAMETERS_UNKNOWN`，由 QA 在平台跳过；「测试准出」由 yueyufei01 在平台确认 |
+| 平台行为 | 「P0新case回归」被表达式跳过，用户接受（测试环境未建好的临时豁免）；QA 在 build 运行中从 348101 配置删除「系统测试功能回归」，控制器 fail-closed 停在 `STAGE_PARAMETERS_UNKNOWN`，由 QA 在平台跳过；「测试准出」由 QA 准出人在平台确认 |
 | 需求/基线 | 用户在 iCode 重建 syncookie 分支；case_http3 失败经 G6 诊断为基线缺 BGW-1918，rebase 后通过；旧承接 run `1fef8adb` 停掉重开 |
 
 新发现，进入合同 3.3：BranchPipeline 的配置可以在 build 运行中被修改，所以 stage plan 要同时绑定 build 启动时的快照和实时配置；两者不一致时应停下来出卡，而不是报参数未知。

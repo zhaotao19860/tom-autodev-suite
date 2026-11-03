@@ -1927,8 +1927,8 @@ class ApiClientShapeTests(unittest.TestCase):
             "ok": True,
             "success_ratios": [0.0, 0.0],
             "failed_cases": ["test_stun_route_NAT44_cc_tcp_017"],
-            "agent_host": "bjkjy-sys-ip-base-sep6.bjkjy.baidu.com",
-            "agent_ip": "10.130.21.26",
+            "agent_host": "agent-host.example.test",
+            "agent_ip": "192.0.2.26",
             "workspace": "/root/workspace/abc",
             "scripts": ["script/fetch_cr.sh"],
         }
@@ -1939,7 +1939,7 @@ class ApiClientShapeTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["job_build_id"], "1018370712")
         self.assertEqual(found[0]["failed_cases"], ["test_stun_route_NAT44_cc_tcp_017"])
-        self.assertEqual(found[0]["agent_ip"], "10.130.21.26")
+        self.assertEqual(found[0]["agent_ip"], "192.0.2.26")
         self.assertEqual(found[0]["scripts"], ["script/fetch_cr.sh"])
 
     def test_a_job_whose_log_reports_every_case_passing_stays_passing_evidence(self):

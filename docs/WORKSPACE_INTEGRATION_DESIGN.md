@@ -1,6 +1,6 @@
 # tom-autodev 接入 bgw-workspace 设计
 
-状态：阶段 2（2.1–2.3）已实现（2026-11-02）。依据 [BGW_WORKSPACE_MIGRATION_PLAN.md](BGW_WORKSPACE_MIGRATION_PLAN.md) 第 6 节，负责人按全部建议执行：workspace 为准、INTAKE 钉 commit、公开套件删主机人名、repos 先写 3 个仓库、阶段 1 的 CR 由负责人评审合入。
+状态：阶段 1、阶段 2 已完成（2026-11-02；阶段 1 为 bgw-workspace CR 123095131）；阶段 3 实施中。依据 [BGW_WORKSPACE_MIGRATION_PLAN.md](BGW_WORKSPACE_MIGRATION_PLAN.md) 第 6 节，负责人按全部建议执行：workspace 为准、INTAKE 钉 commit、公开套件删主机人名、repos 先写 3 个仓库、阶段 1 的 CR 由负责人评审合入。
 
 分工：本文档由 Claude 写；代码与 workspace 文档由 Codex 按本文档实现；Claude 评审、跑全量测试后合入。每个阶段一个提交。
 
@@ -68,7 +68,7 @@
 - `tom-project-bgw/references/runtime-topology.md`、`knowledge-and-evidence.md` 删除；`SKILL.md` 只留接口合同（profile 要求、知识优先级、验证合同、Parent Scheduling Contract），并写明 BGW 知识见 workspace 的哪些路径。
 - 「Reading declarations」一节移到 `tom-autodev/references/phase-protocol.md`。
 - 本机记忆 `project-bgw-p0-newcase-env`、`project-bgw-autodev-skip-test-request` 删除，`MEMORY.md` 改为一条指向 workspace 的记忆。
-- 全仓扫描：公开套件内不再出现 `bjkjy-`、`sep5/6/7`、`yueyufei`、`liuman`、`houpingping` 等主机名与人名（测试夹具按已有规则不含真实人名/主机）。
+- 全仓扫描：公开套件内不再出现 `bjkjy-` 主机名与 `yueyufei`、`liuman`、`houpingping`、`zhangwenxing` 等人名。平台录制夹具里的 job 名（如「25G 环境搭建-sep5」）是流水线配置原文，不是主机地址，保留；`test_platform_fixtures` 的标记检查覆盖上述人名。
 
 ### 2.5 回归
 

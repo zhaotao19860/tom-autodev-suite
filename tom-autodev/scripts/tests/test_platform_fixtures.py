@@ -65,7 +65,8 @@ class FixtureIntegrityTests(unittest.TestCase):
 
     def test_no_person_or_credential_reached_the_public_repository(self):
         text = "".join(str(record["response"]) for record in all_records())
-        for marker in ("@baidu.com", "IREPO-TOKEN:", "triggerUser", "bjkjy-"):
+        for marker in ("@baidu.com", "IREPO-TOKEN:", "triggerUser", "bjkjy-",
+                       "yueyufei", "liuman", "houpingping", "zhangwenxing"):
             self.assertNotIn(marker, text)
 
 
