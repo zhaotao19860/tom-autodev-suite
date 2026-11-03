@@ -4,6 +4,11 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-11-02
 
+- 写回的临时 worktree 为 iCode 提供可恢复的 `.git` 目录视图，保持准确提交及全部 push URLs，不改公共配置；仅以本地 Git 与假 transport 回归验证。
+
+- 阶段 3：`orchestrator.py knowledge-writeback RUN_ID` 默认只读提案，`--request` 请求独立的 `KNOWLEDGE_WRITEBACK` 审批，`--approval-id A --input-hash H` 执行；只处理已 `RELEASE_SUCCESS` 且 INTAKE 有 workspace pin 的 run，汇总 G6 已批准且 hash 绑定的环境/流程知识候选，去重并剔除 pin 中已有正文，无候选不开审批。
+- 写回审批不是 G 门，不进入 workflow 策略哈希或可修订门集合；展示候选目标、标题、正文，只支持同意/停止，停止不改 run 终态。批准后在 pin 的临时 worktree 新建/追加文档，更新新文件索引和已有根 CHANGELOG，使用带卡号与确定性 Change-Id 的提交向 workspace `master` 提 CR，合入仍由人评审，不动用户 checkout。
+- `workspace.writeback` 的 intent/receipt 绑定提案哈希；推送 UNKNOWN 后重跑只按 Change-Id 查询、不重推，明确拒绝才关闭尝试。SKILL、README、操作参考与设计同步阶段 3 用法；完整提案哈希覆盖全部候选及来源，详见根 CHANGELOG 同日条目。
 - 阶段 2 收尾：读取流水线声明的通用规则并入 `references/phase-protocol.md`；测试夹具去掉真实主机名与人名。
 - Workspace 知识源：schema、profile 校验、BGW 模板与可选向导路径；INTAKE 钉 commit 并以 v6 绑定 G0，producer/context 按阶段读取同一版本。无源运行不变；commit 不可用时阻断，不创建 job。新增临时 Git 仓回归；未做本地去重或写回。详见根 CHANGELOG 同日条目。
 - KU 文档精简：新 run 一篇运行文档，每阶段追加一节；审批卡链接到运行文档并注明小节。旧 run 不变。

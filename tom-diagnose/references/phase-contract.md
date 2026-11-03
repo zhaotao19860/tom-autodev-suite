@@ -10,6 +10,7 @@ Use the suite [producer contract](../../tom-autodev/references/producer-contract
 | classification, hypothesis, minimal_verification | Cause category, one causal explanation and the evidence that confirms/refutes it; put confidence/limitations in these supported text fields rather than adding unknown keys |
 | route, repair_direction, repair_plan, repair_scope | Confirmed route proposal; CODE_ONLY keeps behavior/Spec, SPEC_AMENDMENT changes behavior, TASK_SCOPE changes task boundaries |
 | repair_diff_hash | `null` when no patch exists, including route REPAIR; otherwise the hash of an actual already-existing diff. Diagnosis itself does not create a patch |
+| knowledge_candidates (optional) | Evidence-backed environment/process conclusions reusable across runs; each candidate has non-empty target/title/body/reason strings, with evidence and reuse rationale in reason. Never include business-code conclusions |
 
 For insufficient evidence, `route=DIAGNOSIS_INCOMPLETE`, `evidence_state=INSUFFICIENT`, `hypothesis=null`, `repair_direction=null`, `repair_diff_hash=null`, and `repair_plan=[]`. Required evidence arrays must explain the actual missing/observed material, not claim a test ran.
 
@@ -25,3 +26,10 @@ The parent settles the applicable G6 and validates the route. The producer neith
 
 For an environment-class failure (`ENV_UNSATISFIED`, `ENV_TRANSIENT`, `PIPELINE_TRANSIENT`, `JOB_PARAMETER_OVERRIDE_UNSUPPORTED`, ...) whose cause was resolved outside the code and whose failed stage was already re-run under G8 after the failure, use `route=IPIPE`: no business patch, the run returns to the pipeline and continues with the remaining modules. The controller refuses `route=IPIPE` for a non-environment class, and stops the run (`IPIPE_RESUME_WITHOUT_RERUN`) when no confirmed G8 rerun of `stage_id` exists after the failure.
 
+## Optional workspace knowledge candidates
+
+Omit `knowledge_candidates` or return `[]` unless the diagnosis establishes an environment/process conclusion with concrete supporting evidence and value beyond the current run. Business-code conclusions, run-specific patches and unverified hypotheses do not qualify. Each item is exactly `{target, title, body, reason}`: all four values are non-empty strings; `reason` identifies the supporting logs/receipts or verified observations and explains why the conclusion can be reused across runs.
+
+`target` must match `^docs/[a-z0-9-]+(/[a-z0-9._-]+)*\.md$`, contain no `..`, and not have the basename `index.md`, `template.md` or `README.md`. The controller owns category indexes and change-log updates; do not propose these as candidate targets. Write the human-readable title, body and reason in Chinese, preserving source identifiers and paths verbatim.
+
+Returning candidates does not authorize a workspace write. Only approved, input-bound G6 diagnoses can contribute to a post-`RELEASE_SUCCESS` proposal; the controller requests separate `KNOWLEDGE_WRITEBACK` approval and opens a CR whose merge remains subject to human review. DIAGNOSE does not write workspace files or push CRs.

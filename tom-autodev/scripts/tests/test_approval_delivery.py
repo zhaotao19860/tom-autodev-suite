@@ -203,6 +203,43 @@ class InfoflowApprovalTransportTests(unittest.TestCase):
         self.assertIn("同意 approval-1", content)
         self.assertNotIn("APPROVE approval-1", content)
 
+    def test_writeback_delivery_only_offers_approve_or_stop_writeback(self):
+        notify = FakeCardClient()
+        state, transport = self._transport(notify)
+        self._with_group(state)
+        envelope = {**_envelope(), "action": "KNOWLEDGE_WRITEBACK"}
+
+        transport.request(envelope)
+
+        card = notify.cards[0]
+        self.assertFalse(card["revisable"])
+        self.assertEqual(card["stop_label"], "停止")
+        self.assertIn("只放弃写回", card["question"])
+        self.assertIn("不改变 run 终态", "\n".join(card["lines"]))
+        for text in (card["question"], "\n".join(card["lines"]), notify.group_sends[0][1]):
+            self.assertNotIn("需修改", text)
+            self.assertNotIn("停止run", text)
+            self.assertNotIn("停止 run 请回复", text)
+
+    def test_writeback_button_failure_fallback_does_not_offer_modify_or_stop_run(self):
+        notify = FakeCardClient(error=TimeoutError("unknown remote result"))
+        state, transport = self._transport(notify)
+        self._with_group(state)
+
+        result = transport.request({**_envelope(), "action": "KNOWLEDGE_WRITEBACK"})
+        replay = transport.request({**_envelope(), "action": "KNOWLEDGE_WRITEBACK"})
+
+        self.assertEqual(result["status"], "PENDING")
+        self.assertEqual(replay["status"], "PENDING")
+        self.assertEqual(len(notify.cards), 1)
+        self.assertEqual(len(notify.group_sends), 2)
+        warning = notify.group_sends[-1][1]
+        self.assertIn("可回复“同意”或“停止”", warning)
+        self.assertIn("只放弃写回，不改变 run 终态", warning)
+        self.assertIn("approval_id", warning)
+        self.assertNotIn("需修改", warning)
+        self.assertNotIn("停止run", warning)
+
     def test_a_group_gate_also_gets_the_one_tap_button_card(self):
         notify = FakeCardClient()
         state, transport = self._transport(notify)
@@ -716,6 +753,9 @@ class InfoflowBotClientTests(unittest.TestCase):
     def _client(self, responses, **options):
         self.opener = FakeGatewayOpener(responses)
         self.launched = []
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        options.setdefault("log_path", Path(directory.name) / "gateway.log")
         return InfoflowBotClient(
             base_url="http://127.0.0.1:18791",
             opener=self.opener,
@@ -748,7 +788,24 @@ class InfoflowBotClientTests(unittest.TestCase):
         self.assertEqual((method, url), ("POST", "http://127.0.0.1:18791/card/approval"))
         self.assertEqual(json.loads(body)["target_type"], "user")
         self.assertEqual(json.loads(body)["target_id"], "owner")
+        self.assertNotIn("stop_label", json.loads(body))
         self.assertEqual(result["card_id"], "approval-target-owner")
+        self.assertEqual(self.launched, [])
+
+    def test_writeback_card_stop_label_and_non_revisable_reach_gateway_without_network(self):
+        client = self._client([
+            '{"ok": true, "journal": "/tmp/replies.jsonl"}',
+            '{"ok": true, "card_id": "writeback-card", "created": true}',
+        ])
+        result = client.send_approval_card(
+            approval_id="a" * 32, target_type="user", target_id="owner",
+            title="知识写回审批", question="同意或停止", lines=["只放弃写回，不改变 run 终态"],
+            revisable=False, stop_label="停止",
+        )
+        payload = json.loads(self.opener.calls[1][2])
+        self.assertEqual(payload["stop_label"], "停止")
+        self.assertFalse(payload["revisable"])
+        self.assertEqual(result["card_id"], "writeback-card")
         self.assertEqual(self.launched, [])
 
     def test_an_absent_gateway_is_started_once_and_then_used(self):

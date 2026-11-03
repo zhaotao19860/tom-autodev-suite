@@ -165,6 +165,7 @@ class InfoflowBotClient:
         approvers: list[str] | None = None,
         presentation: str | None = None,
         revisable: bool = True,
+        stop_label: str | None = None,
     ) -> dict[str, Any]:
         """Send the one-tap variant of a gate as an interactive card.
 
@@ -186,6 +187,10 @@ class InfoflowBotClient:
             # Whether this gate offers a 需修改 button: only producer gates (G1–G6) do.
             "revisable": bool(revisable),
         }
+        if stop_label is not None:
+            # Approval-only actions may stop that operation without stopping a run.
+            # Omit by default so older callers keep their existing button label.
+            body["stop_label"] = stop_label
         if presentation:
             # A follow-up card (reminder) for the same approval, posted as its own
             # bubble instead of refreshing the original one up the chat.

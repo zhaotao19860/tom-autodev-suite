@@ -99,11 +99,12 @@ KU 适配使用已安装的 `/ku-doc-manage` skill，而不是依赖 PATH 中恰
 
 - 审批详情会说明本次对象、逐项核对重点、应读文件/证据、固定版本，以及同意后允许执行的动作。G0–G9 都有各自的检查重点。
 - 自动草案审批会提供本次材料的本地 JSON 快照路径；这是阅读副本，不是已验收产物。路径只能在运行机器打开，已有 KU 文档才显示网页链接。缺少与 hash 匹配的材料会明确提示“请勿批准”。
-- 如流正文旁有“同意 / 需修改 / 停止run”按钮（“停止run”即原“驳回”，停止本 run）。有协作群时发群；G0 尚未建群时发给审批成员的机器人单聊。
+- 工作流 G 门的如流正文旁有“同意 / 需修改 / 停止run”按钮（“停止run”即原“驳回”，停止本 run）。有协作群时发群；G0 尚未建群时发给审批成员的机器人单聊。
   后续审批正文和操作示例统一使用中文：“同意 <approval_id>”会继续当前 run；
   “需修改 <approval_id> <修改意见>”会保留 run、按意见重做并重新发起本门；
   “停止 <approval_id>”会停止 run。按钮未完整送达会单独提示。“需修改”适用于
   G1–G6；G5 的修改意见会原地重做 IMPLEMENT，G6 的会原地重做诊断。
+  发布后的 `KNOWLEDGE_WRITEBACK` 是例外：只有“同意 / 停止”，停止仅放弃写回，不改 run 终态。
 - 在如流提意见有三种方式，均有可视化回执：
   1）点“需修改”后直接在本群回复意见（不用带审批 ID，可分多条，到你对本审批再次回复或对别的审批选“需修改”为止）；网关收到后立即把该卡刷新为“已收到修改意见…”，watcher 再登记重做并回执；
   2）一次回复“需修改 <审批ID> <意见>”；
@@ -301,7 +302,7 @@ Producer action 与 `context` 返回 `knowledge_workspace` 的仓库、commit �
 
 钉住的 commit 在本地不可用时，producer 阻断为 `WORKSPACE_COMMIT_UNAVAILABLE`，不创建 job，
 不会回退到最新 `HEAD`。团队 workspace 知识优先于项目 skill 中同名内容；
-钉住 revision 上的业务源码仍是最终事实。本次不涉及项目知识本地去重或结论写回 workspace。
+钉住 revision 上的业务源码仍是最终事实。验证过的结论可在发布成功后单独申请写回，见下文[验证过的结论写回 workspace](#验证过的结论写回-workspace)。
 
 BGW 的模板环境只保存用于绑定远程证据的稳定声明，不承担本地平台可用性验证。runner、
 编译器、测试拓扑、数据和服务由 iPipe 与 `tom-project-bgw` 管理；向导不再询问
@@ -583,6 +584,29 @@ python3 tom-autodev/scripts/cli.py --config-root /path/to/autodev-state status R
 **一个 run 一篇 KU 文档。** 新 run 在 INTAKE 固定 `knowledge_layout: single`：KU 里只建一篇本次运行文档，每个阶段完成后在「阶段记录」下追加一节（标题下移一级，不重复规范化 JSON；规范化内容与哈希在本地产物库）。每节末尾有校验标记，绑定该阶段的内容哈希。审批卡片的「相关文档」第一条就是这篇运行文档，并写明要看哪一节。之前开始的 run 仍按每阶段一篇子文档加目录索引写入，不受影响。
 
 所有动作都绑定来源事件、输入 hash、前驱产物和版本。完成所有任务后，控制器生成冻结的 `pipeline_plan`，明确模块、仓库 revision、依赖、流水线和环境；iPipe 与发布校验只认这份计划。配置、workflow 或代码规则漂移会阻断新的写操作，不能删除 hash 绕过。
+
+### 验证过的结论写回 workspace
+
+运行记录与团队知识分开保存。只有 `RELEASE_SUCCESS` 且 INTAKE 已钉住 `knowledge_workspace` 的 run 才能申请写回；不满足时分别返回 `WRITEBACK_RUN_NOT_RELEASED`、`WRITEBACK_NO_WORKSPACE`。`diagnosis.knowledge_candidates` 只记录有证据、跨 run 可复用的环境/流程结论，不记录业务代码结论。
+
+```bash
+# 默认只读：汇总候选，查看提案与 input_hash
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID
+
+# 按该提案请求审批；不写文件、不推送
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --request
+
+# 人工同意后，使用该次审批 ID 与 input_hash 执行
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --approval-id A --input-hash H
+```
+
+提案只汇总该 run 的 G6 已 `APPROVE` 且输入哈希与诊断产物绑定一致的候选，按 `(target, body)` 去重，并剔除钉住 commit 的目标文件中已含完全相同正文的项；没有剩余候选返回 `WRITEBACK_NOTHING`，不开审批。提案的规范 JSON SHA-256 绑定仓库、commit 和每个候选的全部字段；执行前重新计算，变化后不能复用旧批准。
+
+`KNOWLEDGE_WRITEBACK` 是独立审批动作，不是 G 门，不进入 `workflow_spec` 门表或策略哈希。审批材料展示每个候选的目标文件、标题、正文；按钮只有**同意 / 停止**，不可“需修改”。停止只放弃写回，不改变 run 的 `RELEASE_SUCCESS`。它由上述显式命令发起，不由 worker 或普通 `continue` 自动写回。
+
+批准后从 pin commit 建临时 worktree 与 `tom-autodev/<run_id 前 12 位>` 分支：新文件写 `# <title>` 与正文，已有文件追加 `## <title>` 小节；新文件补分类 `index.md` 的 Knowledge Map，根 `CHANGELOG.md` 若存在则在顶部补当天条目。提交带卡片 ID 与内容哈希生成的确定性 Change-Id，经 iCode `push_cr` 向 `master` 提 CR，**合入仍由人评审**；不切换或改写用户原 checkout，结束后清理临时 worktree。 CLI 所需的 `.git` 目录视图也仅在临时 worktree 内短暂提供，恢复后再清理，不改公共远端配置。
+
+外部写入由 intent/receipt 去重并保存 CR URL。超时或推送结果 `UNKNOWN` 后，重跑同一执行命令只按 Change-Id 查询已有 CR，不会重新推送。完整约束与恢复规则见[操作参考](docs/OPERATIONS.md#验证过的结论写回-workspace阶段-3)与[集成设计阶段 3](docs/WORKSPACE_INTEGRATION_DESIGN.md#阶段-3验证过的结论写回-workspace)。
 
 ## 当前边界
 

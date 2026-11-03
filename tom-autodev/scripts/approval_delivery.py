@@ -216,6 +216,7 @@ def _deliver_approval_card(
     evidence = gateway_request.get("evidence")
     gate = _review_gate(gateway_request)
     action = str(gateway_request.get("action") or "gate")
+    writeback = gate_of(action) == "KNOWLEDGE_WRITEBACK"
     reads = _reading_lines(gate)
     lines = [
         f"需求 {_safe(_evidence(evidence, 'card_id'))} {_safe(_evidence(evidence, 'card_title'))}".strip(),
@@ -225,9 +226,10 @@ def _deliver_approval_card(
          if gate.get("material_status") == "MISSING"
          else "请先查看 " + ("；".join(reads[:2]) if reads else "材料未齐，请先在 IDE 补齐，勿盲批")),
         f"批准后 {_line(gate.get('effect'))}" if _line(gate.get("effect")) else "",
-        ("按钮含义：同意=继续 run；需修改=保留 run、按意见重做并重发；停止run=停止本 run。"
-         if revisable
-         else "按钮含义：同意=执行本操作；停止run=停止本 run。"),
+        ("按钮含义：同意=在 workspace 提一个 CR，合入仍由人评审；停止=只放弃写回，不改变 run 终态。"
+         if writeback else
+         "按钮含义：同意=继续 run；需修改=保留 run、按意见重做并重发；停止run=停止本 run。"
+         if revisable else "按钮含义：同意=执行本操作；停止run=停止本 run。"),
         f"版本 {gateway_request['input_hash'][:12]}…；截止 {_moment(gateway_request['deadline_at'])}；完整材料及本地文件位置见同一审批详情",
     ]
     targets = [("group", group_id)] if group_id is not None else [
@@ -256,11 +258,13 @@ def _deliver_approval_card(
                     approval_id=gateway_request["approval_id"],
                     target_type=target_type, target_id=target_id,
                     title=f"tom-autodev {action} 审批",
-                    question=("待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。"
-                              if revisable
-                              else "待你审批：请先核对材料和重点，再选择「同意」或「停止run」。"),
+                    question=("待你审批：请先核对写回提案，再选择「同意」或「停止」（只放弃写回，不改变 run 终态）。"
+                              if writeback else
+                              "待你审批：请先核对材料和重点，再选择「同意」「需修改」或「停止run」。"
+                              if revisable else "待你审批：请先核对材料和重点，再选择「同意」或「停止run」。"),
                     lines=[line for line in lines if line],
                     revisable=revisable,
+                    **({"stop_label": "停止"} if writeback else {}),
                     # Who may answer, so a shared group card only reads as answered
                     # when the tap came from an approver. The ledger still decides.
                     approvers=sorted({
@@ -475,10 +479,15 @@ class InfoflowApprovalTransport:
             },
         )
         if card.get("status") != "DELIVERED":
+            writeback = gate_of(gateway_request.get("action")) == "KNOWLEDGE_WRITEBACK"
+            reply_choices = (
+                "可回复“同意”或“停止”（只放弃写回，不改变 run 终态）"
+                if writeback else "可回复“同意”“需修改”或“停止run”"
+            )
             warning = (
                 f"## tom-autodev 审批操作提示（不是新审批）\n\n"
                 f"审批 {gateway_request['approval_id']} 的按钮未完整送达或结果未确认。"
-                "\n请先阅读审批详情；可回复“同意”“需修改”或“停止run”，也可以在 IDE 处理。"
+                f"\n请先阅读审批详情；{reply_choices}，文字回复须带 approval_id；也可以在 IDE 处理。"
                 "\n这不表示审批已通过；不会自动重复发送结果不明的按钮。"
             )
             try:
@@ -618,7 +627,10 @@ def _approval_markdown(
     run_id = gateway_request["run_id"]
     input_hash = gateway_request["input_hash"]
     action = str(gateway_request.get("action") or "gate")
-    if revisable is None:
+    writeback = gate_of(action) == "KNOWLEDGE_WRITEBACK"
+    if writeback:
+        revisable = False
+    elif revisable is None:
         revisable = gate_of(action) in _REVISABLE_GATES
     evidence = gateway_request.get("evidence")
     lines = [
@@ -658,7 +670,7 @@ def _approval_markdown(
     if gate.get("material_status") == "MISSING":
         lines += ["", "**材料缺口：未取得与本次 hash 匹配的产物，请勿批准。**"]
     lines += ["", f"**决定边界** {_line(gate.get('decision'))}"]
-    summary = [_line(item) for item in gate.get("summary") or []]
+    summary = [] if writeback and body else [_line(item) for item in gate.get("summary") or []]
     summary = [item for item in summary if item]
     if summary and not (body and all(f"- {item}" in body for item in summary)):
         lines += ["", "**内容摘要**", *(f"- {item}" for item in summary)]
@@ -689,7 +701,7 @@ def _approval_markdown(
             if revisable
             else []
         ),
-        "**停止 run 请回复**",
+        "**停止写回请回复（不改变 run 终态）**" if writeback else "**停止 run 请回复**",
         f"停止 {approval_id}",
         "",
         *(["> 点卡片“需修改”后直接在本群回复修改意见即可（不用带审批 ID）；也可按上面格式一次回复。"
@@ -697,7 +709,8 @@ def _approval_markdown(
            "“停止”则结束本 run。收到意见后自动登记重做，在 IDE 继续即生成新版草案并重新发起本门。"
            "历史“驳回”“REJECT”等回复仍兼容。"]
           if revisable else []),
-        "> 文字回复的同意/停止/需修改必须带 approval_id；它绑定本次内容，需求一变即失效。",
+        ("> 文字回复的同意/停止必须带 approval_id；同意只授权本次提案，停止只放弃写回，不改变 run 终态。"
+         if writeback else "> 文字回复的同意/停止/需修改必须带 approval_id；它绑定本次内容，需求一变即失效。"),
         f"> input_hash `{input_hash[:12]}…`",
         f"> run_id `{run_id[:12]}…`",
     ]
@@ -721,6 +734,14 @@ def _review_body(gate: dict[str, Any]) -> list[str]:
     Infoflow cannot open it, so the reviewed content has to travel with the message.
     """
     material = gate.get("_review_content")
+    proposal = material.get("proposal") if isinstance(material, dict) else None
+    if isinstance(proposal, dict):
+        from approval_summary import knowledge_writeback_lines
+
+        # This approval is about every byte of every candidate. Do not clip its
+        # body into a partial proposal; the gateway splits long markdown safely.
+        return [f"#{line}" if line.startswith("#") else line
+                for line in knowledge_writeback_lines(proposal)]
     draft = material.get("draft") if isinstance(material, dict) else None
     if not isinstance(draft, dict):
         return []

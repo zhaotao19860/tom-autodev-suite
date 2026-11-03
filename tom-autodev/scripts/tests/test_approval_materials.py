@@ -1,4 +1,5 @@
 """Approval copy must describe the exact candidate, not a nearby/latest artifact."""
+import hashlib
 import json
 import sys
 import tempfile
@@ -32,6 +33,134 @@ class ApprovalMaterialsTests(unittest.TestCase):
             "deadline_at": "2026-09-30T00:00:00+00:00",
             "evidence": {"card_id": "EXAMPLE-1", "gate": detail},
         }, ["owner"])
+
+    def _writeback_proposal(self, run_id="run-1"):
+        candidates = []
+        for index in (1, 2):
+            body = (f"经本次发布验证的环境流程结论 {index}。\n" + "步骤与证据不可省略。" * 100
+                    + f"\n候选 {index} 完整正文末尾。")
+            candidates.append({
+                "target": f"docs/environment/reusable-{index}.md",
+                "title": f"复用结论 {index}", "body": body, "reason": f"跨 run 可复用的环境证据 {index}",
+                "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "source_artifact_id": f"diagnosis-{index}",
+            })
+        return {"run_id": run_id, "repository": "example/workspace", "commit": "c" * 40,
+                "candidates": candidates}
+
+    def test_writeback_intent_is_not_a_revisable_phase_or_stop_run(self):
+        from approval_ledger import revise_supported
+
+        for action in ("KNOWLEDGE_WRITEBACK", "KNOWLEDGE_WRITEBACK#retry-1"):
+            with self.subTest(action=action):
+                detail = gate_intent(action)
+                self.assertIn("把本次运行验证过的结论写回 workspace", detail["subject"])
+                self.assertIn("CR", detail["effect"])
+                self.assertIn("合入仍由人评审", detail["effect"])
+                self.assertIn("input_hash", detail["decision"])
+                self.assertIn("不改变 run 终态", detail["decision"])
+                self.assertNotIn("需修改", detail["decision"])
+                self.assertNotIn("停止run", detail["decision"])
+                self.assertFalse(revise_supported(action))
+
+    def test_writeback_context_pins_every_complete_candidate_without_driving(self):
+        orch = Orchestrator(self.root)
+        proposal = self._writeback_proposal()
+        bound = _hash(proposal)
+        key = f"workspace.writeback-material:run-1:{bound}"
+        orch.state.save_idempotency_result(key, proposal)
+        events = orch.state.events("run-1")
+        with patch.object(orch, "next", side_effect=AssertionError("must be read-only")), \
+                patch.object(orch.approvals, "request", side_effect=AssertionError("must not open approval")):
+            for action in ("KNOWLEDGE_WRITEBACK", "KNOWLEDGE_WRITEBACK#retry-1"):
+                detail = pinned_context(orch, "run-1", action, bound)
+                self.assertEqual(detail["material_status"], "PINNED")
+                self.assertEqual(detail["content_hash"], bound)
+                self.assertEqual(detail["_review_content"], {"proposal": proposal})
+                text = "\n".join(detail["summary"])
+                for item in proposal["candidates"]:
+                    for field in ("target", "title", "body", "reason"):
+                        self.assertIn(item[field], text)
+        self.assertEqual(orch.state.events("run-1"), events)
+        self.assertEqual(orch.state.pending_intents("run-1"), [])
+
+    def test_writeback_context_rejects_missing_foreign_or_tampered_material(self):
+        orch = Orchestrator(self.root)
+        proposal = self._writeback_proposal()
+        bound = _hash(proposal)
+        for mutation in ("missing", "foreign-run", "changed-body", "wrong-body-digest", "empty-candidates"):
+            with self.subTest(mutation=mutation):
+                candidate = json.loads(json.dumps(proposal))
+                expected_hash = bound
+                if mutation == "foreign-run":
+                    candidate["run_id"] = "another-run"
+                    expected_hash = _hash(candidate)
+                elif mutation == "changed-body":
+                    candidate["candidates"][1]["body"] += "!"
+                elif mutation == "wrong-body-digest":
+                    candidate["candidates"][0]["body_sha256"] = "0" * 64
+                    expected_hash = _hash(candidate)
+                elif mutation == "empty-candidates":
+                    candidate["candidates"] = []
+                    expected_hash = _hash(candidate)
+                with patch.object(orch.state, "idempotency_result", return_value=None if mutation == "missing" else candidate):
+                    detail = pinned_context(orch, "run-1", "KNOWLEDGE_WRITEBACK", expected_hash)
+                self.assertEqual(detail["material_status"], "MISSING")
+                self.assertNotIn("_review_content", detail)
+
+    def test_writeback_message_carries_complete_proposal_and_no_modify_or_stop_run_copy(self):
+        orch = Orchestrator(self.root)
+        proposal = self._writeback_proposal()
+        # Greater than the generic draft preview limit: still no candidate may be clipped.
+        proposal["candidates"][-1]["body"] += "末尾证据" * 4000
+        proposal["candidates"][-1]["body_sha256"] = hashlib.sha256(
+            proposal["candidates"][-1]["body"].encode()
+        ).hexdigest()
+        bound = _hash(proposal)
+        orch.state.save_idempotency_result(f"workspace.writeback-material:run-1:{bound}", proposal)
+        detail = pinned_context(orch, "run-1", "KNOWLEDGE_WRITEBACK", bound)
+        text = self._render("KNOWLEDGE_WRITEBACK", detail)
+        self.assertIn("审批正文（本次 input_hash 绑定的内容）", text)
+        for item in proposal["candidates"]:
+            for field in ("target", "title", "body", "reason"):
+                self.assertIn(item[field], text)
+        self.assertIn("停止写回请回复（不改变 run 终态）", text)
+        for wrong in ("需修改", "停止run", "停止 run 请回复", "正文超过消息篇幅上限"):
+            self.assertNotIn(wrong, text)
+
+    def test_writeback_approval_context_saves_full_packet_and_readable_preview(self):
+        _write_profile(self.root, PROFILE)
+        orch = Orchestrator(self.root)
+        run_id = _start(orch)["run_id"]
+        orch.state.transition(run_id, "RELEASE_SUCCESS", {})
+        proposal = self._writeback_proposal(run_id)
+        bound = _hash(proposal)
+        orch.state.save_idempotency_result(f"workspace.writeback-material:{run_id}:{bound}", proposal)
+        before = orch.state.events(run_id)
+        with patch.object(orch, "next", side_effect=AssertionError("must not advance")):
+            context = _approval_context(orch, run_id, action="KNOWLEDGE_WRITEBACK", input_hash=bound)
+        self.assertNotIn("error", context)
+        members = sorted({email for values in PROFILE["approval_channels"]["role_members"].values()
+                          for email in values})
+        self.assertEqual(context["member_policy"], {"comate": members, "infoflow": members})
+        refs = context["evidence"]["gate"]["references"]
+        packet = next(Path(item["ref"]) for item in refs if item["label"].startswith("本次审批材料包"))
+        preview = next(Path(item["ref"]) for item in refs if item["label"].startswith("本次审批可读预览"))
+        self.assertEqual(json.loads(packet.read_text())["material"], {"proposal": proposal})
+        text = preview.read_text()
+        for item in proposal["candidates"]:
+            for field in ("target", "title", "body", "reason"):
+                self.assertIn(item[field], text)
+        self.assertEqual(orch.state.events(run_id), before)
+        self.assertEqual(orch.approvals.for_run(run_id), [])
+
+    def test_writeback_approval_context_has_no_legacy_fallback_for_missing_material(self):
+        _write_profile(self.root, PROFILE)
+        orch = Orchestrator(self.root)
+        run_id = _start(orch)["run_id"]
+        detail = _approval_context(orch, run_id, action="KNOWLEDGE_WRITEBACK", input_hash="b" * 64)
+        self.assertEqual(detail["error"]["reason_code"], "APPROVAL_MATERIAL_MISSING")
+        self.assertFalse((self.root / "approval-materials").exists())
 
     def test_every_gate_including_retry_has_review_focus_and_effect(self):
         for gate in [f"G{i}" for i in range(11)]:

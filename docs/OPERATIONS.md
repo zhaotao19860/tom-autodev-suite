@@ -251,3 +251,52 @@ python3 tom-autodev/scripts/cli.py --config-root /path/to/autodev-state status "
 读取归档使用 `cli.py artifact show ARTIFACT_ID` 的完整性校验入口。需要查看全部事件可用 `status RUN --json`；CLI 没有 `trace` 子命令。
 
 发生过一次的现象应先核对版本、触发条件和反例；只有适用的结论才进入可复用知识。机械故障优先补脚本校验和回归，模型决策变化使用 [行为场景](../evals/README.md) 比较。
+
+### 验证过的结论写回 workspace（阶段 3）
+
+这是发布成功后的**显式、可选**知识维护动作，不由 worker、`process` 或 `continue` 自动执行。前置条件是 run 为 `RELEASE_SUCCESS`，且 INTAKE 含 `knowledge_workspace = {repository, path, commit}`；不允许临时指定另一个 workspace 或回退到当前 HEAD。
+
+```bash
+# 1. 只读 plan：检查前置条件，显示 proposal 与 input_hash
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID
+
+# 2. 请求 KNOWLEDGE_WRITEBACK 审批；只投递卡片，不写 workspace、不推送
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --request
+
+# 3. 收到同意后，使用本次返回的 approval_id（A）和 input_hash（H）执行
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --approval-id A --input-hash H
+```
+
+候选来自该 run **所有** G6 已 `APPROVE` 且审批 `input_hash` 与诊断产物绑定一致的 `diagnosis.knowledge_candidates`，不是只取最后一次诊断，也不包含未批准草案。只有有证据、跨 run 可复用的环境/流程类结论才应入候选；业务代码结论不写。每项的 `target/title/body/reason` 均为非空字符串；`target` 必须匹配 `^docs/[a-z0-9-]+(/[a-z0-9._-]+)*\.md$`，不得含 `..`，文件名不得为 `index.md`、`template.md`、`README.md`。
+
+plan 按 `(target, body)` 去重，并用 `git show <pin commit>:<target>` 剔除已含完全相同正文的项。返回的 `proposal = {run_id, repository, commit, candidates}` 中，每项候选含 `target/title/body/reason/body_sha256/source_artifact_id`；`input_hash` 是**整个提案**的规范 JSON SHA-256，改动任一候选的任一字段都必须重新审批。plan 只读；无候选时 `--request` 也不开审批。
+
+| reason_code | 含义与处置 |
+|---|---|
+| `WRITEBACK_RUN_NOT_RELEASED` | run 尚未发布成功，拒绝写回；不据此更改 run 状态 |
+| `WRITEBACK_NO_WORKSPACE` | INTAKE 没有 workspace pin，拒绝写回；不按当前配置补造旧 run 的 pin |
+| `WRITEBACK_READY` | 有待写候选，可审阅提案后加 `--request` |
+| `WRITEBACK_NOTHING` | 无剩余候选，正常结束，不开审批、不推送 |
+| `WRITEBACK_PUSHED` | 已创建知识 CR 并写入回执，仍待人评审合入 |
+| `WRITEBACK_REPLAY` | 已有确认回执的幂等重放，不重复推送 |
+
+`WRITEBACK_READY`、`WRITEBACK_NOTHING`、`WRITEBACK_PUSHED`、`WRITEBACK_REPLAY` 为成功退出码；拒绝与未确认结果不能当成功。
+
+审批成员取项目 profile，沿用 `request_infoflow_approval` 的如流投递。审批的 pinned context 展示每个候选的目标文件、标题和完整正文。**审批对象：把本次运行验证过的结论写回 workspace；批准后：在 workspace 提一个 CR，合入仍由人评审；停止：只放弃写回。** `KNOWLEDGE_WRITEBACK` 不是 G 门，不进入 `workflow_spec` 门表、策略哈希或可修订门集合；卡片只有“同意 / 停止”，不支持“需修改”。`REJECT` 不停止或重开 run，保留原 `RELEASE_SUCCESS`。 升级后若本机 gateway 已在运行，需由宿主重启以加载新的“停止”按钮标签与不可修订展示；不要复用旧进程展示来判断本轮实现。本次本地测试不操作真实 gateway。
+
+执行入口重新 plan，要求输入哈希未变，审批状态为 `APPROVE`，且审批动作、run 与输入哈希全部匹配；任何一项不符都不写文件或推送。执行只在 pin 的仓库 `path` 上管理临时 worktree：
+
+- 从 pin commit 建 `tom-autodev/<run_id 前 12 位>` 分支，不切换用户原 checkout，保留其分支与未提交内容。
+- 新文件写 `# <title>` 加正文；已有文件在末尾追加 `## <title>` 与正文。只有新文件才在所属分类 `index.md` 的 Knowledge Map 追加一条链接。
+- 根 `CHANGELOG.md` 若存在，在顶部补当天条目；提交首行为 `<卡片ID> docs: tom-autodev 运行 <run_id 前 12 位> 写回知识`，正文列出候选，末尾带内容哈希生成的 `Change-Id: I<40 位 hex>`，不依赖 commit-msg hook。
+- 通过 iCode `push_cr --repo-path <临时 worktree> --branch master` 提 CR，不自动合入；完成或异常后清理临时 worktree。 为兼容 CLI 的 `.git` 目录检查，仅在临时 worktree 内将 gitfile 临时替换为指向其专属 gitdir 的目录链接，核对 HEAD、父 commit、仓库与 push URLs 不变；结束先恢复 gitfile，再移除 worktree，不修改公共 Git 配置。
+
+**结果未知时的恢复**：写入通过 `state.claim_intent(run_id, "workspace.writeback", "workspace.writeback:<run_id>:<input_hash>", payload)` 去重，成功将 CR URL 写入 receipt。超时、丢失响应或非零退出默认 `UNKNOWN`；只有现有 `_push_refused(output, _single_push_target(repo))` 为真，才可认定拒绝并结束本次尝试。尤其不能把多推送地址的一条 Gerrit 拒绝当成整体未落地；单推送地址的明确 Gerrit 拒绝才可关闭尝试。
+
+`UNKNOWN` 后再次执行第 3 条命令只读核对，不重新推送。控制器按同一确定性 Change-Id 查询：
+
+```bash
+icode api get_repo_reviews --repo REPOSITORY --status NEW -o json
+```
+
+查到匹配 CR 才确认并补回执；未确认时保持未决，不因列表为空而重新推送。不要删除 intent/receipt、手改 pin 或换哈希规避未知结果。阶段 3 的实现与回归合同见[集成设计](WORKSPACE_INTEGRATION_DESIGN.md#阶段-3验证过的结论写回-workspace)。

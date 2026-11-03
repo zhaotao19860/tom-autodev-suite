@@ -1,6 +1,6 @@
 # tom-autodev 接入 bgw-workspace 设计
 
-状态：阶段 1、阶段 2 已完成（2026-11-02；阶段 1 为 bgw-workspace CR 123095131）；阶段 3 实施中。依据 [BGW_WORKSPACE_MIGRATION_PLAN.md](BGW_WORKSPACE_MIGRATION_PLAN.md) 第 6 节，负责人按全部建议执行：workspace 为准、INTAKE 钉 commit、公开套件删主机人名、repos 先写 3 个仓库、阶段 1 的 CR 由负责人评审合入。
+状态：三个阶段均已实现（2026-11-02；阶段 1 为 bgw-workspace CR 123095131）。依据 [BGW_WORKSPACE_MIGRATION_PLAN.md](BGW_WORKSPACE_MIGRATION_PLAN.md) 第 6 节，负责人按全部建议执行：workspace 为准、INTAKE 钉 commit、公开套件删主机人名、repos 先写 3 个仓库、阶段 1 的 CR 由负责人评审合入。
 
 分工：本文档由 Claude 写；代码与 workspace 文档由 Codex 按本文档实现；Claude 评审、跑全量测试后合入。每个阶段一个提交。
 
@@ -80,23 +80,100 @@
 
 ### 3.1 候选
 
-`DIAGNOSE` 草案 schema 增加可选字段 `knowledge_candidates: [{"target": "docs/environment/<file>.md", "title", "body", "reason"}]`（`target` 必须在 `docs/` 下、以 `.md` 结尾，不得含 `..`）。tom-diagnose SKILL 说明：只有环境/流程类、可复用的结论才写候选。
+`diagnosis.schema.json` 增加可选数组 `knowledge_candidates`，每项为 `{target, title, body, reason}`，四个字段均为非空字符串。`schema_validator` 在 diagnosis 语义检查中校验目标路径：
 
-### 3.2 何时写回
+- 必须匹配 `^docs/[a-z0-9-]+(/[a-z0-9._-]+)*\.md$`，不得含 `..`。
+- 文件名不得为 `index.md`、`template.md`、`README.md`；索引由写回脚本维护，不作为候选目标。
+- 越界路径、空字段等不合法候选拒绝摄取，不到写入时才处理。
 
-run 到 `RELEASE_SUCCESS` 后，worker 汇总该 run 所有已批准 G6 诊断里的候选（去重、过滤掉 workspace pin 中已存在且内容相同的），生成一个写回提案，开审批动作 **`KNOWLEDGE_WRITEBACK`**（不是 G 门：不进 `workflow_spec` 的门表与策略哈希，已钉住的 run 不漂移；做法同已删除的 `PROFILE_REPIN` 动作）：
+`tom-diagnose/SKILL.md` 与 `references/phase-contract.md` 约定：只有**环境/流程类、有证据、跨 run 可复用**的结论才写候选，业务代码结论不写；`reason` 说明结论依据与复用理由。
 
-- 输入哈希 = 提案（`workspace commit` + 各候选的 `target`/内容 sha256）的规范哈希。
-- 审批卡显示每个候选的目标文件与正文；按钮只有同意/停止（不可需修改）；停止只放弃写回，不改 run 的终态。
-- 没有候选时不开审批。
+### 3.2 只读提案与申请审批
 
-### 3.3 写入
+模块 `tom-autodev/scripts/knowledge_writeback.py` 提供 `plan` → `request` → `execute` 三段入口；写回由**显式 CLI** 发起，不是 worker 的终态自动动作。以下命令从套件根目录执行：
 
-`KNOWLEDGE_WRITEBACK` 批准后，控制器在 workspace 仓库新建分支 `tom-autodev/<run_id 前 12 位>`，基于钉住的 commit，写入候选（新文件，或在已有文件末尾追加 `## <title>` 一节），更新所在分类 `index.md`，commit（Change-Id 由 commit-msg hook 生成），用 iCode CLI `push_cr` 推到 `master`。走现有 icode 外部写入的 intent/receipt 与未知结果处理（与业务 CR 同一套），CR 由人评审合入。
+```bash
+# plan：只读，不开审批、不写 workspace
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID
+# request：只投递审批，不执行写回
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --request
+# execute：只有同意该提案后才执行；A/H 为本次审批 ID 与输入哈希
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --approval-id A --input-hash H
+```
+
+`plan(orchestrator, run_id)`：
+
+1. run 必须为 `RELEASE_SUCCESS`，否则返回 `WRITEBACK_RUN_NOT_RELEASED`；INTAKE 必须有 `knowledge_workspace` pin，否则返回 `WRITEBACK_NO_WORKSPACE`。不补 pin，不使用当前 HEAD 替代 pin commit。
+2. 汇总该 run **所有** G6 已 `APPROVE` 且审批 `input_hash` 与诊断产物绑定一致的产物中的 `knowledge_candidates`；排除未批准或绑定不符的产物。
+3. 按 `(target, body)` 去重；在 pin commit 上用 `git show <commit>:<target>` 检查，剔除目标文件中已包含完全相同 `body` 的候选，不以标题相同或语义近似代替。
+4. 没有剩余候选返回 `{ok: true, reason_code: "WRITEBACK_NOTHING"}`，request 也不开审批。有候选返回 `{ok: true, reason_code: "WRITEBACK_READY", proposal, input_hash}`，其中 proposal 结构为：
+
+```json
+{
+  "run_id": "...",
+  "repository": "...",
+  "commit": "...",
+  "candidates": [
+    {
+      "target": "docs/environment/example.md",
+      "title": "...",
+      "body": "...",
+      "reason": "...",
+      "body_sha256": "...",
+      "source_artifact_id": "..."
+    }
+  ]
+}
+```
+
+`body_sha256` 是正文哈希，`input_hash` 是**整个 proposal 的规范 JSON SHA-256**，包括 run、仓库、pin commit 及各候选全部字段；任何候选内容或来源变化都不能复用旧批准。
+
+`ACTION = "KNOWLEDGE_WRITEBACK"` 是审批动作，**不是 G 门**：不进入 `workflow_spec` 门表与策略哈希，不加入 `approval_ledger._REVISABLE_GATES`，不因阶段 3 改变旧 run 的 workflow pin。`request(orchestrator, run_id, ...)` 使用 plan 的输入哈希、profile 成员及现有 `request_infoflow_approval` 投递；`approval_summary` 的 pinned context 展示每个候选的目标文件、标题与正文。审批卡只有**同意 / 停止**，不支持“需修改”。中文合同：
+
+- 审批对象：把本次运行验证过的结论写回 workspace。
+- 批准后：在 workspace 提一个 CR，合入仍由人评审。
+- 停止：只放弃写回；`REJECT` 不改变 run 的 `RELEASE_SUCCESS` 终态。
+
+### 3.3 批准后写入与恢复
+
+`execute(orchestrator, run_id, approval_id, input_hash)` 重新 plan；提案哈希必须一致，审批必须为 `APPROVE`、动作为 `KNOWLEDGE_WRITEBACK`、run 与输入哈希一致，否则拒绝，不能写文件或推送。
+
+在 pin 的 workspace 仓库 `path` 上：
+
+1. 以 pin commit 为基，使用 `git worktree add` 建立临时 worktree 与分支 `tom-autodev/<run_id 前 12 位>`。不切换或改写用户当前 checkout，保留其分支与工作区内容，结束时清理临时 worktree。
+2. 对每个候选：目标不存在则新建，写 `# <title>` 加正文；已存在则在末尾追加 `## <title>` 一节。新文件在所属分类目录 `index.md` 的 Knowledge Map 中追加一条链接，已有文件追加小节不重复加链接。
+3. workspace 根 `CHANGELOG.md` 若存在，在顶部追加当天条目；不要求原仓库必须有该文件。提交首行如下，正文列出各候选，末尾保留确定性 Change-Id：
+
+```text
+<卡片ID> docs: tom-autodev 运行 <run_id 前 12 位> 写回知识
+
+<逐项列出候选>
+
+Change-Id: I<40 位 hex>
+```
+
+Change-Id 用内容哈希生成以保证幂等，**不依赖 commit-msg hook**。外部写入用 `state.claim_intent(run_id, "workspace.writeback", "workspace.writeback:<run_id>:<input_hash>", payload)` 记录，已确认 receipt 可幂等重放。
+
+通过 iCode CLI `push_cr --repo-path <临时 worktree> --branch master` 提 CR；不使用真实平台作为本地测试依赖，也不直接合入。 为兼容现有 CLI 的 `.git` 目录检查，推送时仅将临时 worktree 的 gitfile 替换为指向其专属 gitdir 的目录链接；核对 HEAD、父 commit、common gitdir 与全部 push URLs 不变，结束后恢复 gitfile 再清理，不改用户仓库配置。成功从输出解析 CR URL 并写 receipt，返回 `WRITEBACK_PUSHED`；已有确认回执返回 `WRITEBACK_REPLAY`。
+
+推送判定复用 `clients/icode_runtime.py` 的规则：非零退出默认 `UNKNOWN`，仅当 `_push_refused(output, _single_push_target(repo))` 为真时才能认定拒绝、结束本次尝试。超时、失联或多推送地址下无法证明整体拒绝，均不能当未落地重推；单推送地址的明确 Gerrit 拒绝则结束该尝试。
+
+`UNKNOWN` 后再次 execute **只读核对，不重新推送**：按同一确定性 Change-Id 用 `icode api get_repo_reviews --repo <repository> --status NEW -o json` 查找，确认后补回执；查询未确认则保持未决，不能因列表为空便重推。
+
+CLI 的 `WRITEBACK_READY`、`WRITEBACK_NOTHING`、`WRITEBACK_PUSHED`、`WRITEBACK_REPLAY` 为成功退出码；拒绝或未知结果不冒充成功。审批停止仅放弃写回，不触发 run 状态迁移。
 
 ### 3.4 回归
 
-候选 schema 校验；无候选不开审批；审批哈希覆盖每个候选；未批准不写；推送未知结果只读核对；路径越界被拒。
+测试入口：`tom-autodev/scripts/tests/test_knowledge_writeback.py`。使用临时 Git 仓库作 workspace，注入假 transport 代替 iCode CLI，不调用真实平台、不运行业务项目编译/测试。覆盖：
+
+- 候选 schema/语义校验：越界路径、`index.md`、其他保留文件名与空字段被拒。
+- 非 `RELEASE_SUCCESS` 或无 workspace pin 被拒；无候选不开审批；pin 中已有完全相同正文被剔除。
+- 提案哈希覆盖每个候选，改一个字节哈希即变；未批准、审批动作/run 不符或哈希不一致均不写。
+- 批准后新文件与已有文件追加两种写法；新文件 Knowledge Map 与已有根 CHANGELOG 更新；提交带卡片号与确定性 Change-Id。
+- 用户原 checkout 的分支与工作区不变；临时 worktree 清理。
+- 推送超时 UNKNOWN 后重跑只查询、不重推；单推送地址的明确 Gerrit 拒绝结束尝试；`REJECT` 不改 run 终态。
+
+集成实现完成后，在 `tom-autodev/scripts/tests` 下运行 `python3 -m unittest discover -q` 记录实际全量结果；文档状态不替代测试或真实平台验收证据。
 
 ## 不在本次范围
 

@@ -109,7 +109,7 @@ const modules = {
   },
 };
 const module = new vm.SourceTextModule(SOURCE + `
-export { sendApprovalCard, sendChoiceCard, answerCard, journalInteraction, live, renderCard };
+export { sendApprovalCard, sendChoiceCard, answerCard, journalInteraction, acknowledgeFeedback, live, renderCard };
 `, { context });
 await module.link(async (name) => {
   assert.ok(modules[name], 'unexpected import: ' + name);
@@ -195,6 +195,67 @@ assert.equal(buttons.some(b => b.event_key.startsWith('revise.')), false);
 // An onlooker tap must not resurrect a 需修改 button on refresh either.
 await api.answerCard({ cardId: card.card_id, cardInstanceId: 'i' }, 'approve.' + request.approval_id, 'outsider');
 assert.equal(rendered.at(-1).card.buttons.some(b => b.event_key.startsWith('revise.')), false);
+""")
+
+    def test_writeback_stop_label_is_forwarded_and_preserved_on_repeated_refresh(self):
+        self._run(r"""
+const reply = await post('/card/approval', { ...request, stop_label: '停止', revisable: false });
+assert.equal(reply.status, 200);
+const cardId = reply.payload.card_id;
+for (let i = 0; i < 3; i++) {
+  assert.deepEqual(Array.from(rendered.at(-1).card.buttons, b => b.text), ['同意', '停止']);
+  await api.answerCard({ cardId }, 'reject.' + request.approval_id, 'outsider');
+}
+assert.deepEqual(Array.from(rendered.at(-1).card.buttons, b => b.text), ['同意', '停止']);
+await api.answerCard({ cardId }, 'reject.' + request.approval_id, 'owner');
+assert.equal(rendered.at(-1).question, '已由 owner 处理：停止');
+assert.equal(rendered.at(-1).card.buttons.length, 0);
+assert.match(rendered.at(-1).card.components.at(-1).text, /已选择「停止」/);
+""")
+
+    def test_writeback_refresh_after_restart_uses_echoed_stop_semantics(self):
+        self._run(r"""
+const copy = '按钮含义：同意=在 workspace 提一个 CR，合入仍由人评审；停止=只放弃写回，不改变 run 终态。';
+const initial = await api.sendApprovalCard({ ...request, lines: [copy], revisable: false, stop_label: '停止' });
+api.live.clear();
+await api.answerCard({
+  cardId: initial.card_id, receiver: { type: 'user', id: 'owner' },
+  caller: { requestId: request.approval_id },
+  submit: { components: [{ componentId: 'line-0', type: 'text', label: copy }] },
+}, 'reject.' + request.approval_id, 'owner');
+assert.deepEqual(Array.from(rendered.at(-1).card.buttons, b => b.text), ['同意', '停止']);
+assert.match(rendered.at(-1).card.components.at(-1).text, /点击待校验「停止」/);
+""")
+
+    def test_writeback_reminder_refresh_after_restart_without_echo_keeps_only_two_buttons(self):
+        self._run(r"""
+const initial = await api.sendApprovalCard({
+  ...request, lines: [], presentation: 'nudge-1', revisable: false, stop_label: '停止',
+});
+api.live.clear();
+for (let i = 0; i < 2; i++) {
+  await api.answerCard({
+    cardId: initial.card_id, receiver: { type: 'user', id: 'owner' },
+    caller: { requestId: request.approval_id },
+  }, 'reject.' + request.approval_id, 'owner');
+  assert.deepEqual(Array.from(rendered.at(-1).card.buttons, b => b.text), ['同意', '停止']);
+  assert.match(rendered.at(-1).card.components.at(-1).text, /点击待校验「停止」/);
+}
+""")
+
+    def test_writeback_card_never_claims_arbitrary_message_is_modification_feedback(self):
+        self._run(r"""
+await api.sendApprovalCard({ ...request, target_type: 'group', target_id: '123', revisable: false, stop_label: '停止' });
+const before = rendered.length;
+await api.acknowledgeFeedback({ group_id: '123', sender: 'owner', text: '这条消息不是修改意见' });
+assert.equal(rendered.length, before);
+""")
+
+    def test_approval_endpoint_rejects_unsupported_stop_label_without_sending(self):
+        self._run(r"""
+const reply = await post('/card/approval', { ...request, stop_label: '强制发布' });
+assert.equal(reply.status, 400);
+assert.equal(rendered.length, 0);
 """)
 
     def test_approver_click_locks_card_as_selected_and_keeps_seven_materials(self):

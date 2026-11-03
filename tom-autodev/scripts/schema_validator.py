@@ -497,7 +497,40 @@ def _validate_finding_classifications(findings: list[Any]) -> list[SchemaIssue]:
     return issues
 
 
+def validate_knowledge_candidates(candidates: Any) -> list[SchemaIssue]:
+    """Validate raw diagnosis candidates for both ingestion and workspace writeback.
+
+    An empty list is valid; callers handle an absent optional field themselves.
+    Issue paths are rooted at ``knowledge_candidates``. Proposal metadata is not
+    part of these four-field candidate objects.
+    """
+    schema = load_named_schema("diagnosis")
+    issues: list[SchemaIssue] = []
+    candidate_schema = schema["properties"]["knowledge_candidates"]
+    _validate(candidates, candidate_schema, schema, "knowledge_candidates", issues)
+    if not isinstance(candidates, list):
+        return issues
+    target_pattern = candidate_schema["items"]["properties"]["target"]["pattern"]
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict):
+            continue
+        path = f"knowledge_candidates[{index}]"
+        for field in ("target", "title", "body", "reason"):
+            value = candidate.get(field)
+            if isinstance(value, str) and not value.strip():
+                issues.append(SchemaIssue(f"{path}.{field}", "missing"))
+        target = candidate.get("target")
+        if isinstance(target, str) and (
+            re.fullmatch(target_pattern, target) is None
+            or ".." in target
+            or target.rsplit("/", 1)[-1] in {"index.md", "template.md", "README.md"}
+        ):
+            issues.append(SchemaIssue(f"{path}.target", "invalid"))
+    return sorted(set(issues), key=lambda issue: (issue.path, issue.kind))
+
+
 def _validate_diagnosis(instance: dict[str, Any]) -> list[SchemaIssue]:
+    issues = validate_knowledge_candidates(instance["knowledge_candidates"]) if "knowledge_candidates" in instance else []
     # Environment/control-plane failures must not authorize a business repair.
     # The diagnosis schema has no environment-recovery route yet, so fail closed
     # instead of allowing CODE_ONLY (or a legacy SPEC fallback) to make a patch.
@@ -506,38 +539,38 @@ def _validate_diagnosis(instance: dict[str, Any]) -> list[SchemaIssue]:
     from repair_policy import ENVIRONMENT_FAILURE_CLASSES, ENVIRONMENT_FORBIDDEN_ROUTES
     if (instance.get("classification") in ENVIRONMENT_FAILURE_CLASSES
             and instance.get("route") in ENVIRONMENT_FORBIDDEN_ROUTES):
-        return [SchemaIssue("route", "inconsistent")]
+        return issues + [SchemaIssue("route", "inconsistent")]
     # route IPIPE = the environment cause was resolved outside the code (the failed stage
     # re-ran under G8); only an environment-class diagnosis may return to the pipeline.
     if instance.get("route") == "IPIPE" and instance.get("classification") not in ENVIRONMENT_FAILURE_CLASSES:
-        return [SchemaIssue("classification", "inconsistent")]
+        return issues + [SchemaIssue("classification", "inconsistent")]
     if instance.get("evidence_state") == "INSUFFICIENT":
         if instance.get("route") != "DIAGNOSIS_INCOMPLETE":
-            return [SchemaIssue("route", "inconsistent")]
+            return issues + [SchemaIssue("route", "inconsistent")]
         if any(instance.get(field) not in {None} for field in ("hypothesis", "repair_direction", "repair_diff_hash")):
-            return [SchemaIssue("evidence_state", "inconsistent")]
+            return issues + [SchemaIssue("evidence_state", "inconsistent")]
         if instance.get("repair_plan") != []:
-            return [SchemaIssue("repair_plan", "inconsistent")]
-        return []
+            return issues + [SchemaIssue("repair_plan", "inconsistent")]
+        return issues
     required = ("hypothesis", "repair_direction")
     if any(not isinstance(instance.get(field), str) or not instance[field] for field in required):
-        return [SchemaIssue("evidence_state", "inconsistent")]
+        return issues + [SchemaIssue("evidence_state", "inconsistent")]
     # G6 approves the diagnosis and repair direction, before PLAN/IMPLEMENT creates
     # the patch. An optional existing diff is evidence, never repair authorization;
     # the actual candidate remains hash-bound by IMPLEMENT and its fresh G5.
     if instance.get("route") != "REPAIR" and instance.get("repair_diff_hash") is not None:
-        return [SchemaIssue("repair_diff_hash", "inconsistent")]
+        return issues + [SchemaIssue("repair_diff_hash", "inconsistent")]
     # A changed requirement is amended where it was decided. Repairing it at SPEC/PLAN
     # leaves the approved decision log saying the opposite, and the next regeneration
     # restores it.
     requirement_changed = instance.get("classification") == "USER_REQUIREMENT_CHANGED"
     if requirement_changed and instance.get("route") not in {"GRILL", "STOPPED"}:
-        return [SchemaIssue("route", "inconsistent")]
+        return issues + [SchemaIssue("route", "inconsistent")]
     if instance.get("route") == "GRILL" and not requirement_changed:
-        return [SchemaIssue("classification", "inconsistent")]
+        return issues + [SchemaIssue("classification", "inconsistent")]
     if not instance.get("repair_plan"):
-        return [SchemaIssue("repair_plan", "missing")]
-    return []
+        return issues + [SchemaIssue("repair_plan", "missing")]
+    return issues
 
 
 def _validate_ipipe(instance: dict[str, Any]) -> list[SchemaIssue]:

@@ -17,8 +17,13 @@ from typing import Any
 
 import workflow_spec
 
-# Subject and effect per gate, from the single workflow spec (workflow_spec.py).
-_GATES: dict[str, tuple[str, str]] = workflow_spec.GATE_LABELS
+# G-gate subjects remain owned by workflow_spec; approval-only actions must not
+# mutate that mapping or the policy fingerprint already pinned by existing runs.
+_GATES: dict[str, tuple[str, str]] = dict(workflow_spec.GATE_LABELS)
+_GATES["KNOWLEDGE_WRITEBACK"] = (
+    "把本次运行验证过的结论写回 workspace",
+    "在 workspace 提一个 CR，合入仍由人评审；停止只放弃写回，不改变 run 终态",
+)
 
 
 # Presentation only: do not change the pinned workflow fingerprint for copy edits.
@@ -45,6 +50,10 @@ _REVIEW = {
            "重新构建为 rebuild binding 与下载探测状态"),
     "G9": ("全部必需模块的 build、版本、环境、发布规则和发布证据一致",
            "冻结 pipeline plan 与本次 action 钉住的全部 iPipe 产物；旧 build 不可替代"),
+    "KNOWLEDGE_WRITEBACK": (
+        "逐项核对目标文件、标题、完整正文和写回理由；仅限本次运行验证过的可复用知识",
+        "固定 workspace 仓库与 commit、全部候选及其来源诊断产物；合入仍由人评审",
+    ),
 }
 _EFFECTS = {
     "G0": "批准当前需求/协作/路由绑定；控制器随后建群并进入 GRILL，不授权代码提交或发布",
@@ -55,6 +64,7 @@ _EFFECTS = {
     "G7": "仅执行本次 hash 绑定的 iCode 提交或单模块 iPipe 触发；不是两种操作的通用授权",
     "G8": "仅重跑或继续本次 build/stage 和参数绑定的阶段，或对同一 CR 版本重新构建一次；不批准新代码或发布",
     "G9": "只读核验平台发布并记录匹配证据；全部模块通过才进入 RELEASE_SUCCESS，未发布则等待，不强制发布",
+    "KNOWLEDGE_WRITEBACK": "在 workspace 提一个 CR，合入仍由人评审；停止只放弃写回，不改变 run 终态",
 }
 
 
@@ -63,10 +73,12 @@ def gate_intent(action: Any) -> dict[str, Any]:
     name = gate_of(str(action))
     subject, effect = _GATES.get(name, ("", ""))
     focus, reads = _REVIEW.get(name, ("核对本次动作与绑定", "缺少已知审批合同，请先补齐"))
-    revisable = name in workflow_spec.REVISABLE_GATES
     return {"subject": subject, "effect": _EFFECTS.get(name, effect),
             "checklist": [focus, reads],
             "decision": (
+                "同意仅授权本次 input_hash 绑定的 workspace 写回提案；内容变化须重新审批。"
+                "批准后在 workspace 提一个 CR，合入仍由人评审；停止只放弃本次写回，不改变 run 终态。"
+                if name == "KNOWLEDGE_WRITEBACK" else
                 ("Agent 结构化选择已经完成；本卡只审批已生成的 Decision Log，不替用户答题。"
                  "本次授权仍只绑定 input_hash，内容变化须重新审批。" if name == "G1" else
                  "同意仅授权本次 input_hash；内容变化须重新审批，审批本身不推进阶段。")
@@ -121,6 +133,65 @@ def _missing() -> dict[str, Any]:
         "summary": ["未取得与本次 hash 匹配的内容；请先补齐材料，不要仅凭标题批准。"],
         "references": [],
         "material_status": "MISSING",
+    }
+
+
+def knowledge_writeback_lines(proposal: dict[str, Any]) -> list[str]:
+    """The complete pinned proposal, shared by chat and the local readable preview."""
+    lines = [
+        "## workspace 知识写回提案", "",
+        f"- 仓库：`{proposal['repository']}`",
+        f"- 基准提交：`{proposal['commit']}`",
+    ]
+    for index, candidate in enumerate(proposal["candidates"], 1):
+        lines += [
+            "", f"### 候选 {index}：{candidate['title']}", "",
+            f"- 目标文件：`{candidate['target']}`",
+            f"- 标题：{candidate['title']}",
+            f"- 写回理由：{candidate['reason']}",
+            f"- 来源诊断产物：`{candidate['source_artifact_id']}`",
+            f"- 正文 SHA-256：`{candidate['body_sha256']}`",
+            "", "#### 正文", "", candidate["body"],
+        ]
+    return lines
+
+
+def _knowledge_writeback_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[str, Any]:
+    proposal = orchestrator.state.idempotency_result(
+        f"workspace.writeback-material:{run_id}:{input_hash}"
+    )
+    if (
+        not isinstance(proposal, dict)
+        or proposal.get("run_id") != run_id
+        or _hash(proposal) != input_hash
+        or any(not isinstance(proposal.get(key), str) or not proposal[key].strip()
+               for key in ("repository", "commit"))
+    ):
+        return _missing()
+    candidates = proposal.get("candidates")
+    fields = ("target", "title", "body", "reason", "body_sha256", "source_artifact_id")
+    if not isinstance(candidates, list) or not candidates or any(
+        not isinstance(candidate, dict)
+        or any(not isinstance(candidate.get(key), str) or not candidate[key].strip()
+               for key in fields)
+        or hashlib.sha256(candidate["body"].encode("utf-8")).hexdigest() != candidate["body_sha256"]
+        for candidate in candidates
+    ):
+        return _missing()
+    return {
+        "summary": [
+            f"workspace 仓库 {proposal['repository']}，基准提交 {proposal['commit']}",
+            *(f"目标文件 {item['target']}\n标题 {item['title']}\n正文\n{item['body']}\n理由 {item['reason']}"
+              for item in candidates),
+        ],
+        "references": [
+            {"label": "workspace 仓库", "ref": proposal["repository"]},
+            {"label": "固定 workspace commit", "ref": proposal["commit"]},
+            *({"label": "来源诊断产物", "ref": item["source_artifact_id"]} for item in candidates),
+        ],
+        "content_hash": input_hash,
+        "material_status": "PINNED",
+        "_review_content": {"proposal": proposal},
     }
 
 
@@ -291,6 +362,9 @@ def pinned_context(orchestrator: Any, run_id: str, gate_name: str, input_hash: s
 
     missing = _missing()
     try:
+        from approval_ledger import gate_of
+        if gate_of(gate_name) == "KNOWLEDGE_WRITEBACK":
+            return _knowledge_writeback_context(orchestrator, run_id, input_hash)
         if gate_name == "G8":
             material = orchestrator.state.idempotency_result(
                 f"ipipe.g8-material:{run_id}:{input_hash}"

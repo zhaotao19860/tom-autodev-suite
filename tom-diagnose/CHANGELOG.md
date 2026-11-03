@@ -4,6 +4,7 @@
 
 ## 2026-11-02
 
+- DIAGNOSE 草案增加可选 `knowledge_candidates`：只收录有证据、跨 run 可复用的环境/流程结论，不收录业务代码结论；明确四字段、受限文档路径与索引/模板保留文件名校验，候选需在发布成功后另经 `KNOWLEDGE_WRITEBACK` 审批生成 CR。
 - action 提供 `knowledge_workspace` 时，先用其 `show` 命令读取钉住版本的团队知识；同名内容优先于项目 skill，钉住 revision 的业务源码仍是最终事实。
 
 ## 2026-10-08

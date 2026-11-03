@@ -420,14 +420,17 @@ function targetCardKey(targetType, targetId) {
     .slice(0, 16)
 }
 
-function approvalCardId(approvalId, targetType, targetId, presentation) {
+function approvalCardId(approvalId, targetType, targetId, presentation, stopLabel) {
   // The same approval may be delivered to a group and to several private
   // reviewers. Card identity is global on the platform, so the recipient must
   // participate in the identity or one target overwrites another target.
   // A reminder re-posts the buttons under its own message; re-rendering the
   // original id would only refresh the bubble further up the chat.
   const base = `approval-${approvalId}-${targetCardKey(targetType, targetId)}`
-  return presentation ? `${base}-${presentation}` : base
+  const cardId = presentation ? `${base}-${presentation}` : base
+  // The gateway may restart without any echoed material. Keep optional-operation
+  // stop semantics in the identity too, so refresh cannot resurrect 需修改.
+  return stopLabel === '停止' ? `${cardId}-writeback` : cardId
 }
 
 function parseDecision(eventKey) {
@@ -463,7 +466,7 @@ async function interactiveCards() {
 async function sendApprovalCard(request) {
   return await renderCard({
     card_id: approvalCardId(
-      request.approval_id, request.target_type, request.target_id, request.presentation,
+      request.approval_id, request.target_type, request.target_id, request.presentation, request.stop_label,
     ),
     request_id: request.approval_id,
     target_type: request.target_type,
@@ -476,19 +479,20 @@ async function sendApprovalCard(request) {
     approvers: request.approvers,
     // Reserve one component for the pending-validation status after a tap.
     lines: request.lines.slice(0, 7),
-    buttons: approvalButtons(request.approval_id, request.revisable !== false),
+    buttons: approvalButtons(request.approval_id, request.revisable !== false, request.stop_label),
     revisable: request.revisable !== false,
+    stop_label: request.stop_label,
   })
 }
 
 // A 需修改 button only on producer gates (G1–G6); other gates (migration, change
 // request, profile repin, submit/pipeline/release) have nothing to redo, so offering
 // it would resolve the gate into an unusable REVISE.
-function approvalButtons(approvalId, revisable) {
+function approvalButtons(approvalId, revisable, stopLabel = '停止run') {
   return [
     { eventKey: buttonEventKey('approve', approvalId), text: '同意' },
     ...(revisable ? [{ eventKey: buttonEventKey('revise', approvalId), text: '需修改' }] : []),
-    { eventKey: buttonEventKey('reject', approvalId), text: '停止run' },
+    { eventKey: buttonEventKey('reject', approvalId), text: stopLabel },
   ]
 }
 
@@ -570,6 +574,7 @@ async function renderCard(request) {
       labels: Object.fromEntries(request.buttons.map((button) => [button.eventKey, button.text])),
       approvers: Array.isArray(request.approvers) ? [...request.approvers] : null,
       revisable: request.revisable !== false,
+      stop_label: request.stop_label || '停止run',
     })
   }
   return {
@@ -618,12 +623,20 @@ async function refreshAnsweredCard(cardId, data, eventKey, sender) {
         .filter(Boolean)
     : []
   const baseLines = known?.base_lines?.length ? known.base_lines : echoed
+  // A writeback stops only the optional operation, never the completed run.
+  // Retain that copy after onlooker taps; after a restart recover it from the
+  // echoed, previously delivered material rather than resurrecting 需修改.
+  const writeback = cardId.endsWith('-writeback') || baseLines.some((line) =>
+    readString(isRecord(line) ? line.text ?? line.label : line)
+      .includes('停止=只放弃写回，不改变 run 终态'))
+  const stopLabel = known?.stop_label || (writeback ? '停止' : '停止run')
+  const revisable = writeback ? false : known?.revisable !== false
   const event = readString(eventKey).trim()
   const parsed = parseDecision(event)
   const label = known?.labels?.[event]
     || (parsed?.text?.startsWith('APPROVE ') ? '同意'
       : parsed?.text?.startsWith('REVISE ') ? '需修改'
-        : parsed?.text?.startsWith('REJECT ') ? '停止run' : event)
+        : parsed?.text?.startsWith('REJECT ') ? stopLabel : event)
   // A group card is shared, so the tap may come from someone who cannot answer this
   // gate. Only an approver's tap may present the card as answered and drop the
   // buttons; anyone else's tap is recorded without taking the one-tap path away from
@@ -638,7 +651,7 @@ async function refreshAnsweredCard(cardId, data, eventKey, sender) {
   const refreshId = approvalIdOf(parsed, known, data)
   // Default to revisable when the card predates this field (restart), so an older
   // producer-gate card is not stripped of its 需修改 button on refresh.
-  const buttons = answered || !refreshId ? [] : approvalButtons(refreshId, known?.revisable !== false)
+  const buttons = answered || !refreshId ? [] : approvalButtons(refreshId, revisable, stopLabel)
   await renderCard({
     card_id: cardId,
     request_id: known?.request_id || readString(isRecord(data.caller) ? data.caller.requestId : ''),
@@ -647,6 +660,8 @@ async function refreshAnsweredCard(cardId, data, eventKey, sender) {
     target_id: targetId,
     title: known?.title || '',
     approvers: approvers === null ? undefined : [...approvers],
+    revisable,
+    stop_label: stopLabel,
     question: choice
       ? `已由 ${sender} 选择：${label}`
       : answered && label === '需修改'
@@ -724,6 +739,7 @@ async function acknowledgeFeedback(normalized) {
     cardId.startsWith('approval-')
     && known?.target_type === 'group'
     && readString(known?.target_id) === groupId
+    && known?.stop_label !== '停止'
     && Array.isArray(known?.approvers) && known.approvers.includes(sender))
   // Only an unambiguous single awaiting card is echoed; otherwise the Python watcher
   // still acknowledges per bound approval and nothing misleading is drawn.
@@ -741,7 +757,9 @@ async function acknowledgeFeedback(normalized) {
       title: known.title || '',
       approvers: Array.isArray(known.approvers) ? [...known.approvers] : undefined,
       question: `已收到 ${sender} 的修改意见，将按意见重做并重新发起本门（在 IDE 继续后生效）`,
-      buttons: approvalId ? approvalButtons(approvalId, known?.revisable !== false) : [],
+      revisable: known?.revisable !== false,
+      stop_label: known?.stop_label,
+      buttons: approvalId ? approvalButtons(approvalId, known?.revisable !== false, known?.stop_label) : [],
       lines: [...(known.base_lines || []).slice(0, 7), {
         componentId: 'click-status',
         type: 'text',
@@ -1069,16 +1087,18 @@ const server = createServer(async (req, res) => {
       const presentation = readString(body.presentation).trim()
       // Default true so an older caller that omits the field keeps the 需修改 button.
       const revisable = body.revisable !== false
+      const stopLabel = readString(body.stop_label).trim() || '停止run'
       if (
         !/^[0-9a-f]{32}$/.test(approvalId)
         || !['group', 'user'].includes(targetType)
         || !targetId
         || !title
         || (presentation && !/^[a-z0-9-]{1,32}$/.test(presentation))
+        || !['停止run', '停止'].includes(stopLabel)
       ) {
         sendJson(res, 400, {
           ok: false,
-          error: 'approval_id (32 hex), target_type (group|user), target_id and title are required; presentation must match [a-z0-9-]{1,32}',
+          error: 'approval_id (32 hex), target_type (group|user), target_id and title are required; presentation must match [a-z0-9-]{1,32}; stop_label must be 停止run or 停止',
         })
         return
       }
@@ -1092,6 +1112,7 @@ const server = createServer(async (req, res) => {
         approvers,
         presentation: presentation || undefined,
         revisable,
+        stop_label: stopLabel,
       })
       sendJson(res, 200, { ok: true, approval_id: approvalId, ...receipt })
       return

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -43,6 +44,80 @@ class CliOperationTests(unittest.TestCase):
             code = main(["--config-root", str(self.root), *arguments])
         return code, json.loads(output.getvalue())
 
+
+    def _writeback_module(self, **results):
+        return SimpleNamespace(**{
+            name: Mock(return_value=results.get(name, {"ok": True}))
+            for name in ("plan", "request", "execute")
+        })
+
+    def test_knowledge_writeback_defaults_to_read_only_plan(self):
+        for reason in ("WRITEBACK_READY", "WRITEBACK_NOTHING"):
+            with self.subTest(reason=reason):
+                result = {"ok": True, "reason_code": reason, "input_hash": "b" * 64}
+                module = self._writeback_module(plan=result)
+                with patch.dict(sys.modules, {"knowledge_writeback": module}):
+                    code, got = self._run("knowledge-writeback", self.run_id)
+                self.assertEqual((code, got), (0, result))
+                module.plan.assert_called_once_with(self.orchestrator, self.run_id)
+                module.request.assert_not_called()
+                module.execute.assert_not_called()
+
+    def test_knowledge_writeback_request_only_requests_approval(self):
+        result = {"ok": True, "approval_id": "a" * 32, "input_hash": "b" * 64}
+        module = self._writeback_module(request=result)
+        with patch.dict(sys.modules, {"knowledge_writeback": module}):
+            code, got = self._run("knowledge-writeback", self.run_id, "--request")
+        self.assertEqual((code, got), (0, result))
+        module.request.assert_called_once_with(self.orchestrator, self.run_id)
+        module.plan.assert_not_called()
+        module.execute.assert_not_called()
+
+    def test_knowledge_writeback_execute_passes_exact_approval_and_hash(self):
+        for reason in ("WRITEBACK_PUSHED", "WRITEBACK_REPLAY"):
+            with self.subTest(reason=reason):
+                result = {"ok": True, "reason_code": reason, "cr_url": "https://example.test/cr/1"}
+                module = self._writeback_module(execute=result)
+                with patch.dict(sys.modules, {"knowledge_writeback": module}):
+                    code, got = self._run(
+                        "knowledge-writeback", self.run_id,
+                        "--approval-id", "a" * 32, "--input-hash", "b" * 64,
+                    )
+                self.assertEqual((code, got), (0, result))
+                module.execute.assert_called_once_with(self.orchestrator, self.run_id, "a" * 32, "b" * 64)
+                module.plan.assert_not_called()
+                module.request.assert_not_called()
+
+    def test_knowledge_writeback_refuses_incomplete_execution_binding_before_dispatch(self):
+        for arguments in (("--approval-id", "a" * 32), ("--input-hash", "b" * 64),
+                          ("--approval-id", "", "--input-hash", "b" * 64)):
+            with self.subTest(arguments=arguments):
+                module = self._writeback_module()
+                with patch.dict(sys.modules, {"knowledge_writeback": module}):
+                    code, result = self._run("knowledge-writeback", self.run_id, *arguments)
+                self.assertEqual((code, result["reason_code"]), (1, "APPROVAL_REQUIRED"))
+                for name in ("plan", "request", "execute"):
+                    getattr(module, name).assert_not_called()
+
+    def test_knowledge_writeback_request_and_execution_are_mutually_exclusive(self):
+        for arguments in (("--approval-id", "a" * 32), ("--input-hash", "b" * 64),
+                          ("--approval-id", "a" * 32, "--input-hash", "b" * 64)):
+            with self.subTest(arguments=arguments):
+                module = self._writeback_module()
+                with patch.dict(sys.modules, {"knowledge_writeback": module}):
+                    code, result = self._run("knowledge-writeback", self.run_id, "--request", *arguments)
+                self.assertEqual((code, result["reason_code"]), (1, "WRITEBACK_ARGUMENT_CONFLICT"))
+                for name in ("plan", "request", "execute"):
+                    getattr(module, name).assert_not_called()
+
+    def test_knowledge_writeback_cli_success_codes_never_override_failure(self):
+        from orchestrator import _cli_exit_code
+
+        for reason in ("WRITEBACK_READY", "WRITEBACK_NOTHING", "WRITEBACK_PUSHED", "WRITEBACK_REPLAY"):
+            with self.subTest(reason=reason):
+                self.assertEqual(_cli_exit_code({"ok": True, "reason_code": reason}), 0)
+                self.assertEqual(_cli_exit_code({"ok": False, "reason_code": reason}), 1)
+        self.assertEqual(_cli_exit_code({"ok": False, "reason_code": "WRITEBACK_UNKNOWN"}), 1)
 
     def test_drive_command_delegates_to_agent_bridge_and_accepts_card_target(self):
         result = {"ok": True, "reason_code": "PARKED", "parked": "PRODUCER_WAIT"}

@@ -25,7 +25,7 @@ Register a new project or language once before this skill can process its requir
 
 A profile may include at most one `knowledge_sources` entry with `provider: workspace`, a `repository` identity and a local Git checkout root `path`; KU remains required. Set `workspace_knowledge_path` in wizard answers and confirm it in `confirmed_inputs` to enable the BGW template's optional source, or omit it to remove the placeholder source without changing existing behavior.
 
-INTAKE pins the workspace's current HEAD in `knowledge_workspace` and binds it into G0 under `intake_hash_version: v6`, including any requirement diff; runs without this source retain their existing versions and hashes. Producer actions and `context` expose the repository, commit and phase-filtered Markdown documents with pinned `show` commands, excluding `template.md`; this presentation field does not enter `input_hash` or `action_id`. Read these team-maintained documents before same-named project-skill knowledge, with business source code at its pinned revision remaining authoritative. An unreadable HEAD prevents run creation with `PROJECT_NOT_READY`; an unavailable pinned commit blocks production with `WORKSPACE_COMMIT_UNAVAILABLE`, never a fallback to a newer HEAD. This integration does not deduplicate local project knowledge or write conclusions back to the workspace.
+INTAKE pins the workspace's current HEAD in `knowledge_workspace` and binds it into G0 under `intake_hash_version: v6`, including any requirement diff; runs without this source retain their existing versions and hashes. Producer actions and `context` expose the repository, commit and phase-filtered Markdown documents with pinned `show` commands, excluding `template.md`; this presentation field does not enter `input_hash` or `action_id`. Read these team-maintained documents before same-named project-skill knowledge, with business source code at its pinned revision remaining authoritative. An unreadable HEAD prevents run creation with `PROJECT_NOT_READY`; an unavailable pinned commit blocks production with `WORKSPACE_COMMIT_UNAVAILABLE`, never a fallback to a newer HEAD. Writing verified conclusions back is a separate, explicit post-release operation; see [Workspace knowledge writeback](#workspace-knowledge-writeback-post-release).
 
 ## Start and Continue
 
@@ -134,10 +134,12 @@ Require approval for Spec/test interfaces/environment, Task DAG, each Task Plan,
 
 All approval-facing text is Chinese by default: card titles, questions, material summaries,
 button labels, reply examples, timeout notices, resend notices, acknowledgements and
-error prompts. Display `同意 <approval_id>`, `需修改 <approval_id> <中文修改意见>` and
-`停止 <approval_id>` for new approvals; the reject button reads `停止run`. Keep `APPROVE`,
-`REVISE`, `REJECT` and the historical `驳回` label only as internal ledger values and
-backward-compatible input aliases; never make new approvers translate an English command.
+error prompts. For workflow gates, display `同意 <approval_id>` and `停止 <approval_id>`;
+offer `需修改 <approval_id> <中文修改意见>` only for revisable gates. The workflow reject
+button reads `停止run`. The separate post-release `KNOWLEDGE_WRITEBACK` card offers only
+`同意 / 停止`, and stopping it abandons only writeback. Keep `APPROVE`, `REVISE`, `REJECT`
+and the historical `驳回` label only as internal ledger values and backward-compatible
+input aliases; never make new approvers translate an English command.
 A reviewer may also give the feedback to the driving agent directly with
 `/tom-autodev CARD 需修改 <意见>`, which settles a still-pending gate as a REVISE on the
 comate channel and re-enters the phase in one step — no 如流 tap first.
@@ -261,8 +263,9 @@ When a reviewer selects “需修改” on G1–G6, do not tell them to restart 
 reissue the same gate manually. The next `/tom-autodev CARD 继续` consumes the
 hash-bound feedback, re-enters the producer phase, and delivers a new Chinese approval card
 for the new content hash. G4 is the PLAN producer gate and is revisable for the same reason
-as the earlier producer gates. An English `REVISE` reply is the same as “需修改”; `REJECT`
-(`停止`/`驳回`) stops the run and is not a redo.
+as the earlier producer gates. For these workflow gates, an English `REVISE` reply is
+the same as “需修改”; `REJECT` (`停止`/`驳回`) stops the run and is not a redo. The
+post-release `KNOWLEDGE_WRITEBACK` action below has a different stop effect.
 For an explicit CLI recovery, run `scripts/cli.py revise RUN_ID --approval-id <rejected>
 --feedback <text> --actor <who>`; the producer is re-entered with
 `revision_context` (instruction plus the previous draft) from `context`, must address every
@@ -290,6 +293,62 @@ It must not alter run state, repin workflow policy, create approvals, or emit du
 iCafe comments. Use `--dry-run` before any external write.
 
 Persist events, artifacts, approvals, locks, heartbeats, external results, and handoffs. Resume only from a confirmed checkpoint; never submit, notify, rerun, or release twice.
+
+### Workspace knowledge writeback (post-release)
+
+Use this explicit controller operation only for a `RELEASE_SUCCESS` run with an INTAKE
+`knowledge_workspace` pin. It is not an automatic worker step or an ordinary `continue`.
+Run from the suite root:
+
+```bash
+# Read-only plan: proposal and input_hash; no approval or external write
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID
+# Request KNOWLEDGE_WRITEBACK for the exact proposal; do not execute it
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --request
+# Only after APPROVE, use the returned approval_id and its input_hash
+python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --approval-id A --input-hash H
+```
+
+Only evidence-backed environment/process conclusions reusable across runs belong in
+`diagnosis.knowledge_candidates`; never put business-code conclusions there. Each candidate
+has nonempty `target`, `title`, `body`, and `reason` strings. Targets must match
+`^docs/[a-z0-9-]+(/[a-z0-9._-]+)*\.md$`, contain no `..`, and not name
+`index.md`, `template.md`, or `README.md`.
+
+Planning collects all this run's G6 `APPROVE` diagnoses whose approval input hashes match
+those artifacts' bindings. Deduplicate by `(target, body)` and remove a candidate if the
+pinned commit's target already contains its exact body. No candidates means
+`WRITEBACK_NOTHING` and no approval. The canonical proposal SHA-256 covers `run_id`,
+workspace repository/commit, and every candidate's target, title, body, reason, body hash,
+and source artifact ID. A non-released run or a missing pin returns
+`WRITEBACK_RUN_NOT_RELEASED` or `WRITEBACK_NO_WORKSPACE`, respectively.
+
+`KNOWLEDGE_WRITEBACK` is an approval action, not a G gate: do not add it to the workflow gate
+table, policy hash, or revisable-gate set. Request through the existing Infoflow approval
+delivery with profile members; pinned context must show every candidate's target, title,
+and body. Offer only **同意 / 停止**, never **需修改**. `REJECT` abandons only writeback and
+leaves the run terminal state unchanged. Execute must re-plan and require the same hash
+and an `APPROVE` record for this action and run before writing anything.
+
+Use a temporary Git worktree at the pinned commit on `tom-autodev/<first 12 run_id chars>`;
+never change the user's checkout branch or working files. Write new documents with
+`# <title>` and body, or append `## <title>` sections to existing ones. Add new-file links
+to the category index's Knowledge Map and prepend a dated root CHANGELOG entry if that
+file exists. Commit with the card ID, candidate list and a content-derived deterministic
+`Change-Id: I<40 hex>`, then use iCode `push_cr` targeting `master`. This creates a CR for
+human review, not an automatic merge. Always clean up the temporary worktree.
+
+For the CLI directory precheck, expose only the temporary worktree's `.git` as a
+directory symlink to its own gitdir during push. Verify HEAD, parent, common gitdir
+and all push URLs are unchanged; restore its original gitfile before worktree
+removal. Never rewrite the user checkout or shared remote configuration.
+
+Persist the `workspace.writeback` intent under `workspace.writeback:<run_id>:<input_hash>`
+and save the CR URL in its receipt. A timeout/unknown push must never be blindly repeated:
+a subsequent execute only queries NEW repository reviews by Change-Id. Nonzero exit is
+`UNKNOWN` unless the existing iCode refusal/single-push-target checks prove refusal;
+a proven refusal closes this attempt. See the [operations guide](../docs/OPERATIONS.md#验证过的结论写回-workspace阶段-3)
+and [stage 3 design](../docs/WORKSPACE_INTEGRATION_DESIGN.md#阶段-3验证过的结论写回-workspace).
 
 ## References
 

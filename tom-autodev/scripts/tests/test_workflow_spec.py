@@ -142,7 +142,27 @@ class LegacyStructureConsistencyTests(unittest.TestCase):
         self.assertEqual(spec_transitions, evidence_policy.TRANSITION_REQUIREMENTS)
 
     def test_gate_labels_match(self):
-        self.assertEqual(ws.GATE_LABELS, approval_summary._GATES)
+        # Approval-only actions are presentation, not workflow G-gates or policy.
+        self.assertEqual(
+            {name: label for name, label in ws.GATE_LABELS.items()
+             if re.fullmatch(r"G\d+", name)},
+            {name: label for name, label in approval_summary._GATES.items()
+             if re.fullmatch(r"G\d+", name)},
+        )
+        self.assertIsNot(ws.GATE_LABELS, approval_summary._GATES)
+
+    def test_writeback_presentation_does_not_mutate_the_workflow_policy(self):
+        before = ws.canonical_hash()
+        labels = dict(ws.GATE_LABELS)
+        original = approval_summary._GATES["KNOWLEDGE_WRITEBACK"]
+        try:
+            approval_summary._GATES["KNOWLEDGE_WRITEBACK"] = ("展示副本", "不是 G 门")
+            self.assertEqual(ws.GATE_LABELS, labels)
+            self.assertNotIn("KNOWLEDGE_WRITEBACK", ws.GATE_LABELS)
+            self.assertNotIn("KNOWLEDGE_WRITEBACK", ws.REVISABLE_GATES)
+            self.assertEqual(ws.canonical_hash(), before)
+        finally:
+            approval_summary._GATES["KNOWLEDGE_WRITEBACK"] = original
 
 
 class ChangeClassTests(unittest.TestCase):

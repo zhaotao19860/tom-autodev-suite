@@ -4,6 +4,17 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-02 · 验证过的结论经审批写回 workspace（阶段 3）
+
+- `diagnosis.knowledge_candidates` 支持有证据、跨 run 可复用的环境/流程结论，不包含业务代码结论；候选字段非空，目标限定安全的 `docs/` Markdown 路径，拒绝 `..` 与 `index.md`、`template.md`、`README.md`。
+- 新增显式 `orchestrator.py knowledge-writeback RUN_ID`：默认只读 plan，`--request` 投递 `KNOWLEDGE_WRITEBACK`，`--approval-id A --input-hash H` 执行。仅接受 `RELEASE_SUCCESS` 且有 INTAKE workspace pin 的 run；汇总该 run 全部 G6 已批准且输入哈希绑定一致的诊断候选，按目标/正文去重并过滤 pin 中已有正文，无候选不开审批。
+- 完整提案的规范 JSON SHA-256 绑定每个候选及来源。`KNOWLEDGE_WRITEBACK` 是非 G 门动作，不改变 workflow 策略哈希，不可“需修改”；审批展示目标、标题、正文，只允许同意/停止，停止只放弃写回、不改 run 终态。
+- 批准后基于 pin commit 在临时 worktree 的 `tom-autodev/<run_id 前 12 位>` 分支新建文档或追加小节，新文件更新分类 Knowledge Map，根 CHANGELOG 若存在则补当天条目；提交含卡片 ID、候选与内容哈希生成的确定性 Change-Id，经 iCode `push_cr` 向 `master` 提 CR，合入仍由人评审，不动用户原 checkout。
+- iCode 的 `.git` 目录检查由临时 worktree 内的专属 gitdir 链接适配；保持 commit 与全部 push URLs，推送结束先恢复 gitfile 再清理，不动公共配置。仅用假 transport 和本地 Git 验证，不据此宣称真实平台资格。
+- `workspace.writeback:<run_id>:<input_hash>` 的 intent/receipt 记录 CR URL；超时或结果未知后重跑仅按 Change-Id 只读查询、不重推。非零退出默认 UNKNOWN，复用 iCode 的拒绝与单推送地址判定，明确拒绝才结束尝试。
+- 推送结果的 CR 链接同时识别 iCode 控制台域名（`console.cloud.baidu-int.com/devops/icode/myreview/...`，BGW-2020 那次 `push_cr` 实际输出的格式），否则成功的推送会被记成结果未知。如流网关的审批卡新增 `stop_label`（写回卡显示「停止」），网关代码变更需重启网关进程才生效。
+- README、控制面 SKILL、操作参考与设计阶段 3 同步命令、审批边界和恢复规则；设计状态更新为“三个阶段均已实现”。本条不代表真实平台资格或业务发布验收。
+
 ## 2026-11-02 · Workspace 知识源（阶段 2）
 
 - 实现 workspace 集成设计 2.1–2.3、2.5：profile 支持至多一个 `workspace` 源，必填 `repository`、Git 仓库根目录 `path`，KU 仍必填；BGW 模板和向导支持可选的 `workspace_knowledge_path` 及路径确认。

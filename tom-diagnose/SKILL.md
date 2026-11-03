@@ -31,6 +31,12 @@ Use the action's [diagnosis schema](../tom-autodev/schemas/diagnosis.schema.json
 
 If root cause or verification is absent, use `DIAGNOSIS_INCOMPLETE` with explicit missing evidence. If a required controller/schema field cannot be truthfully represented, return a contract blocker; never manufacture a repair diff, identity or remote receipt to make validation pass.
 
+## Reusable workspace knowledge
+
+The optional `knowledge_candidates` array contains only evidence-backed environment/process conclusions that are reusable across runs. Do not include business-code conclusions, run-specific fixes or unverified hypotheses; omit the field or use `[]` when nothing qualifies. Each candidate has non-empty `target`, `title`, `body` and `reason` strings. Use `reason` to cite the supporting evidence and explain cross-run reuse; write `title`, `body` and `reason` in Chinese while preserving source identifiers.
+
+A target must match `^docs/[a-z0-9-]+(/[a-z0-9._-]+)*\.md$`, contain no `..`, and have a basename other than `index.md`, `template.md` or `README.md`. Provide only the reusable body, not an index/change-log edit. Candidates are proposals, not workspace writes: after `RELEASE_SUCCESS`, the controller may aggregate approved G6 diagnoses and request a separate `KNOWLEDGE_WRITEBACK` approval before opening a workspace CR for human review. The producer must not edit workspace files or push a CR during DIAGNOSE.
+
 ## Remote output
 
 Report target/role, time window and clock skew, request IDs and exit status, redacted observations, hypothesis/counter-evidence, next useful observation and cleanup status. Use only the resources loaded for this case. The full relay/session/process tooling is bundled here; no external debugging skill is required.

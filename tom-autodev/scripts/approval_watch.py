@@ -418,7 +418,8 @@ class ApprovalWatcher:
         if reason == "OK" and decision in {"APPROVE", "REVISE", "REJECT"}:
             responder = self._responder(approval_id)
             revised = self._revise(approval, responder) if decision == "REVISE" and not stale else None
-            if decision == "REJECT" and not stale:
+            if (decision == "REJECT" and not stale
+                    and gate_of(approval.get("action")) != "KNOWLEDGE_WRITEBACK"):
                 stopped = self.orchestrator.stop(run_id)
                 outcome["stopped_state"] = stopped.get("state")
             if revised is not None and revised.get("ok"):
@@ -758,6 +759,7 @@ def _nudge_markdown(
     progress: dict[str, Any] | None = None,
 ) -> str:
     action = approval.get("action") or "gate"
+    writeback = gate_of(action) == "KNOWLEDGE_WRITEBACK"
     hours = max(1, int(remaining_seconds // 3600))
     head = [
         f"## tom-autodev {action} 审批待回复",
@@ -770,7 +772,8 @@ def _nudge_markdown(
 
         head += ["**整体进度**", render_progress(progress), ""]
     head += [
-        f"**剩余** 约 {hours} 小时后超时，超时后该闸门不能补批，只能重新发起",
+        (f"**剩余** 约 {hours} 小时后写回审批超时，超时后需重新发起；不改变 run 终态"
+         if writeback else f"**剩余** 约 {hours} 小时后超时，超时后该闸门不能补批，只能重新发起"),
         "",
     ]
     if card:
@@ -791,7 +794,7 @@ def _nudge_markdown(
                 if gate_of(approval.get("action") or "") in workflow_spec.REVISABLE_GATES
                 else []
             ),
-            "**停止 run 请回复**",
+            "**停止写回请回复（不改变 run 终态）**" if writeback else "**停止 run 请回复**",
             f"停止 {approval_id}",
         ]
     )
@@ -972,6 +975,8 @@ def _ack_note(
     if decision == "REVISE":
         return "已选择需修改：保留 run 并重新进入当前阶段，Agent 将按审批重点生成新版材料并重新发起本门。"
     if decision == "REJECT":
+        if gate == "KNOWLEDGE_WRITEBACK":
+            return "已放弃本次 workspace 知识写回，不改变 run 终态。"
         return "已停止 run，不会继续后续阶段。"
     return None
 
@@ -981,11 +986,13 @@ def _ack_markdown(
     *, progress: dict[str, Any] | None = None, note: str | None = None,
 ) -> str:
     action = approval.get("action") or "gate"
+    writeback = gate_of(action) == "KNOWLEDGE_WRITEBACK"
     if decision == "TIMEOUT":
         lines = [
             f"## tom-autodev {action} 审批超时",
             "",
-            "**结果** 未在截止前收到决策，流程已停在该闸门",
+            ("**结果** 未在截止前收到写回决策，本次写回未获授权；不改变 run 终态"
+             if writeback else "**结果** 未在截止前收到决策，流程已停在该闸门"),
             f"**approval_id** `{approval['approval_id'][:12]}…`",
         ]
         if progress:
@@ -1003,6 +1010,19 @@ def _ack_markdown(
         "REVISE": "run 保留，Agent 按意见重做当前阶段并重新发起审批。",
         "REJECT": "run 已停止，不会继续后续阶段。",
     }.get(decision, "请以审批账本和 run 状态为准。")
+    if writeback:
+        if decision == "APPROVE":
+            landed = "已同意写回"
+            following = (
+                "仅批准本次 workspace 写回提案，尚未执行写回或推送 CR；不改变 run 终态。"
+                "请显式执行：\n\n"
+                f"`tom-autodev knowledge-writeback {approval['run_id']} "
+                f"--approval-id {approval['approval_id']} --input-hash {approval['input_hash']}`\n\n"
+                "执行后在 workspace 提一个 CR，合入仍由人评审。"
+            )
+        elif decision == "REJECT":
+            landed = "已放弃写回"
+            following = "只放弃本次 workspace 知识写回，不改变 run 终态。"
     if note:
         replaces = decision in {"APPROVE", "REVISE_FEEDBACK"} or "取代" in note or "回复修改意见" in note
         following = note if replaces else following + note

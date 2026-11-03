@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from approval_delivery import ComateApprovalClient, InfoflowApprovalTransport
-from approval_watch import ApprovalWatcher, auto_resume_from_hook
+from approval_watch import ApprovalWatcher, auto_resume_from_hook, _ack_markdown, _nudge_markdown
 from clients.infoflow_approval_client import InfoflowApprovalClient
 from clients.infoflow_reply_client import InfoflowReplyConsumer
 from orchestrator import Orchestrator
@@ -317,6 +317,74 @@ class ApprovalWatcherTests(unittest.TestCase):
         self.assertEqual(settled[0]["acknowledgement_reason_code"], "APPROVAL_ACK_FAILED")
         pending = self.orchestrator.state.pending_intents("run-1")
         self.assertEqual([item["operation"] for item in pending], ["approval.ack"])
+
+    def test_writeback_rejection_abandons_only_writeback_and_keeps_release_success(self):
+        self.orchestrator.state.transition("run-1", "RELEASE_SUCCESS", {})
+        self.orchestrator.status = lambda run_id: {"state": "RELEASE_SUCCESS"}
+        before = self.orchestrator.state.events("run-1")
+        approval_id = self._request("b" * 64, "KNOWLEDGE_WRITEBACK")
+        self.journal.add(
+            f"REJECT {approval_id}", received_at=(self.now + timedelta(minutes=1)).isoformat()
+        )
+
+        settled = self.watcher.tick()
+
+        self.assertEqual(settled[0]["effective_decision"], "REJECT")
+        self.assertNotIn("stopped_state", settled[0])
+        self.assertEqual(self.orchestrator.state.events("run-1"), before)
+        self.assertEqual(self.orchestrator.approvals.get(approval_id)["effective_decision"], "REJECT")
+        text = self.notify.sends[0][1]
+        self.assertIn("已放弃写回", text)
+        self.assertIn("不改变 run 终态", text)
+        self.assertNotIn("run 已停止", text)
+        self.assertNotIn("已停止 run", text)
+
+    def test_writeback_approval_ack_requires_explicit_hash_bound_execution(self):
+        self.orchestrator.state.transition("run-1", "RELEASE_SUCCESS", {})
+        self.orchestrator.status = lambda run_id: {"state": "RELEASE_SUCCESS"}
+        before = self.orchestrator.state.events("run-1")
+        approval_id = self._request("b" * 64, "KNOWLEDGE_WRITEBACK")
+        self.journal.add(
+            f"APPROVE {approval_id}", received_at=(self.now + timedelta(minutes=1)).isoformat()
+        )
+
+        settled = self.watcher.tick()
+
+        self.assertEqual(settled[0]["effective_decision"], "APPROVE")
+        self.assertEqual(self.orchestrator.state.events("run-1"), before)
+        text = self.notify.sends[0][1]
+        self.assertIn("已同意写回", text)
+        self.assertIn("尚未执行写回或推送 CR", text)
+        self.assertIn(
+            f"knowledge-writeback run-1 --approval-id {approval_id} --input-hash {'b' * 64}", text,
+        )
+        self.assertIn("合入仍由人评审", text)
+        self.assertNotIn("自动接续", text)
+        self.assertNotIn("输入“继续”", text)
+
+    def test_writeback_reminder_without_saved_card_does_not_offer_modify_or_stop_run(self):
+        approval = {
+            "run_id": "run-1", "action": "KNOWLEDGE_WRITEBACK", "approval_id": "a" * 32,
+            "input_hash": "b" * 64,
+        }
+        text = _nudge_markdown(approval, "", 3600)
+        self.assertIn("停止写回请回复（不改变 run 终态）", text)
+        self.assertIn("同意 " + "a" * 32, text)
+        self.assertIn("停止 " + "a" * 32, text)
+        self.assertNotIn("停止 run", text)
+        self.assertNotIn("需修改", text)
+        self.assertNotIn("该闸门", text)
+
+    def test_writeback_timeout_ack_does_not_claim_run_stopped_at_a_gate(self):
+        approval = {
+            "run_id": "run-1", "action": "KNOWLEDGE_WRITEBACK", "approval_id": "a" * 32,
+            "input_hash": "b" * 64,
+        }
+        text = _ack_markdown(approval, "TIMEOUT", None)
+        self.assertIn("本次写回未获授权", text)
+        self.assertIn("不改变 run 终态", text)
+        self.assertNotIn("流程已停在该闸门", text)
+        self.assertNotIn("run 已停止", text)
 
     def test_a_rejection_says_the_run_will_not_continue(self):
         approval_id = self._request()

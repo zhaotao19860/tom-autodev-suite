@@ -3294,6 +3294,17 @@ def main(argv: list[str] | None = None) -> int:
         help="仅 GET 核对已存在的触发意图并认领新构建（再换绑）；绝不 POST",
     )
 
+    writeback = subparsers.add_parser(
+        "knowledge-writeback",
+        help="把已发布运行验证过的结论写回 workspace（默认只读提案；--request 只投递审批）",
+    )
+    writeback.add_argument("run_id")
+    writeback.add_argument(
+        "--request", action="store_true", help="保存提案并投递 KNOWLEDGE_WRITEBACK；不写仓库、不推送 CR",
+    )
+    writeback.add_argument("--approval-id", default=None, help="已批准的 KNOWLEDGE_WRITEBACK 编号；执行需同时提供 --input-hash")
+    writeback.add_argument("--input-hash", default=None, help="准确写回提案的 input_hash；与 --approval-id 一起执行")
+
     # Callable with no arguments so a session-stop hook can drive it: whoever stopped
     # the IDE may never have run a phase, which is exactly when the notice was missing.
     ide_turn = subparsers.add_parser("notify-ide-turn")
@@ -3722,6 +3733,25 @@ def main(argv: list[str] | None = None) -> int:
         else:
             planned = ipipe_rebuild.plan(orchestrator, runtime, args.run_id, **options)
             result = ipipe_rebuild.public_plan(planned) if planned.get("ok") else planned
+    elif args.command == "knowledge-writeback":
+        has_execution_args = args.approval_id is not None or args.input_hash is not None
+        if args.request and has_execution_args:
+            result = {"ok": False, "reason_code": "WRITEBACK_ARGUMENT_CONFLICT", "run_id": args.run_id,
+                      "detail": "--request 只投递审批，不能与 --approval-id 或 --input-hash 同用"}
+        elif has_execution_args and not (args.approval_id and args.input_hash):
+            result = {"ok": False, "reason_code": "APPROVAL_REQUIRED", "run_id": args.run_id,
+                      "detail": "执行写回需要同时提供 --approval-id 和 --input-hash"}
+        else:
+            import knowledge_writeback
+
+            if args.request:
+                result = knowledge_writeback.request(orchestrator, args.run_id)
+            elif has_execution_args:
+                result = knowledge_writeback.execute(
+                    orchestrator, args.run_id, args.approval_id, args.input_hash,
+                )
+            else:
+                result = knowledge_writeback.plan(orchestrator, args.run_id)
     elif args.command == "ai-review":
         from cli_transport import ProcessTransport
 
@@ -4092,6 +4122,7 @@ def _cli_exit_code(result: Any) -> int:
         "RESTART_READY", "RESTARTED", "RESTART_REPLAY",
         "CORRECTION_DELIVERED", "CORRECTION_ALREADY_DELIVERED",
         "ALREADY_REVISED", "ALREADY_REBOUND",
+        "WRITEBACK_READY", "WRITEBACK_NOTHING", "WRITEBACK_PUSHED", "WRITEBACK_REPLAY",
     } else 1
 
 
@@ -4602,7 +4633,8 @@ def _approval_context(
     else:
         gate = {"gate": pinned_context(orchestrator, run_id, str(action or ""), input_hash or "")}
         if gate["gate"].get("material_status") == "MISSING":
-            if str(action or "") in {"G0", "G4", "G5", "G9"}:
+            if (str(action or "") in {"G0", "G4", "G5", "G9"}
+                    or gate_of(action or "") == "KNOWLEDGE_WRITEBACK"):
                 reason = (
                     "APPROVAL_CONTENT_MISMATCH"
                     if input_hash != payload.get("g0_input_hash") and str(action or "") == "G0"
@@ -4656,7 +4688,11 @@ def _approval_context(
             f"- input_hash：`{input_hash}`",
             "",
         ]
-        if isinstance(draft, dict):
+        if gate_of(action or "") == "KNOWLEDGE_WRITEBACK" and isinstance(material.get("proposal"), dict):
+            from approval_summary import knowledge_writeback_lines
+
+            preview_lines.extend(knowledge_writeback_lines(material["proposal"]))
+        elif isinstance(draft, dict):
             if isinstance(draft.get("spec"), dict):
                 preview_lines.extend(content_lines(draft["spec"], "SPEC"))
                 if isinstance(draft.get("dag"), dict):
