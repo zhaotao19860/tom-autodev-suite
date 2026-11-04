@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -983,6 +984,17 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         result = self.execute(run_id, approval["approval_id"], planned["input_hash"])
         self.assertEqual(result["reason_code"], "WRITEBACK_PUSHED", result)
         self.assert_cleaned()
+
+    def test_missing_icode_cli_is_refused_before_any_intent(self):
+        run_id, planned, approval = self.authorized()
+        with mock.patch.object(knowledge_writeback, "_resolve_executable", return_value=None):
+            result = knowledge_writeback.execute(
+                self.orchestrator, run_id, approval["approval_id"], planned["input_hash"],
+                argv_transport=self.transport,
+            )
+        self.assertEqual(result["reason_code"], "WRITEBACK_ICODE_CLI_MISSING", result)
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(self.orchestrator.state.all_intents(run_id), [])
 
     def test_leftover_unused_branch_is_dropped_but_a_checked_out_one_blocks(self):
         run_id, planned, approval = self.authorized()

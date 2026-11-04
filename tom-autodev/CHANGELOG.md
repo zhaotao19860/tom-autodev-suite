@@ -4,7 +4,7 @@ tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套
 
 ## 2026-11-04
 
-- 第 12 轮评审修复：workspace pin 改钉 `origin/<revision>`；知识写回拒绝未发布 pin、失败可重试并清理临时分支、规范化目标路径；写回与终态 run 不再留续跑交接；G0 卡片显示 workspace pin。详见根 CHANGELOG 同日条目。
+- 第 12 轮评审修复：workspace pin 改钉 `origin/<revision>`；知识写回拒绝未发布 pin、失败可重试并清理临时分支、规范化目标路径；写回与终态 run 不再留续跑交接；G0 卡片显示 workspace pin；写回解析 iCode CLI 与 iCode 运行时一致，提示命令改为实际入口。详见根 CHANGELOG 同日条目。
 
 ## 2026-11-03
 

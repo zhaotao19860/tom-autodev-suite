@@ -22,6 +22,8 @@ import workspace_knowledge
 from approval_ledger import gate_of
 from cli_transport import ProcessTransport
 from clients.icode_runtime import (
+    _default_candidates,
+    _resolve_executable,
     _bounded_cli_output, _cr_url, _push_refused, _run, _single_push_target, _valid_url,
 )
 from execution_guard import execution_guard, guard_execution
@@ -447,7 +449,12 @@ def execute(
     if not loaded.get("ok"):
         return loaded
     transport = argv_transport if argv_transport is not None else ProcessTransport()
-    binary = icode_binary or os.environ.get("ICODE_CLI_PATH") or "icode"
+    # Resolve the CLI the way the iCode runtime does (PATH, ~/.icode/bin, ...): a bare
+    # "icode" missing from PATH would raise at dispatch and read as UNKNOWN forever.
+    binary = icode_binary or next(
+        (found for found in map(_resolve_executable, filter(None, _default_candidates())) if found), None)
+    if binary is None:
+        return _failure("WRITEBACK_ICODE_CLI_MISSING", run_id)
     existing = orchestrator.state.intent_by_idempotency_key(key)
     if existing is not None:
         return _observe(orchestrator, existing, transport, binary)

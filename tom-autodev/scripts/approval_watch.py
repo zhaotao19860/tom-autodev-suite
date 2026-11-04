@@ -1026,7 +1026,7 @@ def _ack_markdown(
             following = (
                 "仅批准本次 workspace 写回提案，尚未执行写回或推送 CR；不改变 run 终态。"
                 "请显式执行：\n\n"
-                f"`tom-autodev knowledge-writeback {approval['run_id']} "
+                f"`python3 tom-autodev/scripts/orchestrator.py knowledge-writeback {approval['run_id']} "
                 f"--approval-id {approval['approval_id']} --input-hash {approval['input_hash']}`\n\n"
                 "执行后在 workspace 提一个 CR，合入仍由人评审。"
             )

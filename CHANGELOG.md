@@ -10,6 +10,7 @@ suite had no version control before then.
 - workspace pin 改钉 `refs/remotes/origin/<revision>`（不 fetch），不再用 checkout 的 `HEAD`；`knowledge_workspace` 增加 `revision`；读不到返回 `PROJECT_NOT_READY`（R12A-002）。G0 卡片显示钉住的 workspace 仓库与 commit（R12A-004），不改哈希。
 - 知识写回：pin 不在 `origin/master` 上时在建立意图前返回 `WRITEBACK_PIN_UNPUBLISHED`，避免把未审批的本地提交一起推去评审（R12B-004）；本地失败与唯一推送地址的明确拒绝改为可重试（幂等键沿用 `live_idempotency_key` 链），结束后删除临时分支 `tom-autodev/<run12>`，残留且未被检出的分支自动清理（R12B-001）；目标路径拒绝 `.`/空路径段、保留文件名大小写不敏感、与已有路径仅大小写不同时拒绝，`git add` 后核对暂存列表（R12B-002）。
 - 写回审批与终态 run 的 Comate 批准不再记续跑交接；Stop hook 跳过并关闭终态 run 的残留交接，不再让其他 run 返回 `MULTIPLE_RESUME_HANDOFFS`（R12B-003）。
+- 独立评审 R12K 追加：写回按 iCode 运行时的查找顺序解析 CLI（含 `~/.icode/bin`），找不到时在建立意图前返回 `WRITEBACK_ICODE_CLI_MISSING`，不再记成永久未知；同意写回后的提示命令改为 `python3 tom-autodev/scripts/orchestrator.py knowledge-writeback ...`。
 - `tom-autodev/SKILL.md` 的 P0新case回归指引与 `tom-project-bgw` description 改指 bgw-workspace（R12A-001）。
 
 ## 2026-11-03 · ProducerJob 接入 tom-model-router 模型建议
