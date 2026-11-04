@@ -61,6 +61,9 @@ _log = logging.getLogger(__name__)
 # happened. Every other exception -- a socket dying mid-request, an HTTP error, a
 # timeout -- leaves the outcome genuinely unknown and must still be reconciled.
 _NOTHING_SENT_EXCEPTIONS = (AttributeError, TypeError, NameError, ImportError)
+# knowledge_writeback.ACTION; not imported here because that module imports orchestrator.
+_KNOWLEDGE_WRITEBACK = "KNOWLEDGE_WRITEBACK"
+_TERMINAL_RUN_STATES = frozenset({"RELEASE_SUCCESS", "STOPPED"})
 
 
 class Orchestrator:
@@ -171,21 +174,30 @@ class Orchestrator:
         ), None)
         knowledge_workspace = None
         if workspace_source is not None:
-            try:
-                workspace_path = str(Path(workspace_source["path"]).expanduser().resolve())
-                commit = subprocess.run(
-                    ["git", "-C", workspace_path, "rev-parse", "HEAD"],
-                    check=True, capture_output=True, text=True, timeout=30,
-                ).stdout.strip()
-            except (OSError, subprocess.SubprocessError):
-                commit = ""
+            # Pin the reviewed, merged revision (origin/<revision>), never the checkout's
+            # HEAD: a feature branch or unpushed local commits would otherwise become the
+            # run's knowledge and the base a writeback pushes for review (R12A-002).
+            # No fetch: the remote-tracking ref is read as the operator last updated it.
+            revision = workspace_source.get("revision") or "master"
+            commit = ""
+            if isinstance(revision, str) and revision.strip() == revision:
+                try:
+                    workspace_path = str(Path(workspace_source["path"]).expanduser().resolve())
+                    commit = subprocess.run(
+                        ["git", "-C", workspace_path, "rev-parse", "--verify", "--quiet",
+                         f"refs/remotes/origin/{revision}^{{commit}}"],
+                        check=True, capture_output=True, text=True, timeout=30,
+                    ).stdout.strip()
+                except (OSError, subprocess.SubprocessError):
+                    commit = ""
             if not commit:
                 return {
                     "ok": False, "reason_code": "PROJECT_NOT_READY",
                     "missing": ["knowledge_sources.workspace"],
                 }
             knowledge_workspace = {
-                "repository": workspace_source["repository"], "path": workspace_path, "commit": commit,
+                "repository": workspace_source["repository"], "path": workspace_path,
+                "commit": commit, "revision": revision,
             }
         run_id = uuid.uuid4().hex
         prepared = _collaboration_binding(
@@ -1418,9 +1430,11 @@ class Orchestrator:
             and result.get("effective_decision") == "APPROVE"
             and result.get("effective_channel") == channel
             and isinstance(bound_run, str)
+            # A writeback approval acts on a released run; nothing resumes (R12B-003).
+            and gate_of(result.get("action") or (record or {}).get("action")) != _KNOWLEDGE_WRITEBACK
         ):
             latest = self.state.events(bound_run)
-            if latest:
+            if latest and latest[-1].get("state") not in _TERMINAL_RUN_STATES:
                 handoff_id = f"approval-resume-{approval_id}-{latest[-1]['event_id']}"
                 handoff = self.state.record_handoff(
                     bound_run,

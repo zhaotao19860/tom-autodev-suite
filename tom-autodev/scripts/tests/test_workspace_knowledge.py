@@ -74,6 +74,7 @@ class WorkspaceFixture(unittest.TestCase):
             "repository": "team/project-workspace",
             "path": str(self.workspace),
             "commit": self.commit,
+            "revision": "master",
         }
         self.profile = production_profile()
         for name, repo in (("business", self.profile["business_repos"][0]),
@@ -91,7 +92,7 @@ class WorkspaceFixture(unittest.TestCase):
             "provider": "workspace",
             "repository": self.pin["repository"],
             "path": self.pin["path"],
-            "revision": "HEAD",
+            "revision": "master",
             "search_scope": "Team project knowledge",
             "priority": 0,
         })
@@ -107,12 +108,16 @@ class WorkspaceFixture(unittest.TestCase):
             check=True, capture_output=True, text=True, timeout=30,
         ).stdout.strip()
 
-    def commit_workspace(self):
+    def commit_workspace(self, *, publish=True):
+        """Commit the checkout; ``publish`` also moves origin/master there (no remote)."""
         self.git(self.workspace, "add", ".")
         self.git(self.workspace, "-c", "user.name=Fixture", "-c",
                  "user.email=fixture@example.test", "-c", "core.hooksPath=/dev/null",
                  "commit", "--no-gpg-sign", "-qm", "Workspace knowledge")
-        return self.git(self.workspace, "rev-parse", "HEAD")
+        head = self.git(self.workspace, "rev-parse", "HEAD")
+        if publish:
+            self.git(self.workspace, "update-ref", "refs/remotes/origin/master", head)
+        return head
 
     def write_profile(self):
         self.profile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,6 +267,20 @@ class WorkspaceIntakeTests(WorkspaceFixture):
         self.assertTrue(intake_prerequisites_valid(payload, started["run_id"]))
         self.assertEqual(self.orchestrator.next(started["run_id"])["input_hash"], payload["g0_input_hash"])
 
+    def test_g0_card_shows_the_workspace_pin_without_changing_its_hash(self):
+        from approval_summary import _g0_context
+        started = self.start()
+        payload = self.orchestrator.state.events(started["run_id"])[0]["payload"]
+        detail = _g0_context(self.orchestrator, started["run_id"], payload["g0_input_hash"])
+        line = f"知识库 workspace：{self.pin['repository']} @ {self.commit[:12]}（master）"
+        self.assertIn(line, detail["summary"])
+        events = copy.deepcopy(self.orchestrator.state.events(started["run_id"]))
+        del events[0]["payload"]["knowledge_workspace"]
+        with patch.object(self.orchestrator.state, "events", return_value=events):
+            bare = _g0_context(self.orchestrator, started["run_id"], payload["g0_input_hash"])
+        self.assertNotIn(line, bare["summary"])
+        self.assertEqual(bare["content_hash"], detail["content_hash"])
+
     def test_workspace_commit_changes_g0_hash(self):
         before = self.prepared_payload()
         (self.workspace / "docs/index.md").write_text("New knowledge\n", encoding="utf-8")
@@ -321,6 +340,32 @@ class WorkspaceIntakeTests(WorkspaceFixture):
                 profile_result, _requirement_snapshot(), None, "intake-key",
             )
         self.assertEqual(result, {
+            "ok": False, "reason_code": "PROJECT_NOT_READY", "missing": ["knowledge_sources.workspace"],
+        })
+        self.assertEqual(self.orchestrator.state.latest_states(), [])
+
+    def test_intake_pins_origin_revision_not_unpushed_local_head(self):
+        self.git(self.workspace, "switch", "-qc", "feature/unreviewed")
+        (self.workspace / "docs/index.md").write_text("Unreviewed local knowledge\n", encoding="utf-8")
+        local = self.commit_workspace(publish=False)
+        self.assertNotEqual(local, self.commit)
+        payload = self.prepared_payload()
+        self.assertEqual(payload["knowledge_workspace"]["commit"], self.commit)
+        self.assertEqual(payload["knowledge_workspace"]["revision"], "master")
+        self.assertEqual(self.git(self.workspace, "rev-parse", "HEAD"), local)
+
+    def test_intake_pins_the_configured_revision(self):
+        (self.workspace / "docs/index.md").write_text("Release branch knowledge\n", encoding="utf-8")
+        release = self.commit_workspace(publish=False)
+        self.git(self.workspace, "update-ref", "refs/remotes/origin/release-1", release)
+        self.profile["knowledge_sources"][-1]["revision"] = "release-1"
+        self.write_profile()
+        pinned = self.prepared_payload()["knowledge_workspace"]
+        self.assertEqual((pinned["commit"], pinned["revision"]), (release, "release-1"))
+
+    def test_intake_without_origin_revision_ref_is_not_ready(self):
+        self.git(self.workspace, "update-ref", "-d", "refs/remotes/origin/master")
+        self.assertEqual(self.start(), {
             "ok": False, "reason_code": "PROJECT_NOT_READY", "missing": ["knowledge_sources.workspace"],
         })
         self.assertEqual(self.orchestrator.state.latest_states(), [])

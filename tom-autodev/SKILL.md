@@ -226,7 +226,7 @@ The platform's own review (小码哥) is a second opinion taken after SUBMIT, wh
 | Language | `tom-lang-c-cpp` or `tom-lang-npl` |
 | Project | `tom-project-bgw` or `tom-project-xflow` |
 
-Project skills supply repository topology, environment, iPipe parameter names, log locations, and version/counter inspection. This controller sequences `next` / G8 / `ipipe-rerun` / evidence ingest. For BGW, read `tom-project-bgw/references/runtime-topology.md` before filling or rerunning `P0新case回归`.
+Project skills supply repository topology, environment, iPipe parameter names, log locations, and version/counter inspection. This controller sequences `next` / G8 / `ipipe-rerun` / evidence ingest. For BGW, read the pinned bgw-workspace `docs/environment/ipipe-pipelines.md` and `docs/environment/bgw-test-topology.md` (see `tom-project-bgw` Team Knowledge) before filling or rerunning `P0新case回归`.
 
 Every child phase follows [`references/phase-protocol.md`](references/phase-protocol.md): consume and emit a schema-validated, content-hashed `ArtifactEnvelope`, persist the human-readable phase document to KU, and link only the required milestone/evidence to iCafe. Child skills return artifacts and evidence to this controller; only this controller owns iCafe/KU/iCode/iPipe adapters and G0-G9 gates.
 

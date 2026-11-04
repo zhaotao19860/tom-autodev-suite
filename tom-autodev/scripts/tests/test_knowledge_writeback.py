@@ -146,6 +146,8 @@ class KnowledgeCandidateSchemaTests(unittest.TestCase):
             "docs/environment/file.txt", "docs/environment//file.md",
             "docs/environment/file.md\n", "docs/environment/file.md\x00",
             "docs/environment\\file.md", "docs/environment/%2e%2e/file.md",
+            "docs/environment/./file.md", "docs/x/./y.md", "docs/./file.md",
+            "docs/environment/readme.md", "docs/environment/Index.md", "docs/TEMPLATE.md",
         )
         for target in targets:
             with self.subTest(target=target):
@@ -302,7 +304,19 @@ class KnowledgeWritebackTests(WorkspaceFixture):
     def intent_key(self, run_id, planned):
         return f"workspace.writeback:{run_id}:{planned['input_hash']}"
 
+    def committed_revision(self, run_id):
+        """The writeback commit as recorded on the intent; the local branch is deleted."""
+        revisions = [item["observation"]["commit_revision"]
+                     for item in self.orchestrator.state.external_observations(run_id)
+                     if item["observation"].get("operation") == "workspace.writeback.commit"]
+        self.assertTrue(revisions)
+        return revisions[-1]
+
+    def assert_no_writeback_branches(self):
+        self.assertEqual(self.git(self.workspace, "for-each-ref", "refs/heads/tom-autodev/"), "")
+
     def assert_cleaned(self):
+        self.assert_no_writeback_branches()
         self.assertTrue(self.transport.worktrees)
         for path in self.transport.worktrees:
             self.assertFalse(path.exists(), path)
@@ -575,8 +589,7 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         self.assertEqual(result["change_id"], "I" + planned["input_hash"][:40])
         self.assertEqual(len(observations), 1)
         self.assertEqual(observations[0][1], self.commit)
-        branch = f"tom-autodev/{run_id[:12]}"
-        revision = self.git(self.workspace, "rev-parse", branch)
+        revision = branch = self.committed_revision(run_id)
         self.assertEqual(result["commit_revision"], revision)
         self.assertEqual(self.git(self.workspace, "show", f"{branch}:{items[0]['target']}"),
                          f"# {items[0]['title']}\n\n{items[0]['body']}")
@@ -695,7 +708,7 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         self.assertEqual(self.checkout_snapshot(), before)
         self.assert_cleaned()
 
-    def test_cli_view_failure_restores_gitfile_and_cleans_worktree_without_dispatch(self):
+    def test_cli_view_failure_restores_gitfile_cleans_worktree_and_retries_after_fix(self):
         run_id, planned, approval = self.authorized()
         before = self.checkout_snapshot()
         original_prepare = knowledge_writeback._prepare_cli_worktree
@@ -717,9 +730,17 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         self.assertFalse(temporary_worktrees[0].exists())
         self.assertEqual(sum(line.startswith("worktree ") for line in
                              self.git(self.workspace, "worktree", "list", "--porcelain").splitlines()), 1)
+        self.assert_no_writeback_branches()
+        # A proven local failure closes only that attempt: once the cause is fixed,
+        # the same approval retries under a new intent and pushes exactly once.
+        retried = self.execute(run_id, approval["approval_id"], planned["input_hash"])
+        self.assertEqual(retried["reason_code"], "WRITEBACK_PUSHED", retried)
+        self.assertEqual(len(self.transport.pushes), 1)
+        self.assertEqual(len(self.orchestrator.state.all_intents(run_id)), 2)
         replay = self.execute(run_id, approval["approval_id"], planned["input_hash"])
-        self.assertEqual(replay["reason_code"], "WRITEBACK_LOCAL_FAILED")
-        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(replay["reason_code"], "WRITEBACK_REPLAY", replay)
+        self.assertEqual(len(self.transport.pushes), 1)
+        self.assert_cleaned()
 
     def test_multiple_sections_in_one_new_file_create_only_one_map_entry(self):
         first = candidate(body="A: 已验证的网络前置条件。")
@@ -743,8 +764,7 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         self.assertIsNone(self.orchestrator.state.result_by_idempotency_key(key))
         intent = self.orchestrator.state.intent_by_idempotency_key(key)
         self.assertEqual(intent["operation"], "workspace.writeback")
-        branch = f"tom-autodev/{run_id[:12]}"
-        revision = self.git(self.workspace, "rev-parse", branch)
+        revision = self.committed_revision(run_id)
         self.assert_cleaned()
         restarted = Orchestrator(self.config)
         for _ in range(2):
@@ -757,14 +777,15 @@ class KnowledgeWritebackTests(WorkspaceFixture):
             self.assertEqual(argv, ["icode", "api", "get_repo_reviews", "--repo", self.pin["repository"],
                                     "--status", "NEW", "-o", "json"])
             self.assertEqual(Path(cwd), self.workspace)
-        self.assertEqual(self.git(self.workspace, "rev-parse", branch), revision)
+        self.assertEqual(self.committed_revision(run_id), revision)
+        self.assert_no_writeback_branches()
         self.assertIsNone(restarted.state.result_by_idempotency_key(key))
 
     def test_unknown_can_be_receipted_by_exact_change_id_lookup_without_push(self):
         run_id, planned, approval = self.authorized()
         self.transport.push_result = TimeoutError("response lost")
         self.execute(run_id, approval["approval_id"], planned["input_hash"])
-        revision = self.git(self.workspace, "rev-parse", f"tom-autodev/{run_id[:12]}")
+        revision = self.committed_revision(run_id)
         self.transport.changes = [{
             "_number": CR_NUMBER, "status": "NEW", "branch": "master", "project": self.pin["repository"],
             "change_id": "I" + planned["input_hash"][:40], "current_revision": revision, "url": CR_URL,
@@ -792,7 +813,7 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         (self.workspace / "docs/environment/topology.md").write_text("User's later edit\n", encoding="utf-8")
         (self.workspace / "later-note.txt").write_text("User's untracked note\n", encoding="utf-8")
         before = self.mutation_snapshot(run_id)
-        branch = f"tom-autodev/{run_id[:12]}"
+        branch = self.committed_revision(run_id)
         tree = self.git(self.workspace, "ls-tree", "-r", branch)
         restarted = Orchestrator(self.config)
         with patch("knowledge_writeback._write_candidates", side_effect=AssertionError("recovery must not write")), \
@@ -816,7 +837,7 @@ class KnowledgeWritebackTests(WorkspaceFixture):
                 self.transport.push_result = TimeoutError("response lost")
                 first = self.execute(run_id, approval["approval_id"], planned["input_hash"])
                 self.assertEqual(first["intent_state"], "UNKNOWN", first)
-                revision = self.git(self.workspace, "rev-parse", f"tom-autodev/{run_id[:12]}")
+                revision = self.committed_revision(run_id)
                 exact = {"_number": CR_NUMBER, "status": "NEW", "branch": "master",
                          "project": self.pin["repository"], "change_id": "I" + planned["input_hash"][:40],
                          "current_revision": revision, "url": CR_URL}
@@ -904,7 +925,7 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         self.assertIsNone(self.orchestrator.state.result_by_idempotency_key(self.intent_key(run_id, planned)))
         self.assert_cleaned()
 
-    def test_single_push_target_gerrit_refusal_is_terminal_receipt(self):
+    def test_single_push_target_gerrit_refusal_is_confirmed_absent_and_retryable(self):
         self.git(self.workspace, "config", "remote.origin.pushurl", "ssh://icode.example:8235/team/project-workspace")
         run_id, planned, approval = self.authorized()
         self.transport.push_result = {"returncode": 1, "stdout": "", "stderr": (
@@ -912,12 +933,21 @@ class KnowledgeWritebackTests(WorkspaceFixture):
             " ! [remote rejected] HEAD -> refs/for/master (prohibited)\n")}
         first = self.execute(run_id, approval["approval_id"], planned["input_hash"])
         self.assertEqual(first["reason_code"], "WRITEBACK_PUSH_REJECTED", first)
+        self.assertEqual(first["intent_state"], "CONFIRMED_ABSENT", first)
         saved = self.orchestrator.state.result_by_idempotency_key(self.intent_key(run_id, planned))
         self.assertEqual(saved["receipt"]["response"]["reason_code"], "WRITEBACK_PUSH_REJECTED")
         self.assertEqual(self.orchestrator.state.pending_intents(run_id), [])
+        self.assert_no_writeback_branches()
+        # The only target refused it, so nothing landed: a rerun pushes again under a
+        # new intent instead of replaying the refusal forever.
         second = self.execute(run_id, approval["approval_id"], planned["input_hash"])
         self.assertEqual(second["reason_code"], "WRITEBACK_PUSH_REJECTED", second)
-        self.assertEqual(len(self.transport.pushes), 1)
+        self.assertEqual(len(self.transport.pushes), 2)
+        self.transport.push_result = {"returncode": 0, "stdout": f"Created review: {CR_URL}\n", "stderr": ""}
+        third = self.execute(run_id, approval["approval_id"], planned["input_hash"])
+        self.assertEqual(third["reason_code"], "WRITEBACK_PUSHED", third)
+        self.assertEqual(len(self.transport.pushes), 3)
+        self.assertEqual(len(self.orchestrator.state.all_intents(run_id)), 3)
         self.assertEqual(self.transport.queries, [])
         self.assert_cleaned()
 
@@ -937,6 +967,75 @@ class KnowledgeWritebackTests(WorkspaceFixture):
         self.assertEqual(len(self.transport.pushes), 1)
         self.assertEqual(len(self.transport.queries), 1)
         self.assert_cleaned()
+
+    def test_unpublished_pin_is_refused_before_any_intent_or_push(self):
+        run_id, planned, approval = self.authorized()
+        # origin/master moves back behind the pin, as if the pin were a local-only commit.
+        self.git(self.workspace, "update-ref", "refs/remotes/origin/master", self.git(
+            self.workspace, "rev-parse", f"{self.commit}^"))
+        before = self.mutation_snapshot(run_id)
+        result = self.execute(run_id, approval["approval_id"], planned["input_hash"])
+        self.assertEqual(result["reason_code"], "WRITEBACK_PIN_UNPUBLISHED", result)
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual(self.orchestrator.state.all_intents(run_id), [])
+        self.assertEqual(self.mutation_snapshot(run_id), before)
+        self.git(self.workspace, "update-ref", "refs/remotes/origin/master", self.commit)
+        result = self.execute(run_id, approval["approval_id"], planned["input_hash"])
+        self.assertEqual(result["reason_code"], "WRITEBACK_PUSHED", result)
+        self.assert_cleaned()
+
+    def test_leftover_unused_branch_is_dropped_but_a_checked_out_one_blocks(self):
+        run_id, planned, approval = self.authorized()
+        branch = f"tom-autodev/{run_id[:12]}"
+        self.git(self.workspace, "branch", branch, self.commit)
+        result = self.execute(run_id, approval["approval_id"], planned["input_hash"])
+        self.assertEqual(result["reason_code"], "WRITEBACK_PUSHED", result)
+        self.assert_cleaned()
+
+        run_id, planned, approval = self.authorized([candidate("docs/environment/second.md")])
+        branch = f"tom-autodev/{run_id[:12]}"
+        held = self.root / "held-worktree"
+        self.git(self.workspace, "worktree", "add", "-q", "-b", branch, str(held), self.commit)
+        self.addCleanup(lambda: self.git(self.workspace, "worktree", "remove", "--force", str(held)))
+        result = self.execute(run_id, approval["approval_id"], planned["input_hash"])
+        self.assertEqual(result["reason_code"], "WRITEBACK_BRANCH_EXISTS", result)
+        self.assertEqual(len(self.transport.pushes), 1)
+        self.assertEqual(self.git(self.workspace, "rev-parse", branch), self.commit)
+
+    def test_staged_set_must_contain_every_candidate_target(self):
+        run_id, planned, approval = self.authorized()
+        original = knowledge_writeback._git
+
+        def git(repo, *arguments, **options):
+            output = original(repo, *arguments, **options)
+            if arguments[:3] == ("diff", "--cached", "--name-only"):
+                return "\0".join(name for name in output.split("\0")
+                                  if name != candidate()["target"])
+            return output
+
+        with patch("knowledge_writeback._git", side_effect=git):
+            result = self.execute(run_id, approval["approval_id"], planned["input_hash"])
+        self.assertEqual(result["reason_code"], "WRITEBACK_STAGE_MISMATCH", result)
+        self.assertEqual(result["intent_state"], "ABANDONED_LOCAL")
+        self.assertEqual(self.transport.calls, [])
+        self.assert_no_writeback_branches()
+
+    def test_target_differing_from_a_tracked_path_only_by_case_is_refused(self):
+        (self.workspace / "docs/environment/Runner-Network.md").write_text("Existing\n", encoding="utf-8")
+        (self.workspace / "docs/Ops").mkdir()
+        (self.workspace / "docs/Ops/existing.md").write_text("Existing\n", encoding="utf-8")
+        self.commit = self.commit_workspace()
+        for target in ("docs/environment/runner-network.md", "docs/ops/new.md"):
+            with self.subTest(target=target):
+                run_id = self.new_run()
+                self.seed_diagnosis(run_id, [candidate(target)])
+                planned = knowledge_writeback.plan(self.orchestrator, run_id)
+                self.assertEqual(planned["reason_code"], "WRITEBACK_CANDIDATE_INVALID", planned)
+                self.assertEqual(planned["target"], target)
+                self.assertEqual(planned["schema_issues"][0]["kind"], "target_case_conflict")
+        run_id = self.new_run()
+        self.seed_diagnosis(run_id, [candidate("docs/environment/fresh.md")])
+        self.ready(run_id)
 
     def test_tracked_symlink_parent_cannot_escape_workspace(self):
         outside = self.root / "outside-knowledge"

@@ -2,6 +2,10 @@
 
 tom-autodev（控制面）的变更摘要，按日期倒序。完整说明见套件根目录 [CHANGELOG.md](../CHANGELOG.md) 的同日条目。
 
+## 2026-11-04
+
+- 第 12 轮评审修复：workspace pin 改钉 `origin/<revision>`；知识写回拒绝未发布 pin、失败可重试并清理临时分支、规范化目标路径；写回与终态 run 不再留续跑交接；G0 卡片显示 workspace pin。详见根 CHANGELOG 同日条目。
+
 ## 2026-11-03
 
 - `context` 返回 tom-model-router 给出的 `model_route` 建议；`submit-draft --model` 把产出模型写入执行回执。路由只是建议，不影响门与状态。文档去掉 Comate 专用表述。详见根 CHANGELOG 同日条目。

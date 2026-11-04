@@ -203,6 +203,14 @@ def _runtime_profile(orchestrator: Any, run_id: str) -> dict[str, Any] | None:
     return result.get("profile") if isinstance(result, dict) and result.get("ok") else None
 
 
+def _workspace_pin_line(pin: Any) -> list[str]:
+    """The knowledge workspace G0 binds; display only, outside the material hash."""
+    if not isinstance(pin, dict) or not isinstance(pin.get("commit"), str):
+        return []
+    revision = pin.get("revision") if isinstance(pin.get("revision"), str) else "-"
+    return [f"知识库 workspace：{pin.get('repository') or '-'} @ {pin['commit'][:12]}（{revision}）"]
+
+
 def _g0_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[str, Any]:
     events = orchestrator.state.events(run_id)
     payload = events[0].get("payload") if events and isinstance(events[0].get("payload"), dict) else {}
@@ -230,6 +238,7 @@ def _g0_context(orchestrator: Any, run_id: str, input_hash: str) -> dict[str, An
             f"需求 {payload.get('requirement_id') or '-'} / 项目 {payload.get('project') or '-'}",
             f"profile {payload.get('profile_path') or '-'}",
             f"协作成员 {len(binding.get('member_snapshot') or [])} 人",
+            *_workspace_pin_line(payload.get("knowledge_workspace")),
         ],
         "references": refs,
         "content_hash": _hash(material),

@@ -1,6 +1,6 @@
 ---
 name: tom-project-bgw
-description: Use when tom-autodev targets the BGW C/C++ project and needs repository topology, knowledge sources, test-repository, environment, Review, iPipe rules, the 25G client/BGW/RS topology, associated logs, version or counter inspection, or P0新case回归 parameters get_bgw_test_case and get_bgwagent.
+description: Use when tom-autodev targets the BGW C/C++ project and needs the profile requirements, knowledge priority, verification contract and parent scheduling contract, or a pointer to the BGW team knowledge in bgw-workspace (25G topology, logs, version/counter checks, P0新case回归 parameters get_bgw_test_case and get_bgwagent).
 ---
 
 # Tom Project BGW

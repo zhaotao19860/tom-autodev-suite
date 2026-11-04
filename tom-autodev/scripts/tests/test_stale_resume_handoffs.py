@@ -229,5 +229,62 @@ class StaleResumeHandoffTests(unittest.TestCase):
             auto_resume_from_hook(self.orch, {"hook_event_name": "Stop", "session_id": "sess-1"})
         self.assertEqual(sorted(self._open()), before)
 
+    # -- R12B-003: terminal runs and writeback approvals never resume ---------------------
+    def _request(self, action, run_id=RUN, input_hash="writeback-hash"):
+        record = self.orch.approvals.request(
+            action, input_hash, _CHANNELS, run_id=run_id, member_policy=_POLICY)
+        for channel in _CHANNELS:
+            self.orch.approvals.record_delivery(
+                record["approval_id"], channel, {"request_id": f"local-{channel}"},
+                payload_hash=input_hash)
+        return record
+
+    def test_comate_writeback_approval_records_no_resume_handoff(self):
+        released = "run-released"
+        self.state.transition(released, "RELEASE_SUCCESS", {"project": "bgw"})
+        record = self._request("KNOWLEDGE_WRITEBACK", run_id=released)
+        result = self.orch.approve(record["approval_id"], "APPROVE", "writeback-hash", "comate",
+                                   run_id=released, responder="owner@example.test")
+        self.assertEqual(result["reason_code"], "OK", result)
+        self.assertNotIn("handoff", result)
+        self.assertEqual(self.state.incomplete_handoffs(released), [])
+
+    def test_comate_approval_on_a_terminal_run_records_no_resume_handoff(self):
+        stopped = "run-stopped"
+        self.state.transition(stopped, "STOPPED", {"project": "bgw"})
+        record = self._request("G9", run_id=stopped, input_hash="g9-hash")
+        result = self.orch.approve(record["approval_id"], "APPROVE", "g9-hash", "comate",
+                                   run_id=stopped, responder="owner@example.test")
+        self.assertEqual(result["reason_code"], "OK", result)
+        self.assertEqual(self.state.incomplete_handoffs(stopped), [])
+
+    def test_comate_approval_on_a_live_run_still_records_the_handoff(self):
+        record = self._request("G6", input_hash="g6-hash")
+        result = self.orch.approve(record["approval_id"], "APPROVE", "g6-hash", "comate",
+                                   run_id=RUN, responder="owner@example.test")
+        self.assertIn("handoff", result)
+        self.assertEqual(len(self._open()), 1)
+
+    def test_stop_hook_ignores_and_closes_a_terminal_runs_leftover_handoff(self):
+        released = "run-released"
+        event = self.state.transition(released, "RELEASE_SUCCESS", {"project": "bgw"})
+        leftover = self._request("KNOWLEDGE_WRITEBACK", run_id=released)
+        self.orch.approvals.resolve(leftover["approval_id"], "APPROVE", "writeback-hash", "comate",
+                                    run_id=released, responder="owner@example.test", state_store=self.state)
+        handoff_id = f"approval-resume-{leftover['approval_id']}-{event['event_id']}"
+        self.state.record_handoff(released, handoff_id, {
+            "kind": "APPROVAL_RESUME", "run_id": released, "event_id": event["event_id"],
+            "approval_id": leftover["approval_id"], "input_hash": "writeback-hash",
+            "action": "KNOWLEDGE_WRITEBACK"})
+        current = self._approval("G6")
+        self._handoff(current, self._events()[-1]["event_id"])
+        result = auto_resume_from_hook(self.orch, {"hook_event_name": "Stop", "session_id": "sess-1"})
+        self.assertEqual(result["reason_code"], "AUTO_RESUME", result)
+        self.assertEqual(result["approval_id"], current["approval_id"])
+        self.assertEqual(self.state.incomplete_handoffs(released), [])
+        audit = self.state.idempotency_result(f"handoff-completion:{handoff_id}")
+        self.assertEqual(audit["reason"], "STALE_TERMINAL_RUN")
+
+
 if __name__ == "__main__":
     unittest.main()

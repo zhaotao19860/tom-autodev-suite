@@ -2,6 +2,10 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-11-04
+
+- description 改为接口合同与 bgw-workspace 指引，不再声称本 skill 提供拓扑与 P0 参数；无行为变化。
+
 ## 2026-11-02
 
 - BGW 项目知识迁到团队 workspace `baidu/sysip/bgw-workspace`（BGW-2020，CR 123095131）：删除 `references/runtime-topology.md` 与 `references/knowledge-and-evidence.md`，SKILL.md 改为「Team Knowledge」指引（列出 workspace 中对应文件），保留与控制面的调度合同。读取流水线声明的通用规则移到 tom-autodev 的 `references/phase-protocol.md`。

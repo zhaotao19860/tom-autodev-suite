@@ -285,9 +285,10 @@ KU 知识源仍然必填，workspace 不替代 KU 文档发布位置。BGW 模�
 在向导的 `answers.json` 中填写 `workspace_knowledge_path: "/path/to/bgw-workspace"`，
 并在 `confirmed_inputs` 中确认该路径；省略此答案时，向导移除模板中的该占位源，不影响原有配置。
 
-INTAKE 将 workspace 当前 `HEAD` 钉为 `knowledge_workspace = {repository, path, commit}`，
+INTAKE 将 workspace 本地远端跟踪分支 `origin/<revision>`（模板为 `origin/master`，不 fetch）的 commit 钉为
+`knowledge_workspace = {repository, path, commit, revision}`，不用 checkout 的 `HEAD`，未推送的本地提交不会进入 run；
 使用 `intake_hash_version: v6` 把它连同既有字段（含需求差异）纳入 G0 哈希；
-无法读取 commit 时返回 `PROJECT_NOT_READY`，不创建 run。没有 workspace 源的运行仍沿用
+读不到该远端跟踪分支时返回 `PROJECT_NOT_READY`，不创建 run；开 run 前先在 workspace 执行 `git fetch` 取到最新已合入内容。G0 卡片显示钉住的仓库与 commit。没有 workspace 源的运行仍沿用
 原来的 v3/v4/v5 版本与哈希，不改变已有 run 的 G0。
 
 Producer action 与 `context` 返回 `knowledge_workspace` 的仓库、commit 和文件列表；
@@ -604,7 +605,7 @@ python3 tom-autodev/scripts/orchestrator.py knowledge-writeback RUN_ID --approva
 
 `KNOWLEDGE_WRITEBACK` 是独立审批动作，不是 G 门，不进入 `workflow_spec` 门表或策略哈希。审批材料展示每个候选的目标文件、标题、正文；按钮只有**同意 / 停止**，不可“需修改”。停止只放弃写回，不改变 run 的 `RELEASE_SUCCESS`。它由上述显式命令发起，不由 worker 或普通 `continue` 自动写回。
 
-批准后从 pin commit 建临时 worktree 与 `tom-autodev/<run_id 前 12 位>` 分支：新文件写 `# <title>` 与正文，已有文件追加 `## <title>` 小节；新文件补分类 `index.md` 的 Knowledge Map，根 `CHANGELOG.md` 若存在则在顶部补当天条目。提交带卡片 ID 与内容哈希生成的确定性 Change-Id，经 iCode `push_cr` 向 `master` 提 CR，**合入仍由人评审**；不切换或改写用户原 checkout，结束后清理临时 worktree。 CLI 所需的 `.git` 目录视图也仅在临时 worktree 内短暂提供，恢复后再清理，不改公共远端配置。
+批准后从 pin commit 建临时 worktree 与 `tom-autodev/<run_id 前 12 位>` 分支：新文件写 `# <title>` 与正文，已有文件追加 `## <title>` 小节；新文件补分类 `index.md` 的 Knowledge Map，根 `CHANGELOG.md` 若存在则在顶部补当天条目。提交带卡片 ID 与内容哈希生成的确定性 Change-Id，经 iCode `push_cr` 向 `master` 提 CR，**合入仍由人评审**；不切换或改写用户原 checkout，结束后清理临时 worktree 和临时分支。pin 不在 `origin/master` 上时返回 `WRITEBACK_PIN_UNPUBLISHED`，不推送；目标路径与已有文件仅大小写不同、或含 `.`/空路径段时拒绝；本地失败或唯一推送地址明确拒绝后可重新 execute（新 intent），结果未知时仍只查询不重推。写回审批不产生续跑交接。 CLI 所需的 `.git` 目录视图也仅在临时 worktree 内短暂提供，恢复后再清理，不改公共远端配置。
 
 外部写入由 intent/receipt 去重并保存 CR URL。超时或推送结果 `UNKNOWN` 后，重跑同一执行命令只按 Change-Id 查询已有 CR，不会重新推送。完整约束与恢复规则见[操作参考](docs/OPERATIONS.md#验证过的结论写回-workspace阶段-3)与[集成设计阶段 3](docs/WORKSPACE_INTEGRATION_DESIGN.md#阶段-3验证过的结论写回-workspace)。
 

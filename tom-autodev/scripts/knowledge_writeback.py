@@ -119,7 +119,13 @@ def plan(orchestrator: Any, run_id: str) -> dict[str, Any]:
         repo = Path(pin["path"]).expanduser()
         # A missing file is not an unreadable git show: distinguish the two rather
         # than silently including candidates when the object database is broken.
-        files = set(_git(repo, "ls-tree", "-r", "--name-only", "-z", pin["commit"]).split("\0"))
+        files = set(_git(repo, "ls-tree", "-r", "--name-only", "-z", pin["commit"]).split("\0")) - {""}
+        conflict = _case_conflict(files, [item["target"] for item in candidates])
+        if conflict is not None:
+            return _failure(
+                "WRITEBACK_CANDIDATE_INVALID", run_id, target=conflict,
+                schema_issues=[{"path": "knowledge_candidates.target", "kind": "target_case_conflict"}],
+            )
         existing = {
             target: _git(repo, "show", f"{pin['commit']}:{target}")
             for target in sorted({item["target"] for item in candidates}) if target in files
@@ -135,6 +141,41 @@ def plan(orchestrator: Any, run_id: str) -> dict[str, Any]:
                 "commit": pin["commit"], "candidates": candidates}
     return {"ok": True, "reason_code": "WRITEBACK_READY", "proposal": proposal,
             "input_hash": _hash(proposal)}
+
+
+def _case_conflict(files: set[str], targets: list[str]) -> str | None:
+    """A target that a case-insensitive checkout would fold onto another tracked path.
+
+    The file (or any parent directory) may exist only under a different spelling,
+    e.g. docs/readme.md vs README.md: the write would land in the other path and the
+    deduplication above, which compares literally, would not see it (R12B-002).
+    """
+    spellings: dict[str, set[str]] = {}
+    for name in files:
+        parts = name.split("/")
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            spellings.setdefault(prefix.lower(), set()).add(prefix)
+    for target in sorted(set(targets)):
+        parts = target.split("/")
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            known = spellings.get(prefix.lower())
+            if known and prefix not in known:
+                return target
+    return None
+
+
+def _published(repo: Path, commit: str) -> bool:
+    """Whether the pin is already on the reviewed branch (origin/master), read locally."""
+    try:
+        return subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), "merge-base",
+             "--is-ancestor", commit, "refs/remotes/origin/master"],
+            capture_output=True, timeout=120,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 @guard_execution
@@ -395,7 +436,9 @@ def execute(
     if approval.get("effective_decision") != "APPROVE":
         return _failure("WRITEBACK_APPROVAL_REQUIRED", run_id)
 
-    key = _intent_key(run_id, input_hash)
+    # A closed attempt (proven local failure, or a refusal from the only push target)
+    # does not hold the key forever: the retry claims the next key in the chain.
+    key = orchestrator.state.live_idempotency_key(_intent_key(run_id, input_hash))
     completed = orchestrator.state.result_by_idempotency_key(key)
     if completed is not None:
         response = completed["receipt"]["response"]
@@ -426,6 +469,10 @@ def execute(
         "commit": proposal["commit"], "branch": branch, "target_branch": "master",
         "change_id": "I" + input_hash[:40], "card_id": card_id,
     }
+    # The worktree is based on the pin and push_cr pushes every commit above
+    # origin/master: an unreviewed local pin would be pushed for review with it.
+    if not _published(Path(payload["path"]), proposal["commit"]):
+        return _failure("WRITEBACK_PIN_UNPUBLISHED", run_id)
     claim = orchestrator.state.claim_intent(run_id, _OPERATION, key, payload)
     if claim["status"] == "CONFLICT":
         return _failure("WRITEBACK_INTENT_CONFLICT", run_id)
@@ -446,11 +493,19 @@ def execute(
             try:
                 branches = _git(repo, "for-each-ref", "--format=%(refname)", f"refs/heads/{branch}")
                 if f"refs/heads/{branch}" in branches.splitlines():
-                    raise _LocalError("WRITEBACK_BRANCH_EXISTS")
+                    # Left by an earlier attempt that died before its cleanup. Only a
+                    # branch no worktree has checked out is ours to drop.
+                    listing = _git(repo, "worktree", "list", "--porcelain")
+                    if f"branch refs/heads/{branch}" in listing.splitlines():
+                        raise _LocalError("WRITEBACK_BRANCH_EXISTS")
+                    _git(repo, "branch", "-D", branch)
                 _git(repo, "worktree", "add", "-b", branch, str(worktree), proposal["commit"])
                 added = True
                 changed = _write_candidates(worktree, proposal, card_id)
                 _git(worktree, "add", "--", *changed)
+                staged = set(_git(worktree, "diff", "--cached", "--name-only", "-z").split("\0"))
+                if any(item["target"] not in staged for item in proposal["candidates"]):
+                    raise _LocalError("WRITEBACK_STAGE_MISMATCH")
                 _git(worktree, "commit", "--no-gpg-sign", "--file=-",
                      input_text=_message(card_id, proposal, payload["change_id"]))
                 revision = _git(worktree, "rev-parse", "HEAD").strip()
@@ -493,8 +548,10 @@ def execute(
                 if not _push_refused(output, single_target):
                     return _answer(orchestrator, intent, intent_executor.Verdict.unknown(
                         _failure("WRITEBACK_RESULT_UNKNOWN", run_id, **_bounded_cli_output(pushed))))
+                # The only push target refused it: proven not landed, so retryable.
                 result = _failure("WRITEBACK_PUSH_REJECTED", run_id, intent_id=intent["intent_id"],
-                                  retry_allowed=False, **_bounded_cli_output(pushed))
+                                  retry_allowed=True, intent_state=intent_executor.CONFIRMED_ABSENT,
+                                  **_bounded_cli_output(pushed))
                 orchestrator.state.receipt(intent["intent_id"], result, [])
                 return result
             parsed = _pushed_url(output)
@@ -510,3 +567,9 @@ def execute(
                 marker.write_bytes(original_gitfile)
             if added:
                 _git(repo, "worktree", "remove", "--force", str(worktree))
+                # The commit is recorded in the intent's observations and, once pushed,
+                # lives on the review server; the local branch would only block a retry.
+                try:
+                    _git(repo, "branch", "-D", branch)
+                except (OSError, subprocess.SubprocessError):
+                    pass  # a leftover unused branch is dropped by the next attempt

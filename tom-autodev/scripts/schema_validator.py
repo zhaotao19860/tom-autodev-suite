@@ -520,10 +520,14 @@ def validate_knowledge_candidates(candidates: Any) -> list[SchemaIssue]:
             if isinstance(value, str) and not value.strip():
                 issues.append(SchemaIssue(f"{path}.{field}", "missing"))
         target = candidate.get("target")
+        # Normalise before comparing: a "." or empty segment is another spelling of
+        # an existing path, and a case-insensitive checkout folds readme.md onto
+        # README.md (R12B-002).
         if isinstance(target, str) and (
             re.fullmatch(target_pattern, target) is None
             or ".." in target
-            or target.rsplit("/", 1)[-1] in {"index.md", "template.md", "README.md"}
+            or any(part in {"", "."} for part in target.split("/"))
+            or target.rsplit("/", 1)[-1].lower() in {"index.md", "template.md", "readme.md"}
         ):
             issues.append(SchemaIssue(f"{path}.target", "invalid"))
     return sorted(set(issues), key=lambda issue: (issue.path, issue.kind))

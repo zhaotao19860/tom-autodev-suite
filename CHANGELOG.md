@@ -4,6 +4,14 @@ All notable changes to this suite. Dates are the dates the work landed locally; 
 before 2026-08-27 are reconstructed from design documents and file timestamps, since the
 suite had no version control before then.
 
+## 2026-11-04 · 第 12 轮评审（真实需求前）修复
+
+- 评审：对 ed34c1c..7759c72 做差分复核，A 片（KU 单篇、workspace 知识源、模型路由）与 B 片（知识写回、R11B-001）各一份。两片确认 P2 共 6 项，无 P0/P1；报告见 `docs/reviews/2026-11-04-r12-*`。
+- workspace pin 改钉 `refs/remotes/origin/<revision>`（不 fetch），不再用 checkout 的 `HEAD`；`knowledge_workspace` 增加 `revision`；读不到返回 `PROJECT_NOT_READY`（R12A-002）。G0 卡片显示钉住的 workspace 仓库与 commit（R12A-004），不改哈希。
+- 知识写回：pin 不在 `origin/master` 上时在建立意图前返回 `WRITEBACK_PIN_UNPUBLISHED`，避免把未审批的本地提交一起推去评审（R12B-004）；本地失败与唯一推送地址的明确拒绝改为可重试（幂等键沿用 `live_idempotency_key` 链），结束后删除临时分支 `tom-autodev/<run12>`，残留且未被检出的分支自动清理（R12B-001）；目标路径拒绝 `.`/空路径段、保留文件名大小写不敏感、与已有路径仅大小写不同时拒绝，`git add` 后核对暂存列表（R12B-002）。
+- 写回审批与终态 run 的 Comate 批准不再记续跑交接；Stop hook 跳过并关闭终态 run 的残留交接，不再让其他 run 返回 `MULTIPLE_RESUME_HANDOFFS`（R12B-003）。
+- `tom-autodev/SKILL.md` 的 P0新case回归指引与 `tom-project-bgw` description 改指 bgw-workspace（R12A-001）。
+
 ## 2026-11-03 · ProducerJob 接入 tom-model-router 模型建议
 
 - 新增 `scripts/model_routing.py`：把当前 skill 阶段映射为 tom-model-router 的角色和档位（GRILL/SPEC/TASKS/PLAN/DIAGNOSE→design；IMPLEMENT 首次→implement，诊断回流或同任务再次产出→repair 并按已有回执计 attempt；REVIEW→review 且带实现者模型避开同家族；hotfix/express→S、standard→M、full→L），调用已安装的 `tom-model-router/router.py pick` 取建议。Claude Code 下可选子代理，其他 Agent 只给 CLI 执行方式。

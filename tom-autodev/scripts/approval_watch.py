@@ -902,6 +902,16 @@ def auto_resume_from_hook(orchestrator: Any, payload: dict[str, Any]) -> dict[st
             handoff for handoff in orchestrator.state.incomplete_handoffs(run_id)
             if (handoff.get("payload") or {}).get("kind") == "APPROVAL_RESUME"
         ]
+        if latest.get("state") in _TERMINAL_STATES:
+            # A finished run has nothing to resume; its leftover handoff must not turn
+            # another run's single resume into MULTIPLE_RESUME_HANDOFFS (R12B-003).
+            # Close it as stale only where the run's pinned contracts still allow writes.
+            if open_handoffs and execution_guard(orchestrator.state, run_id) is None:
+                for handoff in open_handoffs:
+                    orchestrator.state.complete_handoff_audited(
+                        handoff, actor="approval_watch.stop_hook", reason="STALE_TERMINAL_RUN",
+                    )
+            continue
         # Reaping writes handoff completions, so a drifted run is left untouched (R11A-005).
         if len(open_handoffs) > 1 and execution_guard(orchestrator.state, run_id) is None:
             open_handoffs = reap_stale_resume_handoffs(
