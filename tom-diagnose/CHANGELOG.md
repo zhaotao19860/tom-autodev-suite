@@ -2,6 +2,14 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-11-04
+
+- 并入 tom-autodebug 1.5.0 的文档与评测：BGW 领域知识（原 `bgw-domain-knowledge.md` 与 README 中的 BGW 诊断顺序、controller 配置链路、累计计数增量、证据边界、BGW-1956 CDN URL Offer Hash 排障清单）迁移为 `references/domains/bgw.md`；如流群聊取证及降级规则迁移为 `references/infoflow-evidence.md`；VIP 不通模板、已知能力边界与踩过的坑、分阶段重试策略补入 `references/remote-troubleshooting.md`。
+- description 增加中文触发场景：内网机器名/IP、登录看日志、网络/VIP/BGW 定位、如流群号/群链接结合群聊定位、Higress/irouter/MCP/如流机器人链路故障；SKILL.md 新增 “Select the domain” 小表。
+- 新增 `references/domains/higress-mcp.md`：如流机器人 → irouter/BFE → Higress → MCP → 模型网关链路的逐跳绕过定位方法、2026-11-03/04 实测信号对照表、控制台只读 API 与证据边界。
+- 新增 `evals/evals.json`：迁移 tom-autodebug 的 22 条评测（路径和 skill 名已更新），追加 3 条 Higress+MCP 场景（全路径 405、503 Connection refused、约 50 秒 BFE 500），共 25 条。
+- 脚本未改动。tom-autodebug 自此下线，相关能力只在 tom-diagnose 维护。
+
 ## 2026-11-02
 
 - DIAGNOSE 草案增加可选 `knowledge_candidates`：只收录有证据、跨 run 可复用的环境/流程结论，不收录业务代码结论；明确四字段、受限文档路径与索引/模板保留文件名校验，候选需在发布成功后另经 `KNOWLEDGE_WRITEBACK` 审批生成 CR。

@@ -1,6 +1,6 @@
 ---
 name: tom-diagnose
-description: Use when Review, iPipe, release or product-test evidence needs root-cause diagnosis, or when an explicitly identified internal host needs bounded relay/tmux remote investigation of logs, processes, routing or VIP connectivity.
+description: Use when Review, iPipe, release or product-test evidence needs root-cause diagnosis, or when an explicitly identified internal host needs bounded relay/tmux remote investigation of logs, processes, routing, VIP or BGW (x86bgw, bgwagent, newttm, controller) issues; when an InfoFlow group ID or link is supplied for chat-correlated diagnosis; or when a Higress/irouter/MCP/InfoFlow-bot chain fails (401/405/503/timeout/bot silent). 当用户给出内网机器名或 IP、要求登录机器看日志、定位网络/VIP/BGW 问题，给出如流群号或群链接要求结合群聊定位，或如流机器人、irouter 域名、Higress 网关、MCP 服务链路出现 401/405/503/超时/机器人不回复时使用。不用于纯本地操作、发版或未授权访问。
 ---
 
 # Tom Diagnose
@@ -16,6 +16,16 @@ When the action carries `knowledge_workspace`, first read every listed file with
 | Workflow failure plus missing live-host evidence | Keep workflow mode. Present a bounded evidence request to the parent; use remote operations only for its authorized target/commands. Observations supplement, but never replace, iPipe execution receipts. |
 
 Remote operation does not authorize deployment, an iPipe rerun or code repair. BNS/Matrix/container transports are unsupported by the bundled relay helper; require an exact supported SSH target instead of guessing.
+
+## Select the domain
+
+| Symptom area | Read |
+|---|---|
+| BGW data plane / control plane / newttm (x86bgw, bgwagent, controller/ACC, ECV, Offer Hash, TTM) | [domains/bgw.md](references/domains/bgw.md) |
+| Gateway / MCP / bot chain (InfoFlow bot, bridge, irouter/BFE, Higress route and key-auth, MCP service, model gateway) | [domains/higress-mcp.md](references/domains/higress-mcp.md) |
+| User supplies an InfoFlow group ID or link | [infoflow-evidence.md](references/infoflow-evidence.md) |
+
+Domain files are methods and signal semantics. Concrete environment facts (hosts, domains, ports, topology) come from the workspace/environment docs, not from these files.
 
 ## Diagnose from evidence
 

@@ -3,6 +3,16 @@
   "version": "1.5.0",
   "imported_at": "2026-09-21",
   "runtime_dependency_on_source": false,
+  "docs_and_evals_merged": {
+    "merged_at": "2026-11-04",
+    "note": "tom-autodebug 的 BGW 领域知识、如流群聊取证、VIP 模板与踩坑记录、中文触发和 22 条评测已并入 tom-diagnose；tom-autodebug 下线。脚本未变，以下 sha256 不变。",
+    "targets": [
+      "references/domains/bgw.md",
+      "references/infoflow-evidence.md",
+      "references/remote-troubleshooting.md",
+      "evals/evals.json"
+    ]
+  },
   "files": [
     {
       "path": "scripts/autodebug.sh",
