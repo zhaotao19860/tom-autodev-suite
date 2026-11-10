@@ -27,7 +27,7 @@ bash "$DIAG_SCRIPT" capture user@host
 bash "$DIAG_SCRIPT" cleanup --host user@host
 ```
 
-The target precedes flags, which precede `--`. Commands are data for the helper; do not interpolate untrusted log text into a shell command. Multi-line commands use the documented `--stdin` path rather than nested quoting.
+The target precedes flags, which precede `--`. Commands are data for the helper; do not interpolate untrusted log text into a shell command. History expansion is disabled for sent commands (`set +H`), so awk `!~` is safe; output without a trailing newline is still parsed. Scripts that write temp files (even `rm -f` cleanup) are classified as write/dangerous; prefer pipes and shell variables for read-only probes. Multi-line commands use the documented `--stdin` path rather than nested quoting.
 
 ```bash
 bash "$DIAG_SCRIPT" case-create vip-check \
@@ -39,7 +39,18 @@ bash "$DIAG_SCRIPT" status --case vip-check
 bash "$DIAG_SCRIPT" cleanup --case vip-check
 ```
 
-`connect-many` connects sequentially so authentication can be reused. Check `expected/processed/ready` and failed roles; one ready machine does not make a case ready. `exec-all` is for independent reads only; inspect `exec_summary` and every role's current request output before a dependent step. The default limit is eight targets; expansion needs explicit scope.
+To find a host's BNS service and every sibling instance (needs an existing `connect` to that host; runs `get_service_by_host` / `get_instance_by_service` read-only there), then turn the first service into a case:
+
+```bash
+bash "$DIAG_SCRIPT" cluster user@host
+bash "$DIAG_SCRIPT" cluster user@host --create-case ibgw-cmp --ttl 1800
+bash "$DIAG_SCRIPT" connect-many ibgw-cmp
+bash "$DIAG_SCRIPT" exec-all --case ibgw-cmp --timeout 60 --stdin < probe.sh
+```
+
+Use this for "same symptom on sibling machines?" comparisons: run one identical read-only probe everywhere and compare, instead of reasoning from one host or from cluster-level dashboards.
+
+`connect-many` connects sequentially so authentication can be reused. Check `expected/processed/ready` and failed roles; one ready machine does not make a case ready. `exec-all` is for independent reads only; inspect `exec_summary` and every role's current request output before a dependent step. The default limit is 32 targets (`TOM_AUTODEBUG_MAX_TARGETS`); expansion needs explicit scope. Each role gets its own tmux window.
 
 ## Authorization and bounded work
 

@@ -14,6 +14,8 @@
 4. 配置不一致时沿 controller 期望配置 → 生成文件 → bgwagent 加载 → x86bgw 运行态逐层比较；不能把 shell 历史、示例文件或未发现 controller 当作最终配置来源。
 5. 只有在响应、解析、聚合、worker 同步和数据面都具有匹配版本证据后，才把“RS 被 Offer Hash 屏蔽”扩展为“响应没有携带允许 flag”。
 
+网口丢包 / `rx_nombuf` / `imissed` / worker 卡顿走第 8 节；VIP/RS/VS 的配置、归属和变更历史走 8.5（CMDB）；同类机器先用 `cluster` 子命令找同集群对照组。
+
 远端现场（经 [remote-operations.md](../remote-operations.md) 的 relay/tmux 只读取证）先看 `ps -ef | grep bgw`、实际加载的 `bgw.conf`、`env_start`、接口信息、DPDK 端口和相关日志。不要把手册中的路径、示例配置或历史测试环境当作当前现场；VIP 不通的通用分角色模板见 [remote-troubleshooting.md](../remote-troubleshooting.md)。
 
 ## 1. 子系统和证据边界
@@ -207,3 +209,80 @@ python3 <enterprise-search-base>/scripts/ku_search.py --word "BGW controller 配
 结论明确区分“现场观测”“手册/源码定义”“推断与待验证项”。至少说明子系统、运行版本、关键证据及缺口；不能把源码说明写成现场抓包结果。配置开关、累计计数和健康状态来源不足以闭合根因时，继续缩小只读检查范围或报告证据缺口。
 
 新增参数结论应附来源、适用版本与核实日期，未知内容保留为待核实；这份文档维护知识导航和易误判规则，不复制整份手册或凭据。领域知识归属 tom-diagnose，`tom-project-bgw` 与 bgw-workspace 可作补充（环境事实以 workspace 为准），不能替代此方法入口。
+
+## 8. 网口丢包、rx_nombuf 与 worker 卡顿
+
+2026-11-09 在 yq01-sys-ibgwcluster（x86bgw `795e20a`、DPDK 20.11 `3c94c38`、mlx5 网卡）定位过一次。下面是可复用的方法和易误判点；数值是该现场的，不是规格。
+
+### 8.1 计数器语义（先对齐网卡驱动）
+
+- `--list-port-stats` 的 `vnicN` 是 bgw.conf 里端口顺序（`main.c` 里 uplink/downlink 编号），不是 Linux 网卡名；用 `ps -ef | grep "bgw -w"` 的 PCI 地址 + `lspci -s <pci>` 确认驱动，numa 看 `/sys/bus/pci/devices/<pci>/numa_node`。
+- `rx_nombuf` 是 PMD 补 RX 描述符时从该队列 mempool 拿 mbuf 失败的次数（`pal/netif.c:1058` 抄自 `rte_eth_stats`）。mlx5 向量路径一次批量失败就 `+= n` 且每轮轮询都会重试（`drivers/net/mlx5/mlx5_rxtx_vec.c:105`），所以它常比 `rx_pkts` 大十几倍：**是失败次数，不是丢包数**。
+- mlx5 的 per-queue `err`（`q_errors`）= `idropped + rx_nombuf`（`mlx5_stats.c:119`），能直接看出集中在哪个队列。`imissed` 来自 `/sys/class/infiniband/mlx5_X/ports/1/hw_counters/out_of_buffer`；它和 `ethtool -S` 的 `rx_out_of_buffer`/`rx_discards_phy` 都为 0 时，硬件侧没丢。
+- RX mempool 每端口每队列一个：`rcv_port_<口>_pool_<队列>`，大小 `((n_worker-1)*2 + n_receiver + 1) * NB_RX_MBUF + 4096`；i40e 的 `NB_RX_MBUF=4096`，mlx5 只有默认 512（`pal/netif.c:248/667`），4 worker/4 receiver 时每池 9728 个，per-lcore cache 512。池小 + 消费者慢就会被占满。
+
+### 8.2 只读排查顺序（BGW 机 `/home/work/x86bgw/bin`）
+
+1. 逐秒或 5 秒取差值，**不要看累计值**：`./bgwagent --list-port-stats` 两次相减，看 nombuf 是持续还是突发、集中在哪个 vnic 的哪个 queue（`err` 列）。突发型说明不是泄漏。
+2. 池水位：`./bgwagent --list-pal-mem slab`，看 `rcv_port_<口>_pool_<队列>` 的 `size/used`（无突发时 used 约一半属正常）。
+3. 是 receiver 慢还是 worker 慢：`./bgwagent --list-ratio`（各线程 CPU 占比）和 `./bgwagent --check-timer`（`out_loop_rate` 是每秒主循环次数）。某个 worker 的 `out_loop_rate` 突发时掉到平时的几分之一，就是它被卡住、mbuf 迟迟不回池；`dispatch_ppl_err`（`--list-pal-stats`）为 0 说明 receiver→worker 的 fifo 没满。
+4. 流量是否相关：`./bgwagent --list-service --show-stats --format 3` 逐秒取 top pps/bps 的 VS，与 nombuf 突发对齐。集群级看板（如 sugar「vip指标概览」）是 BNS 集群聚合口径、分钟粒度，只能用来排除或提示，不能证明单机因果。
+5. **核心绑核**：确认 worker/receiver 的核（`ps -L -o psr=,comm= -p <bgw pid>`）上没有别的线程：
+   ```bash
+   ps -eLo psr,pid,comm --no-headers | awk '$1==<worker核>'
+   grep set_cpu_affinity /etc/crontab
+   ```
+   `/home/work/x86bgw/monitor/set_cpu_affinity.sh <目标核> <源核...>` 每分钟把源核上非 bgw 线程 `taskset` 到目标核。目标核如果正是某台机器的 worker 核（bgw.conf 各 numa 的 `worker_cpus` 是 numa 内序号，换成物理核要看实际线程），heyeAgent（主机安全 agent，约 100 线程，周期性 asset_work/full scan/Malware::scan）等进程会和 worker 抢核，表现为该 numa 的 vnic 间歇性 rx_nombuf。heyeAgent 日志 `/home/noah/heyeAgent/logs/heyeAgent_service_child*.log` 可与突发秒对时。
+6. 控制面事件：`/var/log/messages` 里 `bgw[pid]:` 的 RS add/del/valid/invalid、`config locked` 按秒对齐，排除配置下发拖慢。
+
+### 8.3 集群对比
+
+同问题先拿同集群机器做对照（`autodebug.sh cluster <host> --create-case <ID>` 拿到全集群主机，`connect-many` 后 `exec-all` 跑同一只读脚本）。2026-11-09 实测：同集群两种核布局（numa1 用 14–21 或 16–23），cron 目标核都写 23；只有 16–23 布局的 4 台（ibgw41–44）是 worker 与 heyeAgent 共核。绑核冲突是必要条件，单机严重程度还取决于落在该 worker 上的流量。处理是改 cron 目标核到空闲系统核，需要变更窗口。
+
+### 8.4 历史指标（sugar / mtgrafana，分钟粒度）
+
+部门 sugar「BGW 节点指标概览」底层是 mtgrafana（dashboard uid `0762Fx5vz`）+ MySQL 数据源（uid `gDMdnQ8Vk`，库 `baidu_group_cloud`），分钟粒度，至少保留 60 天。用 `scripts/sugar_query.sh` 复用用户已登录的 ego-browser 会话做只读查询（需 UUAP 登录，过期会交给用户扫码/指纹）。2026-11-10 核实的常用表：
+
+| 表 | 关键列 |
+|-|-|
+| `bgw_agent_node_cluster` | cluster, node（集群与节点对应） |
+| `bgw_port_node` | node, port_name(vnic0/1), rx_pkts, rx_bytes, rx_err, imissed, rx_nombuf, tx_pkts, tx_bytes, tx_err |
+| `bgw_fwd_pkt_node` | pkt_err, bgw_err, hardware_pkts_err, hardware_pkts, bgw_receive_pkts, bgw_transmit_pkts |
+| `bgw_pal_ipv4_node` 等 `bgw_pal_*` / `bgw_ipv4_*_node` | pal/l4 协议计数 |
+| `bgw_agent_vip_cluster` | vip, vport, protocol, inbytes, outbytes, curr_conns …（集群聚合口径） |
+
+值是每分钟增量；面板统一过滤 `< 2000000000` 去掉计数回绕/重启尖刺。库不认 `1e9` 这类科学计数字面量。时间列是本地时间，Grafana 返回时按 UTC 解释，脚本已按此换算。
+
+典型用法：
+```bash
+S=<tom-diagnose-base>/scripts/sugar_query.sh
+bash $S nodes yq01-sys-ibgwcluster
+bash $S port yq01-sys-x86ibgw44.yq01 --port vnic1 --by day --from now-60d
+bash $S sql "select date(time) d, node, sum(rx_nombuf) nb from bgw_port_node where \$__timeFilter(time) and cluster='yq01-sys-ibgwcluster' and port_name='vnic1' and rx_nombuf<2000000000 group by d,node order by d,node" --from now-30d
+```
+主要价值：找**问题开始时间**并与变更对时（2026-11-09 案例：ibgw44 vnic1 nombuf 从 2026-10-15 17:03 起出现，同日 12:50 heyeAgent 二进制更新；同集群 35/42 两个月为 0），以及同集群横向对比。秒级突发和根因仍要上机器采。
+
+### 8.5 NLB/BGW 资产、配置与变更历史（BSP CMDB）
+
+BSP 基础服务 CMDB 开放接口（`http://api.bsp.baidu-int.com/cmdb/open/v1`，文档在 KU「设计文档 › 6. CMDB › 3. 开放接口」，作者 zhangjinlong01）是 BGW/NLB 资产与配置的权威来源，用 `scripts/cmdb_query.py` 只读查询。凭据放 `~/.config/tom-diagnose/bsp.env`（权限 600，HS256 JWT，签名密钥 `userId|secret|2`），脚本不打印密钥和 token。
+
+| 子命令 | 接口 | 用途 |
+|-|-|-|
+| `cluster [NAME]` / `nodes CLUSTER` | `/bgw/cluster`、`/bgw/node` | 集群规格与节点列表、状态、版本（不用登机器跑 `get_instance_by_service`） |
+| `host HOST... [--show-config --show-route]` | `POST /host/service` | 单机 BGW 版本、网卡容量、**完整 bgw.conf 与 zebra 配置** |
+| `vip VIP` | `/nlb/vip/info` | VIP 归属实例、地域、集群、负责人 |
+| `vs --vip VIP [--port] [--rs --config]` / `vs --rip RIP` | `/nlb/vs-via-vip`、`/nlb/vs-via-rip` | VS 配置（bw_in、调度算法、检查方式等）和 RS 列表；RS 反查 VS |
+| `vslog ... --from --to [--summary]` | `/nlb/vs/log` | **VS 配置和 RS 增删改的历史**，带原值 |
+
+2026-11-10 实测：10.11.10.28:9520 是 vsId 82580、cluster yq01-sys-ibgwcluster；10-01 以来没有变更记录，所以 ibgw44 从 10-15 开始的 nombuf 不是这个 VS 改配置引起的（与 heyeAgent 结论一致）。`host yq01-sys-x86ibgw44.yq01` 返回的 subVersion 与机器上 `./bgw -v` 一致。
+
+用法要点：
+- 定位前先 `vip`/`vs` 确认 VS 所在 cluster，与 BGW 机所属集群（`nodes` 或 `autodebug.sh cluster`）一致再上机器；CMDB 的 RS 列表可与现场 `bgwagent --list-server` 对比，发现未下发或被手工改动。
+- `vslog` 偏慢（繁忙 VS 一小时 2–27 秒不等），脚本按小时分片串行查，默认最多 7 天；不带 vsId 时 vni 必填（默认 -1）。先用 sugar（8.4）找到问题开始时间，再查前后几小时的 vslog，和 bgw 机 `/var/log/messages` 的 RS add/del 对时。
+- `host --show-config` 可以不登机器就对比同集群各机器的 bgw.conf（比如 numa1 核布局 14–21 和 16–23 的差异）。
+
+### 8.6 易误判
+
+- 不要把 `rx_nombuf` 增量当丢包量，也不要据比值直接下“泄漏”结论；泄漏的特征是池 used 持续逼近 size 且流量下降后不回落。
+- 不要只凭“流量最大的 VS”认定大象流打满 CPU：先看 receiver/worker 占比和循环速率是否与突发同秒，再看该 VS 流量高点是否也有 nombuf。
+- 答案里给的 bgwagent 子命令必须是帮助文本里有的（如 `--list-pal-mem seg|zone|slab|fifo`），不要写“以 -h 为准”。

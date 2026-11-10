@@ -175,6 +175,27 @@
       "prompt": "机器人问一个复杂问题时，大约 50 秒后收到 500，响应头 Server: bfe；简单问题正常。怎么定位，怎么改？",
       "expected_output": "判断是域名前 BFE 超时断开；用 NodePort 直连同一长请求对比，直连正常即可确认；BFE 属于外部团队，不自行改超时；给出服务端异步方案：提交即返回 job_id，再用 get_answer 轮询，单次调用控制在 40 秒以内；区分观察事实与推断。",
       "files": []
+    },
+    {
+      "id": 26,
+      "name": "bgw-rx-nombuf-single-vnic",
+      "prompt": "x86bgw-dpdk-2011_2.0.2_commit_795e20a，mlx5 网卡，vnic1 的 rx_nombuf 间歇性猛涨（10s 涨 1.5 亿，rx_pkts 才涨 860 万），vnic0 正常，imissed/rx_err 都是 0。机器是 yq01-sys-x86ibgw44.yq01，帮我登上去定位根因。",
+      "expected_output": "把 rx_nombuf 解释为 mlx5 补 mbuf 批量失败次数而不是丢包数；逐秒取差值确认突发型及集中队列（--list-port-stats 的 queue err）；用 --list-pal-mem slab 看 rcv_port_<口>_pool_<队列>；用 --list-ratio 与 --check-timer 的 out_loop_rate 找出突发同秒变慢的 worker；检查该 worker 核上的非 bgw 线程与 /etc/crontab 的 set_cpu_affinity.sh 目标核，发现 heyeAgent 被绑到 worker 核；结论区分观测与推断，修复（改 cron 目标核）需变更窗口，不擅自执行。",
+      "files": []
+    },
+    {
+      "id": 27,
+      "name": "bgw-cluster-sibling-compare",
+      "prompt": "yq01-sys-x86ibgw44.yq01 属于哪个 BGW 集群？同集群还有哪些机器？这些机器有没有同样的绑核问题？",
+      "expected_output": "先 connect 该主机，再用 autodebug.sh cluster 跑 get_service_by_host/get_instance_by_service 得到 BNS 服务和实例列表；用 --create-case 生成 case、connect-many 后 exec-all 跑同一只读探针（bgw 版本、cron 目标核、worker 核、heyeAgent 亲和性、nombuf）；按核布局分组说明哪些机器 worker 与 heyeAgent 共核，并指出共核只是必要条件、单机严重度另需证据；不修改任何机器。",
+      "files": []
+    },
+    {
+      "id": 28,
+      "name": "vs-dashboard-not-single-host",
+      "prompt": "sugar 上集群入向流量 top1 的 VIP 和 rx_nombuf 尖峰都一阵一阵的，能否确定是这个大象流打高 CPU 导致丢包？",
+      "expected_output": "指出看板是集群聚合、分钟粒度，只是时间相关；到单机逐秒对齐该 VS 的 pps/bps、nombuf 和各线程占比/循环速率；用反例（VS 流量最高时无 nombuf、nombuf 最大时 VS 流量为 0、receiver 占比很低）否定或保留假设；不把相关当因果。",
+      "files": []
     }
   ]
 }

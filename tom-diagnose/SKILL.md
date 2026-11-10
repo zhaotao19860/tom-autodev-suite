@@ -21,7 +21,7 @@ Remote operation does not authorize deployment, an iPipe rerun or code repair. B
 
 | Symptom area | Read |
 |---|---|
-| BGW data plane / control plane / newttm (x86bgw, bgwagent, controller/ACC, ECV, Offer Hash, TTM) | [domains/bgw.md](references/domains/bgw.md) |
+| BGW data plane / control plane / newttm (x86bgw, bgwagent, controller/ACC, ECV, Offer Hash, TTM); BGW node/port history metrics via `scripts/sugar_query.sh`; BGW/NLB asset, VS config/RS and change history via `scripts/cmdb_query.py` (BSP CMDB) | [domains/bgw.md](references/domains/bgw.md) |
 | Gateway / MCP / bot chain (InfoFlow bot, bridge, irouter/BFE, Higress route and key-auth, MCP service, model gateway) | [domains/higress-mcp.md](references/domains/higress-mcp.md) |
 | User supplies an InfoFlow group ID or link | [infoflow-evidence.md](references/infoflow-evidence.md) |
 

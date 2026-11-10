@@ -6,7 +6,7 @@ readonly VERSION="1.5.0"
 readonly DEFAULT_TTL="${TOM_AUTODEBUG_TTL:-1800}"
 readonly CONNECT_TIMEOUT="${TOM_AUTODEBUG_CONNECT_TIMEOUT:-120}"
 readonly COMMAND_TIMEOUT="${TOM_AUTODEBUG_COMMAND_TIMEOUT:-60}"
-readonly MAX_TARGETS="${TOM_AUTODEBUG_MAX_TARGETS:-8}"
+readonly MAX_TARGETS="${TOM_AUTODEBUG_MAX_TARGETS:-32}"
 # pane 宽度直接决定远端 pty 的 COLUMNS；过窄会让 ss/ip/ps 等宽表格输出在折行处粘连丢字符。
 readonly PANE_COLS="${TOM_AUTODEBUG_PANE_COLS:-512}"
 readonly PANE_ROWS="${TOM_AUTODEBUG_PANE_ROWS:-50}"
@@ -43,6 +43,7 @@ Usage:
   autodebug.sh connect-many CASE_ID
   autodebug.sh exec-all --case CASE_ID [--timeout SECONDS] [--confirm-write|--confirm-dangerous] -- COMMAND...
   autodebug.sh exec-all --case CASE_ID [--timeout SECONDS] [--confirm-write|--confirm-dangerous] --stdin < SCRIPT
+  autodebug.sh cluster <host-or-ip> [--create-case CASE_ID] [--ttl SECONDS] [--timeout SECONDS]
 
 Notes:
   - 只支持 transport=ssh；BNS/Matrix 入口未实现。
@@ -444,6 +445,8 @@ marker_is_complete_line() {
   LC_ALL=C awk -v wanted="$marker" '
     { sub(/\r$/, "") }
     $1 == wanted && (NF == 1 || (NF == 2 && $2 ~ /^[0-9]+$/)) { found=1 }
+    # 命令输出末尾没有换行时，end marker 会粘在最后一行输出后面：`0 1 2 __END__ 0`。
+    NF > 2 && $(NF-1) == wanted && $NF ~ /^[0-9]+$/ { found=1 }
     END { exit(found ? 0 : 1) }
   '
 }
@@ -507,18 +510,29 @@ wait_for_marker_file() {
 }
 
 # 取 begin/end 之间的增量输出；命令回显行本身不等于 marker，故不会被计入。
+# end marker 可能粘在最后一行输出之后（输出无结尾换行），此时 marker 前的文本作为最后一行输出。
 capture_marked_file() {
   local stream="$1" begin="$2" end="$3" max_lines="${4:-200}" max_bytes="${5:-65536}"
   strip_terminal_control < "$stream" | LC_ALL=C awk -v begin="$begin" -v end="$end" -v max="$max_lines" '
     $0 == begin { active=1; count=0; next }
     $1 == end && $2 ~ /^[0-9]+$/ { active=0 }
+    active && NF > 2 && $(NF-1) == end && $NF ~ /^[0-9]+$/ {
+      prefix = $0
+      sub(/[ \t]*[^ \t]+[ \t]+[0-9]+[ \t]*$/, "", prefix)
+      if (prefix != "" && count < max) { print prefix; count++ }
+      active=0
+    }
     active && count < max { print; count++ }
   ' | head -c "$max_bytes"
 }
 
 marked_exit_code_file() {
   local stream="$1" end="$2"
-  strip_terminal_control < "$stream" | LC_ALL=C awk -v marker="$end" '$1 == marker && $2 ~ /^[0-9]+$/ { code=$2 } END { print code }'
+  strip_terminal_control < "$stream" | LC_ALL=C awk -v marker="$end" '
+    $1 == marker && $2 ~ /^[0-9]+$/ { code=$2 }
+    NF > 2 && $(NF-1) == marker && $NF ~ /^[0-9]+$/ { code=$NF }
+    END { print code }
+  '
 }
 
 # 命令超时后 pane 可能停在续行提示符或前台进程未退出，发 C-c 让 shell 回到可用状态。
@@ -590,7 +604,8 @@ health_probe() {
   [[ -n "$pane" && -n "$owner" ]] || return 1
   [[ "$(tmux display-message -p -t "$pane" '#{@tom_autodebug_owner}' 2>/dev/null || true)" == "$owner" ]] || return 1
   nonce="__TOM_AUTODEBUG_HEALTH_$(random_token)__"
-  tmux send-keys -t "$pane" "printf '%s\\n' '$nonce'" Enter 2>/dev/null || return 1
+  # 顺带关闭历史展开：exec_on_state 下发命令前必先 health_probe，保证后续整行读入时 `!` 不被展开。
+  tmux send-keys -t "$pane" "set +H 2>/dev/null; printf '%s\\n' '$nonce'" Enter 2>/dev/null || return 1
   wait_for_marker "$pane" "$nonce" "${TOM_AUTODEBUG_HEALTH_TIMEOUT:-10}" >/dev/null 2>&1
 }
 
@@ -674,7 +689,9 @@ cmd_connect() {
 
   if tmux_alive "$session"; then
     if [[ "$new_pane" -eq 1 ]]; then
-      pane="$(tmux split-window -d -t "$session" -P -F '#{pane_id}' 2>/dev/null || true)"
+      # 每个目标单独一个 window：split-window 切到第 4~5 个 pane 就没有空间而失败，
+      # 而且切分会压缩 pane 宽度。new-window 继承 new-session -x/-y 设定的 session 尺寸。
+      pane="$(tmux new-window -d -t "${session}:" -P -F '#{pane_id}' 2>/dev/null || true)"
     else
       session="${session}-$(random_token | cut -c1-8)"
       tmux new-session -d -s "$session" -x "$PANE_COLS" -y "$PANE_ROWS" || { lock_release "$lock_path_value"; fail "创建独立 tmux session 失败: $session" 6; return $?; }
@@ -872,7 +889,10 @@ exec_on_state() {
     fail "启动 tmux pipe-pane 失败: $host" 6
     return $?
   fi
-  if ! tmux send-keys -t "$pane" "printf '%s\\n' '$begin'; { $command; rc=\$?; }; printf '%s %s\\n' '$end' \"\$rc\"" Enter; then
+  # set +H：交互 bash 默认开启历史展开，命令里的 `!`（如 awk 的 `!~`）会触发
+  # "event not found" 导致整行不执行。历史展开在读入整行时发生，同一行的 set +H
+  # 对本行不生效；health_probe 已在前一行关掉，这里再带一次保持幂等。
+  if ! tmux send-keys -t "$pane" "set +H 2>/dev/null; printf '%s\\n' '$begin'; { $command; rc=\$?; }; printf '%s %s\\n' '$end' \"\$rc\"" Enter; then
     tmux pipe-pane -t "$pane" 2>/dev/null || true
     rm -f "$stream"
     lock_release "$lock_path_value"
@@ -1157,7 +1177,7 @@ cmd_connect_many() {
 
   if ! tmux_alive "$session"; then
     tmux new-session -d -s "$session" -x "$PANE_COLS" -y "$PANE_ROWS" || { fail "创建 case tmux session 失败: $session" 6; return $?; }
-    placeholder="$(tmux list-panes -t "$session" -F '#{pane_id}' 2>/dev/null | head -1)"
+    placeholder="$(tmux list-panes -s -t "$session" -F '#{pane_id}' 2>/dev/null | head -1)"
     created_session=1
   fi
   # 串行连接：relay 首次认证后凭据被缓存，后续角色可复用，避免并发触发 N 次指纹/扫码。
@@ -1195,8 +1215,8 @@ cmd_connect_many() {
   printf 'connect_summary expected=%s processed=%s ready=%s failed_roles=%s\n' \
     "$expected" "$processed" "$ready" "${failed_roles:-none}"
   if [[ "$created_session" -eq 1 && -n "$placeholder" ]]; then
+    # 各角色各占一个 window，占位 pane 独占 window 0，kill 后该 window 随之关闭。
     tmux kill-pane -t "$placeholder" 2>/dev/null || true
-    tmux select-layout -t "$session" tiled 2>/dev/null || true
   fi
   return "$overall"
 }
@@ -1462,6 +1482,101 @@ cmd_watch() {
   done
 }
 
+# 只读查询：目标机所属 BNS 服务及每个服务的全部实例。
+# 远端每行输出 `SERVICE <svc>` 或 `INSTANCE <hostname> <ip> <status>`；缺工具时输出 NO_BNS_TOOLS。
+readonly CLUSTER_REMOTE_CMD='if ! command -v get_service_by_host >/dev/null 2>&1 || ! command -v get_instance_by_service >/dev/null 2>&1; then echo NO_BNS_TOOLS; else for s in $(get_service_by_host -i "$(hostname)" 2>/dev/null); do echo "SERVICE $s"; get_instance_by_service -a "$s" 2>/dev/null | awk '"'"'NF {print "INSTANCE", $1, $2, $4}'"'"'; done; fi'
+
+# 把远端原始输出解析成表格并打印 cluster_summary；第一个服务的实例主机名
+# （按出现顺序去重）另以 `__FIRST_HOST__ <hostname>` 行输出，供 --create-case 使用，
+# 展示前由调用方过滤掉。
+cluster_parse_output() {
+  printf '%s\n' "$1" | LC_ALL=C awk '
+    { sub(/\r$/, "") }
+    $1 == "SERVICE" && NF >= 2 {
+      if (svc != "") printf "cluster_summary service=%s instances=%d abnormal=%d\n", svc, n, bad
+      svc = $2; n = 0; bad = 0; services++
+      printf "service=%s\n", svc
+      next
+    }
+    $1 == "INSTANCE" && NF >= 3 && svc != "" {
+      st = (NF >= 4 ? $4 : "unknown")
+      n++
+      if (st != "0") bad++
+      printf "  %s %s %s\n", $2, $3, st
+      if (services == 1 && !($2 in seen)) { seen[$2] = 1; printf "__FIRST_HOST__ %s\n", $2 }
+    }
+    END { if (svc != "") printf "cluster_summary service=%s instances=%d abnormal=%d\n", svc, n, bad }
+  '
+}
+
+cmd_cluster() {
+  local host_input="${1:-}" case_id="" ttl="$DEFAULT_TTL" timeout="$COMMAND_TIMEOUT" arg state_file out rc table
+  [[ -n "$host_input" && "$host_input" != --* ]] || { subcommand_usage cluster >&2; return 2; }
+  shift
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    case "$arg" in
+      --create-case) [[ $# -ge 2 ]] || { fail "--create-case 缺少 CASE_ID"; return 2; }; case_id="$2"; shift 2 ;;
+      --ttl) [[ $# -ge 2 ]] || { fail "--ttl 缺少值"; return 2; }; ttl="$2"; shift 2 ;;
+      --timeout) [[ $# -ge 2 ]] || { fail "--timeout 缺少值"; return 2; }; timeout="$2"; shift 2 ;;
+      *) fail "cluster 未知参数: $arg"; return 2 ;;
+    esac
+  done
+  parse_positive_int "$ttl" --ttl || return $?
+  parse_positive_int "$timeout" --timeout || return $?
+  if [[ -n "$case_id" ]]; then
+    valid_token "$case_id" || { fail "CASE_ID 包含不支持的字符"; return 2; }
+    [[ ! -f "$(case_state_path "$case_id")" ]] || { fail "case 已存在: $case_id"; return 6; }
+  fi
+  resolve_state_file "$host_input" 0 || return $?
+  state_file="$RESOLVED_STATE_FILE"
+  if [[ ! -f "$state_file" || "$(state_get phase "$state_file" 2>/dev/null || true)" != connected ]]; then
+    fail "尚未连接 $host_input，请先执行: autodebug.sh connect $host_input" 6
+    return $?
+  fi
+  out="$(exec_on_state "$state_file" "" "" "$CLUSTER_REMOTE_CMD" "$timeout" "")"
+  rc=$?
+  if (( rc != 0 )); then
+    printf '%s\n' "$out" >&2
+    fail "cluster 远端查询失败（rc=$rc）: $host_input" 5
+    return $?
+  fi
+  if printf '%s\n' "$out" | grep -q '^NO_BNS_TOOLS'; then
+    fail "目标机缺少 BNS 工具 get_service_by_host/get_instance_by_service，无法查询集群: $host_input" 3
+    return $?
+  fi
+  table="$(cluster_parse_output "$out")"
+  if ! printf '%s\n' "$table" | grep -q '^cluster_summary '; then
+    printf '%s\n' "$out" >&2
+    fail "未查询到 $host_input 所属的 BNS 服务" 6
+    return $?
+  fi
+  printf '%s\n' "$table" | grep -v '^__FIRST_HOST__ ' || true
+  [[ -n "$case_id" ]] || return 0
+
+  local ssh_user host count=0 first_service
+  local -a case_args=()
+  first_service="$(printf '%s\n' "$table" | awk -F= '/^service=/ { print $2; exit }')"
+  ssh_user="$(default_get ssh_user 2>/dev/null || true)"
+  [[ -n "$ssh_user" ]] || ssh_user=root
+  while IFS= read -r host; do
+    [[ -n "$host" ]] || continue
+    # 主机名来自远端输出，写入 manifest 前必须是安全 token（不能含 , = 空白）。
+    valid_token "$host" || { fail "实例主机名包含不支持的字符，拒绝写入 case: $host" 2; return $?; }
+    count=$((count + 1))
+    case_args+=(--target "h${count}=${ssh_user}@${host}")
+  done < <(printf '%s\n' "$table" | awk '$1 == "__FIRST_HOST__" { print $2 }')
+  (( count > 0 )) || { fail "服务 $first_service 没有可用实例，无法创建 case" 6; return $?; }
+  if (( count > MAX_TARGETS )); then
+    fail "服务 $first_service 有 $count 台实例，超过 case 目标上限 $MAX_TARGETS（可设 TOM_AUTODEBUG_MAX_TARGETS 调大）" 2
+    return $?
+  fi
+  cmd_case_create "$case_id" "${case_args[@]}" --ttl "$ttl" || return $?
+  log "已按服务 $first_service 创建 case: $case_id（${count} 台，role=h1..h${count}）"
+  printf 'next: autodebug.sh connect-many %s\n' "$case_id"
+  printf 'next: autodebug.sh exec-all --case %s -- "hostname; uptime"\n' "$case_id"
+}
+
 subcommand_usage() {
   case "$1" in
     exec)
@@ -1574,6 +1689,22 @@ EOF
     connect-many)
       printf 'Usage:\n  autodebug.sh connect-many CASE_ID\n'
       ;;
+    cluster)
+      cat <<'EOF'
+Usage:
+  autodebug.sh cluster <host-or-ip> [--create-case CASE_ID] [--ttl SECONDS] [--timeout SECONDS]
+
+在已连接的目标机上只读执行 get_service_by_host / get_instance_by_service，
+列出该机所属 BNS 服务及每个服务的全部实例（hostname ip status，status=0 为正常），
+每个服务末尾打印 cluster_summary service=<svc> instances=<n> abnormal=<m>。
+需要先 connect 该 host；目标机缺少 BNS 工具时返回 3。
+  --create-case CASE_ID  用第一个服务的实例建 case，role 为 h1..hN，
+                         用户取 defaults 的 ssh_user（缺省 root）；
+                         实例数超过 TOM_AUTODEBUG_MAX_TARGETS（默认 32）时拒绝
+  --ttl SECONDS          新 case 的 TTL，默认 1800
+  --timeout SECONDS      远端查询超时，默认 60
+EOF
+      ;;
     exec-all)
       cat <<'EOF'
 Usage:
@@ -1619,6 +1750,7 @@ main() {
     case-create) cmd_case_create "$@" ;;
     connect-many) cmd_connect_many "$@" ;;
     exec-all) cmd_exec_all "$@" ;;
+    cluster) cmd_cluster "$@" ;;
     *) usage >&2; fail "未知子命令: $subcommand" 2 ;;
   esac
 }

@@ -17,7 +17,8 @@
     {
       "path": "scripts/autodebug.sh",
       "source_version": "tom-autodebug 1.5.0",
-      "sha256": "3791cd03f38272971a05f3babd56d929417caf4e5fd7b3d7089971daeebdb273"
+      "sha256": "e5471d6db4dceb7d7165a7333b0e40cd1924c2222fbc070a670bcda86458bb54",
+      "local_changes": "2026-11-10：marker 粘连解析、set +H、--new-pane 改 new-window、MAX_TARGETS 32、新增 cluster 子命令"
     },
     {
       "path": "scripts/remote/proc_audit.sh",

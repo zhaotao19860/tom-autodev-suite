@@ -2,6 +2,18 @@
 
 本 skill 属于 tom-autodev 套件，整套共 12 个。端到端流程依赖套件内控制面、相位与所选项目/语言规则；职责见 SKILL.md，外部参考 skill 不再是运行时依赖。
 
+## 2026-11-10
+
+- 新增 `cluster <host> [--create-case ID]`：在已连接主机上只读执行 `get_service_by_host` / `get_instance_by_service`，列出所属 BNS 服务和全部同集群实例，可直接生成多机 case 做同类机器对照。
+- 修复：命令输出没有末尾换行时结束 marker 粘在同一行，exec 误报"缺少退出码"（码 7）；三个解析函数改为也接受行尾 `marker rc`。
+- 修复：下发命令含 `!`（如 awk `!~`）时远端 bash 历史展开报 `event not found`；下发和健康检查都先 `set +H`。
+- 修复：`connect-many` 超过约 4 台时 `split-window` 空间不足报"无法探测 tmux pane"；每个角色改用独立 tmux window。
+- 新增 `scripts/sugar_query.sh`：复用用户已登录的 ego-browser 会话，经 mtgrafana `ds/query` 对 sugar BGW 指标库做只读 SQL 查询（`sql`/`tables`/`columns`/`nodes`/`port`），SQL 只允许单条 select/show/desc 并强制 limit，未登录时交给用户扫码/指纹后退出码 5；`domains/bgw.md` 8.4 节记录常用表、字段与典型查询。
+- 新增 `scripts/cmdb_query.py`：只读查询 BSP 基础服务 CMDB 开放接口（`/cmdb/open/v1`，HS256 JWT，凭据 `~/.config/tom-diagnose/bsp.env` 600 权限、不打印）——BGW 集群/节点、单机版本与 bgw.conf/zebra 配置、VIP 归属、VS 配置与 RS、VS 配置和 RS 变更历史（vslog 按小时分片）；`domains/bgw.md` 8.5 节记录用法与 ibgw44 案例结论。
+- case 目标上限默认值 8 → 32（`TOM_AUTODEBUG_MAX_TARGETS`）。
+- `domains/bgw.md` 新增第 8 节：rx_nombuf/imissed 计数语义（mlx5 批量累加、per-queue err）、RX mempool 规模、逐秒取差与 `--list-ratio`/`--check-timer` 找卡住的 worker、`set_cpu_affinity.sh` 把 heyeAgent 绑到 worker 核的绑核冲突、集群对照方法与易误判点（来自 2026-11-09 yq01-sys-ibgwcluster 实际定位）。
+- evals 新增 3 条（rx_nombuf 定位、同集群对照、集群看板不等于单机因果），共 28 条。
+
 ## 2026-11-04
 
 - 并入 tom-autodebug 1.5.0 的文档与评测：BGW 领域知识（原 `bgw-domain-knowledge.md` 与 README 中的 BGW 诊断顺序、controller 配置链路、累计计数增量、证据边界、BGW-1956 CDN URL Offer Hash 排障清单）迁移为 `references/domains/bgw.md`；如流群聊取证及降级规则迁移为 `references/infoflow-evidence.md`；VIP 不通模板、已知能力边界与踩过的坑、分阶段重试策略补入 `references/remote-troubleshooting.md`。
